@@ -5,12 +5,13 @@
   "main": "index.js",
   "scripts": {
     "server": "liquidcore server",
-    "bundler": "liquidcore bundle --out ./build",
+    "bundler": "liquidcore bundle",
     "init": "liquidcore init",
     "gradle-config": "liquidcore gradle",
     "pod-config": "liquidcore pod",
     "postinstall": "liquidcore postinstall",
-    "tsc": "tsc"
+    "tsc": "tsc",
+    "build": "tsc && npm run bundler --out ./build"
   },
   "author": "",
   "license": "ISC",

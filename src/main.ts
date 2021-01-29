@@ -1,9 +1,14 @@
-import { LiquidCore } from 'liquidcore';
+const {LiquidCore} = require('liquidcore')
+const PerspectivismCore = require('./core/PerspectivismCore')
 
-function addNumbers(a: number, b: number) { 
-    return a + b; 
-} 
+const core = PerspectivismCore.create()
+const perspectivesController = core.perspectivesController();
+const languageController = core.languageController();
 
-var sum: number = addNumbers(10, 15) 
-
-console.log('Sum of the two numbers is: ' +sum); 
+LiquidCore.on('init', function() {
+  core.initServices()
+  core.startGraphQLServer()
+  core.waitForAgent().then(() => {
+    core.initControllers()
+  })
+})
