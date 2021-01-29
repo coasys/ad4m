@@ -1,0 +1,41 @@
+# import Expression, Link, LinkExpression from "../acai/acai.graphql"
+
+input LinkQuery {
+    source: String
+    predicate: String
+    target: String
+}
+
+type Query {
+    hello: String
+    links(perspectiveUUID: String, query: LinkQuery): [LinkExpression]
+    expression(url: String): Expression
+}
+
+
+input AddLinkInput {
+    perspectiveUUID: String
+    link: String
+}
+
+input UpdateLinkInput {
+    perspectiveUUID: String
+    oldLink: String
+    newLink: String
+}
+
+input RemoveLinkInput {
+    perspectiveUUID: String
+    link: String
+}
+
+type Mutation {
+    addLink(input: AddLinkInput): LinkExpression
+    updateLink(input: UpdateLinkInput): LinkExpression
+    removeLink(input: RemoveLinkInput): Boolean
+}
+
+type Subscription {
+    linkAdded(perspectiveUUID: String): LinkExpression
+    linkRemove(perspectiveUUID: String): LinkExpression
+}

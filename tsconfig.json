@@ -1,7 +1,6 @@
 {
     "compilerOptions": {
-      //"types": ["jest", "mocha"],
-      "target": "ES5",
+      "target": "es6",
       "module": "system",
       "moduleResolution": "node",
       "sourceMap": true,
@@ -11,5 +10,5 @@
       "noImplicitAny": false
     },
     "include": ["src/**/*.ts"],
-    "exclude": ["node_modules/*", "__sapper__/*", "public/*", "src/languages"],
+    "exclude": ["node_modules/*", "__sapper__/*", "public/*", "src/languages", "src/core/storage-services/Holochain/*"],
 }
