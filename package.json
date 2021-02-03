@@ -26,7 +26,7 @@
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",
-    "@transmute/did-wallet": "file:/home/josh/Documents/junto/perspectivism_new/did-wallet",
+    "@transmute/did-wallet": "lucksus/did-wallet",
     "apollo-server": "^2.18.2",
     "base-x": "^3.0.8",
     "liquidcore": "^0.7.10",
