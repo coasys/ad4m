@@ -114,13 +114,13 @@ export type NewLinksObserver = (added: Expression[], removed: Expression[])=>voi
 export interface LinksAdapter {
     writable(): boolean;
     public(): boolean;
-    others(): Promise<Agent[]>;
+    others(): Agent[];
 
     addLink(linkExpression: Expression);
     updateLink(oldLinkExpression: Expression, newLinkExpression: Expression);
     removeLink(link: Expression);
 
-    getLinks(query: LinkQuery): Promise<Expression[]>;
+    getLinks(query: LinkQuery, from?: Date, until?: Date): Promise<Expression[]>;
 
     // Get push notified by added links
     addCallback(callback: NewLinksObserver);
@@ -145,4 +145,24 @@ export interface Interaction {
 export class InteractionCall {
     name: string;
     parameters: object;
+}
+
+export class OnlineAgent {
+    did: string
+    status: string
+}
+
+export class TelepresenceRpcCall {
+    fn_name: string
+    params: object
+}
+
+export type TelepresenceRpcCallback = (call: TelepresenceRpcCall) => object;
+
+export interface TelepresenceAdapter {
+    setOnlineStatus(status: string);
+    getOnlineAgents(): [OnlineAgent];
+
+    rpcCall(remoteAgentDid: string, call: TelepresenceRpcCall): object;
+    registerRpcCallback(callback: TelepresenceRpcCall);
 }

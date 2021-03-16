@@ -1,13 +1,13 @@
-import type Agent from "../acai/Agent"
-import Link, { hashLinkExpression, linkEqual, LinkQuery } from "../acai/Links";
+import type Agent from "../ad4m/Agent"
+import Link, { hashLinkExpression, linkEqual, LinkQuery } from "../ad4m/Links";
 import { SHA3 } from "sha3";
-import type Expression from "../acai/Expression";
+import type Expression from "../ad4m/Expression";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
-import type LanguageRef from "../acai/LanguageRef";
+import type LanguageRef from "../ad4m/LanguageRef";
 import * as PubSub from './PubSub'
 import type PerspectiveID from "./PerspectiveID"
-import type SharedPerspective from "../acai/SharedPerspective";
+import type SharedPerspective from "../ad4m/SharedPerspective";
 import type PerspectiveContext from "./PerspectiveContext"
 
 export default class Perspective {
@@ -76,9 +76,9 @@ export default class Perspective {
                 const langRef = this.sharedPerspective.linkLanguages[0]
                 const linksAdapter = this.#languageController.getLinksAdapter(langRef)
                 if(linksAdapter) {
-                    console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     const result = await linksAdapter[functionName](...args)
-                    console.debug("Got result:", result)
+                    //console.debug("Got result:", result)
                     resolve(result)
                 } else {
                     console.error("LinksSharingLanguage", langRef.address, "set in perspective '"+this.name+"' not installed!")
@@ -93,7 +93,7 @@ export default class Perspective {
     }
 
     async syncWithSharingAdapter() {
-        const localLinks = this.#db.getAllLinks(this.uuid)
+        const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link)
         const remoteLinks = await this.callLinksAdapter('getLinks')
         const includes = (link, list) => {
             return undefined !== list.find(e =>
@@ -146,9 +146,9 @@ export default class Perspective {
     }
 
     async updateLink(oldLink: Expression, newLink: Expression) {
-        console.debug("LINK REPO: updating link:", oldLink, newLink)
+        //console.debug("LINK REPO: updating link:", oldLink, newLink)
         const addr = this.findLink(oldLink)
-        console.debug("hash:", addr)
+        //console.debug("hash:", addr)
 
         const _old = oldLink.data as Link
         const _new = newLink.data as Link

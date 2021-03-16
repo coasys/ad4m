@@ -1,15 +1,9 @@
 {
-  "name": "acai-junto-executor",
+  "name": "ad4m-core-executor",
   "version": "1.0.0",
-  "description": "Node.js package that allows the running/interfacing of Acai Languages & Perspectives.",
-  "main": "index.js",
+  "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
+  "main": "./build/main.js",
   "scripts": {
-    "server": "liquidcore server",
-    "bundler": "liquidcore bundle",
-    "init": "liquidcore init",
-    "gradle-config": "liquidcore gradle",
-    "pod-config": "liquidcore pod",
-    "postinstall": "liquidcore postinstall",
     "tsc": "tsc",
     "build": "tsc && npm run bundler --out ./build"
   },
@@ -23,6 +17,8 @@
     "typescript": "^4.1.3"
   },
   "dependencies": {
+    "@holochain-open-dev/holochain-run-dna": "^0.2.6",
+    "@holochain/conductor-api": "0.0.1-dev.15",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",
@@ -34,10 +30,5 @@
     "lowdb": "^1.0.0",
     "sha3": "^2.1.3",
     "sha256": "^0.2.0"
-  },
-  "liquidcore": {
-    "entry": [
-      "src/main.js"
-    ]
   }
 }

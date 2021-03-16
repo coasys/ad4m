@@ -1,4 +1,4 @@
-# import Expression, Link, LinkExpression from "../acai/acai.graphql"
+# import Expression, Link, LinkExpression from "../ad4m/ad4m.graphql"
 
 input LinkQuery {
     source: String

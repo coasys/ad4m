@@ -5,7 +5,6 @@ export enum SharingType  {
     Broadcast = "broadcast",
     Permissionless = "permissionless",
     Permissioned = "permissioned",
-    Holochain = "holochain"
 }
 
 export function sharingTypeFromString(str: string): SharingType {
@@ -16,8 +15,6 @@ export function sharingTypeFromString(str: string): SharingType {
             return SharingType.Permissionless
         case 'permissioned':
             return SharingType.Permissioned
-        case 'holochain':
-            return SharingType.Holochain
         default:
             throw new Error(`Not a SharingType string: ${str}`)
     }

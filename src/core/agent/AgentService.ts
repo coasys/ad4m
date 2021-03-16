@@ -1,13 +1,13 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
-import Expression, { ExpressionProof } from '../../acai/Expression';
+import Expression, { ExpressionProof } from '../../ad4m/Expression';
 import secp256k1 from 'secp256k1'
 import * as ed25519 from '@transmute/did-key-ed25519';
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
-import Agent from '../../acai/Agent';
-import type Language from '../../acai/Language';
+import Agent from '../../ad4m/Agent';
+import type Language from '../../ad4m/Language';
 import * as PubSubInstance from '../PubSub'
 import type { PubSub } from 'apollo-server';
 import crypto from 'crypto'

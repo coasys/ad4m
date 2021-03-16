@@ -1,12 +1,10 @@
-## Node.js Executor For Acai
+## Node.js Executor For Ad4m
 
-This package is intended to be used inside the Junto mobile application as a method of communication with the Acai ontology and thus Junto's Acai languages & user perspectives.
+This package can be used for starting an AD4M node.js runtime.
 
-`main.js` will listen for calls from the host on the event `init`. Upon receiving this event it will spawn the Acai runtime; this runtime is interfaced with and managed via a locally running graphql server. Information on the topology of this server can be found [here](./src/core/graphQL-interface/GraphQL.ts).
+`main.js` will listen for calls from the host on the event `init`. Upon receiving this event it will spawn the AD4M runtime; this runtime is interfaced with and managed via a locally running graphql server. Information on the topology of this server can be found [here](./src/core/graphQL-interface/GraphQL.ts).
 
-[LiquidCore](https://github.com/LiquidPlayer/LiquidCore) is the technology used in order to run this node.js package in both android & iOS. Information about how to build for different platforms as well as the method of communication with said runtime can be found on the projects README. 
-
-More information about the Acai ontology and scope can be found [here](https://github.com/lucksus/perspectivism).
+More information about the AD4M ontology and scope can be found [here](https://github.com/perspect3vism/perspect3ve/tree/master/src/ad4m).
 
 ### Building
 

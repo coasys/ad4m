@@ -1,8 +1,8 @@
+import { app } from 'electron'
 import * as path from 'path';
 import * as fs from 'fs';
 
-//I think that this needs to be set by the application via an event; filesystems for different OS's might have different paths 
-export var rootConfigPath = path.join("", 'acai')
+export const rootConfigPath = path.join(app.getPath('appData'), 'Perspectivism')
 export const dataPath = path.join(rootConfigPath, 'data')
 export const languagesPath = path.join(rootConfigPath, 'languages')
 export const holochainPath = path.join(rootConfigPath, 'holochain')

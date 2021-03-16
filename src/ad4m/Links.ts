@@ -30,8 +30,17 @@ export class LinkQuery {
     }
 
     isMatch(l: Link): boolean {
-        for(const prop in ['source', 'predicate', 'target'])
-            if(this[prop] && this[prop] != l[prop]) return false
+        if(this.source)
+            if(this.source !== l.source)
+                return false
+
+        if(this.predicate)
+            if(this.predicate !== l.predicate)
+                return false
+        
+        if(this.target)
+            if(this.target !== l.target)
+                return false    
 
         return true
     }
