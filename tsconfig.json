@@ -1,14 +1,21 @@
 {
-    "compilerOptions": {
-      "target": "es6",
-      "module": "system",
-      "moduleResolution": "node",
-      "sourceMap": true,
-      "emitDecoratorMetadata": true,
-      "experimentalDecorators": true,
-      "removeComments": false,
-      "noImplicitAny": false
-    },
-    "include": ["src/**/*.ts"],
-    "exclude": ["node_modules/*", "__sapper__/*", "public/*", "src/languages", "src/core/storage-services/Holochain/*"],
+  "compilerOptions": {
+      "target": "es6",         
+      "module": "es6",
+      "moduleResolution": "node",    
+      //"strict": true,          
+      "esModuleInterop": true,    
+      "outDir": "./build",
+      "sourceMap": true
+  },
+  "include": [
+    // All these options do not do the job 
+    "./*.ts",
+    "./*",
+    "*",
+    "./"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
 }

@@ -17,7 +17,6 @@ import LinkLanguageFactory from './LinkLanguageFactory'
 import type { PublicSharing } from '../ad4m/Language'
 import type PerspectiveID from './PerspectiveID'
 
-
 export default class PerspectivismCore {
     #holochain: HolochainService
     #IPFS: any
