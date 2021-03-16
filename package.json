@@ -2,10 +2,10 @@
   "name": "ad4m-core-executor",
   "version": "1.0.0",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
-  "main": "./build/main.js",
+  "main": "main.js",
   "scripts": {
     "tsc": "tsc",
-    "build": "tsc && npm run bundler --out ./build"
+    "build": "tsc"
   },
   "author": "",
   "license": "ISC",

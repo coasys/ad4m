@@ -4,7 +4,7 @@ import { exprRef2String, parseExprURL } from '../../ad4m/ExpressionRef'
 import type LanguageRef from '../../ad4m/LanguageRef'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from '../PubSub'
-import { shell } from 'electron'
+//import { shell } from 'electron'
 
 const typeDefs = gql`
 type Agent {
@@ -328,7 +328,7 @@ function createResolvers(core: PerspectivismCore) {
             openLinkExtern: (parent, args) => {
                 const { url } = args
                 console.log("openLinkExtern:", url)
-                shell.openExternal(url)
+                //shell.openExternal(url)
                 return true
             },
             quit: () => {

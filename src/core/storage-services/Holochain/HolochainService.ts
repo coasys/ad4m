@@ -3,7 +3,7 @@ import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
 import { execHolochain } from '@holochain-open-dev/holochain-run-dna/src/execHolochain'
-import { rootPath } from 'electron-root-path'
+//import { rootPath } from 'electron-root-path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import type Dna from "./dna"
@@ -19,7 +19,7 @@ export default class HolochainService {
     #dataPath: string
     #ready: Promise<void>
 
-    constructor(configPath, dataPath) {
+    constructor(configPath, dataPath, rootPath) {
         let resolveReady
         this.#ready = new Promise(resolve => resolveReady = resolve)
 
