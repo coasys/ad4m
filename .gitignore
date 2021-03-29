@@ -1,4 +1,5 @@
 /src/**/*.js
 *.js.map
+*.js
 /build/*
 /node_modules

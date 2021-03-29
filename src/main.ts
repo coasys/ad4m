@@ -1,6 +1,6 @@
 import create from "./core/PerspectivismCore";
 
-export default function init(appDataPath: String) {
+export function init(appDataPath: String) {
     const core = new create(appDataPath);
     const perspectivesController = core.perspectivesController;
     const languageController = core.languageController;
