@@ -1,18 +1,18 @@
-import type Expression from '../ad4m/Expression';
-import ExpressionRef from '../ad4m/ExpressionRef';
-import type Language from '../ad4m/Language'
-import type { LinksAdapter } from '../ad4m/Language'
-import type { InteractionCall } from '../ad4m/Language'
-import type LanguageContext from '../ad4m/LanguageContext';
-import type LanguageRef from '../ad4m/LanguageRef'
+import type Expression from 'ad4m/Expression';
+import ExpressionRef from 'ad4m/ExpressionRef';
+import type Language from 'ad4m/Language'
+import type { LinksAdapter } from 'ad4m/Language'
+import type { InteractionCall } from 'ad4m/Language'
+import type LanguageContext from 'language-context/LanguageContext';
+import type LanguageRef from 'ad4m/LanguageRef'
 import fs from 'fs'
 import path from 'path'
 import multihashing from 'multihashing'
 import * as Config from './Config'
-import type HolochainService from './storage-services/Holochain/HolochainService';
+import type HolochainService from 'language-context/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
-import type Address from '../ad4m/Address';
+import type Address from 'ad4m/Address';
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const bs58 = baseX(BASE58)

@@ -2,11 +2,11 @@ import fs from 'fs'
 import path from 'path'
 import multihashing from 'multihashing'
 import baseX from 'base-x'
-import SharedPerspective, { SharingType } from "../ad4m/SharedPerspective";
+import SharedPerspective, { SharingType } from "ad4m/SharedPerspective";
 import type AgentService from "./agent/AgentService";
-import type Language from "../ad4m/Language";
-import type { PublicSharing } from "../ad4m/Language";
-import type LanguageRef from "../ad4m/LanguageRef";
+import type Language from "ad4m/Language";
+import type { PublicSharing } from "ad4m/Language";
+import type LanguageRef from "ad4m/LanguageRef";
 
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
