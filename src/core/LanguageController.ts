@@ -18,15 +18,15 @@ const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const bs58 = baseX(BASE58)
 
 const builtInLanguages = [
-    'note-ipfs',
+    //'note-ipfs',
     'url-iframe',
-    'gun-links',
-    'ipfs-links',
-    'junto-hc-shortform',
+    //'gun-links',
+    //'ipfs-links',
+    //'junto-hc-shortform',
     'agent-profiles',
     'languages',
     'shared-perspectives'
-].map(l => `./src/languages/${l}/build/bundle.js`)
+].map(l => `./ad4m/languages/${l}/build/bundle.js`)
 
 const aliases = {
     'http': 'url-iframe',

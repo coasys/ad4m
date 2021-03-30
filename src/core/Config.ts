@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 
-export var rootConfigPath = path.join('', 'Perspectivism')
+export var rootConfigPath = path.join('', 'ad4m')
 export var dataPath = path.join(rootConfigPath, 'data')
 export var languagesPath = path.join(rootConfigPath, 'languages')
 export var holochainPath = path.join(rootConfigPath, 'holochain')
@@ -9,7 +9,7 @@ export var holochainConfigPath = path.join(holochainPath, 'config')
 export var holochainDataPath = path.join(holochainPath, 'data')
 
 export function init(appDataPath) {
-    rootConfigPath = path.join(appDataPath, 'Perspectivism')
+    rootConfigPath = path.join(appDataPath, 'ad4m')
     const dirs = [rootConfigPath, dataPath, languagesPath, holochainPath, holochainConfigPath, holochainDataPath]
     for(const d of dirs)
     if(!fs.existsSync(d)) {

@@ -1,9 +1,14 @@
 import create from "./core/PerspectivismCore";
 
+export * from "./ad4m";
 export function init(appDataPath: String) {
+    console.log("Starting ad4m core with path:", appDataPath);
     const core = new create(appDataPath);
-    const perspectivesController = core.perspectivesController;
-    const languageController = core.languageController;
-    
-    console.log('Hello World!, the AD4M Microservice is running!');
+    console.log("Init services...");
+    core.initServices();
+    console.log("GraphQL server starting...");
+    core.startGraphQLServer()
+
+    console.log("AD4M init complete");
+    return core
 }
