@@ -13,20 +13,10 @@ import type HolochainService from 'language-context/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
 import type Address from 'ad4m/Address';
+import { defaultLangs, defaultLangPath } from "../main";
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const bs58 = baseX(BASE58)
-
-const builtInLanguages = [
-    //'note-ipfs',
-    'url-iframe',
-    //'gun-links',
-    //'ipfs-links',
-    //'junto-hc-shortform',
-    'agent-profiles',
-    'languages',
-    'shared-perspectives'
-].map(l => `./ad4m/languages/${l}/build/bundle.js`)
 
 const aliases = {
     'http': 'url-iframe',
@@ -44,6 +34,7 @@ export default class LanguageController {
     #context: object;
     #linkObservers: LinkObservers[];
     #holochainService: HolochainService
+    #builtInLanguages: string[];
 
     #agentLanguage: Language
     #languageLanguage: Language
@@ -51,6 +42,8 @@ export default class LanguageController {
 
 
     constructor(context: object, holochainService: HolochainService) {
+        this.#builtInLanguages = defaultLangs.map(l => `${defaultLangPath}/${l}/build/bundle.js`)
+
         this.#context = context
         this.#holochainService = holochainService
         this.#languages = new Map()
@@ -64,7 +57,7 @@ export default class LanguageController {
     }
 
     async loadBuiltInLanguages() {
-        await Promise.all(builtInLanguages.map( async bundle => {
+        await Promise.all(this.#builtInLanguages.map( async bundle => {
             const { hash, language } = await this.loadLanguage(bundle)
             
             // Do special stuff for AD4M languages:

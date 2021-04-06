@@ -31,8 +31,8 @@ export default class PerspectivismCore {
 
     #linkLanguageFactory: LinkLanguageFactory
 
-    constructor(appDataPath) {
-        Config.init(appDataPath)
+    constructor(appDataPath, resourcePath) {
+        Config.init(appDataPath, resourcePath)
 
         this.#agentService = new AgentService(Config.rootConfigPath)
         this.#agentService.load()
@@ -60,7 +60,8 @@ export default class PerspectivismCore {
     }
 
     async initServices() {
-        this.#holochain = new HolochainService(Config.holochainConfigPath, Config.holochainDataPath, Config.rootConfigPath)
+        console.log("Init HolochainService with sandbox path:", Config.holochainDataPath, "config path:", Config.holochainConfigPath, "resource path:", Config.resourcePath)
+        this.#holochain = new HolochainService(Config.holochainDataPath, Config.holochainConfigPath, Config.resourcePath)
         this.#IPFS = await IPFS.init()
     }
 
@@ -112,6 +113,6 @@ export default class PerspectivismCore {
     }
 }
 
-export function create(appDataPath): PerspectivismCore {
-    return new PerspectivismCore(appDataPath)
+export function create(appDataPath, resourcePath): PerspectivismCore {
+    return new PerspectivismCore(appDataPath, resourcePath)
 }
