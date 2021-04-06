@@ -1,15 +1,25 @@
 import * as path from 'path';
 import * as fs from 'fs';
 
-export var rootConfigPath = path.join('', 'ad4m')
-export var dataPath = path.join(rootConfigPath, 'data')
-export var languagesPath = path.join(rootConfigPath, 'languages')
-export var holochainPath = path.join(rootConfigPath, 'holochain')
-export var holochainConfigPath = path.join(holochainPath, 'config')
-export var holochainDataPath = path.join(holochainPath, 'data')
+export let rootConfigPath = path.join('', 'ad4m')
+export let dataPath = path.join(rootConfigPath, 'data')
+export let languagesPath = path.join(rootConfigPath, 'languages')
+export let holochainPath = path.join(rootConfigPath, 'holochain')
+export let holochainConfigPath = path.join(holochainPath, 'config')
+export let holochainDataPath = path.join(holochainPath, 'data')
+export let resourcePath = ''
 
-export function init(appDataPath) {
+export function init(appDataPath, appResourcePath) {
+    //Reinit vars
+    resourcePath = appResourcePath;
     rootConfigPath = path.join(appDataPath, 'ad4m')
+    dataPath = path.join(rootConfigPath, 'data')
+    languagesPath = path.join(rootConfigPath, 'languages')
+    holochainPath = path.join(rootConfigPath, 'holochain')
+    holochainConfigPath = path.join(holochainPath, 'config')
+    holochainDataPath = path.join(holochainPath, 'data')
+
+    //Create paths if they do not exist
     const dirs = [rootConfigPath, dataPath, languagesPath, holochainPath, holochainConfigPath, holochainDataPath]
     for(const d of dirs)
     if(!fs.existsSync(d)) {
