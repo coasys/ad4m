@@ -18,3 +18,9 @@ export async function init(appDataPath: String, resourcePath: string, appDefault
     console.log("AD4M init complete");
     return core
 }
+
+export default {
+  init: init,
+  defaultLangPath,
+  defaultLangs
+}
