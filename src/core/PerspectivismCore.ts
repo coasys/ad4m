@@ -53,6 +53,11 @@ export default class PerspectivismCore {
         return this.#languageController
     }
 
+    exit() {
+        this.#IPFS.stop();
+        this.#holochain.stop();
+    }
+
     async startGraphQLServer() {
         const { url, subscriptionsUrl } = await GraphQL.startServer(this)
         console.log(`🚀  GraphQL Server ready at ${url}`)
