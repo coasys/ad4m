@@ -21,7 +21,7 @@ export async function init(appDataPath: String, resourcePath: string, appDefault
 }
 
 export default {
-  init: init,
+  init,
   defaultLangPath,
   defaultLangs,
   PerspectivismCore
