@@ -23,6 +23,7 @@ const aliases = {
     'https': 'url-iframe',
     'did': 'agent-profiles',
     'lang': 'languages',
+    'encrypt-lang': 'encrypted-languages',
     'perspective': 'shared-perspectives'
 }
 
@@ -38,6 +39,7 @@ export default class LanguageController {
 
     #agentLanguage: Language
     #languageLanguage: Language
+    #encryptedLanguageLanguage: Language
     #perspectiveLanguage: Language
 
 
@@ -57,6 +59,7 @@ export default class LanguageController {
     }
 
     async loadBuiltInLanguages() {
+        console.log("loadBuiltInLanguages: Built in languages:", this.#builtInLanguages);
         await Promise.all(this.#builtInLanguages.map( async bundle => {
             const { hash, language } = await this.loadLanguage(bundle)
             
@@ -73,6 +76,9 @@ export default class LanguageController {
                     }
                     if(alias === 'perspective') {
                         this.#perspectiveLanguage = language
+                    }
+                    if(alias === 'encrypt-lang') {
+                        this.#encryptedLanguageLanguage = language
                     }
                 }
             })
@@ -131,6 +137,47 @@ export default class LanguageController {
         return ipfsAddress.cid.toString()
     }
 
+    async installEncryptedLanguage(address: Address, languageMeta: void|Expression, passphrase: String) {
+        if(!languageMeta) {
+            languageMeta = await this.#encryptedLanguageLanguage.expressionAdapter.get(address)
+        }
+        // @ts-ignore
+        console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
+        const source = await this.#encryptedLanguageLanguage.languageAdapter.getLanguageSource(address+`?passphrase=${passphrase}`)
+
+        const hash = await this.ipfsHash(source)
+        if(hash === 'asdf') {
+            console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
+            console.error("LanguageController.installLanguage: Address:", address)
+            console.error("LanguageController.installLanguage: Computed hash:", hash)
+            console.error("LanguageController.installLanguage: =================================")
+            console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+            console.error("LanguageController.installLanguage: =================================")
+            console.error("LanguageController.installLanguage:", languageMeta)
+            console.error("LanguageController.installLanguage: =================================")
+            console.error("LanguageController.installLanguage: =================================")
+            console.error("LanguageController.installLanguage: CONTENT:")
+            //console.error(source)
+            //console.error("LanguageController.installLanguage: =================================")
+            //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+            //console.error("LanguageController.installLanguage: =================================")
+            return
+        }
+
+        const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
+        const metaPath = path.join(Config.languagesPath, address, 'meta.json')
+        fs.mkdirSync(path.join(Config.languagesPath, address))
+        fs.writeFileSync(sourcePath, source)
+        fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
+        try {
+            this.loadLanguage(sourcePath)
+        } catch(e) {
+            console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
+            console.error("LanguageController.installLanguage: ======================================")
+            console.error(e)
+        }
+    }
+
     async installLanguage(address: Address, languageMeta: void|Expression) {
         if(!languageMeta) {
             languageMeta = await this.#languageLanguage.expressionAdapter.get(address)
@@ -170,7 +217,6 @@ export default class LanguageController {
             console.error("LanguageController.installLanguage: ======================================")
             console.error(e)
         }
-        
     }
 
     languageForExpression(e: ExpressionRef): Language {
@@ -183,6 +229,7 @@ export default class LanguageController {
         }
     }
 
+    //TODO: this will break if reference to encrypted language is passed
     languageByRef(ref: LanguageRef): Language {
         const address = aliases[ref.address] ? aliases[ref.address] : ref.address
         const language = this.#languages.get(address)
@@ -232,10 +279,17 @@ export default class LanguageController {
     }
 
     getLanguageLanguage(): Language {
-        if(!this.#agentLanguage) {
+        if(!this.#languageLanguage) {
             throw new Error("No Language Language installed!")
         }
         return this.#languageLanguage
+    }
+
+    getEncrypedLanguageLanguage(): Language {
+        if(!this.#encryptedLanguageLanguage) {
+            throw new Error("No Encryped language language installed")
+        }
+        return this.#encryptedLanguageLanguage
     }
 
     getPerspectiveLanguage(): Language {
