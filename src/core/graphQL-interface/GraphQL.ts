@@ -92,19 +92,6 @@ type SharedPerspective {
     type: String
 }
 
-type Query {
-    hello: String
-    agent: AgentService
-    links(perspectiveUUID: String, query: LinkQuery): [LinkExpression]
-    expression(url: String): Expression
-    language(address: String): Language
-    languages(filter: String): [Language]
-    perspectives: [Perspective]
-    perspective(uuid: String): Perspective
-
-}
-
-
 input AddLinkInput {
     perspectiveUUID: String
     link: String
@@ -146,11 +133,34 @@ input PublishPerspectiveInput {
     name: String
     description: String
     type: String
+    encrypt: Boolean
+    passphrase: String
+    requiredExpressionLanguages: [String]
+    allowedExpressionLanguages: [String]
+    sharedExpressionLanguages: [String]
+}
+
+input CreateHcExpressionLanguageInput {
+    languagePath: String 
+    dnaNick: String
+    encrypt: Boolean 
+    passphrase: String
 }
 
 input UpdateAgentProfileInput {
     name: String
     email: String
+}
+
+type Query {
+    hello: String
+    agent: AgentService
+    links(perspectiveUUID: String, query: LinkQuery): [LinkExpression]
+    expression(url: String): Expression
+    language(address: String): Language
+    languages(filter: String): [Language]
+    perspectives: [Perspective]
+    perspective(uuid: String): Perspective
 }
 
 type Mutation {
@@ -169,6 +179,7 @@ type Mutation {
     setLanguageSettings(input: SetLanguageSettingsInput): Boolean
     openLinkExtern(url: String): Boolean
     quit: Boolean
+    createUniqueHolochainExpressionLanguageFromTemplate(input: CreateHcExpressionLanguageInput): String
 }
 
 type Subscription {
@@ -313,12 +324,18 @@ function createResolvers(core: PerspectivismCore) {
                 return perspective
             },
             publishPerspective: (parent, args, context, info) => {
-                const { uuid, name, description, type } = args.input
+                const { uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages, sharedExpressionLanguages } = args.input
+                //Note: this code is being executed twice in fn call, once here and once in publishPerspective
                 const perspective = core.perspectivesController.perspectiveID(uuid)
                 // @ts-ignore
                 if(perspective.sharedPerspective && perspective.sharedURL)
                     throw new Error(`Perspective ${name} (${uuid}) is already shared`)
-                return core.publishPerspective(uuid, name, description, type)
+                return core.publishPerspective(uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages, sharedExpressionLanguages)
+            },
+            createUniqueHolochainExpressionLanguageFromTemplate: (parent, args, context, info) => {
+                const {languagePath, dnaNick, encrypt, passphrase} = args.input;
+
+                return core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, encrypt, passphrase)
             },
             removePerspective: (parent, args, context, info) => {
                 const { uuid } = args

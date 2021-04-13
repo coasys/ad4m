@@ -117,44 +117,6 @@ export type SharedPerspective = {
   type?: Maybe<Scalars['String']>;
 };
 
-export type Query = {
-  __typename?: 'Query';
-  hello?: Maybe<Scalars['String']>;
-  agent?: Maybe<AgentService>;
-  links?: Maybe<Array<Maybe<LinkExpression>>>;
-  expression?: Maybe<Expression>;
-  language?: Maybe<Language>;
-  languages?: Maybe<Array<Maybe<Language>>>;
-  perspectives?: Maybe<Array<Maybe<Perspective>>>;
-  perspective?: Maybe<Perspective>;
-};
-
-
-export type QueryLinksArgs = {
-  perspectiveUUID?: Maybe<Scalars['String']>;
-  query?: Maybe<LinkQuery>;
-};
-
-
-export type QueryExpressionArgs = {
-  url?: Maybe<Scalars['String']>;
-};
-
-
-export type QueryLanguageArgs = {
-  address?: Maybe<Scalars['String']>;
-};
-
-
-export type QueryLanguagesArgs = {
-  filter?: Maybe<Scalars['String']>;
-};
-
-
-export type QueryPerspectiveArgs = {
-  uuid?: Maybe<Scalars['String']>;
-};
-
 export type AddLinkInput = {
   perspectiveUUID?: Maybe<Scalars['String']>;
   link?: Maybe<Scalars['String']>;
@@ -196,11 +158,61 @@ export type PublishPerspectiveInput = {
   name?: Maybe<Scalars['String']>;
   description?: Maybe<Scalars['String']>;
   type?: Maybe<Scalars['String']>;
+  encrypt?: Maybe<Scalars['Boolean']>;
+  passphrase?: Maybe<Scalars['String']>;
+  requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+};
+
+export type CreateHcExpressionLanguageInput = {
+  languagePath?: Maybe<Scalars['String']>;
+  dnaNick?: Maybe<Scalars['String']>;
+  encrypt?: Maybe<Scalars['Boolean']>;
+  passphrase?: Maybe<Scalars['String']>;
 };
 
 export type UpdateAgentProfileInput = {
   name?: Maybe<Scalars['String']>;
   email?: Maybe<Scalars['String']>;
+};
+
+export type Query = {
+  __typename?: 'Query';
+  hello?: Maybe<Scalars['String']>;
+  agent?: Maybe<AgentService>;
+  links?: Maybe<Array<Maybe<LinkExpression>>>;
+  expression?: Maybe<Expression>;
+  language?: Maybe<Language>;
+  languages?: Maybe<Array<Maybe<Language>>>;
+  perspectives?: Maybe<Array<Maybe<Perspective>>>;
+  perspective?: Maybe<Perspective>;
+};
+
+
+export type QueryLinksArgs = {
+  perspectiveUUID?: Maybe<Scalars['String']>;
+  query?: Maybe<LinkQuery>;
+};
+
+
+export type QueryExpressionArgs = {
+  url?: Maybe<Scalars['String']>;
+};
+
+
+export type QueryLanguageArgs = {
+  address?: Maybe<Scalars['String']>;
+};
+
+
+export type QueryLanguagesArgs = {
+  filter?: Maybe<Scalars['String']>;
+};
+
+
+export type QueryPerspectiveArgs = {
+  uuid?: Maybe<Scalars['String']>;
 };
 
 export type Mutation = {
@@ -220,6 +232,7 @@ export type Mutation = {
   setLanguageSettings?: Maybe<Scalars['Boolean']>;
   openLinkExtern?: Maybe<Scalars['Boolean']>;
   quit?: Maybe<Scalars['Boolean']>;
+  createUniqueHolochainExpressionLanguageFromTemplate?: Maybe<Scalars['String']>;
 };
 
 
@@ -290,6 +303,11 @@ export type MutationSetLanguageSettingsArgs = {
 
 export type MutationOpenLinkExternArgs = {
   url?: Maybe<Scalars['String']>;
+};
+
+
+export type MutationCreateUniqueHolochainExpressionLanguageFromTemplateArgs = {
+  input?: Maybe<CreateHcExpressionLanguageInput>;
 };
 
 export type Subscription = {
