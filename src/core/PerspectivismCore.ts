@@ -6,6 +6,7 @@ import * as IPFS from './storage-services/IPFS'
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
+import type LanguageRef from 'ad4m/LanguageRef'
 import * as GraphQL from './graphQL-interface/GraphQL'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
@@ -13,9 +14,10 @@ import Signatures from './agent/Signatures'
 import type Perspective from './Perspective'
 import SharedPerspective from 'ad4m/SharedPerspective'
 import type { SharingType } from 'ad4m/SharedPerspective'
-import LinkLanguageFactory from './LinkLanguageFactory'
+import LanguageFactory from './LanguageFactory'
 import type { PublicSharing } from 'ad4m/Language'
 import type PerspectiveID from './PerspectiveID'
+import type Address from "ad4m/Address"
 
 export default class PerspectivismCore {
     #holochain: HolochainService
@@ -29,7 +31,7 @@ export default class PerspectivismCore {
     #perspectivesController: PerspectivesController
     #languageController: LanguageController
 
-    #linkLanguageFactory: LinkLanguageFactory
+    #languageFactory: LanguageFactory
 
     constructor(appDataPath, resourcePath) {
         Config.init(appDataPath, resourcePath)
@@ -89,10 +91,12 @@ export default class PerspectivismCore {
             languageController: this.#languageController
         })
 
-        this.#linkLanguageFactory = new LinkLanguageFactory(this.#agentService, this.#languageController.getLanguageLanguage())
+        this.#languageFactory = new LanguageFactory(this.#agentService, this.#languageController.getLanguageLanguage(), this.#languageController.getEncrypedLanguageLanguage(), this.#holochain)
     }
 
-    async publishPerspective(uuid: string, name: string, description: string, sharingType: SharingType): Promise<PerspectiveID> {
+    async publishPerspective(uuid: string, name: string, description: string, sharingType: SharingType, 
+        encrypt: Boolean, passphrase: string, requiredExpressionLanguages: Address[], allowedExpressionLanguages: Address[],
+        sharedExpressionLanguages: LanguageRef[]): Promise<SharedPerspective> {
         // We only work on the PerspectiveID object.
         // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
         // instance object here
@@ -101,12 +105,19 @@ export default class PerspectivismCore {
         const sharedPerspective = new SharedPerspective(name, description, sharingType)
 
         // Create LinkLanguage
-        const linkLanguageRef = await this.#linkLanguageFactory.createLinkLanguageForSharedPerspective(sharedPerspective)
+        const linkLanguageRef = await this.#languageFactory.createLinkLanguageForSharedPerspective(sharedPerspective, encrypt, passphrase)
         sharedPerspective.linkLanguages = [linkLanguageRef]
-        await this.#languageController.installLanguage(linkLanguageRef.address)
+        sharedPerspective.allowedExpressionLanguages = allowedExpressionLanguages
+        sharedPerspective.requiredExpressionLanguages = requiredExpressionLanguages
+        sharedPerspective.sharedExpressionLanguages = sharedExpressionLanguages
+        if (encrypt) {
+            await this.#languageController.installEncryptedLanguage(linkLanguageRef.address, null, passphrase)
+        } else {
+            await this.#languageController.installLanguage(linkLanguageRef.address)
+        }
 
         // Create SharedPerspective
-        const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(sharedPerspective)
+        const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(perspectiveID.sharedPerspective)
         const perspectiveUrl = `perspective://${perspectiveAddress}`
 
         // Put it back together and safe new Perspective state
@@ -114,7 +125,11 @@ export default class PerspectivismCore {
         perspectiveID.sharedPerspective = sharedPerspective
         this.#perspectivesController.update(perspectiveID)
 
-        return perspectiveID
+        return sharedPerspective
+    }
+
+    createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, encrypt: Boolean, passphrase: string): Promise<LanguageRef> {
+        return this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, encrypt, passphrase)
     }
 }
 
