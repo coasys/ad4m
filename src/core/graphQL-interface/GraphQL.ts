@@ -90,6 +90,10 @@ type SharedPerspective {
     name: String
     description: String
     type: String
+    linkLanguages: [String]
+    allowedExpressionLanguages: [String]
+    requiredExpressionLanguages: [String]
+    sharedExpressionLanguages: [String]
 }
 
 input AddLinkInput {
@@ -171,7 +175,7 @@ type Mutation {
     addPerspective(input: AddPerspectiveInput): Perspective
     updatePerspective(input: UpdatePerspectiveInput): Perspective
     removePerspective(uuid: String): Boolean
-    publishPerspective(input: PublishPerspectiveInput): Perspective
+    publishPerspective(input: PublishPerspectiveInput): SharedPerspective
     addLink(input: AddLinkInput): LinkExpression
     updateLink(input: UpdateLinkInput): LinkExpression
     removeLink(input: RemoveLinkInput): Boolean

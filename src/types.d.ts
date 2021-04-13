@@ -115,6 +115,10 @@ export type SharedPerspective = {
   name?: Maybe<Scalars['String']>;
   description?: Maybe<Scalars['String']>;
   type?: Maybe<Scalars['String']>;
+  linkLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
 };
 
 export type AddLinkInput = {
@@ -224,7 +228,7 @@ export type Mutation = {
   addPerspective?: Maybe<Perspective>;
   updatePerspective?: Maybe<Perspective>;
   removePerspective?: Maybe<Scalars['Boolean']>;
-  publishPerspective?: Maybe<Perspective>;
+  publishPerspective?: Maybe<SharedPerspective>;
   addLink?: Maybe<LinkExpression>;
   updateLink?: Maybe<LinkExpression>;
   removeLink?: Maybe<Scalars['Boolean']>;
