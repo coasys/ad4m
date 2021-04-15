@@ -1,4 +1,4 @@
-import fs from 'fs'
+import * as fs from 'fs';
 import path from 'path'
 import multihashing from 'multihashing'
 import baseX from 'base-x'
@@ -39,8 +39,9 @@ export default class LanguageFactory {
     }
 
     createUniqueHolochainDNA(dnaPath: string, dnaNick: string, passphrase: string): string {
+        console.debug("LanguageFactory: createUniqueHolochainDNA");
         //TODO: this should be derived from global vars and not hard coded
-        fs.copyFileSync(path.join(`${defaultLangPath}`, dnaPath), Config.tempLangPath);
+        fs.copyFileSync(`${dnaPath}`, path.join(Config.tempLangPath, `${dnaNick}.dna`));
         let unpackRes = this.#holochainService.unpackDna(path.join(Config.tempLangPath, `${dnaNick}.dna`));
         if (!fs.existsSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`))) {
             console.error("LanguageFactory: Error unpacking DNA");
@@ -67,17 +68,19 @@ export default class LanguageFactory {
         var dnaCode = `var dna = "${base64}";`.trim();
 
         //Cleanup temp files
-        fs.rm(path.join(Config.tempLangPath, `${dnaNick}.dna`), () => {});
-        fs.rmdir(path.join(Config.tempLangPath, `${dnaNick}`), () => {});
+        fs.unlinkSync(path.join(Config.tempLangPath, `${dnaNick}.dna`));
+        fs.rmdirSync(path.join(Config.tempLangPath, `${dnaNick}`), {recursive: true});
+        fs.rmdirSync(path.join(Config.tempLangPath, "target"), {recursive: true});
         return dnaCode
     }
 
     async createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, encrypt: Boolean, passphrase: string): Promise<LanguageRef> {
         console.debug("LanguageFactory: creating new expression language")
         //Load the language to get the name
+        //NOTE: path code below is a little funky; it assumes that languagePath points to language/bundle and that dna would be found at /language/dnaNick.dna
         const { name } = require(path.join(`${languagePath}`, "bundle.js"))
-        let template = fs.readFileSync(languagePath).toString();
-        let dnaCode = this.createUniqueHolochainDNA(path.join(`${languagePath}`, `${dnaNick}.dna`), dnaNick, passphrase);
+        let template = fs.readFileSync(path.join(`${languagePath}`, "bundle.js")).toString();
+        let dnaCode = this.createUniqueHolochainDNA(path.join(`${languagePath}`, `../${dnaNick}.dna`), dnaNick, passphrase);
         const templateLines = template.split('\n') 
         templateLines.push(dnaCode);
         const code = templateLines.join('\n');
