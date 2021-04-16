@@ -96,6 +96,11 @@ type SharedPerspective {
     sharedExpressionLanguages: [String]
 }
 
+type LanguageRef {
+    address: String
+    name: String
+}
+
 input AddLinkInput {
     perspectiveUUID: String
     link: String
@@ -183,7 +188,7 @@ type Mutation {
     setLanguageSettings(input: SetLanguageSettingsInput): Boolean
     openLinkExtern(url: String): Boolean
     quit: Boolean
-    createUniqueHolochainExpressionLanguageFromTemplate(input: CreateHcExpressionLanguageInput): String
+    createUniqueHolochainExpressionLanguageFromTemplate(input: CreateHcExpressionLanguageInput): LanguageRef
 }
 
 type Subscription {

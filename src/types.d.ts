@@ -121,6 +121,12 @@ export type SharedPerspective = {
   sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
 };
 
+export type LanguageRef = {
+  __typename?: 'LanguageRef';
+  address?: Maybe<Scalars['String']>;
+  name?: Maybe<Scalars['String']>;
+};
+
 export type AddLinkInput = {
   perspectiveUUID?: Maybe<Scalars['String']>;
   link?: Maybe<Scalars['String']>;
@@ -236,7 +242,7 @@ export type Mutation = {
   setLanguageSettings?: Maybe<Scalars['Boolean']>;
   openLinkExtern?: Maybe<Scalars['Boolean']>;
   quit?: Maybe<Scalars['Boolean']>;
-  createUniqueHolochainExpressionLanguageFromTemplate?: Maybe<Scalars['String']>;
+  createUniqueHolochainExpressionLanguageFromTemplate?: Maybe<LanguageRef>;
 };
 
 
