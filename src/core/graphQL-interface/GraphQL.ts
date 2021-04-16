@@ -90,7 +90,7 @@ type SharedPerspective {
     name: String
     description: String
     type: String
-    linkLanguages: [String]
+    linkLanguages: [LanguageRef]
     allowedExpressionLanguages: [String]
     requiredExpressionLanguages: [String]
     sharedExpressionLanguages: [String]

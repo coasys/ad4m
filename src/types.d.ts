@@ -115,9 +115,10 @@ export type SharedPerspective = {
   name?: Maybe<Scalars['String']>;
   description?: Maybe<Scalars['String']>;
   type?: Maybe<Scalars['String']>;
-  linkLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  linkLanguages?: Maybe<Array<Maybe<LanguageRef>>>;
   allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
   requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
 };
 
 export type LanguageRef = {
@@ -171,7 +172,6 @@ export type PublishPerspectiveInput = {
   passphrase?: Maybe<Scalars['String']>;
   requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
   allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
-  sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
 };
 
 export type CreateHcExpressionLanguageInput = {
