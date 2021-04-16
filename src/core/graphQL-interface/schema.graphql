@@ -137,7 +137,6 @@ input PublishPerspectiveInput {
     passphrase: String
     requiredExpressionLanguages: [String]
     allowedExpressionLanguages: [String]
-    sharedExpressionLanguages: [String]
 }
 
 input CreateHcExpressionLanguageInput {

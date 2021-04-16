@@ -118,7 +118,6 @@ export type SharedPerspective = {
   linkLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
   allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
   requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
-  sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
 };
 
 export type LanguageRef = {

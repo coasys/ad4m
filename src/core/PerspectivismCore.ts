@@ -95,8 +95,7 @@ export default class PerspectivismCore {
     }
 
     async publishPerspective(uuid: string, name: string, description: string, sharingType: SharingType, 
-        encrypt: Boolean, passphrase: string, requiredExpressionLanguages: Address[], allowedExpressionLanguages: Address[],
-        sharedExpressionLanguages: LanguageRef[]): Promise<SharedPerspective> {
+        encrypt: Boolean, passphrase: string, requiredExpressionLanguages: Address[], allowedExpressionLanguages: Address[]): Promise<SharedPerspective> {
         // We only work on the PerspectiveID object.
         // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
         // instance object here
@@ -109,11 +108,14 @@ export default class PerspectivismCore {
         sharedPerspective.linkLanguages = [linkLanguageRef]
         sharedPerspective.allowedExpressionLanguages = allowedExpressionLanguages
         sharedPerspective.requiredExpressionLanguages = requiredExpressionLanguages
-        sharedPerspective.sharedExpressionLanguages = sharedExpressionLanguages
         if (encrypt) {
             await this.#languageController.installEncryptedLanguage(linkLanguageRef.address, null, passphrase)
+            allowedExpressionLanguages.forEach(language => this.#languageController.installEncryptedLanguage(language, null, passphrase))
+            requiredExpressionLanguages.forEach(language => this.#languageController.installEncryptedLanguage(language, null, passphrase))
         } else {
             await this.#languageController.installLanguage(linkLanguageRef.address)
+            allowedExpressionLanguages.forEach(language => this.#languageController.installLanguage(language, null))
+            requiredExpressionLanguages.forEach(language => this.#languageController.installLanguage(language, null))
         }
 
         // Create SharedPerspective

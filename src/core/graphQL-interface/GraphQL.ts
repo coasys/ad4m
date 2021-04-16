@@ -146,7 +146,6 @@ input PublishPerspectiveInput {
     passphrase: String
     requiredExpressionLanguages: [String]
     allowedExpressionLanguages: [String]
-    sharedExpressionLanguages: [String]
 }
 
 input CreateHcExpressionLanguageInput {
@@ -333,13 +332,13 @@ function createResolvers(core: PerspectivismCore) {
                 return perspective
             },
             publishPerspective: (parent, args, context, info) => {
-                const { uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages, sharedExpressionLanguages } = args.input
+                const { uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
                 //Note: this code is being executed twice in fn call, once here and once in publishPerspective
                 const perspective = core.perspectivesController.perspectiveID(uuid)
                 // @ts-ignore
                 if(perspective.sharedPerspective && perspective.sharedURL)
                     throw new Error(`Perspective ${name} (${uuid}) is already shared`)
-                return core.publishPerspective(uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages, sharedExpressionLanguages)
+                return core.publishPerspective(uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages)
             },
             createUniqueHolochainExpressionLanguageFromTemplate: (parent, args, context, info) => {
                 const {languagePath, dnaNick, encrypt, passphrase} = args.input;
