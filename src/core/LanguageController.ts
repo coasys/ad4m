@@ -138,84 +138,92 @@ export default class LanguageController {
     }
 
     async installEncryptedLanguage(address: Address, languageMeta: void|Expression, passphrase: String) {
-        if(!languageMeta) {
-            languageMeta = await this.#encryptedLanguageLanguage.expressionAdapter.get(address)
-        }
-        // @ts-ignore
-        console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
-        const source = await this.#encryptedLanguageLanguage.languageAdapter.getLanguageSource(address+`?passphrase=${passphrase}`)
+        const language = this.#languages.get(address)
+        
+        if (language == undefined) {
+            if(!languageMeta) {
+                languageMeta = await this.#encryptedLanguageLanguage.expressionAdapter.get(address)
+            }
+            // @ts-ignore
+            console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
+            const source = await this.#encryptedLanguageLanguage.languageAdapter.getLanguageSource(address+`?passphrase=${passphrase}`)
 
-        const hash = await this.ipfsHash(source)
-        if(hash === 'asdf') {
-            console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
-            console.error("LanguageController.installLanguage: Address:", address)
-            console.error("LanguageController.installLanguage: Computed hash:", hash)
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage:", languageMeta)
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: CONTENT:")
-            //console.error(source)
-            //console.error("LanguageController.installLanguage: =================================")
-            //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-            //console.error("LanguageController.installLanguage: =================================")
-            return
-        }
+            const hash = await this.ipfsHash(source)
+            if(hash === 'asdf') {
+                console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
+                console.error("LanguageController.installLanguage: Address:", address)
+                console.error("LanguageController.installLanguage: Computed hash:", hash)
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage:", languageMeta)
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage: CONTENT:")
+                //console.error(source)
+                //console.error("LanguageController.installLanguage: =================================")
+                //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+                //console.error("LanguageController.installLanguage: =================================")
+                return
+            }
 
-        const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
-        const metaPath = path.join(Config.languagesPath, address, 'meta.json')
-        fs.mkdirSync(path.join(Config.languagesPath, address))
-        fs.writeFileSync(sourcePath, source)
-        fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
-        try {
-            this.loadLanguage(sourcePath)
-        } catch(e) {
-            console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
-            console.error("LanguageController.installLanguage: ======================================")
-            console.error(e)
+            const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
+            const metaPath = path.join(Config.languagesPath, address, 'meta.json')
+            fs.mkdirSync(path.join(Config.languagesPath, address))
+            fs.writeFileSync(sourcePath, source)
+            fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
+            try {
+                this.loadLanguage(sourcePath)
+            } catch(e) {
+                console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
+                console.error("LanguageController.installLanguage: ======================================")
+                console.error(e)
+            }
         }
     }
 
     async installLanguage(address: Address, languageMeta: void|Expression) {
-        if(!languageMeta) {
-            languageMeta = await this.#languageLanguage.expressionAdapter.get(address)
-        }
-        // @ts-ignore
-        console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
-        const source = await this.#languageLanguage.languageAdapter.getLanguageSource(address)
-
-        const hash = await this.ipfsHash(source)
-        if(hash === 'asdf') {
-            console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
-            console.error("LanguageController.installLanguage: Address:", address)
-            console.error("LanguageController.installLanguage: Computed hash:", hash)
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage:", languageMeta)
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: CONTENT:")
-            //console.error(source)
-            //console.error("LanguageController.installLanguage: =================================")
-            //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-            //console.error("LanguageController.installLanguage: =================================")
-            return
-        }
-
-        const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
-        const metaPath = path.join(Config.languagesPath, address, 'meta.json')
-        fs.mkdirSync(path.join(Config.languagesPath, address))
-        fs.writeFileSync(sourcePath, source)
-        fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
-        try {
-            this.loadLanguage(sourcePath)
-        } catch(e) {
-            console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
-            console.error("LanguageController.installLanguage: ======================================")
-            console.error(e)
+        const language = this.#languages.get(address)
+        
+        if (language == undefined) {
+            if(!languageMeta) {
+                languageMeta = await this.#languageLanguage.expressionAdapter.get(address)
+            }
+            // @ts-ignore
+            console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
+            const source = await this.#languageLanguage.languageAdapter.getLanguageSource(address)
+    
+            const hash = await this.ipfsHash(source)
+            if(hash === 'asdf') {
+                console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
+                console.error("LanguageController.installLanguage: Address:", address)
+                console.error("LanguageController.installLanguage: Computed hash:", hash)
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage:", languageMeta)
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage: CONTENT:")
+                //console.error(source)
+                //console.error("LanguageController.installLanguage: =================================")
+                //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+                //console.error("LanguageController.installLanguage: =================================")
+                return
+            }
+    
+            const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
+            const metaPath = path.join(Config.languagesPath, address, 'meta.json')
+            fs.mkdirSync(path.join(Config.languagesPath, address))
+            fs.writeFileSync(sourcePath, source)
+            fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
+            try {
+                this.loadLanguage(sourcePath)
+            } catch(e) {
+                console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
+                console.error("LanguageController.installLanguage: ======================================")
+                console.error(e)
+            }
         }
     }
 
