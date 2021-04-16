@@ -110,23 +110,26 @@ export default class PerspectivismCore {
         sharedPerspective.requiredExpressionLanguages = requiredExpressionLanguages
         if (encrypt) {
             await this.#languageController.installEncryptedLanguage(linkLanguageRef.address, null, passphrase)
-            allowedExpressionLanguages.forEach(language => this.#languageController.installEncryptedLanguage(language, null, passphrase))
-            requiredExpressionLanguages.forEach(language => this.#languageController.installEncryptedLanguage(language, null, passphrase))
+            let installs = allowedExpressionLanguages.concat(requiredExpressionLanguages);
+            installs = Array.from(new Set(installs));
+            console.log("\x1b[32m", "PerspectivismCore.publishPerspective: Attempting to install expression languages", installs);
+            installs.forEach(language => this.#languageController.installEncryptedLanguage(language, null, passphrase))
         } else {
             await this.#languageController.installLanguage(linkLanguageRef.address)
-            allowedExpressionLanguages.forEach(language => this.#languageController.installLanguage(language, null))
-            requiredExpressionLanguages.forEach(language => this.#languageController.installLanguage(language, null))
+            let installs = allowedExpressionLanguages.concat(requiredExpressionLanguages);
+            installs = Array.from(new Set(installs));
+            console.log("\x1b[32m", "PerspectivismCore.publishPerspective: Attempting to install expression languages", installs);
+            installs.forEach(language => this.#languageController.installLanguage(language, null))
         }
 
         // Create SharedPerspective
-        const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(perspectiveID.sharedPerspective)
+        const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(sharedPerspective)
         const perspectiveUrl = `perspective://${perspectiveAddress}`
 
-        // Put it back together and safe new Perspective state
-        perspectiveID.sharedURL = perspectiveUrl
+        //Add shared perspective to original perpspective and then update controller
         perspectiveID.sharedPerspective = sharedPerspective
+        perspectiveID.sharedURL = perspectiveUrl
         this.#perspectivesController.update(perspectiveID)
-
         return sharedPerspective
     }
 

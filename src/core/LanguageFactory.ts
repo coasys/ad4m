@@ -17,8 +17,8 @@ const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const bs58 = baseX(BASE58)
 
 const templates = {
-    permissionless: `${defaultLangPath}/ipfs-links/build/bundle.js`,
-    holochain: `${defaultLangPath}/social-context/build/bundle.js`
+    permissionless: `/ipfs-links/build/bundle.js`,
+    holochain: `/social-context/build/bundle.js`
 }
 
 export default class LanguageFactory {
@@ -130,7 +130,7 @@ export default class LanguageFactory {
             case SharingType.Permissionless:
                 console.debug("LanguageFactory: Permissionless language")
                 console.debug("LanguageFactory: reading template file", templates.permissionless)
-                template = fs.readFileSync(templates.permissionless).toString()
+                template = fs.readFileSync(path.join(defaultLangPath, templates.permissionless)).toString()
                 break;
             case SharingType.Holochain:
                 //TODO: this should be derived from global vars and not hard coded
@@ -138,7 +138,7 @@ export default class LanguageFactory {
                 
                 console.debug("LanguageFactory: Holochain language")
                 console.debug("LanguageFactory: reading template file", templates.holochain)
-                template = fs.readFileSync(templates.holochain).toString()
+                template = fs.readFileSync(path.join(defaultLangPath, templates.holochain)).toString()
                 const lines = template.split('\n') 
                 lines.push(dnaCode);
                 template = lines.join('\n');
