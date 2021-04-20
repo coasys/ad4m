@@ -289,6 +289,7 @@ function createResolvers(core: PerspectivismCore) {
                 const { perspectiveUUID, link } = args.input
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 const parsedLink = JSON.parse(link)
+                // console.log("returning response", parsedLink);
                 return perspective.addLink(parsedLink)
             },
             updateLink: (parent, args, context, info) => {
@@ -428,7 +429,7 @@ function createResolvers(core: PerspectivismCore) {
 
         Agent: {
             name: async (agent) => {
-                console.debug("GQL| AGENT.name:", agent)
+                //console.debug("GQL| AGENT.name:", agent)
                 if(agent.name && agent.name !== "")
                     return agent.name
                 else {
@@ -441,7 +442,7 @@ function createResolvers(core: PerspectivismCore) {
             },
 
             email: async (agent) => {
-                console.debug("GQL| AGENT.email:", agent)
+                //console.debug("GQL| AGENT.email:", agent)
                 if(agent.email && agent.email !== "")
                     return agent.email
                 else {

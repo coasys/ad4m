@@ -52,7 +52,7 @@ export default class LanguageFactory {
         let dnaYaml = yaml.load(fs.readFileSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`), 'utf8'));
         dnaYaml.uuid = passphrase;
         let dnaYamlDump = yaml.dump(dnaYaml);
-        console.log("LanguageFactory: writing new language DNA bundle", dnaYamlDump);
+        //console.log("LanguageFactory: writing new language DNA bundle", dnaYamlDump);
         fs.writeFileSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`), dnaYamlDump);
 
         //Pack as new DNA with new ID property injected
@@ -103,7 +103,6 @@ export default class LanguageFactory {
                 } as LanguageRef
             } else {
                 const address = await (this.#languageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
-                console.debug("LanguageFactory: new Language address:", address)
                 return {
                     address,
                     name,
