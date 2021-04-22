@@ -56,7 +56,7 @@ export default class AgentService {
             throw new Error("Can't sign with locked keystore")
         }
 
-        const timestamp = new Date().toString()
+        const timestamp = new Date().toISOString()
         const payloadBytes = Signatures.buildMessage(data, timestamp)
 
         const key = this.getSigningKey()
