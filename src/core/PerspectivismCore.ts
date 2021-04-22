@@ -18,6 +18,7 @@ import LanguageFactory from './LanguageFactory'
 import type { PublicSharing } from 'ad4m/Language'
 import type PerspectiveID from './PerspectiveID'
 import type Address from "ad4m/Address"
+import { AppSignal } from '@holochain/conductor-api'
 
 export default class PerspectivismCore {
     #holochain: HolochainService
@@ -66,9 +67,9 @@ export default class PerspectivismCore {
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
 
-    async initServices() {
+    async initServices(signalCallback: (signal: [AppSignal, string]) => void | undefined) {
         console.log("Init HolochainService with sandbox path:", Config.holochainDataPath, "config path:", Config.holochainConfigPath, "resource path:", Config.resourcePath)
-        this.#holochain = new HolochainService(Config.holochainDataPath, Config.holochainConfigPath, Config.resourcePath)
+        this.#holochain = new HolochainService(Config.holochainDataPath, Config.holochainConfigPath, Config.resourcePath, signalCallback)
         this.#IPFS = await IPFS.init()
     }
 
@@ -135,6 +136,10 @@ export default class PerspectivismCore {
 
     createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, encrypt: Boolean, passphrase: string): Promise<LanguageRef> {
         return this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, encrypt, passphrase)
+    }
+
+    async pubKeyForLanguage(lang: string): Promise<Buffer> {
+        return await this.#holochain.pubKeyForLanguage(lang)
     }
 }
 
