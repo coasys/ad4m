@@ -169,6 +169,7 @@ type Query {
     languages(filter: String): [Language]
     perspectives: [Perspective]
     perspective(uuid: String): Perspective
+    pubKeyForLanguage(lang: String): String
 }
 
 type Mutation {
@@ -245,6 +246,11 @@ function createResolvers(core: PerspectivismCore) {
                 let filter
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
+            },
+            pubKeyForLanguage: async (parent, args, context, info) => {
+                const { lang } = args;
+                let val = await core.pubKeyForLanguage(lang);
+                return val.toString('base64');
             }
         },
         Mutation: {
