@@ -18,7 +18,6 @@
     "typescript": "^4.2.4"
   },
   "dependencies": {
-    "@holochain-open-dev/holochain-run-dna": "^0.3.2",
     "@holochain/conductor-api": "0.0.1",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
