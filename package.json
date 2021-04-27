@@ -1,5 +1,5 @@
 {
-  "name": "ad4m-core-executor",
+  "name": "ad4m-executor",
   "version": "1.0.0",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
