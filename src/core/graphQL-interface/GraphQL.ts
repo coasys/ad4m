@@ -409,8 +409,13 @@ function createResolvers(core: PerspectivismCore) {
                 resolve: payload => payload.link
             },
             signal: {
-                subscribe: () => pubsub.asyncIterator(PubSub.SIGNAL),
-                resolve: payload => payload
+                subscribe: () => {
+                    console.log("GQL: Got a subscription to signal!");
+                    return pubsub.asyncIterator(PubSub.SIGNAL)
+                },
+                resolve: (payload) => {
+                    return payload
+                }
             }
         },
 
