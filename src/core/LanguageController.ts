@@ -14,6 +14,7 @@ import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
 import type Address from 'ad4m/Address';
 import { defaultLangs, defaultLangPath } from "../main";
+import * as PubSub from './graphQL-interface/PubSub'
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const bs58 = baseX(BASE58)
@@ -41,6 +42,7 @@ export default class LanguageController {
     #languageLanguage: Language
     #encryptedLanguageLanguage: Language
     #perspectiveLanguage: Language
+    pubSub
 
 
     constructor(context: object, holochainService: HolochainService) {
@@ -51,6 +53,7 @@ export default class LanguageController {
         this.#languages = new Map()
         this.#languageConstructors = new Map()
         this.#linkObservers = []   
+        this.pubSub = PubSub.get()
     }
 
     async loadLanguages() {
@@ -116,7 +119,7 @@ export default class LanguageController {
         const storageDirectory = Config.getLanguageStoragePath(name)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind(hash);
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.pubSub});
         const language = create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {

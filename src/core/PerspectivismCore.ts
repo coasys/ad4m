@@ -16,6 +16,8 @@ import type { SharingType } from 'ad4m/SharedPerspective'
 import LanguageFactory from './LanguageFactory'
 import type { PublicSharing } from 'ad4m/Language'
 import type Address from "ad4m/Address"
+import { SIGNAL } from './graphQL-interface/PubSub'
+
 export default class PerspectivismCore {
     #holochain: HolochainService
     #IPFS: any
@@ -65,7 +67,7 @@ export default class PerspectivismCore {
 
     async initServices() {
         console.log("Init HolochainService with sandbox path:", Config.holochainDataPath, "config path:", Config.holochainConfigPath, "resource path:", Config.resourcePath)
-        this.#holochain = new HolochainService(Config.holochainDataPath, Config.holochainConfigPath, Config.resourcePath, this.languageSignal)
+        this.#holochain = new HolochainService(Config.holochainDataPath, Config.holochainConfigPath, Config.resourcePath)
         this.#IPFS = await IPFS.init()
     }
 
@@ -74,7 +76,10 @@ export default class PerspectivismCore {
     }
     
     languageSignal(signal: any) {
-        console.log("Got signal from language", signal, "with state", this);
+        //@ts-ignore
+        console.log("PerspectivismCore.languageSignal: Got signal", signal, "from language", this.language);
+        //@ts-ignore
+        this.pubsub.publish(SIGNAL, { signal: signal, language: this.language })
     }
 
     async initControllers() {
