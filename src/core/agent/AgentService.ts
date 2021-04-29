@@ -1,7 +1,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
-import Expression, { ExpressionProof } from 'ad4m/Expression';
+import type Expression from 'ad4m/Expression';
+import { ExpressionProof } from 'ad4m/Expression';
 import secp256k1 from 'secp256k1'
 import * as ed25519 from '@transmute/did-key-ed25519';
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
