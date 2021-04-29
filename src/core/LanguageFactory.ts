@@ -9,7 +9,7 @@ import type { PublicSharing } from "ad4m/Language";
 import type LanguageRef from "ad4m/LanguageRef";
 import * as Config from "./Config";
 import { defaultLangs, defaultLangPath } from "../main";
-import HolochainService from 'language-context/Holochain/HolochainService';
+import type HolochainService from 'language-context/Holochain/HolochainService';
 import yaml from "js-yaml";
 import uuid from "uuid";
 

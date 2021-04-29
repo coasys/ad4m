@@ -1,6 +1,6 @@
 import PerspectivismCore from "./core/PerspectivismCore";
 import create from "./core/PerspectivismCore";
-import { AppSignal } from '@holochain/conductor-api'
+import type { AppSignal } from '@holochain/conductor-api'
 
 export let defaultLangPath = "";
 export let defaultLangs = [];

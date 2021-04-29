@@ -18,7 +18,7 @@ import LanguageFactory from './LanguageFactory'
 import type { PublicSharing } from 'ad4m/Language'
 import type PerspectiveID from './PerspectiveID'
 import type Address from "ad4m/Address"
-import { AppSignal } from '@holochain/conductor-api'
+import type { AppSignal } from '@holochain/conductor-api'
 
 export default class PerspectivismCore {
     #holochain: HolochainService
