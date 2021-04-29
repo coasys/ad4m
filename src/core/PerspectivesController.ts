@@ -1,7 +1,7 @@
 import path from 'path'
 import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid'
-import * as PubSub from './PubSub'
+import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
 import type PerspectiveID from './PerspectiveID'
 import Perspective from './Perspective'
