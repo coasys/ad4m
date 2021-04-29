@@ -18,7 +18,8 @@ const bs58 = baseX(BASE58)
 
 const templates = {
     permissionless: `/ipfs-links/build/bundle.js`,
-    holochain: `/social-context/build/bundle.js`
+    holochain: `/social-context/build/bundle.js`,
+    holochainChannel: `/social-context-channel/build/bundle.js`,
 }
 
 export default class LanguageFactory {
@@ -52,7 +53,7 @@ export default class LanguageFactory {
         let dnaYaml = yaml.load(fs.readFileSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`), 'utf8'));
         dnaYaml.uuid = passphrase;
         let dnaYamlDump = yaml.dump(dnaYaml);
-        //console.log("LanguageFactory: writing new language DNA bundle", dnaYamlDump);
+        console.log("LanguageFactory: writing new language DNA bundle", dnaYamlDump);
         fs.writeFileSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`), dnaYamlDump);
 
         //Pack as new DNA with new ID property injected
@@ -125,7 +126,7 @@ export default class LanguageFactory {
         const injection = `var TEMPLATE_INFO=${templateInfo}; var TEMPLATE_UUID="${UUID};"`
 
         let template
-        switch(sharedPerspective.type) {
+        switch(sharedPerspective.type as SharingType) {
             case SharingType.Permissionless:
                 console.debug("LanguageFactory: Permissionless language")
                 console.debug("LanguageFactory: reading template file", templates.permissionless)
@@ -133,7 +134,7 @@ export default class LanguageFactory {
                 break;
             case SharingType.Holochain:
                 //TODO: this should be derived from global vars and not hard coded
-                let dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context/social-context.dna`, "social-context", passphrase);
+                var dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context/social-context.dna`, "social-context", passphrase);
                 
                 console.debug("LanguageFactory: Holochain language")
                 console.debug("LanguageFactory: reading template file", templates.holochain)
@@ -141,6 +142,19 @@ export default class LanguageFactory {
                 const lines = template.split('\n') 
                 lines.push(dnaCode);
                 template = lines.join('\n');
+
+                break;
+            //case SharingType.HolochainChannel does not work and I have no idea why
+            case "holochainChannel":
+                //TODO: this should be derived from global vars and not hard coded
+                var dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context-channel/social-context-channel.dna`, "social-context-channel", passphrase);
+
+                console.debug("LanguageFactory: holochainChannel language")
+                console.debug("LanguageFactory: reading template file", templates.holochainChannel)
+                template = fs.readFileSync(path.join(defaultLangPath, templates.holochainChannel)).toString()
+                const channelLines = template.split('\n') 
+                channelLines.push(dnaCode);
+                template = channelLines.join('\n');
 
                 break;
             default:
