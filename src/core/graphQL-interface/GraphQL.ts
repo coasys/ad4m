@@ -3,7 +3,7 @@ import type Agent from 'ad4m/Agent'
 import { exprRef2String, parseExprURL } from 'ad4m/ExpressionRef'
 import type LanguageRef from 'ad4m/LanguageRef'
 import type PerspectivismCore from '../PerspectivismCore'
-import * as PubSub from '../PubSub'
+import * as PubSub from './PubSub'
 //import { shell } from 'electron'
 
 const typeDefs = gql`
@@ -99,6 +99,11 @@ type SharedPerspective {
 type LanguageRef {
     address: String
     name: String
+}
+
+type Signal {
+    language: String
+    signal: String
 }
 
 input AddLinkInput {
@@ -198,6 +203,7 @@ type Subscription {
     perspectiveRemoved: String
     linkAdded(perspectiveUUID: String): LinkExpression
     linkRemoved(perspectiveUUID: String): LinkExpression
+    signal: Signal
 }
 `
 
@@ -250,7 +256,7 @@ function createResolvers(core: PerspectivismCore) {
             pubKeyForLanguage: async (parent, args, context, info) => {
                 const { lang } = args;
                 let val = await core.pubKeyForLanguage(lang);
-                return val.toString('base64');
+                return val.toString('hex');
             }
         },
         Mutation: {
@@ -401,6 +407,10 @@ function createResolvers(core: PerspectivismCore) {
                     (payload, variables) => payload.perspective.uuid === variables.perspectiveUUID
                 )(undefined, args),
                 resolve: payload => payload.link
+            },
+            signal: {
+                subscribe: () => pubsub.asyncIterator(PubSub.SIGNAL),
+                resolve: payload => payload
             }
         },
 

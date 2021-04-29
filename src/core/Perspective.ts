@@ -5,7 +5,7 @@ import type Expression from "ad4m/Expression";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import type LanguageRef from "ad4m/LanguageRef";
-import * as PubSub from './PubSub'
+import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveID from "./PerspectiveID"
 import type SharedPerspective from "ad4m/SharedPerspective";
 import type PerspectiveContext from "./PerspectiveContext"

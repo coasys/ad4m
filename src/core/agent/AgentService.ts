@@ -9,7 +9,7 @@ import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
 import Agent from 'ad4m/Agent';
 import type Language from 'ad4m/Language';
-import * as PubSubInstance from '../PubSub'
+import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'apollo-server';
 import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';

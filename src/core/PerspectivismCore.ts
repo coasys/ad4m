@@ -11,14 +11,12 @@ import * as GraphQL from './graphQL-interface/GraphQL'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
-import type Perspective from './Perspective'
 import SharedPerspective from 'ad4m/SharedPerspective'
 import type { SharingType } from 'ad4m/SharedPerspective'
 import LanguageFactory from './LanguageFactory'
 import type { PublicSharing } from 'ad4m/Language'
-import type PerspectiveID from './PerspectiveID'
 import type Address from "ad4m/Address"
-import type { AppSignal } from '@holochain/conductor-api'
+import { SIGNAL } from './graphQL-interface/PubSub'
 
 export default class PerspectivismCore {
     #holochain: HolochainService
@@ -67,21 +65,29 @@ export default class PerspectivismCore {
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
 
-    async initServices(signalCallback: (signal: [AppSignal, string]) => void | undefined) {
+    async initServices() {
         console.log("Init HolochainService with sandbox path:", Config.holochainDataPath, "config path:", Config.holochainConfigPath, "resource path:", Config.resourcePath)
-        this.#holochain = new HolochainService(Config.holochainDataPath, Config.holochainConfigPath, Config.resourcePath, signalCallback)
+        this.#holochain = new HolochainService(Config.holochainDataPath, Config.holochainConfigPath, Config.resourcePath)
         this.#IPFS = await IPFS.init()
     }
 
     async waitForAgent(): Promise<void> {
         return this.#agentService.ready
     }
+    
+    languageSignal(signal: any) {
+        //@ts-ignore
+        console.log("PerspectivismCore.languageSignal: Got signal", signal, "from language", this.language);
+        //@ts-ignore
+        this.pubsub.publish(SIGNAL, { signal: signal, language: this.language })
+    }
 
     async initControllers() {
         this.#languageController = new LanguageController({
             agent: this.#agentService,
             IPFS: this.#IPFS,
-            signatures: this.#signatures
+            signatures: this.#signatures,
+            ad4mSignal: this.languageSignal
         }, this.#holochain)
 
         await this.#languageController.loadLanguages()
@@ -103,7 +109,6 @@ export default class PerspectivismCore {
         const perspectiveID = this.#perspectivesController.perspective(uuid).plain()
 
         const sharedPerspective = new SharedPerspective(name, description, sharingType)
-
         // Create LinkLanguage
         const linkLanguageRef = await this.#languageFactory.createLinkLanguageForSharedPerspective(sharedPerspective, encrypt, passphrase)
         sharedPerspective.linkLanguages = [linkLanguageRef]
