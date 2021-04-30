@@ -80,7 +80,7 @@ export default class PerspectivismCore {
         console.log("PerspectivismCore.languageSignal: Got signal", signal, "from language", this.language);
         //NOTE (optimization): worth considering if its worth keeping around pubsub in this or if we should just get a new pubsub here
         //@ts-ignore
-        this.pubsub.publish(PubSub.SIGNAL, { signal: signal.toString(), language: this.language });
+        this.pubsub.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
     }
 
     async initControllers() {
