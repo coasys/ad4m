@@ -1,7 +1,7 @@
 import * as Config from './Config'
 import * as Db from './db'
 import type { PerspectivismDb } from './db'
-import HolochainService from 'language-context/lib/Holochain/HolochainService'
+import HolochainService from '@perspect3vism/ad4m-language-context/lib/Holochain/HolochainService'
 import * as IPFS from './storage-services/IPFS'
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
