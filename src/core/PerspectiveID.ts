@@ -1,5 +1,5 @@
-import type Agent from "ad4m/Agent";
-import type SharedPerspective from "ad4m/SharedPerspective";
+import type Agent from "@perspect3vism/ad4m/Agent";
+import type SharedPerspective from "@perspect3vism/ad4m/SharedPerspective";
 
 export default class PerspectiveID {
     name: string;

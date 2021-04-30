@@ -1,15 +1,32 @@
 {
-  "name": "ad4m-executor",
-  "version": "1.0.0",
+  "name": "@perspect3vism/ad4m-executor",
+  "version": "0.0.3",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
+  "files": ["lib", "src", "types.d.ts"],
   "types": "src/types.d.ts",
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js"
   },
-  "author": "",
-  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/perspect3vism/ad4m-executor.git"
+  },
+  "author": {
+    "name": "Nicolas Luck",
+    "email": "nicolas@lucksus.eu"
+  },
+  "contributors": [
+    {
+      "name": "Joshua Parkin",
+      "email": "joshuadparkin@gmail.com"
+    }
+  ],
+  "license": "CAL-1.0",
+  "bugs": {
+    "url": "https://github.com/perspect3vism/ad4m-executor/issues"
+  },
   "devDependencies": {
     "@apollo/client": "^3.2.5",
     "@types/jest": "^26.0.20",
@@ -18,7 +35,9 @@
     "typescript": "^4.2.4"
   },
   "dependencies": {
-    "@holochain/conductor-api": "0.0.1",
+    "@holochain/conductor-api": "0.0.2",
+    "@perspect3vism/ad4m": "0.0.3",
+    "@perspect3vism/ad4m-language-context": "0.0.1",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^11.2.0",
@@ -26,13 +45,11 @@
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",
     "@transmute/did-wallet": "lucksus/did-wallet",
-    "ad4m": "file:../ad4m",
     "apollo-server": "^2.18.2",
     "base-x": "^3.0.8",
     "graphql": "^15.3.0",
     "ipfs": "^0.54.4",
     "js-yaml": "^4.0.0",
-    "language-context": "file:../language-context",
     "liquidcore": "^0.7.10",
     "lowdb": "^1.0.0",
     "multihashing": "^0.3.3",
