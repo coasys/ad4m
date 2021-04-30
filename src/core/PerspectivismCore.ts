@@ -16,7 +16,7 @@ import type { SharingType } from '@perspect3vism/ad4m/SharedPerspective'
 import LanguageFactory from './LanguageFactory'
 import type { PublicSharing } from '@perspect3vism/ad4m/Language'
 import type Address from "@perspect3vism/ad4m/Address"
-import { SIGNAL } from './graphQL-interface/PubSub'
+import * as PubSub from './graphQL-interface/PubSub'
 
 export default class PerspectivismCore {
     #holochain: HolochainService
@@ -78,8 +78,9 @@ export default class PerspectivismCore {
     languageSignal(signal: any) {
         //@ts-ignore
         console.log("PerspectivismCore.languageSignal: Got signal", signal, "from language", this.language);
+        //NOTE (optimization): worth considering if its worth keeping around pubsub in this or if we should just get a new pubsub here
         //@ts-ignore
-        this.pubsub.publish(SIGNAL, { signal: signal, language: this.language })
+        this.pubsub.publish(PubSub.SIGNAL, { signal: signal.toString(), language: this.language });
     }
 
     async initControllers() {
