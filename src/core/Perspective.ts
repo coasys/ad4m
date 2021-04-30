@@ -1,13 +1,12 @@
-import type Agent from "ad4m/Agent"
-import Link, { hashLinkExpression, linkEqual, LinkQuery } from "ad4m/Links";
+import type Agent from "@perspect3vism/ad4m/Agent"
+import Link, { hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m/Links";
 import { SHA3 } from "sha3";
-import type Expression from "ad4m/Expression";
+import type Expression from "@perspect3vism/ad4m/Expression";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
-import type LanguageRef from "ad4m/LanguageRef";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveID from "./PerspectiveID"
-import type SharedPerspective from "ad4m/SharedPerspective";
+import type SharedPerspective from "@perspect3vism/ad4m/SharedPerspective";
 import type PerspectiveContext from "./PerspectiveContext"
 
 export default class Perspective {

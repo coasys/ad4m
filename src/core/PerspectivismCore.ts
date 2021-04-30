@@ -6,16 +6,16 @@ import * as IPFS from './storage-services/IPFS'
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
-import type LanguageRef from 'ad4m/LanguageRef'
+import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import * as GraphQL from './graphQL-interface/GraphQL'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
-import SharedPerspective from 'ad4m/SharedPerspective'
-import type { SharingType } from 'ad4m/SharedPerspective'
+import SharedPerspective from '@perspect3vism/ad4m/SharedPerspective'
+import type { SharingType } from '@perspect3vism/ad4m/SharedPerspective'
 import LanguageFactory from './LanguageFactory'
-import type { PublicSharing } from 'ad4m/Language'
-import type Address from "ad4m/Address"
+import type { PublicSharing } from '@perspect3vism/ad4m/Language'
+import type Address from "@perspect3vism/ad4m/Address"
 import { SIGNAL } from './graphQL-interface/PubSub'
 
 export default class PerspectivismCore {
