@@ -12,9 +12,3 @@ More information about the AD4M ontology and scope can be found [here](https://g
 npm i
 npm run build
 ```
-
-Running the above command will output `main.js` file inside the `build` directory. Further steps are required to get this running the mobile application.
-
-### Status
-
-This project in its current state is most definitely not working. Whilst the project will compile and run in a tradional node runtime; testing it inside both android & iOS has not been completed as of yet. Once we can confirm the execution of this package in android and iOS; we can proceed to add the languages required to make this package valid middleware for Junto's backend communication.
