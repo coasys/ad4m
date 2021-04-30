@@ -1,6 +1,6 @@
 {
-  "name": "ad4m-executor",
-  "version": "1.0.0",
+  "name": "@perspect3vism/ad4m-executor",
+  "version": "0.0.1",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "types": "src/types.d.ts",
@@ -8,8 +8,24 @@
     "build": "tsc",
     "run": "node lib/main.js"
   },
-  "author": "",
-  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/perspect3vism/ad4m-executor.git"
+  },
+  "author": {
+    "name": "Nicolas Luck",
+    "email": "nicolas@lucksus.eu"
+  },
+  "contributors": [
+    {
+      "name": "Joshua Parkin",
+      "email": "joshuadparkin@gmail.com"
+    }
+  ],
+  "license": "CAL-1.0",
+  "bugs": {
+    "url": "https://github.com/perspect3vism/ad4m-executor/issues"
+  },
   "devDependencies": {
     "@apollo/client": "^3.2.5",
     "@types/jest": "^26.0.20",
