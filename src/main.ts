@@ -5,14 +5,7 @@ import type { AppSignal } from '@holochain/conductor-api'
 export let defaultLangPath = "";
 export let defaultLangs = [];
 
-function escapeShellArg (arg) {
-  return arg.replace(" ", "\\\ ");
-}
-
 export async function init(appDataPath: string, resourcePath: string, appDefaultLangPath: string, appDefaultLangs: string[]): Promise<PerspectivismCore> {
-    appDataPath = escapeShellArg(appDataPath);
-    resourcePath = escapeShellArg(resourcePath);
-    appDefaultLangPath = escapeShellArg(appDefaultLangPath);
     defaultLangPath = appDefaultLangPath;
     defaultLangs = appDefaultLangs;
     console.log("\x1b[2m", "Starting ad4m core with path:", appDataPath, "Default language path:", defaultLangPath, 
