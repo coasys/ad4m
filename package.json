@@ -3,7 +3,11 @@
   "version": "0.0.3",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
-  "files": ["lib", "src", "types.d.ts"],
+  "files": [
+    "lib",
+    "src",
+    "types.d.ts"
+  ],
   "types": "src/types.d.ts",
   "scripts": {
     "build": "tsc",
@@ -36,8 +40,8 @@
   },
   "dependencies": {
     "@holochain/conductor-api": "0.0.2",
-    "@perspect3vism/ad4m": "0.0.3",
-    "@perspect3vism/ad4m-language-context": "0.0.1",
+    "@perspect3vism/ad4m": "file:../ad4m",
+    "@perspect3vism/ad4m-language-context": "file:../ad4m-language-context",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^11.2.0",
