@@ -4,9 +4,12 @@ import { exprRef2String, parseExprURL } from '@perspect3vism/ad4m/ExpressionRef'
 import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
+import { GraphQLScalarType } from "graphql";
 //import { shell } from 'electron'
 
 const typeDefs = gql`
+scalar Date
+
 type Agent {
     did: String
     name: String
@@ -64,10 +67,13 @@ type LinkExpression {
     timestamp: String
     data: Link
 }
+
 input LinkQuery {
     source: String
     predicate: String
     target: String
+    from: Date
+    to: Date
 }
 
 type Language {
@@ -227,8 +233,8 @@ function createResolvers(core: PerspectivismCore) {
                 return core.perspectivesController.allPerspectiveIDs()
             },
             links: async (parent, args, context, info) => {
-                // console.log("GQL| links:", args)
                 const { perspectiveUUID, query } = args
+                // console.log("GQL: Links query: ", query);
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 return await perspective.getLinks(query)
             },
@@ -482,7 +488,17 @@ function createResolvers(core: PerspectivismCore) {
                 //         return ''
                 // }
             }
-        }
+        },
+        Date: new GraphQLScalarType({
+            name: 'Date',
+            description: 'Date custom scalar type',
+            parseValue(value) {
+              return new Date(value); // value from the client
+            },
+            serialize(value) {
+              return value.toISOString(); // value sent to the client
+            }
+        }),
     }
 }
 
