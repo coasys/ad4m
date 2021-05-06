@@ -74,6 +74,7 @@ type Language {
     name: String
     address: String
     constructorIcon: Icon
+    iconFor: Icon
     settings: String
     settingsIcon: Icon
 }
@@ -232,6 +233,7 @@ function createResolvers(core: PerspectivismCore) {
                 return await perspective.getLinks(query)
             },
             expression: async (parent, args, context, info) => {
+                //console.log(new Date().toISOString(), "gql: expression:", args);
                 const ref = parseExprURL(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 if(expression) {
@@ -239,13 +241,15 @@ function createResolvers(core: PerspectivismCore) {
                     expression.url = args.url.toString()
                     expression.data = JSON.stringify(expression.data)
                 }
-
+                //console.log(new Date().toISOString(), "Returning expression", expression);
                 return expression
             },
             language: (parent, args, context, info) => {
+                //console.log("gql: language query:", args);
                 const { address } = args
                 const lang = core.languageController.languageByRef({address} as LanguageRef) as any
                 lang.address = address
+                //console.log("Returning language", lang);
                 return lang
             },
             languages: (parent, args, context, info) => {
@@ -323,6 +327,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             createExpression: async (parent, args, context, info) => {
                 const { languageAddress, content } = args.input
+                //console.log("GQL: creating expression", languageAddress, content);
                 const langref = { address: languageAddress } as LanguageRef
                 const expref = await core.languageController.createPublicExpression(langref, JSON.parse(content))
                 return exprRef2String(expref)
@@ -421,22 +426,25 @@ function createResolvers(core: PerspectivismCore) {
 
         Expression: {
             language: async (expression) => {
-                // console.log("GQL EXPRESSION", expression)
+                //console.log("GQL LANGUAGE", expression)
                 const lang = await core.languageController.languageForExpression(expression.ref) as any
                 lang.address = expression.ref.language.address
                 return lang
             },
 
             icon: (expression) => {
+                //console.log("GQL ICON", expression)
                 return { code: core.languageController.getIcon(expression.ref.language) }
             }
         },
 
         Language: {
             constructorIcon: (language) => {
+                //console.log("GQL: getting Constructor icon for lang:", language);
                 return { code: core.languageController.getConstructorIcon(language) }
             },
             settings: (language) => {
+                //console.log("GQL SETTINGS", language)
                 return JSON.stringify(core.languageController.getSettings(language))
             },
             settingsIcon: (language) => {
@@ -451,28 +459,28 @@ function createResolvers(core: PerspectivismCore) {
         Agent: {
             name: async (agent) => {
                 //console.debug("GQL| AGENT.name:", agent)
-                if(agent.name && agent.name !== "")
-                    return agent.name
-                else {
-                    const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
-                    if(agentExpression)
-                        return (agentExpression.data as Agent).name
-                    else
-                        return ''
-                }
+                // if(agent.name && agent.name !== "")
+                //     return agent.name
+                // else {
+                //     const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
+                //     if(agentExpression)
+                //         return (agentExpression.data as Agent).name
+                //     else
+                //         return ''
+                // }
             },
 
             email: async (agent) => {
                 //console.debug("GQL| AGENT.email:", agent)
-                if(agent.email && agent.email !== "")
-                    return agent.email
-                else {
-                    const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
-                    if(agentExpression)
-                        return (agentExpression.data as Agent).email
-                    else
-                        return ''
-                }
+                // if(agent.email && agent.email !== "")
+                //     return agent.email
+                // else {
+                //     const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
+                //     if(agentExpression)
+                //         return (agentExpression.data as Agent).email
+                //     else
+                //         return ''
+                // }
             }
         }
     }
