@@ -17,6 +17,7 @@ import LanguageFactory from './LanguageFactory'
 import type { PublicSharing } from '@perspect3vism/ad4m/Language'
 import type Address from "@perspect3vism/ad4m/Address"
 import * as PubSub from './graphQL-interface/PubSub'
+import type PerspectiveID from './PerspectiveID'
 
 export default class PerspectivismCore {
     #holochain: HolochainService
@@ -77,7 +78,7 @@ export default class PerspectivismCore {
     
     languageSignal(signal: any) {
         //@ts-ignore
-        console.log("PerspectivismCore.languageSignal: Got signal", signal, "from language", this.language);
+        console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
         //NOTE (optimization): worth considering if its worth keeping around pubsub in this or if we should just get a new pubsub here
         //@ts-ignore
         this.pubsub.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
@@ -138,6 +139,26 @@ export default class PerspectivismCore {
         perspectiveID.sharedURL = perspectiveUrl
         this.#perspectivesController.update(perspectiveID)
         return sharedPerspective
+    }
+
+    async installSharedPerspective(sharedPerspectiveUrl: string, sharedPerspective: SharedPerspective): Promise<PerspectiveID> {
+        const languages = {}
+        sharedPerspective.allowedExpressionLanguages.forEach(l => languages[l] = l)
+        sharedPerspective.allowedExpressionLanguages.forEach(l => languages[l] = l)
+        sharedPerspective.linkLanguages.forEach(l => languages[l.address] = l.address)
+        const uniqueLangs: string[] = Object.values(languages)
+        console.log("Attempting to install languages", uniqueLangs);
+        uniqueLangs.forEach(async (lang) => await this.#languageController.installLanguage(lang));
+        
+        let localPerspective = {
+            name: sharedPerspective.name, 
+            author: this.agentService.agent, 
+            timestamp: new Date().toISOString(), 
+            sharedPerspective: sharedPerspective, 
+            sharedURL: sharedPerspectiveUrl
+        };
+        let perspective = this.#perspectivesController.add(localPerspective);
+        return perspective;        
     }
 
     createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, encrypt: Boolean, passphrase: string): Promise<LanguageRef> {

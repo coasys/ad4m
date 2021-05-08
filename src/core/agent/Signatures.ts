@@ -36,6 +36,7 @@ export default class Signatures {
     static buildMessage(data: any, timestamp: string): Uint8Array {
         const payload = { data, timestamp}
         const payloadString = JSON.stringify(payload)
+        // console.log("Verifying with string:", payloadString);
         const payloadBuffer = Buffer.from(payloadString)
         const payloadBytes = Uint8Array.from(sha256(Uint8Array.from(payloadBuffer), { asBytes: true }))
         return payloadBytes

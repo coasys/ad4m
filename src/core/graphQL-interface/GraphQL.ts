@@ -103,7 +103,22 @@ type SharedPerspective {
     sharedExpressionLanguages: [String]
 }
 
+input SharedPerspectiveInput {
+    name: String
+    description: String
+    type: String
+    linkLanguages: [LanguageRefInput]
+    allowedExpressionLanguages: [String]
+    requiredExpressionLanguages: [String]
+    sharedExpressionLanguages: [String]
+}
+
 type LanguageRef {
+    address: String
+    name: String
+}
+
+input LanguageRefInput {
     address: String
     name: String
 }
@@ -160,6 +175,11 @@ input PublishPerspectiveInput {
     allowedExpressionLanguages: [String]
 }
 
+input InstallSharedPerspectiveInput {
+    sharedPerspectiveUrl: String
+    sharedPerspective: SharedPerspectiveInput
+}
+
 input CreateHcExpressionLanguageInput {
     languagePath: String 
     dnaNick: String
@@ -193,6 +213,7 @@ type Mutation {
     updatePerspective(input: UpdatePerspectiveInput): Perspective
     removePerspective(uuid: String): Boolean
     publishPerspective(input: PublishPerspectiveInput): SharedPerspective
+    installSharedPerspective(input: InstallSharedPerspectiveInput): Perspective
     addLink(input: AddLinkInput): LinkExpression
     updateLink(input: UpdateLinkInput): LinkExpression
     removeLink(input: RemoveLinkInput): Boolean
@@ -239,15 +260,16 @@ function createResolvers(core: PerspectivismCore) {
                 return await perspective.getLinks(query)
             },
             expression: async (parent, args, context, info) => {
-                //console.log(new Date().toISOString(), "gql: expression:", args);
+                console.log(new Date().toISOString(), "gql: expression:", args);
                 const ref = parseExprURL(args.url.toString())
+                console.log("Got ref", ref);
                 const expression = await core.languageController.getExpression(ref) as any
                 if(expression) {
                     expression.ref = ref
                     expression.url = args.url.toString()
                     expression.data = JSON.stringify(expression.data)
                 }
-                //console.log(new Date().toISOString(), "Returning expression", expression);
+                console.log(new Date().toISOString(), "Returning expression", expression);
                 return expression
             },
             language: (parent, args, context, info) => {
@@ -363,6 +385,11 @@ function createResolvers(core: PerspectivismCore) {
                 if(perspective.sharedPerspective && perspective.sharedURL)
                     throw new Error(`Perspective ${name} (${uuid}) is already shared`)
                 return core.publishPerspective(uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages)
+            },
+            installSharedPerspective: async (parent, args, context, info) => {
+                const { sharedPerspectiveUrl, sharedPerspective } = args.input;
+                let perspective = await core.installSharedPerspective(sharedPerspectiveUrl, sharedPerspective);
+                return perspective
             },
             createUniqueHolochainExpressionLanguageFromTemplate: (parent, args, context, info) => {
                 const {languagePath, dnaNick, encrypt, passphrase} = args.input;
@@ -489,6 +516,7 @@ function createResolvers(core: PerspectivismCore) {
                 // }
             }
         },
+
         Date: new GraphQLScalarType({
             name: 'Date',
             description: 'Date custom scalar type',
