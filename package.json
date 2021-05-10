@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
