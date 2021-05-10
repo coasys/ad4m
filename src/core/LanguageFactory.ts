@@ -40,6 +40,7 @@ export default class LanguageFactory {
         //TODO: this should be derived from global vars and not hard coded
         fs.copyFileSync(`${dnaPath}`, path.join(Config.tempLangPath, `${dnaNick}.dna`));
         let unpackRes = this.#holochainService.unpackDna(path.join(Config.tempLangPath, `${dnaNick}.dna`));
+        //console.log("Unpacked with response: ", unpackRes);
         if (!fs.existsSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`))) {
             console.error("LanguageFactory: Error unpacking DNA");
             console.error("LanguageFactory: Unpack execution returned", unpackRes);
@@ -47,13 +48,14 @@ export default class LanguageFactory {
         };
         //Read the dna.yaml and insert passphrase to make unique
         let dnaYaml = yaml.load(fs.readFileSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`), 'utf8'));
-        dnaYaml.uuid = passphrase;
+        dnaYaml.uid = passphrase;
         let dnaYamlDump = yaml.dump(dnaYaml);
-        console.log("LanguageFactory: writing new language DNA bundle", dnaYamlDump);
+        //console.log("LanguageFactory: writing new language DNA bundle", dnaYamlDump);
         fs.writeFileSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`), dnaYamlDump);
 
         //Pack as new DNA with new ID property injected
         let pack = this.#holochainService.packDna(path.join(Config.tempLangPath, `${dnaNick}`));
+        //console.log("Packed DNA with result", pack);
         if (!fs.existsSync(path.join(Config.tempLangPath, `${dnaNick}.dna`))) {
             console.error("LanguageFactory: Error packing DNA");
             console.error("LanguageFactory: Pack execution returned", pack);
@@ -61,8 +63,19 @@ export default class LanguageFactory {
         };
 
         //Read DNA and inject into template file
-        var base64 = fs.readFileSync(path.join(Config.tempLangPath, `${dnaNick}.dna`), "base64").replace(/[\r\n]+/gm, '');
-        var dnaCode = `var dna = "${base64}";`.trim();
+        let findDnaFile = fs.readdirSync(path.join(Config.tempLangPath, `${dnaNick}`));
+        let index = findDnaFile.findIndex(element => element.includes(".dna"));
+        if (index != -1) {
+            var base64 = fs.readFileSync(path.join(Config.tempLangPath, `${dnaNick}/${findDnaFile[index]}`), "base64").replace(/[\r\n]+/gm, '');
+            var dnaCode = `var dna = "${base64}";`.trim();
+        } else {
+            console.log("LanguageFactory: Could not find DNA file");
+            fs.unlinkSync(path.join(Config.tempLangPath, `${dnaNick}.dna`));
+            fs.rmdirSync(path.join(Config.tempLangPath, `${dnaNick}`), {recursive: true});
+            fs.rmdirSync(path.join(Config.tempLangPath, "target"), {recursive: true});
+
+            throw "Could not find DNA file in workdir"
+        }
 
         //Cleanup temp files
         fs.unlinkSync(path.join(Config.tempLangPath, `${dnaNick}.dna`));
@@ -79,7 +92,12 @@ export default class LanguageFactory {
         let template = fs.readFileSync(path.join(`${languagePath}`, "bundle.js")).toString();
         let dnaCode = this.createUniqueHolochainDNA(path.join(`${languagePath}`, `../${dnaNick}.dna`), dnaNick, passphrase);
         const templateLines = template.split('\n') 
-        templateLines.push(dnaCode);
+        let index = templateLines.findIndex(element => element.includes("var dna ="));
+        if (index != -1) {
+            console.log("Deleting DNA line at index", index);
+            delete templateLines[index];
+        };
+        templateLines.unshift(dnaCode);
         const code = templateLines.join('\n');
 
         var newLanguageObj = {
@@ -127,8 +145,13 @@ export default class LanguageFactory {
                 console.debug("LanguageFactory: reading template file", templates.holochain)
                 template = fs.readFileSync(path.join(defaultLangPath, templates.holochain)).toString()
                 const lines = template.split('\n') 
-                lines.push(dnaCode);
-                template = lines.join('\n');
+                let indexH = lines.findIndex(element => element.includes("var dna ="));
+                if (indexH != -1) {
+                    console.log("Deleting DNA line at index", indexH);
+                    delete lines[indexH];
+                };
+                lines.unshift(dnaCode);
+                template = lines;
 
                 break;
             //case SharingType.HolochainChannel does not work and I have no idea why
@@ -140,15 +163,20 @@ export default class LanguageFactory {
                 console.debug("LanguageFactory: reading template file", templates.holochainChannel)
                 template = fs.readFileSync(path.join(defaultLangPath, templates.holochainChannel)).toString()
                 const channelLines = template.split('\n') 
-                channelLines.push(dnaCode);
-                template = channelLines.join('\n');
+                let index = channelLines.findIndex(element => element.includes("var dna ="));
+                if (index != -1) {
+                    console.log("Deleting DNA line at index", index);
+                    delete channelLines[index];
+                };
+                channelLines.unshift(dnaCode);
+                template = channelLines;
 
                 break;
             default:
                 throw new Error(`SharingType ${sharedPerspective.type} not yet implementent`)
         }
 
-        const lines = template.split('\n') 
+        const lines = template
         lines.splice(1, 0, injection) 
         const code = lines.join('\n')
 
