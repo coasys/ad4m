@@ -25,16 +25,12 @@ const templates = {
 export default class LanguageFactory {
     #agentService: AgentService
     #languageLanguage: Language
-    #encrypedLanguageLanguage: Language
     #holochainService: HolochainService
 
-    constructor(agentService: AgentService, languageLanguage: Language, encryptLanguageLanguage: Language, holochainService: HolochainService) {
+    constructor(agentService: AgentService, languageLanguage: Language, holochainService: HolochainService) {
         if(!languageLanguage.languageAdapter)
             throw new Error(`Error creating LanguageFactory! Not a Language Language: ${JSON.stringify(languageLanguage)}`)
-        if(!encryptLanguageLanguage.languageAdapter)
-            throw new Error(`Error creating LanguageFactory! Not a Language Language: ${JSON.stringify(encryptLanguageLanguage)}`)
         this.#languageLanguage = languageLanguage
-        this.#encrypedLanguageLanguage = encryptLanguageLanguage
         this.#agentService = agentService
         this.#holochainService = holochainService
     }
@@ -95,20 +91,11 @@ export default class LanguageFactory {
         }
 
         try {
-            if (encrypt) {
-                newLanguageObj.passphrase = passphrase;
-                const address = await (this.#encrypedLanguageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
-                return {
-                    address,
-                    name,
-                } as LanguageRef
-            } else {
-                const address = await (this.#languageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
-                return {
-                    address,
-                    name,
-                } as LanguageRef
-            }
+            const address = await (this.#languageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
+            return {
+                address,
+                name,
+            } as LanguageRef
         } catch(e) {
             console.error("LanguageFactory: ERROR creating new language:", e)
             throw e
@@ -174,21 +161,12 @@ export default class LanguageFactory {
         }
 
         try {
-            if (encrypt) {
-                newLanguageObj.passphrase = passphrase;
-                const address = await (this.#encrypedLanguageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
-                return {
-                    address,
-                    name,
-                } as LanguageRef
-            } else {
-                const address = await (this.#languageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
-                console.debug("LanguageFactory: new Language address:", address)
-                return {
-                    address,
-                    name,
-                } as LanguageRef
-            }
+            const address = await (this.#languageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
+            console.debug("LanguageFactory: new Language address:", address)
+            return {
+                address,
+                name,
+            } as LanguageRef
         } catch(e) {
             console.error("LanguageFactory: ERROR creating new language:", e)
             throw e

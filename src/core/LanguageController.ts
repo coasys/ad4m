@@ -24,7 +24,6 @@ const aliases = {
     'https': 'url-iframe',
     'did': 'agent-profiles',
     'lang': 'languages',
-    'encrypt-lang': 'encrypted-languages',
     'perspective': 'shared-perspectives'
 }
 
@@ -40,7 +39,6 @@ export default class LanguageController {
 
     #agentLanguage: Language
     #languageLanguage: Language
-    #encryptedLanguageLanguage: Language
     #perspectiveLanguage: Language
     pubSub
 
@@ -79,9 +77,6 @@ export default class LanguageController {
                     }
                     if(alias === 'perspective') {
                         this.#perspectiveLanguage = language
-                    }
-                    if(alias === 'encrypt-lang') {
-                        this.#encryptedLanguageLanguage = language
                     }
                 }
             })
@@ -142,62 +137,24 @@ export default class LanguageController {
         return ipfsAddress.cid.toString()
     }
 
-    async installEncryptedLanguage(address: Address, languageMeta: void|Expression, passphrase: String) {
-        const language = this.#languages.get(address)
-        
-        if (language == undefined) {
-            if(!languageMeta) {
-                languageMeta = await this.#encryptedLanguageLanguage.expressionAdapter.get(address)
-            }
-            // @ts-ignore
-            console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
-            const source = await this.#encryptedLanguageLanguage.languageAdapter.getLanguageSource(address+`?passphrase=${passphrase}`)
-
-            const hash = await this.ipfsHash(source)
-            if(hash === 'asdf') {
-                console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
-                console.error("LanguageController.installLanguage: Address:", address)
-                console.error("LanguageController.installLanguage: Computed hash:", hash)
-                console.error("LanguageController.installLanguage: =================================")
-                console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-                console.error("LanguageController.installLanguage: =================================")
-                console.error("LanguageController.installLanguage:", languageMeta)
-                console.error("LanguageController.installLanguage: =================================")
-                console.error("LanguageController.installLanguage: =================================")
-                console.error("LanguageController.installLanguage: CONTENT:")
-                //console.error(source)
-                //console.error("LanguageController.installLanguage: =================================")
-                //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-                //console.error("LanguageController.installLanguage: =================================")
-                return
-            }
-
-            const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
-            const metaPath = path.join(Config.languagesPath, address, 'meta.json')
-            fs.mkdirSync(path.join(Config.languagesPath, address))
-            fs.writeFileSync(sourcePath, source)
-            fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
-            try {
-                this.loadLanguage(sourcePath)
-            } catch(e) {
-                console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
-                console.error("LanguageController.installLanguage: ======================================")
-                console.error(e)
-            }
-        }
-    }
-
     async installLanguage(address: Address, languageMeta: void|Expression) {
         const language = this.#languages.get(address)
         
         if (language == undefined) {
+            console.log(new Date(), "installLanguage: installing language with address", address);
             if(!languageMeta) {
+                console.log("Using language language", this.#languageLanguage.expressionAdapter.get)
                 languageMeta = await this.#languageLanguage.expressionAdapter.get(address)
+
+                if (languageMeta == null) {
+                    //@ts-ignore
+                    languageMeta = {data: {}};
+                }
             }
+            console.log(new Date(), "got language meta", languageMeta);
             // @ts-ignore
             console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
             const source = await this.#languageLanguage.languageAdapter.getLanguageSource(address)
-    
             const hash = await this.ipfsHash(source)
             if(hash === 'asdf') {
                 console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
@@ -222,6 +179,7 @@ export default class LanguageController {
             fs.mkdirSync(path.join(Config.languagesPath, address))
             fs.writeFileSync(sourcePath, source)
             fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
+            console.log(new Date(), "installed language");
             try {
                 this.loadLanguage(sourcePath)
             } catch(e) {
@@ -296,13 +254,6 @@ export default class LanguageController {
             throw new Error("No Language Language installed!")
         }
         return this.#languageLanguage
-    }
-
-    getEncrypedLanguageLanguage(): Language {
-        if(!this.#encryptedLanguageLanguage) {
-            throw new Error("No Encryped language language installed")
-        }
-        return this.#encryptedLanguageLanguage
     }
 
     getPerspectiveLanguage(): Language {
@@ -381,12 +332,15 @@ export default class LanguageController {
     }
 
     async getExpression(ref: ExpressionRef): Promise<void | Expression> {
-        const expr = await this.languageForExpression(ref).expressionAdapter.get(ref.expression)
+        const lang = this.languageForExpression(ref);
+        console.log("Got lang", lang);
+        const expr = await lang.expressionAdapter.get(ref.expression);
+        console.log("Got exp", expr);
         if(expr) {
             try{
                 // @ts-ignore
                 if(! await this.#context.signatures.verify(expr)) {
-                    console.error("BROKEN SIGNATURE FOR EXPRESSION:", expr)
+                    //console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
                     expr.proof.invalid = true
                 } else {
                     // console.debug("Valid expr:", ref)
