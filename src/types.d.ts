@@ -2,7 +2,7 @@ import("./core/PerspectivismCore");  // Don't delete this line.
 import { PerspectivismCore } from "./core/PerspectivismCore";
 
 //Module types
-export function init(appDataPath: String, resourcePath: string, appDefaultLangPath: string, appDefaultLangs: string[]): Promise<PerspectivismCore>;
+export function init(appDataPath: String, resourcePath: string, appDefaultLangPath: string, appDefaultLangs: string[], mocks: boolean): Promise<PerspectivismCore>;
 export {PerspectivismCore};
 
 //GraphQL interface types
@@ -17,7 +17,9 @@ export type Scalars = {
   Boolean: boolean;
   Int: number;
   Float: number;
+  Date: any;
 };
+
 
 export type Agent = {
   __typename?: 'Agent';
@@ -85,6 +87,8 @@ export type LinkQuery = {
   source?: Maybe<Scalars['String']>;
   predicate?: Maybe<Scalars['String']>;
   target?: Maybe<Scalars['String']>;
+  from?: Maybe<Scalars['Date']>;
+  until?: Maybe<Scalars['Date']>;
 };
 
 export type Language = {
@@ -92,6 +96,7 @@ export type Language = {
   name?: Maybe<Scalars['String']>;
   address?: Maybe<Scalars['String']>;
   constructorIcon?: Maybe<Icon>;
+  iconFor?: Maybe<Icon>;
   settings?: Maybe<Scalars['String']>;
   settingsIcon?: Maybe<Icon>;
 };
@@ -121,10 +126,31 @@ export type SharedPerspective = {
   sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
 };
 
+export type SharedPerspectiveInput = {
+  name?: Maybe<Scalars['String']>;
+  description?: Maybe<Scalars['String']>;
+  type?: Maybe<Scalars['String']>;
+  linkLanguages?: Maybe<Array<Maybe<LanguageRefInput>>>;
+  allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+  sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
+};
+
 export type LanguageRef = {
   __typename?: 'LanguageRef';
   address?: Maybe<Scalars['String']>;
   name?: Maybe<Scalars['String']>;
+};
+
+export type LanguageRefInput = {
+  address?: Maybe<Scalars['String']>;
+  name?: Maybe<Scalars['String']>;
+};
+
+export type Signal = {
+  __typename?: 'Signal';
+  language?: Maybe<Scalars['String']>;
+  signal?: Maybe<Scalars['String']>;
 };
 
 export type AddLinkInput = {
@@ -168,16 +194,19 @@ export type PublishPerspectiveInput = {
   name?: Maybe<Scalars['String']>;
   description?: Maybe<Scalars['String']>;
   type?: Maybe<Scalars['String']>;
-  encrypt?: Maybe<Scalars['Boolean']>;
   passphrase?: Maybe<Scalars['String']>;
   requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
   allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
 };
 
+export type InstallSharedPerspectiveInput = {
+  sharedPerspectiveUrl?: Maybe<Scalars['String']>;
+  sharedPerspective?: Maybe<SharedPerspectiveInput>;
+};
+
 export type CreateHcExpressionLanguageInput = {
   languagePath?: Maybe<Scalars['String']>;
   dnaNick?: Maybe<Scalars['String']>;
-  encrypt?: Maybe<Scalars['Boolean']>;
   passphrase?: Maybe<Scalars['String']>;
 };
 
@@ -196,6 +225,7 @@ export type Query = {
   languages?: Maybe<Array<Maybe<Language>>>;
   perspectives?: Maybe<Array<Maybe<Perspective>>>;
   perspective?: Maybe<Perspective>;
+  pubKeyForLanguage?: Maybe<Scalars['String']>;
 };
 
 
@@ -224,6 +254,11 @@ export type QueryPerspectiveArgs = {
   uuid?: Maybe<Scalars['String']>;
 };
 
+
+export type QueryPubKeyForLanguageArgs = {
+  lang?: Maybe<Scalars['String']>;
+};
+
 export type Mutation = {
   __typename?: 'Mutation';
   initializeAgent?: Maybe<AgentService>;
@@ -234,6 +269,7 @@ export type Mutation = {
   updatePerspective?: Maybe<Perspective>;
   removePerspective?: Maybe<Scalars['Boolean']>;
   publishPerspective?: Maybe<SharedPerspective>;
+  installSharedPerspective?: Maybe<Perspective>;
   addLink?: Maybe<LinkExpression>;
   updateLink?: Maybe<LinkExpression>;
   removeLink?: Maybe<Scalars['Boolean']>;
@@ -285,6 +321,11 @@ export type MutationPublishPerspectiveArgs = {
 };
 
 
+export type MutationInstallSharedPerspectiveArgs = {
+  input?: Maybe<InstallSharedPerspectiveInput>;
+};
+
+
 export type MutationAddLinkArgs = {
   input?: Maybe<AddLinkInput>;
 };
@@ -327,6 +368,7 @@ export type Subscription = {
   perspectiveRemoved?: Maybe<Scalars['String']>;
   linkAdded?: Maybe<LinkExpression>;
   linkRemoved?: Maybe<LinkExpression>;
+  signal?: Maybe<Signal>;
 };
 
 
