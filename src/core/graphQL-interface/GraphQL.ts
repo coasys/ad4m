@@ -73,7 +73,7 @@ input LinkQuery {
     predicate: String
     target: String
     from: Date
-    to: Date
+    until: Date
 }
 
 type Language {
