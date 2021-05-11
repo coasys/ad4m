@@ -1,3 +1,5 @@
+scalar Date
+
 type Agent {
     did: String
     name: String
@@ -55,16 +57,20 @@ type LinkExpression {
     timestamp: String
     data: Link
 }
+
 input LinkQuery {
     source: String
     predicate: String
     target: String
+    from: Date
+    until: Date
 }
 
 type Language {
     name: String
     address: String
     constructorIcon: Icon
+    iconFor: Icon
     settings: String
     settingsIcon: Icon
 }
@@ -87,9 +93,29 @@ type SharedPerspective {
     sharedExpressionLanguages: [String]
 }
 
+input SharedPerspectiveInput {
+    name: String
+    description: String
+    type: String
+    linkLanguages: [LanguageRefInput]
+    allowedExpressionLanguages: [String]
+    requiredExpressionLanguages: [String]
+    sharedExpressionLanguages: [String]
+}
+
 type LanguageRef {
     address: String
     name: String
+}
+
+input LanguageRefInput {
+    address: String
+    name: String
+}
+
+type Signal {
+    language: String
+    signal: String
 }
 
 input AddLinkInput {
@@ -133,16 +159,19 @@ input PublishPerspectiveInput {
     name: String
     description: String
     type: String
-    encrypt: Boolean
     passphrase: String
     requiredExpressionLanguages: [String]
     allowedExpressionLanguages: [String]
 }
 
+input InstallSharedPerspectiveInput {
+    sharedPerspectiveUrl: String
+    sharedPerspective: SharedPerspectiveInput
+}
+
 input CreateHcExpressionLanguageInput {
     languagePath: String 
-    dnaNick: String
-    encrypt: Boolean 
+    dnaNick: String 
     passphrase: String
 }
 
@@ -160,6 +189,7 @@ type Query {
     languages(filter: String): [Language]
     perspectives: [Perspective]
     perspective(uuid: String): Perspective
+    pubKeyForLanguage(lang: String): String
 }
 
 type Mutation {
@@ -171,6 +201,7 @@ type Mutation {
     updatePerspective(input: UpdatePerspectiveInput): Perspective
     removePerspective(uuid: String): Boolean
     publishPerspective(input: PublishPerspectiveInput): SharedPerspective
+    installSharedPerspective(input: InstallSharedPerspectiveInput): Perspective
     addLink(input: AddLinkInput): LinkExpression
     updateLink(input: UpdateLinkInput): LinkExpression
     removeLink(input: RemoveLinkInput): Boolean
@@ -188,4 +219,5 @@ type Subscription {
     perspectiveRemoved: String
     linkAdded(perspectiveUUID: String): LinkExpression
     linkRemoved(perspectiveUUID: String): LinkExpression
+    signal: Signal
 }
