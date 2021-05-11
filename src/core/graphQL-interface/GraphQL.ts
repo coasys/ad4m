@@ -528,9 +528,9 @@ function createResolvers(core: PerspectivismCore) {
 }
 
 
-export async function startServer(core: PerspectivismCore) {
+export async function startServer(core: PerspectivismCore, mocks: boolean) {
     const resolvers = createResolvers(core)
-    const server = new ApolloServer({ typeDefs, resolvers });
+    const server = new ApolloServer({ typeDefs, resolvers, mocks: mocks });
     const { url, subscriptionsUrl } = await server.listen()
     return { url, subscriptionsUrl }
 }

@@ -60,8 +60,8 @@ export default class PerspectivismCore {
         this.#holochain.stop();
     }
 
-    async startGraphQLServer() {
-        const { url, subscriptionsUrl } = await GraphQL.startServer(this)
+    async startGraphQLServer(mocks: boolean) {
+        const { url, subscriptionsUrl } = await GraphQL.startServer(this, mocks)
         console.log(`🚀  GraphQL Server ready at ${url}`)
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
