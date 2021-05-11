@@ -169,7 +169,6 @@ input PublishPerspectiveInput {
     name: String
     description: String
     type: String
-    encrypt: Boolean
     passphrase: String
     requiredExpressionLanguages: [String]
     allowedExpressionLanguages: [String]
@@ -182,8 +181,7 @@ input InstallSharedPerspectiveInput {
 
 input CreateHcExpressionLanguageInput {
     languagePath: String 
-    dnaNick: String
-    encrypt: Boolean 
+    dnaNick: String 
     passphrase: String
 }
 
@@ -247,7 +245,7 @@ function createResolvers(core: PerspectivismCore) {
                 return core.agentService.dump()
             },
             perspective: (parent, args, context, info) => {
-                console.log("GQL perspective", args.uuid)
+                // console.log("GQL perspective", args.uuid)
                 return core.perspectivesController.perspectiveID(args.uuid)
             },
             perspectives: (parent, args, context, info) => {
@@ -260,7 +258,7 @@ function createResolvers(core: PerspectivismCore) {
                 return await perspective.getLinks(query)
             },
             expression: async (parent, args, context, info) => {
-                console.log(new Date().toISOString(), "gql: expression:", args);
+                // console.log(new Date().toISOString(), "gql: expression:", args);
                 const ref = parseExprURL(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 if(expression) {
@@ -376,24 +374,24 @@ function createResolvers(core: PerspectivismCore) {
                 return perspective
             },
             publishPerspective: (parent, args, context, info) => {
-                const { uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
+                const { uuid, name, description, type, passphrase, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
                 //Note: this code is being executed twice in fn call, once here and once in publishPerspective
                 const perspective = core.perspectivesController.perspectiveID(uuid)
                 // @ts-ignore
                 if(perspective.sharedPerspective && perspective.sharedURL)
                     throw new Error(`Perspective ${name} (${uuid}) is already shared`)
-                return core.publishPerspective(uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages)
+                return core.publishPerspective(uuid, name, description, type, passphrase, requiredExpressionLanguages, allowedExpressionLanguages)
             },
             installSharedPerspective: async (parent, args, context, info) => {
-                console.log(new Date(), "GQL install shared perspective", args);
+                // console.log(new Date(), "GQL install shared perspective", args);
                 const { sharedPerspectiveUrl, sharedPerspective } = args.input;
                 let perspective = await core.installSharedPerspective(sharedPerspectiveUrl, sharedPerspective);
                 return perspective
             },
             createUniqueHolochainExpressionLanguageFromTemplate: (parent, args, context, info) => {
-                const {languagePath, dnaNick, encrypt, passphrase} = args.input;
+                const {languagePath, dnaNick, passphrase} = args.input;
 
-                return core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, encrypt, passphrase)
+                return core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, passphrase)
             },
             removePerspective: (parent, args, context, info) => {
                 const { uuid } = args

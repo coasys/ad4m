@@ -84,7 +84,7 @@ export default class LanguageFactory {
         return dnaCode
     }
 
-    async createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, encrypt: Boolean, passphrase: string): Promise<LanguageRef> {
+    async createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, passphrase: string): Promise<LanguageRef> {
         console.debug("LanguageFactory: creating new expression language")
         //Load the language to get the name
         //NOTE: path code below is a little funky; it assumes that languagePath points to language/bundle and that dna would be found at /language/dnaNick.dna
@@ -104,7 +104,6 @@ export default class LanguageFactory {
             name,
             description: "",
             bundleFile: code.toString(),
-            encrypted: encrypt,
             passphrase: ""
         }
 
@@ -120,7 +119,7 @@ export default class LanguageFactory {
         }
     }
 
-    async createLinkLanguageForSharedPerspective(sharedPerspective: SharedPerspective, encrypt: Boolean, passphrase: string): Promise<LanguageRef> {
+    async createLinkLanguageForSharedPerspective(sharedPerspective: SharedPerspective, passphrase: string): Promise<LanguageRef> {
         console.debug("LanguageFactory: creating new link language for shared perspective:", sharedPerspective.name)
 
         const name = `${sharedPerspective.name}-${sharedPerspective.type}-LinkLanguage`
@@ -184,7 +183,6 @@ export default class LanguageFactory {
             name,
             description: `UUID: ${UUID}`,
             bundleFile: code.toString(),
-            encrypted: encrypt,
             passphrase: ""
         }
 

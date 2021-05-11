@@ -333,9 +333,7 @@ export default class LanguageController {
 
     async getExpression(ref: ExpressionRef): Promise<void | Expression> {
         const lang = this.languageForExpression(ref);
-        console.log("Got lang", lang);
         const expr = await lang.expressionAdapter.get(ref.expression);
-        console.log("Got exp", expr);
         if(expr) {
             try{
                 // @ts-ignore

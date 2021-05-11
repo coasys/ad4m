@@ -104,7 +104,7 @@ export default class PerspectivismCore {
     }
 
     async publishPerspective(uuid: string, name: string, description: string, sharingType: SharingType, 
-        encrypt: Boolean, passphrase: string, requiredExpressionLanguages: Address[], allowedExpressionLanguages: Address[]): Promise<SharedPerspective> {
+        passphrase: string, requiredExpressionLanguages: Address[], allowedExpressionLanguages: Address[]): Promise<SharedPerspective> {
         // We only work on the PerspectiveID object.
         // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
         // instance object here
@@ -112,7 +112,7 @@ export default class PerspectivismCore {
 
         const sharedPerspective = new SharedPerspective(name, description, sharingType)
         // Create LinkLanguage
-        const linkLanguageRef = await this.#languageFactory.createLinkLanguageForSharedPerspective(sharedPerspective, encrypt, passphrase)
+        const linkLanguageRef = await this.#languageFactory.createLinkLanguageForSharedPerspective(sharedPerspective, passphrase)
         sharedPerspective.linkLanguages = [linkLanguageRef]
         sharedPerspective.allowedExpressionLanguages = allowedExpressionLanguages
         sharedPerspective.requiredExpressionLanguages = requiredExpressionLanguages
@@ -157,8 +157,8 @@ export default class PerspectivismCore {
         return perspective;        
     }
 
-    createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, encrypt: Boolean, passphrase: string): Promise<LanguageRef> {
-        return this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, encrypt, passphrase)
+    createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, passphrase: string): Promise<LanguageRef> {
+        return this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, passphrase)
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
