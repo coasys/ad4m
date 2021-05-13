@@ -459,7 +459,6 @@ function createResolvers(core: PerspectivismCore) {
             },
 
             icon: (expression) => {
-                //console.log("GQL ICON", expression)
                 return { code: core.languageController.getIcon(expression.ref.language) }
             }
         },
