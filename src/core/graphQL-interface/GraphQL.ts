@@ -258,7 +258,6 @@ function createResolvers(core: PerspectivismCore) {
                 return await perspective.getLinks(query)
             },
             expression: async (parent, args, context, info) => {
-                // console.log(new Date().toISOString(), "gql: expression:", args);
                 const ref = parseExprURL(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 if(expression) {
