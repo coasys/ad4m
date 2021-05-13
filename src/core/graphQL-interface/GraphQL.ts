@@ -271,7 +271,6 @@ function createResolvers(core: PerspectivismCore) {
                 const { address } = args
                 const lang = core.languageController.languageByRef({address} as LanguageRef) as any
                 lang.address = address
-                //console.log("Returning language", lang);
                 return lang
             },
             languages: (parent, args, context, info) => {
