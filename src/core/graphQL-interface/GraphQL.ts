@@ -268,7 +268,6 @@ function createResolvers(core: PerspectivismCore) {
                 return expression
             },
             language: (parent, args, context, info) => {
-                // console.log("gql: language query:", args);
                 const { address } = args
                 const lang = core.languageController.languageByRef({address} as LanguageRef) as any
                 lang.address = address
