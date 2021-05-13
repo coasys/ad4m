@@ -87,8 +87,8 @@ export type LinkQuery = {
   source?: Maybe<Scalars['String']>;
   predicate?: Maybe<Scalars['String']>;
   target?: Maybe<Scalars['String']>;
-  from?: Maybe<Scalars['Date']>;
-  until?: Maybe<Scalars['Date']>;
+  fromDate?: Maybe<Scalars['Date']>;
+  untilDate?: Maybe<Scalars['Date']>;
 };
 
 export type Language = {
@@ -379,4 +379,12 @@ export type SubscriptionLinkAddedArgs = {
 
 export type SubscriptionLinkRemovedArgs = {
   perspectiveUUID?: Maybe<Scalars['String']>;
+};
+
+export type PubKeyForLangInput = {
+  lang: Maybe<Scalars['String']>;
+};
+
+export type GetExpressionInput = {
+  address: Maybe<Scalars['String']>;
 };
