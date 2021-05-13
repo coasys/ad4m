@@ -468,7 +468,6 @@ function createResolvers(core: PerspectivismCore) {
                 return { code: core.languageController.getConstructorIcon(language) }
             },
             settings: (language) => {
-                //console.log("GQL SETTINGS", language)
                 return JSON.stringify(core.languageController.getSettings(language))
             },
             settingsIcon: (language) => {
