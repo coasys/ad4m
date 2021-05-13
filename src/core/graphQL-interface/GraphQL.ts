@@ -348,7 +348,6 @@ function createResolvers(core: PerspectivismCore) {
             },
             createExpression: async (parent, args, context, info) => {
                 const { languageAddress, content } = args.input
-                //console.log("GQL: creating expression", languageAddress, content);
                 const langref = { address: languageAddress } as LanguageRef
                 const expref = await core.languageController.createPublicExpression(langref, JSON.parse(content))
                 return exprRef2String(expref)
