@@ -73,7 +73,6 @@ export default class PerspectivesController {
         if(!perspective.uuid) {
             perspective.uuid = uuidv4()
         }
-        // console.log("Adding perspective", perspective);
         this.#perspectiveIDs.set(perspective.uuid, perspective)
         this.save()
         this.#pubsub.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
