@@ -252,13 +252,13 @@ function createResolvers(core: PerspectivismCore) {
                 return core.perspectivesController.allPerspectiveIDs()
             },
             links: async (parent, args, context, info) => {
-                console.log("GQL: Links query: ", args);
+                // console.log("GQL: Links query: ", args);
                 const { perspectiveUUID, query } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 return await perspective.getLinks(query)
             },
             expression: async (parent, args, context, info) => {
-                console.log(new Date().toISOString(), "gql: expression:", args);
+                // console.log(new Date().toISOString(), "gql: expression:", args);
                 const ref = parseExprURL(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 if(expression) {
@@ -269,7 +269,7 @@ function createResolvers(core: PerspectivismCore) {
                 return expression
             },
             language: (parent, args, context, info) => {
-                console.log("gql: language query:", args);
+                // console.log("gql: language query:", args);
                 const { address } = args
                 const lang = core.languageController.languageByRef({address} as LanguageRef) as any
                 lang.address = address
@@ -325,7 +325,7 @@ function createResolvers(core: PerspectivismCore) {
                 return core.agentService.dump()
             },
             addLink: (parent, args, context, info) => {
-                console.log("GQL| addLink:", args)
+                // console.log("GQL| addLink:", args)
                 const { perspectiveUUID, link } = args.input
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 const parsedLink = JSON.parse(link)

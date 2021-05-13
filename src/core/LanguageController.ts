@@ -143,7 +143,6 @@ export default class LanguageController {
         if (language == undefined) {
             console.log(new Date(), "installLanguage: installing language with address", address);
             if(!languageMeta) {
-                console.log("Using language language", this.#languageLanguage.expressionAdapter.get)
                 languageMeta = await this.#languageLanguage.expressionAdapter.get(address)
 
                 if (languageMeta == null) {
@@ -151,7 +150,6 @@ export default class LanguageController {
                     languageMeta = {data: {}};
                 }
             }
-            console.log(new Date(), "got language meta", languageMeta);
             // @ts-ignore
             console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
             const source = await this.#languageLanguage.languageAdapter.getLanguageSource(address)
@@ -179,7 +177,7 @@ export default class LanguageController {
             fs.mkdirSync(path.join(Config.languagesPath, address))
             fs.writeFileSync(sourcePath, source)
             fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
-            console.log(new Date(), "installed language");
+            // console.log(new Date(), "LanguageController: installed language");
             try {
                 this.loadLanguage(sourcePath)
             } catch(e) {
