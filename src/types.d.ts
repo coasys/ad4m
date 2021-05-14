@@ -126,16 +126,6 @@ export type SharedPerspective = {
   sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
 };
 
-export type SharedPerspectiveInput = {
-  name?: Maybe<Scalars['String']>;
-  description?: Maybe<Scalars['String']>;
-  type?: Maybe<Scalars['String']>;
-  linkLanguages?: Maybe<Array<Maybe<LanguageRefInput>>>;
-  allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
-  requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
-  sharedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
-};
-
 export type LanguageRef = {
   __typename?: 'LanguageRef';
   address?: Maybe<Scalars['String']>;
@@ -194,20 +184,15 @@ export type PublishPerspectiveInput = {
   name?: Maybe<Scalars['String']>;
   description?: Maybe<Scalars['String']>;
   type?: Maybe<Scalars['String']>;
-  passphrase?: Maybe<Scalars['String']>;
+  uid?: Maybe<Scalars['String']>;
   requiredExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
   allowedExpressionLanguages?: Maybe<Array<Maybe<Scalars['String']>>>;
-};
-
-export type InstallSharedPerspectiveInput = {
-  sharedPerspectiveUrl?: Maybe<Scalars['String']>;
-  sharedPerspective?: Maybe<SharedPerspectiveInput>;
 };
 
 export type CreateHcExpressionLanguageInput = {
   languagePath?: Maybe<Scalars['String']>;
   dnaNick?: Maybe<Scalars['String']>;
-  passphrase?: Maybe<Scalars['String']>;
+  uid?: Maybe<Scalars['String']>;
 };
 
 export type UpdateAgentProfileInput = {
@@ -322,7 +307,7 @@ export type MutationPublishPerspectiveArgs = {
 
 
 export type MutationInstallSharedPerspectiveArgs = {
-  input?: Maybe<InstallSharedPerspectiveInput>;
+  url?: Maybe<Scalars['String']>;
 };
 
 
@@ -379,12 +364,4 @@ export type SubscriptionLinkAddedArgs = {
 
 export type SubscriptionLinkRemovedArgs = {
   perspectiveUUID?: Maybe<Scalars['String']>;
-};
-
-export type PubKeyForLangInput = {
-  lang: Maybe<Scalars['String']>;
-};
-
-export type GetExpressionInput = {
-  address: Maybe<Scalars['String']>;
 };
