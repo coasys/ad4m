@@ -255,7 +255,7 @@ export default class LanguageController {
     }
 
     getPerspectiveLanguage(): Language {
-        if(!this.#agentLanguage) {
+        if(!this.#perspectiveLanguage) {
             throw new Error("No Perspective Language installed!")
         }
         return this.#perspectiveLanguage
