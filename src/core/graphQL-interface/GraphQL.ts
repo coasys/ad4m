@@ -467,28 +467,28 @@ function createResolvers(core: PerspectivismCore) {
         Agent: {
             name: async (agent) => {
                 //console.debug("GQL| AGENT.name:", agent)
-                // if(agent.name && agent.name !== "")
-                //     return agent.name
-                // else {
-                //     const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
-                //     if(agentExpression)
-                //         return (agentExpression.data as Agent).name
-                //     else
-                //         return ''
-                // }
+                if(agent.name && agent.name !== "")
+                    return agent.name
+                else {
+                    const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
+                    if(agentExpression)
+                        return (agentExpression.data as Agent).name
+                    else
+                        return ''
+                }
             },
 
             email: async (agent) => {
                 //console.debug("GQL| AGENT.email:", agent)
-                // if(agent.email && agent.email !== "")
-                //     return agent.email
-                // else {
-                //     const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
-                //     if(agentExpression)
-                //         return (agentExpression.data as Agent).email
-                //     else
-                //         return ''
-                // }
+                if(agent.email && agent.email !== "")
+                    return agent.email
+                else {
+                    const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
+                    if(agentExpression)
+                        return (agentExpression.data as Agent).email
+                    else
+                        return ''
+                }
             }
         },
 
