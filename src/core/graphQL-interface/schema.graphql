@@ -93,16 +93,6 @@ type SharedPerspective {
     sharedExpressionLanguages: [String]
 }
 
-input SharedPerspectiveInput {
-    name: String
-    description: String
-    type: String
-    linkLanguages: [LanguageRefInput]
-    allowedExpressionLanguages: [String]
-    requiredExpressionLanguages: [String]
-    sharedExpressionLanguages: [String]
-}
-
 type LanguageRef {
     address: String
     name: String
@@ -159,20 +149,15 @@ input PublishPerspectiveInput {
     name: String
     description: String
     type: String
-    passphrase: String
+    uid: String
     requiredExpressionLanguages: [String]
     allowedExpressionLanguages: [String]
-}
-
-input InstallSharedPerspectiveInput {
-    sharedPerspectiveUrl: String
-    sharedPerspective: SharedPerspectiveInput
 }
 
 input CreateHcExpressionLanguageInput {
     languagePath: String 
     dnaNick: String 
-    passphrase: String
+    uid: String
 }
 
 input UpdateAgentProfileInput {
@@ -201,7 +186,7 @@ type Mutation {
     updatePerspective(input: UpdatePerspectiveInput): Perspective
     removePerspective(uuid: String): Boolean
     publishPerspective(input: PublishPerspectiveInput): SharedPerspective
-    installSharedPerspective(input: InstallSharedPerspectiveInput): Perspective
+    installSharedPerspective(url: String): Perspective
     addLink(input: AddLinkInput): LinkExpression
     updateLink(input: UpdateLinkInput): LinkExpression
     removeLink(input: RemoveLinkInput): Boolean
