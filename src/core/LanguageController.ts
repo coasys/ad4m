@@ -336,7 +336,7 @@ export default class LanguageController {
             try{
                 // @ts-ignore
                 if(! await this.#context.signatures.verify(expr)) {
-                    //console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
+                    console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
                     expr.proof.invalid = true
                 } else {
                     // console.debug("Valid expr:", ref)
