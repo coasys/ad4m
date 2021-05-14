@@ -12,27 +12,14 @@ const uint8ArrayConcat = (chunks) => {
 }
 
 export async function init () {
-    const node = await IPFS.create();
+    const node = await IPFS.create({
+        EXPERIMENTAL: {
+            ipnsPubsub: true
+        }
+    });
     const version = await node.version()
 
     console.log('IPFS Version:', version.version)
-
-    // ipcMain.handle('ipfs-add', async (event, data) => {
-    //     const fileAdded = await node.add(data)
-    //     console.debug('IPFS: Added file:', fileAdded.path, fileAdded.cid)
-    //     return fileAdded
-    // })
-
-    // ipcMain.handle('ipfs-cat', async (event, cid) => {
-    //     const chunks = []
-    //     for await (const chunk of node.cat(cid)) {
-    //         chunks.push(chunk)
-    //     }
-
-    //     const fileString = uint8ArrayConcat(chunks).toString();
-    //     console.debug('IPFS: Read file contents:', fileString)
-    //     return fileString
-    // })
 
     return node
 }
