@@ -74,7 +74,6 @@ export default class AgentService {
             proof: new ExpressionProof(sigHex, this.#signingKeyId)
         } as Expression
 
-        console.debug("Signed Expression:", signedExpresssion)
         return signedExpresssion
     }
 

@@ -1,5 +1,4 @@
-const IPFS = require('ipfs')
-const { app, BrowserWindow, ipcMain } = require('electron')
+import IPFS from "ipfs";
 
 const _appendBuffer = (buffer1, buffer2) => {
     const tmp = new Uint8Array(buffer1.byteLength + buffer2.byteLength);
@@ -15,29 +14,12 @@ const uint8ArrayConcat = (chunks) => {
 export async function init () {
     const node = await IPFS.create({
         EXPERIMENTAL: {
-            pubsub: true
+            ipnsPubsub: true
         }
-    })
+    });
     const version = await node.version()
 
-    console.log('Version:', version.version)
-
-    ipcMain.handle('ipfs-add', async (event, data) => {
-        const fileAdded = await node.add(data)
-        console.debug('IPFS: Added file:', fileAdded.path, fileAdded.cid)
-        return fileAdded
-    })
-
-    ipcMain.handle('ipfs-cat', async (event, cid) => {
-        const chunks = []
-        for await (const chunk of node.cat(cid)) {
-            chunks.push(chunk)
-        }
-
-        const fileString = uint8ArrayConcat(chunks).toString();
-        console.debug('IPFS: Read file contents:', fileString)
-        return fileString
-    })
+    console.log('IPFS Version:', version.version)
 
     return node
 }

@@ -4,9 +4,12 @@ import { exprRef2String, parseExprURL } from '@perspect3vism/ad4m/ExpressionRef'
 import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
+import { GraphQLScalarType } from "graphql";
 //import { shell } from 'electron'
 
 const typeDefs = gql`
+scalar Date
+
 type Agent {
     did: String
     name: String
@@ -64,16 +67,20 @@ type LinkExpression {
     timestamp: String
     data: Link
 }
+
 input LinkQuery {
     source: String
     predicate: String
     target: String
+    fromDate: Date
+    untilDate: Date
 }
 
 type Language {
     name: String
     address: String
     constructorIcon: Icon
+    iconFor: Icon
     settings: String
     settingsIcon: Icon
 }
@@ -97,6 +104,11 @@ type SharedPerspective {
 }
 
 type LanguageRef {
+    address: String
+    name: String
+}
+
+input LanguageRefInput {
     address: String
     name: String
 }
@@ -147,17 +159,15 @@ input PublishPerspectiveInput {
     name: String
     description: String
     type: String
-    encrypt: Boolean
-    passphrase: String
+    uid: String
     requiredExpressionLanguages: [String]
     allowedExpressionLanguages: [String]
 }
 
 input CreateHcExpressionLanguageInput {
     languagePath: String 
-    dnaNick: String
-    encrypt: Boolean 
-    passphrase: String
+    dnaNick: String 
+    uid: String
 }
 
 input UpdateAgentProfileInput {
@@ -186,6 +196,7 @@ type Mutation {
     updatePerspective(input: UpdatePerspectiveInput): Perspective
     removePerspective(uuid: String): Boolean
     publishPerspective(input: PublishPerspectiveInput): SharedPerspective
+    installSharedPerspective(url: String): Perspective
     addLink(input: AddLinkInput): LinkExpression
     updateLink(input: UpdateLinkInput): LinkExpression
     removeLink(input: RemoveLinkInput): Boolean
@@ -226,7 +237,7 @@ function createResolvers(core: PerspectivismCore) {
                 return core.perspectivesController.allPerspectiveIDs()
             },
             links: async (parent, args, context, info) => {
-                // console.log("GQL| links:", args)
+                // console.log("GQL: Links query: ", args);
                 const { perspectiveUUID, query } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 return await perspective.getLinks(query)
@@ -239,7 +250,6 @@ function createResolvers(core: PerspectivismCore) {
                     expression.url = args.url.toString()
                     expression.data = JSON.stringify(expression.data)
                 }
-
                 return expression
             },
             language: (parent, args, context, info) => {
@@ -345,18 +355,24 @@ function createResolvers(core: PerspectivismCore) {
                 return perspective
             },
             publishPerspective: (parent, args, context, info) => {
-                const { uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
+                const { uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
                 //Note: this code is being executed twice in fn call, once here and once in publishPerspective
                 const perspective = core.perspectivesController.perspectiveID(uuid)
                 // @ts-ignore
                 if(perspective.sharedPerspective && perspective.sharedURL)
                     throw new Error(`Perspective ${name} (${uuid}) is already shared`)
-                return core.publishPerspective(uuid, name, description, type, encrypt, passphrase, requiredExpressionLanguages, allowedExpressionLanguages)
+                return core.publishPerspective(uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages)
+            },
+            installSharedPerspective: async (parent, args, context, info) => {
+                console.log(new Date(), "GQL install shared perspective", args);
+                const { url } = args;
+                let perspective = await core.installSharedPerspective(url);
+                return perspective
             },
             createUniqueHolochainExpressionLanguageFromTemplate: (parent, args, context, info) => {
-                const {languagePath, dnaNick, encrypt, passphrase} = args.input;
+                const {languagePath, dnaNick, uid} = args.input;
 
-                return core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, encrypt, passphrase)
+                return core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid)
             },
             removePerspective: (parent, args, context, info) => {
                 const { uuid } = args
@@ -421,7 +437,7 @@ function createResolvers(core: PerspectivismCore) {
 
         Expression: {
             language: async (expression) => {
-                // console.log("GQL EXPRESSION", expression)
+                //console.log("GQL LANGUAGE", expression)
                 const lang = await core.languageController.languageForExpression(expression.ref) as any
                 lang.address = expression.ref.language.address
                 return lang
@@ -474,14 +490,25 @@ function createResolvers(core: PerspectivismCore) {
                         return ''
                 }
             }
-        }
+        },
+
+        Date: new GraphQLScalarType({
+            name: 'Date',
+            description: 'Date custom scalar type',
+            parseValue(value) {
+              return new Date(value); // value from the client
+            },
+            serialize(value) {
+              return value.toISOString(); // value sent to the client
+            }
+        }),
     }
 }
 
 
-export async function startServer(core: PerspectivismCore) {
+export async function startServer(core: PerspectivismCore, mocks: boolean) {
     const resolvers = createResolvers(core)
-    const server = new ApolloServer({ typeDefs, resolvers });
+    const server = new ApolloServer({ typeDefs, resolvers, mocks: mocks });
     const { url, subscriptionsUrl } = await server.listen()
     return { url, subscriptionsUrl }
 }
