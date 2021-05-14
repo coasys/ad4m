@@ -18,6 +18,7 @@ import type { PublicSharing } from '@perspect3vism/ad4m/Language'
 import type Address from "@perspect3vism/ad4m/Address"
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveID from './PerspectiveID'
+import { parseExprURL } from '@perspect3vism/ad4m/ExpressionRef'
 
 export default class PerspectivismCore {
     #holochain: HolochainService
@@ -134,24 +135,30 @@ export default class PerspectivismCore {
         return sharedPerspective
     }
 
-    async installSharedPerspective(sharedPerspectiveUrl: string, sharedPerspective: SharedPerspective): Promise<PerspectiveID> {
+    async installSharedPerspective(url: Address): Promise<PerspectiveID> {
+        let sharedPerspectiveExp = await this.languageController.getPerspectiveLanguage().expressionAdapter.get(parseExprURL(url).expression);
+        if (sharedPerspectiveExp == null) {
+            throw Error(`Could not find sharedPerspective with URL ${url}`);
+        };
+        // console.log("Core.installSharedPerspective: Got shared perspective", sharedPerspectiveExp);
+        //@ts-ignore
+        let sharedPerspective: SharedPerspective = sharedPerspectiveExp.data!;
         const languages = {}
-        sharedPerspective.allowedExpressionLanguages.forEach(l => languages[l] = l)
-        sharedPerspective.allowedExpressionLanguages.forEach(l => languages[l] = l)
+        sharedPerspective.requiredExpressionLanguages.forEach(l => languages[l] = l)
         sharedPerspective.linkLanguages.forEach(l => languages[l.address] = l.address)
         const uniqueLangs: string[] = Object.values(languages)
-        console.log(new Date(), "Attempting to install languages", uniqueLangs);
+        // console.log(new Date(), "Core.installSharedPerspective: Attempting to install languages", uniqueLangs);
         for (let i = 0; i < uniqueLangs.length; i++) {
             await this.#languageController.installLanguage(uniqueLangs[i])
         };
-        console.log(new Date(), "Finished installing languages");
+        // console.log(new Date(), "Core.installSharedPerspective: Finished installing languages");
         
         let localPerspective = {
             name: sharedPerspective.name, 
             author: this.agentService.agent, 
             timestamp: new Date().toISOString(), 
             sharedPerspective: sharedPerspective, 
-            sharedURL: sharedPerspectiveUrl
+            sharedURL: url
         };
         let perspective = this.#perspectivesController.add(localPerspective);
         return perspective;        

@@ -103,16 +103,6 @@ type SharedPerspective {
     sharedExpressionLanguages: [String]
 }
 
-input SharedPerspectiveInput {
-    name: String
-    description: String
-    type: String
-    linkLanguages: [LanguageRefInput]
-    allowedExpressionLanguages: [String]
-    requiredExpressionLanguages: [String]
-    sharedExpressionLanguages: [String]
-}
-
 type LanguageRef {
     address: String
     name: String
@@ -174,11 +164,6 @@ input PublishPerspectiveInput {
     allowedExpressionLanguages: [String]
 }
 
-input InstallSharedPerspectiveInput {
-    sharedPerspectiveUrl: String
-    sharedPerspective: SharedPerspectiveInput
-}
-
 input CreateHcExpressionLanguageInput {
     languagePath: String 
     dnaNick: String 
@@ -211,7 +196,7 @@ type Mutation {
     updatePerspective(input: UpdatePerspectiveInput): Perspective
     removePerspective(uuid: String): Boolean
     publishPerspective(input: PublishPerspectiveInput): SharedPerspective
-    installSharedPerspective(input: InstallSharedPerspectiveInput): Perspective
+    installSharedPerspective(url: String): Perspective
     addLink(input: AddLinkInput): LinkExpression
     updateLink(input: UpdateLinkInput): LinkExpression
     removeLink(input: RemoveLinkInput): Boolean
@@ -380,8 +365,8 @@ function createResolvers(core: PerspectivismCore) {
             },
             installSharedPerspective: async (parent, args, context, info) => {
                 console.log(new Date(), "GQL install shared perspective", args);
-                const { sharedPerspectiveUrl, sharedPerspective } = args.input;
-                let perspective = await core.installSharedPerspective(sharedPerspectiveUrl, sharedPerspective);
+                const { url } = args;
+                let perspective = await core.installSharedPerspective(url);
                 return perspective
             },
             createUniqueHolochainExpressionLanguageFromTemplate: (parent, args, context, info) => {
