@@ -8,10 +8,9 @@ import type Language from "@perspect3vism/ad4m/Language";
 import type { PublicSharing } from "@perspect3vism/ad4m/Language";
 import type LanguageRef from "@perspect3vism/ad4m/LanguageRef";
 import * as Config from "./Config";
-import { defaultLangs, defaultLangPath } from "../main";
+import { defaultLangPath } from "../main";
 import type HolochainService from '@perspect3vism/ad4m-language-context/Holochain/HolochainService';
 import yaml from "js-yaml";
-import uuid from "uuid";
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const bs58 = baseX(BASE58)
@@ -35,7 +34,7 @@ export default class LanguageFactory {
         this.#holochainService = holochainService
     }
 
-    createUniqueHolochainDNA(dnaPath: string, dnaNick: string, passphrase: string): string {
+    createUniqueHolochainDNA(dnaPath: string, dnaNick: string, uid: string): string {
         console.debug("LanguageFactory: createUniqueHolochainDNA");
         //TODO: this should be derived from global vars and not hard coded
         fs.copyFileSync(`${dnaPath}`, path.join(Config.tempLangPath, `${dnaNick}.dna`));
@@ -46,9 +45,9 @@ export default class LanguageFactory {
             console.error("LanguageFactory: Unpack execution returned", unpackRes);
             throw "Could not unpack DNA"
         };
-        //Read the dna.yaml and insert passphrase to make unique
+        //Read the dna.yaml and insert uid to make unique
         let dnaYaml = yaml.load(fs.readFileSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`), 'utf8'));
-        dnaYaml.uid = passphrase;
+        dnaYaml.uid = uid;
         let dnaYamlDump = yaml.dump(dnaYaml);
         //console.log("LanguageFactory: writing new language DNA bundle", dnaYamlDump);
         fs.writeFileSync(path.join(Config.tempLangPath, `${dnaNick}/dna.yaml`), dnaYamlDump);
@@ -84,13 +83,13 @@ export default class LanguageFactory {
         return dnaCode
     }
 
-    async createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, passphrase: string): Promise<LanguageRef> {
+    async createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
         console.debug("LanguageFactory: creating new expression language")
         //Load the language to get the name
         //NOTE: path code below is a little funky; it assumes that languagePath points to language/bundle and that dna would be found at /language/dnaNick.dna
         const { name } = require(path.join(`${languagePath}`, "bundle.js"))
         let template = fs.readFileSync(path.join(`${languagePath}`, "bundle.js")).toString();
-        let dnaCode = this.createUniqueHolochainDNA(path.join(`${languagePath}`, `../${dnaNick}.dna`), dnaNick, passphrase);
+        let dnaCode = this.createUniqueHolochainDNA(path.join(`${languagePath}`, `../${dnaNick}.dna`), dnaNick, uid);
         const templateLines = template.split('\n') 
         let index = templateLines.findIndex(element => element.includes("var dna ="));
         if (index != -1) {
@@ -104,7 +103,7 @@ export default class LanguageFactory {
             name,
             description: "",
             bundleFile: code.toString(),
-            passphrase: ""
+            uid: ""
         }
 
         try {
@@ -119,7 +118,7 @@ export default class LanguageFactory {
         }
     }
 
-    async createLinkLanguageForSharedPerspective(sharedPerspective: SharedPerspective, passphrase: string): Promise<LanguageRef> {
+    async createLinkLanguageForSharedPerspective(sharedPerspective: SharedPerspective, uid: string): Promise<LanguageRef> {
         console.debug("LanguageFactory: creating new link language for shared perspective:", sharedPerspective.name)
 
         const name = `${sharedPerspective.name}-${sharedPerspective.type}-LinkLanguage`
@@ -138,7 +137,7 @@ export default class LanguageFactory {
                 break;
             case SharingType.Holochain:
                 //TODO: this should be derived from global vars and not hard coded
-                var dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context/social-context.dna`, "social-context", passphrase);
+                var dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context/social-context.dna`, "social-context", uid);
                 
                 console.debug("LanguageFactory: Holochain language")
                 console.debug("LanguageFactory: reading template file", templates.holochain)
@@ -156,7 +155,7 @@ export default class LanguageFactory {
             //case SharingType.HolochainChannel does not work and I have no idea why
             case "holochainChannel":
                 //TODO: this should be derived from global vars and not hard coded
-                var dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context-channel/social-context-channel.dna`, "social-context-channel", passphrase);
+                var dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context-channel/social-context-channel.dna`, "social-context-channel", uid);
 
                 console.debug("LanguageFactory: holochainChannel language")
                 console.debug("LanguageFactory: reading template file", templates.holochainChannel)
@@ -183,7 +182,7 @@ export default class LanguageFactory {
             name,
             description: `UUID: ${UUID}`,
             bundleFile: code.toString(),
-            passphrase: ""
+            uid: ""
         }
 
         try {

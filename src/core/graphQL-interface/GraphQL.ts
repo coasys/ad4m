@@ -159,7 +159,7 @@ input PublishPerspectiveInput {
     name: String
     description: String
     type: String
-    passphrase: String
+    uid: String
     requiredExpressionLanguages: [String]
     allowedExpressionLanguages: [String]
 }
@@ -167,7 +167,7 @@ input PublishPerspectiveInput {
 input CreateHcExpressionLanguageInput {
     languagePath: String 
     dnaNick: String 
-    passphrase: String
+    uid: String
 }
 
 input UpdateAgentProfileInput {
@@ -355,13 +355,13 @@ function createResolvers(core: PerspectivismCore) {
                 return perspective
             },
             publishPerspective: (parent, args, context, info) => {
-                const { uuid, name, description, type, passphrase, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
+                const { uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
                 //Note: this code is being executed twice in fn call, once here and once in publishPerspective
                 const perspective = core.perspectivesController.perspectiveID(uuid)
                 // @ts-ignore
                 if(perspective.sharedPerspective && perspective.sharedURL)
                     throw new Error(`Perspective ${name} (${uuid}) is already shared`)
-                return core.publishPerspective(uuid, name, description, type, passphrase, requiredExpressionLanguages, allowedExpressionLanguages)
+                return core.publishPerspective(uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages)
             },
             installSharedPerspective: async (parent, args, context, info) => {
                 console.log(new Date(), "GQL install shared perspective", args);
@@ -370,9 +370,9 @@ function createResolvers(core: PerspectivismCore) {
                 return perspective
             },
             createUniqueHolochainExpressionLanguageFromTemplate: (parent, args, context, info) => {
-                const {languagePath, dnaNick, passphrase} = args.input;
+                const {languagePath, dnaNick, uid} = args.input;
 
-                return core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, passphrase)
+                return core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid)
             },
             removePerspective: (parent, args, context, info) => {
                 const { uuid } = args

@@ -164,8 +164,8 @@ export default class PerspectivismCore {
         return perspective;        
     }
 
-    createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, passphrase: string): Promise<LanguageRef> {
-        return this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, passphrase)
+    createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
+        return this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid)
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
