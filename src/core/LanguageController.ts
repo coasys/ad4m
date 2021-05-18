@@ -115,7 +115,7 @@ export default class LanguageController {
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.pubSub});
-        const language = create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
+        const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((added, removed) => {
