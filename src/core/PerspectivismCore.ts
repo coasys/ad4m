@@ -85,7 +85,7 @@ export default class PerspectivismCore {
         this.pubsub.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
     }
 
-    async initControllers() {
+    initControllers() {
         this.#languageController = new LanguageController({
             agent: this.#agentService,
             IPFS: this.#IPFS,
@@ -93,14 +93,15 @@ export default class PerspectivismCore {
             ad4mSignal: this.languageSignal
         }, this.#holochain)
 
-        await this.#languageController.loadLanguages()
-
         this.#perspectivesController = new PerspectivesController(Config.rootConfigPath, {
             db: this.#db,
             agentService: this.agentService,
             languageController: this.#languageController
         })
+    }
 
+    async initLanguages() {
+        await this.#languageController.loadLanguages()
         this.#languageFactory = new LanguageFactory(this.#agentService, this.#languageController.getLanguageLanguage(), this.#holochain)
     }
 
@@ -122,7 +123,9 @@ export default class PerspectivismCore {
         let installs = allowedExpressionLanguages.concat(requiredExpressionLanguages);
         installs = Array.from(new Set(installs));
         console.log("\x1b[32m", "PerspectivismCore.publishPerspective: Attempting to install expression languages", installs);
-        installs.forEach(language => this.#languageController.installLanguage(language, null))
+        for (let i = 0; i < installs.length; i++) {
+            await this.#languageController.installLanguage(installs[i], null)
+        }
 
         // Create SharedPerspective
         const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(sharedPerspective)
@@ -164,8 +167,8 @@ export default class PerspectivismCore {
         return perspective;        
     }
 
-    createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
-        return this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid)
+    async createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
+        return await this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid)
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
