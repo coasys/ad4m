@@ -93,7 +93,7 @@ export default class LanguageFactory {
         const templateLines = template.split('\n') 
         let index = templateLines.findIndex(element => element.includes("var dna ="));
         if (index != -1) {
-            console.log("Deleting DNA line at index", index);
+            // console.log("Deleting DNA line at index", index);
             delete templateLines[index];
         };
         templateLines.unshift(dnaCode);

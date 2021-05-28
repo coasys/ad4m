@@ -85,7 +85,7 @@ export default class PerspectivismCore {
         this.pubsub.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
     }
 
-    async initControllers() {
+    initControllers() {
         this.#languageController = new LanguageController({
             agent: this.#agentService,
             IPFS: this.#IPFS,
@@ -93,14 +93,15 @@ export default class PerspectivismCore {
             ad4mSignal: this.languageSignal
         }, this.#holochain)
 
-        await this.#languageController.loadLanguages()
-
         this.#perspectivesController = new PerspectivesController(Config.rootConfigPath, {
             db: this.#db,
             agentService: this.agentService,
             languageController: this.#languageController
         })
+    }
 
+    async initLanguages() {
+        await this.#languageController.loadLanguages()
         this.#languageFactory = new LanguageFactory(this.#agentService, this.#languageController.getLanguageLanguage(), this.#holochain)
     }
 
@@ -122,7 +123,9 @@ export default class PerspectivismCore {
         let installs = allowedExpressionLanguages.concat(requiredExpressionLanguages);
         installs = Array.from(new Set(installs));
         console.log("\x1b[32m", "PerspectivismCore.publishPerspective: Attempting to install expression languages", installs);
-        installs.forEach(language => this.#languageController.installLanguage(language, null))
+        await Promise.all(installs.map(async (install) => {
+            await this.#languageController.installLanguage(install, null)
+        }))
 
         // Create SharedPerspective
         const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(sharedPerspective)
@@ -146,12 +149,11 @@ export default class PerspectivismCore {
         const languages = {}
         sharedPerspective.requiredExpressionLanguages.forEach(l => languages[l] = l)
         sharedPerspective.linkLanguages.forEach(l => languages[l.address] = l.address)
-        const uniqueLangs: string[] = Object.values(languages)
-        // console.log(new Date(), "Core.installSharedPerspective: Attempting to install languages", uniqueLangs);
-        for (let i = 0; i < uniqueLangs.length; i++) {
-            await this.#languageController.installLanguage(uniqueLangs[i])
-        };
-        // console.log(new Date(), "Core.installSharedPerspective: Finished installing languages");
+        const installs: string[] = Object.values(languages)
+        console.log(new Date(), "Core.installSharedPerspective: Attempting to install languages", installs);
+        await Promise.all(installs.map(async (install) => {
+            await this.#languageController.installLanguage(install, null)
+        }))
         
         let localPerspective = {
             name: sharedPerspective.name, 
@@ -164,8 +166,8 @@ export default class PerspectivismCore {
         return perspective;        
     }
 
-    createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
-        return this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid)
+    async createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
+        return await this.#languageFactory.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid)
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {

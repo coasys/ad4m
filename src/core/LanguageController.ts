@@ -179,7 +179,7 @@ export default class LanguageController {
             fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
             // console.log(new Date(), "LanguageController: installed language");
             try {
-                this.loadLanguage(sourcePath)
+                await this.loadLanguage(sourcePath)
             } catch(e) {
                 console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
                 console.error("LanguageController.installLanguage: ======================================")
