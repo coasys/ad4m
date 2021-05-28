@@ -174,7 +174,13 @@ export default class LanguageController {
     
             const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
             const metaPath = path.join(Config.languagesPath, address, 'meta.json')
-            fs.mkdirSync(path.join(Config.languagesPath, address))
+            try {
+                fs.mkdirSync(path.join(Config.languagesPath, address))
+            } catch(e) {
+                console.error("Error trying to create directory", path.join(Config.languagesPath, address))
+                console.error("Will proceed with installing language anyway...")
+            }
+            
             fs.writeFileSync(sourcePath, source)
             fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
             // console.log(new Date(), "LanguageController: installed language");
