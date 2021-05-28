@@ -142,25 +142,23 @@ function createResolvers(core: PerspectivismCore) {
                 core.perspectivesController.update(perspective)
                 return perspective
             },
-            publishPerspective: (parent, args, context, info) => {
+            publishPerspective: async (parent, args, context, info) => {
                 const { uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
                 //Note: this code is being executed twice in fn call, once here and once in publishPerspective
                 const perspective = core.perspectivesController.perspectiveID(uuid)
                 // @ts-ignore
                 if(perspective.sharedPerspective && perspective.sharedURL)
                     throw new Error(`Perspective ${name} (${uuid}) is already shared`)
-                return core.publishPerspective(uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages)
+                return await core.publishPerspective(uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages)
             },
             installSharedPerspective: async (parent, args, context, info) => {
-                console.log(new Date(), "GQL install shared perspective", args);
+                // console.log(new Date(), "GQL install shared perspective", args);
                 const { url } = args;
-                let perspective = await core.installSharedPerspective(url);
-                return perspective
+                return await core.installSharedPerspective(url);
             },
-            createUniqueHolochainExpressionLanguageFromTemplate: (parent, args, context, info) => {
+            createUniqueHolochainExpressionLanguageFromTemplate: async (parent, args, context, info) => {
                 const {languagePath, dnaNick, uid} = args.input;
-
-                return core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid)
+                return await core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid);
             },
             removePerspective: (parent, args, context, info) => {
                 const { uuid } = args

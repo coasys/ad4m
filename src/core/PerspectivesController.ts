@@ -45,13 +45,13 @@ export default class PerspectivesController {
 
     perspectiveID(uuid: string): PerspectiveID|void {
         const pID = this.#perspectiveIDs.get(uuid)
-        console.log("pID:", pID)
+        // console.log("pID:", pID)
         return pID
     }
 
     allPerspectiveIDs(): PerspectiveID[] {
         const alluuids = Array.from(this.#perspectiveIDs.values())
-        console.log("ALL PerspectiveIDs:", alluuids)
+        // console.log("ALL PerspectiveIDs:", alluuids)
         return alluuids
     }
 
