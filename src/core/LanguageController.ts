@@ -13,19 +13,11 @@ import type HolochainService from '@perspect3vism/ad4m-language-context/Holochai
 import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
 import type Address from '@perspect3vism/ad4m/Address';
-import { defaultLangs, defaultLangPath } from "../main";
+import { defaultLangs, defaultLangPath, languageAliases } from "../main";
 import * as PubSub from './graphQL-interface/PubSub'
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const bs58 = baseX(BASE58)
-
-const aliases = {
-    'http': 'url-iframe',
-    'https': 'url-iframe',
-    'did': 'agent-profiles',
-    'lang': 'languages',
-    'perspective': 'shared-perspectives'
-}
 
 type LinkObservers = (added: Expression[], removed: Expression[], lang: LanguageRef)=>void;
 
@@ -65,9 +57,9 @@ export default class LanguageController {
             const { hash, language } = await this.loadLanguage(bundle)
             
             // Do special stuff for AD4M languages:
-            Object.keys(aliases).forEach(alias => {
-                if(language.name === aliases[alias]) {
-                    aliases[alias] = hash
+            Object.keys(languageAliases).forEach(alias => {
+                if(language.name === languageAliases[alias]) {
+                    languageAliases[alias] = hash
                     if(alias === 'did') {
                         this.#agentLanguage = language;
                         ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(language)
@@ -195,7 +187,7 @@ export default class LanguageController {
     }
 
     languageForExpression(e: ExpressionRef): Language {
-        const address = aliases[e.language.address] ? aliases[e.language.address] : e.language.address
+        const address = languageAliases[e.language.address] ? languageAliases[e.language.address] : e.language.address
         const language = this.#languages.get(address)
         if(language) {
             return language
@@ -206,7 +198,7 @@ export default class LanguageController {
 
     //TODO: this will break if reference to encrypted language is passed
     languageByRef(ref: LanguageRef): Language {
-        const address = aliases[ref.address] ? aliases[ref.address] : ref.address
+        const address = languageAliases[ref.address] ? languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
         if(language) {
             return language
@@ -325,8 +317,8 @@ export default class LanguageController {
 
         // This makes sure that Expression references used in Links (i.e. in Perspectives) use the aliased Language schemas.
         // Especially important for DIDs
-        for(const alias of Object.keys(aliases)) {
-            const target = aliases[alias]
+        for(const alias of Object.keys(languageAliases)) {
+            const target = languageAliases[alias]
             if(lang.address === target) {
                 lang.address = alias
             }
