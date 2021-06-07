@@ -139,7 +139,7 @@ export default class PerspectivismCore {
     }
 
     async installSharedPerspective(url: Address): Promise<PerspectiveID> {
-        let sharedPerspectiveExp = await this.languageController.getPerspectiveLanguage().expressionAdapter.get(parseExprURL(url).expression);
+        let sharedPerspectiveExp = await this.languageController.getPerspective(parseExprURL(url).expression);
         if (sharedPerspectiveExp == null) {
             throw Error(`Could not find sharedPerspective with URL ${url}`);
         };

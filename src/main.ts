@@ -6,13 +6,14 @@ import Expression from "@perspect3vism/ad4m/Expression";
 export let defaultLangPath = "";
 export let defaultLangs = [];
 export let languageAliases = {};
+export let bootstrapFixtures: BootstrapFixtures|void = null;
 
 interface Config {
   resourcePath: string
   appDataPath: string
   appDefaultLangPath: string
   ad4mBootstrapLanguages: BootstrapLanguages,
-  ad4mBootstrapExpressions: BootstrapExpression[] | void,
+  ad4mBootstrapFixtures: BootstrapFixtures | void,
   appBuiltInLangs: string[] | void,
   appLangAliases: object | void,
   mocks: boolean
@@ -24,14 +25,24 @@ interface BootstrapLanguages {
   perspectives: string,
 }
 
-class BootstrapExpression {
-  schema: string
+class BootstrapFixtures {
+  languages: BootstrapLanguageFixture[]
+  perspectives: BootstrapPerspectiveFixture[]
+}
+
+class BootstrapLanguageFixture {
+  address: string
+  meta: Expression
+  bundle: string
+}
+
+class BootstrapPerspectiveFixture {
   address: string
   expression: Expression
 }
 
 export async function init(config: Config): Promise<PerspectivismCore> {
-    let { resourcePath, appDataPath, appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapExpressions, appBuiltInLangs, appLangAliases, mocks } = config
+    let { resourcePath, appDataPath, appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, appBuiltInLangs, appLangAliases, mocks } = config
     defaultLangPath = appDefaultLangPath;
     defaultLangs = [
       ad4mBootstrapLanguages.agents, 
@@ -61,12 +72,14 @@ export async function init(config: Config): Promise<PerspectivismCore> {
       "Starting ad4m core with path:", appDataPath, "\n", 
       "Default language path:", defaultLangPath, "\n",
       "AD4M Bootstrap Languages:", ad4mBootstrapLanguages, "\n", 
-      "AD4M Bootstrap Expressions:", ad4mBootstrapExpressions, "\n", 
+      "AD4M Bootstrap Fixtures:", ad4mBootstrapFixtures, "\n", 
       "Built-In languages:", appBuiltInLangs, "\n", 
       "=> All auto-loaded languages:", defaultLangs, "\n",
       "Language aliases:", languageAliases, "\n", 
       "Resource path:", resourcePath, "\n", 
     );
+
+    bootstrapFixtures = ad4mBootstrapFixtures
 
     const core = new create(appDataPath, resourcePath);
     console.log("\x1b[34m", "Init services...");

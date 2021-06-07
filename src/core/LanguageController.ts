@@ -13,7 +13,7 @@ import type HolochainService from '@perspect3vism/ad4m-language-context/Holochai
 import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
 import type Address from '@perspect3vism/ad4m/Address';
-import { defaultLangs, defaultLangPath, languageAliases } from "../main";
+import { defaultLangs, defaultLangPath, languageAliases, bootstrapFixtures } from "../main";
 import * as PubSub from './graphQL-interface/PubSub'
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
@@ -135,7 +135,7 @@ export default class LanguageController {
         if (language == undefined) {
             console.log(new Date(), "installLanguage: installing language with address", address);
             if(!languageMeta) {
-                languageMeta = await this.#languageLanguage.expressionAdapter.get(address)
+                languageMeta = await this.getLanguageExpression(address)
 
                 if (languageMeta == null) {
                     //@ts-ignore
@@ -144,7 +144,13 @@ export default class LanguageController {
             }
             // @ts-ignore
             console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
-            const source = await this.#languageLanguage.languageAdapter.getLanguageSource(address)
+            const source = await this.getLanguageSource(address)
+            if(!source){
+                console.error("LanguageController.installLanguage: COULDN'T GET SOURCE OF LANGUAGE TO INSTALL!")
+                console.error("LanguageController.installLanguage: Address:", address)
+                console.error("LanguageController.installLanguage:", languageMeta)
+                return
+            }
             const hash = await this.ipfsHash(source)
             if(hash === 'asdf') {
                 console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
@@ -203,7 +209,7 @@ export default class LanguageController {
         if(language) {
             return language
         } else {
-            this.#languageLanguage.expressionAdapter.get(address).then(languageMeta => {
+            this.getLanguageExpression(address).then(languageMeta => {
                 if(languageMeta) {
                     this.installLanguage(address, languageMeta)
                 }
@@ -224,6 +230,38 @@ export default class LanguageController {
             }
         })
         return refs
+    }
+
+    async getLanguageExpression(address: string): Promise<void|Expression> {
+        if(bootstrapFixtures) {
+            const fixtureLanguage = bootstrapFixtures.languages.find(f=>f.address===address)
+            if(fixtureLanguage) {
+                return fixtureLanguage.meta
+            }
+        }
+
+        return await this.#languageLanguage.expressionAdapter.get(address)
+    }
+
+    async getLanguageSource(address: string): Promise<void|string> {
+        if(bootstrapFixtures) {
+            const fixtureLanguage = bootstrapFixtures.languages.find(f=>f.address===address)
+            if(fixtureLanguage) {
+                return fixtureLanguage.bundle
+            }
+        }
+        return await this.#languageLanguage.languageAdapter.getLanguageSource(address)
+    }
+
+    async getPerspective(address: string): Promise<void|Expression> {
+        if(bootstrapFixtures) {
+            const fixturePerspective = bootstrapFixtures.perspectives.find(f=>f.address===address)
+            if(fixturePerspective) {
+                return fixturePerspective.expression
+            }
+        }
+
+        return await this.#perspectiveLanguage.expressionAdapter.get(address)
     }
 
     getInstalledLanguages(): LanguageRef[] {
@@ -328,6 +366,14 @@ export default class LanguageController {
     }
 
     async getExpression(ref: ExpressionRef): Promise<void | Expression> {
+        if(bootstrapFixtures && ref.language.address === "perspective") {
+            const fixturePerspective = bootstrapFixtures.perspectives.find(f=>f.address===ref.expression)
+            if(fixturePerspective) return fixturePerspective.expression
+        }
+        if(bootstrapFixtures && ref.language.address === "lang") {
+            const fixtureLang = bootstrapFixtures.languages.find(f=>f.address===ref.expression)
+            if(fixtureLang) return fixtureLang.meta
+        }
         const lang = this.languageForExpression(ref);
         const expr = await lang.expressionAdapter.get(ref.expression);
         if(expr) {
