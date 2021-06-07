@@ -40,6 +40,11 @@ function createResolvers(core: PerspectivismCore) {
                 }
                 return expression
             },
+            expressionRaw: async (parent, args, context, info) => {
+                const ref = parseExprURL(args.url.toString())
+                const expression = await core.languageController.getExpression(ref) as any
+                return JSON.stringify(expression)
+            },
             language: (parent, args, context, info) => {
                 const { address } = args
                 const lang = core.languageController.languageByRef({address} as LanguageRef) as any

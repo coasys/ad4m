@@ -174,6 +174,7 @@ type Query {
     agent: AgentService
     links(perspectiveUUID: String, query: LinkQuery): [LinkExpression]
     expression(url: String): Expression
+    expressionRaw(url: String): String
     language(address: String): Language
     languages(filter: String): [Language]
     perspectives: [Perspective]
