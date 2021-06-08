@@ -13,7 +13,7 @@ import type HolochainService from '@perspect3vism/ad4m-language-context/Holochai
 import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
 import type Address from '@perspect3vism/ad4m/Address';
-import { defaultLangs, defaultLangPath, languageAliases, bootstrapFixtures } from "../main";
+import { builtInLangs, builtInLangPath, languageAliases, bootstrapFixtures } from "./Config";
 import * as PubSub from './graphQL-interface/PubSub'
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
@@ -36,7 +36,7 @@ export default class LanguageController {
 
 
     constructor(context: object, holochainService: HolochainService) {
-        this.#builtInLanguages = defaultLangs.map(l => `${defaultLangPath}/${l}/build/bundle.js`)
+        this.#builtInLanguages = builtInLangs.map(l => `${builtInLangPath}/${l}/build/bundle.js`)
 
         this.#context = context
         this.#holochainService = holochainService

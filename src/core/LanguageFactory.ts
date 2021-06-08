@@ -8,7 +8,7 @@ import type Language from "@perspect3vism/ad4m/Language";
 import type { PublicSharing } from "@perspect3vism/ad4m/Language";
 import type LanguageRef from "@perspect3vism/ad4m/LanguageRef";
 import * as Config from "./Config";
-import { defaultLangPath } from "../main";
+import { builtInLangPath } from "./Config";
 import type HolochainService from '@perspect3vism/ad4m-language-context/Holochain/HolochainService';
 import yaml from "js-yaml";
 
@@ -133,15 +133,15 @@ export default class LanguageFactory {
             case SharingType.Permissionless:
                 console.debug("LanguageFactory: Permissionless language")
                 console.debug("LanguageFactory: reading template file", templates.permissionless)
-                template = fs.readFileSync(path.join(defaultLangPath, templates.permissionless)).toString()
+                template = fs.readFileSync(path.join(builtInLangPath, templates.permissionless)).toString()
                 break;
             case SharingType.Holochain:
                 //TODO: this should be derived from global vars and not hard coded
-                var dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context/social-context.dna`, "social-context", uid);
+                var dnaCode = this.createUniqueHolochainDNA(`${builtInLangPath}/social-context/social-context.dna`, "social-context", uid);
                 
                 console.debug("LanguageFactory: Holochain language")
                 console.debug("LanguageFactory: reading template file", templates.holochain)
-                template = fs.readFileSync(path.join(defaultLangPath, templates.holochain)).toString()
+                template = fs.readFileSync(path.join(builtInLangPath, templates.holochain)).toString()
                 const lines = template.split('\n') 
                 let indexH = lines.findIndex(element => element.includes("var dna ="));
                 if (indexH != -1) {
@@ -155,11 +155,11 @@ export default class LanguageFactory {
             //case SharingType.HolochainChannel does not work and I have no idea why
             case "holochainChannel":
                 //TODO: this should be derived from global vars and not hard coded
-                var dnaCode = this.createUniqueHolochainDNA(`${defaultLangPath}/social-context-channel/social-context-channel.dna`, "social-context-channel", uid);
+                var dnaCode = this.createUniqueHolochainDNA(`${builtInLangPath}/social-context-channel/social-context-channel.dna`, "social-context-channel", uid);
 
                 console.debug("LanguageFactory: holochainChannel language")
                 console.debug("LanguageFactory: reading template file", templates.holochainChannel)
-                template = fs.readFileSync(path.join(defaultLangPath, templates.holochainChannel)).toString()
+                template = fs.readFileSync(path.join(builtInLangPath, templates.holochainChannel)).toString()
                 const channelLines = template.split('\n') 
                 let index = channelLines.findIndex(element => element.includes("var dna ="));
                 if (index != -1) {
