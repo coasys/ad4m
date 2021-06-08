@@ -1,7 +1,7 @@
 import * as Config from './Config'
 import * as Db from './db'
 import type { PerspectivismDb } from './db'
-import HolochainService from '@perspect3vism/ad4m-language-context/lib/Holochain/HolochainService'
+import HolochainService from './storage-services/Holochain/HolochainService';
 import * as IPFS from './storage-services/IPFS'
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
@@ -56,9 +56,9 @@ export default class PerspectivismCore {
         return this.#languageController
     }
 
-    exit() {
+    async exit() {
         this.#IPFS.stop();
-        this.#holochain.stop();
+        await this.#holochain.stop();
     }
 
     async startGraphQLServer(mocks: boolean) {
@@ -68,8 +68,8 @@ export default class PerspectivismCore {
     }
 
     async initServices() {
-        console.log("Init HolochainService with sandbox path:", Config.holochainDataPath, "config path:", Config.holochainConfigPath, "resource path:", Config.resourcePath)
-        this.#holochain = new HolochainService(Config.holochainDataPath, Config.holochainConfigPath, Config.resourcePath)
+        console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
+        this.#holochain = new HolochainService(Config.holochainConductorPath, Config.holochainDataPath, Config.resourcePath)
         this.#IPFS = await IPFS.init()
     }
 
