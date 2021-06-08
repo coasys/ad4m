@@ -34,8 +34,8 @@ export default class PerspectivismCore {
 
     #languageFactory: LanguageFactory
 
-    constructor(appDataPath, resourcePath) {
-        Config.init(appDataPath, resourcePath)
+    constructor(config: Config.CoreConfig) {
+        Config.init(config)
 
         this.#agentService = new AgentService(Config.rootConfigPath)
         this.#agentService.load()
@@ -175,6 +175,6 @@ export default class PerspectivismCore {
     }
 }
 
-export function create(appDataPath, resourcePath): PerspectivismCore {
-    return new PerspectivismCore(appDataPath, resourcePath)
+export function create(config: Config.CoreConfig): PerspectivismCore {
+    return new PerspectivismCore(config)
 }

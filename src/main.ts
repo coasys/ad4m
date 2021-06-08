@@ -1,14 +1,8 @@
 import PerspectivismCore from "./core/PerspectivismCore";
 import create from "./core/PerspectivismCore";
-import type { AppSignal } from '@holochain/conductor-api'
-import Expression from "@perspect3vism/ad4m/Expression";
+import { BootstrapFixtures, BootstrapLanguages } from "./core/Config"
 
-export let defaultLangPath = "";
-export let defaultLangs = [];
-export let languageAliases = {};
-export let bootstrapFixtures: BootstrapFixtures|void = null;
-
-interface Config {
+interface OuterConfig {
   resourcePath: string
   appDataPath: string
   appDefaultLangPath: string
@@ -19,45 +13,24 @@ interface Config {
   mocks: boolean
 }
 
-interface BootstrapLanguages {
-  agents: string,
-  languages: string,
-  perspectives: string,
-}
 
-class BootstrapFixtures {
-  languages: BootstrapLanguageFixture[]
-  perspectives: BootstrapPerspectiveFixture[]
-}
-
-class BootstrapLanguageFixture {
-  address: string
-  meta: Expression
-  bundle: string
-}
-
-class BootstrapPerspectiveFixture {
-  address: string
-  expression: Expression
-}
-
-export async function init(config: Config): Promise<PerspectivismCore> {
+export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let { resourcePath, appDataPath, appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, appBuiltInLangs, appLangAliases, mocks } = config
-    defaultLangPath = appDefaultLangPath;
-    defaultLangs = [
+    let builtInLangPath = appDefaultLangPath;
+    let builtInLangs = [
       ad4mBootstrapLanguages.agents, 
       ad4mBootstrapLanguages.languages, 
       ad4mBootstrapLanguages.perspectives
     ]
 
-    languageAliases = {
+    let languageAliases = {
       'did': ad4mBootstrapLanguages.agents,
       'lang': ad4mBootstrapLanguages.languages,
       'perspective': ad4mBootstrapLanguages.perspectives
     }
 
     if(appBuiltInLangs) {
-      defaultLangs = Array.from(new Set(defaultLangs.concat(appBuiltInLangs)))
+      builtInLangs = Array.from(new Set(builtInLangs.concat(appBuiltInLangs)))
     }
 
     if(appLangAliases) {
@@ -70,18 +43,25 @@ export async function init(config: Config): Promise<PerspectivismCore> {
 
     console.log("\x1b[2m", 
       "Starting ad4m core with path:", appDataPath, "\n", 
-      "Default language path:", defaultLangPath, "\n",
       "AD4M Bootstrap Languages:", ad4mBootstrapLanguages, "\n", 
       "AD4M Bootstrap Fixtures:", ad4mBootstrapFixtures, "\n", 
+      "Built-in languages path:", builtInLangPath, "\n",
       "Built-In languages:", appBuiltInLangs, "\n", 
-      "=> All auto-loaded languages:", defaultLangs, "\n",
+      "=> All auto-loaded languages:", builtInLangs, "\n",
       "Language aliases:", languageAliases, "\n", 
       "Resource path:", resourcePath, "\n", 
     );
 
-    bootstrapFixtures = ad4mBootstrapFixtures
+    let bootstrapFixtures = ad4mBootstrapFixtures
 
-    const core = new create(appDataPath, resourcePath);
+    const core = new create({
+      appDataPath,
+      appResourcePath: resourcePath,
+      builtInLangPath,
+      builtInLangs,
+      languageAliases,
+      bootstrapFixtures,
+    });
     console.log("\x1b[34m", "Init services...");
     await core.initServices();
     console.log("\x1b[31m", "GraphQL server starting...");
@@ -93,7 +73,5 @@ export async function init(config: Config): Promise<PerspectivismCore> {
 
 export default {
   init,
-  defaultLangPath,
-  defaultLangs,
   PerspectivismCore
 }
