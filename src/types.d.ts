@@ -2,7 +2,19 @@ import("./core/PerspectivismCore");  // Don't delete this line.
 import { PerspectivismCore } from "./core/PerspectivismCore";
 
 //Module types
-export function init(appDataPath: String, resourcePath: string, appDefaultLangPath: string, appDefaultLangs: string[], mocks: boolean): Promise<PerspectivismCore>;
+export interface Config {
+  resourcePath: string
+  appDataPath: string
+  appDefaultLangPath: string
+  ad4mBootstrapLanguages: BootstrapLanguages,
+  ad4mBootstrapFixtures: BootstrapFixtures | null,
+  appBuiltInLangs: string[] | null,
+  appLangAliases: object | null,
+  mocks: boolean
+}
+
+export function init(config: Config): Promise<PerspectivismCore>;
+
 export {PerspectivismCore};
 
 //GraphQL interface types
