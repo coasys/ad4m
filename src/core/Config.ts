@@ -7,8 +7,8 @@ export let dataPath = path.join(rootConfigPath, 'data')
 export let languagesPath = path.join(rootConfigPath, 'languages')
 export let tempLangPath = path.join(languagesPath, "temp")
 export let holochainPath = path.join(rootConfigPath, 'h')
-export let holochainConfigPath = path.join(holochainPath, 'config')
-export let holochainDataPath = holochainPath
+export let holochainDataPath = path.join(holochainPath, 'd')
+export let holochainConductorPath = path.join(holochainPath, 'c')
 export let resourcePath = ''
 
 export let builtInLangPath = "";
@@ -35,11 +35,11 @@ export function init(c: CoreConfig) {
     languagesPath = path.join(rootConfigPath, 'languages')
     tempLangPath = path.join(languagesPath, "temp")
     holochainPath = path.join(rootConfigPath, 'h')
-    holochainConfigPath = path.join(holochainPath, 'config')
-    holochainDataPath = holochainPath
+    holochainDataPath = path.join(holochainPath, 'd')
+    holochainConductorPath = path.join(holochainPath, 'c')
 
     //Create paths if they do not exist
-    const dirs = [rootConfigPath, dataPath, languagesPath, tempLangPath, holochainPath, holochainConfigPath, holochainDataPath]
+    const dirs = [rootConfigPath, dataPath, languagesPath, tempLangPath, holochainPath, holochainDataPath, holochainConductorPath]
     for(const d of dirs)
     if(!fs.existsSync(d)) {
         fs.mkdirSync(d)

@@ -9,7 +9,7 @@ import type { PublicSharing } from "@perspect3vism/ad4m/Language";
 import type LanguageRef from "@perspect3vism/ad4m/LanguageRef";
 import * as Config from "./Config";
 import { builtInLangPath } from "./Config";
-import type HolochainService from '@perspect3vism/ad4m-language-context/Holochain/HolochainService';
+import type HolochainService from './storage-services/Holochain/HolochainService';
 import yaml from "js-yaml";
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'

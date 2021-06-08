@@ -3,13 +3,12 @@ import ExpressionRef from '@perspect3vism/ad4m/ExpressionRef';
 import type Language from '@perspect3vism/ad4m/Language'
 import type { LinksAdapter } from '@perspect3vism/ad4m/Language'
 import type { InteractionCall } from '@perspect3vism/ad4m/Language'
-import type LanguageContext from '@perspect3vism/ad4m-language-context/LanguageContext';
+import type LanguageContext from '@perspect3vism/ad4m/LanguageContext';
 import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import fs from 'fs'
 import path from 'path'
-import multihashing from 'multihashing'
 import * as Config from './Config'
-import type HolochainService from '@perspect3vism/ad4m-language-context/Holochain/HolochainService';
+import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
 import type Address from '@perspect3vism/ad4m/Address';
