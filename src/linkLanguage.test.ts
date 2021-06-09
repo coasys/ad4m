@@ -19,12 +19,6 @@ const core = new create({
     builtInLangs: [LANG_TO_TEST]
 })
 
-const ready = new Promise<void>(async (resolve)=>{
-    
-    resolve()
-})
-
-
 describe(LANG_TO_TEST, () => {
 
     beforeAll(async () => {
@@ -36,19 +30,11 @@ describe(LANG_TO_TEST, () => {
     })
 
     afterAll(async () => {
-        console.log("afterAll 1")
         await core.exit()
-        console.log("afterAll 2")
         await new Promise((resolve)=>setTimeout(resolve, 1000))
-        console.log("afterAll 3")
     })
 
     it('has a linksAdapter', (done) => {
-        try {
-            throw "test throw"
-        } catch(e) {
-            console.log(e)
-        }
         const langs = core.languageController.getLanguagesWithLinksAdapter()
         expect(langs.length).toEqual(1)
         expect(langs[0].name).toEqual(LANG_TO_TEST)
