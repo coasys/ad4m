@@ -32,7 +32,7 @@ describe(LANG_TO_TEST, () => {
         await core.agentService.createNewKeys()
         core.agentService.save('')
         core.initControllers()
-        await core.initLanguages()
+        await core.initLanguages(true)
     })
 
     afterAll(async () => {
