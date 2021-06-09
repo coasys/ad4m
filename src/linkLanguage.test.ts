@@ -62,7 +62,7 @@ describe(LANG_TO_TEST, () => {
 
                 const linkExpression = createMockExpression(did, link)
                 allLinks.push(linkExpression)
-                linkLanguage.addLink(linkExpression)
+                await linkLanguage.addLink(linkExpression)
             }
         })
 
