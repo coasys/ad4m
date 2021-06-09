@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
-    "test-links-lang": "jest src/linkLanguage.test.ts"
+    "test-links-lang": "jest --forceExit src/linkLanguage.test.ts"
   },
   "repository": {
     "type": "git",
