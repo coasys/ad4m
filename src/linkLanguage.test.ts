@@ -1,30 +1,31 @@
-import { v4 as uuidv4 } from 'uuid'
-import faker from 'faker'
-import type Link from '@perspect3vism/ad4m/Links'
 import type { LinkQuery } from '@perspect3vism/ad4m/Links'
-import Memory from 'lowdb/adapters/Memory'
-import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import { createLink } from './testutils/links'
 import create from "./core/PerspectivismCore";
 import { LinksAdapter } from '@perspect3vism/ad4m/Language'
 import { createMockExpression } from './testutils/expression'
 import Expression from '@perspect3vism/ad4m/Expression'
+import PerspectivismCore from './core/PerspectivismCore'
+import fs from 'fs-extra'
+import path from 'path'
 
 const DATA_RESOURCE_PATH = `${__dirname}/test-temp`
 const LANG_TO_TEST = "social-context-channel"
 
-jest.setTimeout(15000)
+fs.removeSync(path.join(DATA_RESOURCE_PATH, 'ad4m'))
 
-const core = new create({
-    appDataPath: DATA_RESOURCE_PATH,
-    appResourcePath: DATA_RESOURCE_PATH,
-    builtInLangPath: DATA_RESOURCE_PATH,
-    builtInLangs: [LANG_TO_TEST]
-})
+jest.setTimeout(15000)
+let core: PerspectivismCore = null
 
 describe(LANG_TO_TEST, () => {
 
     beforeAll(async () => {
+        core = new create({
+            appDataPath: DATA_RESOURCE_PATH,
+            appResourcePath: DATA_RESOURCE_PATH,
+            builtInLangPath: DATA_RESOURCE_PATH,
+            builtInLangs: [LANG_TO_TEST]
+        })
+
         await core.initServices()
         await core.agentService.createNewKeys()
         core.agentService.save('')
