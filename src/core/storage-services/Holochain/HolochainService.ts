@@ -25,10 +25,12 @@ export default class HolochainService {
     #lairProcess: ChildProcess
     #resourcePath: string
     #conductorPath: string
+    #didResolveError: boolean
     signalCallbacks: Map<string, [AppSignalCb, string]>;
 
     constructor(conductorPath, dataPath, resourcePath) {
         let resolveReady
+        this.#didResolveError = false;
         this.#ready = new Promise(resolve => resolveReady = resolve)
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
@@ -62,7 +64,11 @@ export default class HolochainService {
                 this.#appPort = holochainAppPort;
                 if (this.#adminWebsocket == undefined) {
                     this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
-                    this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
+                    try {
+                        await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
+                    } catch {
+                        console.log("HolochainService: Could not attach app interface, assuming already attached...")
+                    }
                     console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
                 };
                 if (this.#appWebsocket == undefined) {
@@ -71,8 +77,11 @@ export default class HolochainService {
                     console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
                 };
                 resolveReady()
+                this.#didResolveError = false;
             } catch(e) {
                 console.error("HolochainService: Error intializing Holochain conductor:", e)
+                this.#didResolveError = true;
+                resolveReady()
             }
         })
     }
@@ -89,6 +98,9 @@ export default class HolochainService {
 
     async stop() {
         await this.#ready
+        if (this.#didResolveError) {
+            console.error("HolochainService.stop: Warning attempting to close holochain processes when they did not start error free...")
+        }
         stopProcesses(this.#conductorPath, this.#hcProcess, this.#lairProcess)
     }
 
@@ -116,6 +128,9 @@ export default class HolochainService {
 
     async ensureInstallDNAforLanguage(lang: string, dnas: Dna[], callback: AppSignalCb | undefined) {
         await this.#ready
+        if (this.#didResolveError) {
+            console.error("HolochainService.ensureInstallDNAforLanguage: Warning attempting to install holochain DNA when conductor did not start error free...")
+        }
         const pubKey = await this.pubKeyForLanguage(lang);
         if (callback != undefined) {
             console.log("HolochainService: setting holochains signal callback for language", lang);
@@ -178,6 +193,9 @@ export default class HolochainService {
 
     async callZomeFunction(lang: string, dnaNick: string, zomeName: string, fnName: string, payload: object): Promise<any> {
         await this.#ready
+        if (this.#didResolveError) {
+            console.error("HolochainService.callZomeFunction: Warning attempting to call zome function when conductor did not start error free...")
+        }
         const installed_app_id = lang
         //console.debug("HolochainService.callZomefunction: getting info for app:", installed_app_id)
         let infoResult = await this.#appWebsocket.appInfo({installed_app_id})
