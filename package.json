@@ -12,6 +12,7 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
+    "prepare-test-links-lang": "nix-shell --run ./prepareLinkLanguageTest.sh",
     "test-links-lang": "jest --forceExit src/linkLanguage.test.ts"
   },
   "repository": {
