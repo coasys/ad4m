@@ -22,8 +22,8 @@ export interface CoreConfig {
     appResourcePath: string
     builtInLangPath: string
     builtInLangs: string[]
-    languageAliases: object
-    bootstrapFixtures: BootstrapFixtures|void
+    languageAliases?: object|void
+    bootstrapFixtures?: BootstrapFixtures|void
 }
 
 
@@ -47,7 +47,8 @@ export function init(c: CoreConfig) {
 
     builtInLangPath = c.builtInLangPath
     builtInLangs = c.builtInLangs
-    languageAliases = c.languageAliases
+    if(c.languageAliases)
+        languageAliases = c.languageAliases
     bootstrapFixtures = c.bootstrapFixtures
 }
 

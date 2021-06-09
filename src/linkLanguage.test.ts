@@ -1,77 +1,64 @@
-import Perspective from './Perspective'
-import type PerspectiveContext from './PerspectiveContext'
-import type PerspectiveID from './PerspectiveID'
-import { PerspectivismDb } from './db'
 import { v4 as uuidv4 } from 'uuid'
+import faker from 'faker'
+import type Link from '@perspect3vism/ad4m/Links'
 import type { LinkQuery } from '@perspect3vism/ad4m/Links'
 import Memory from 'lowdb/adapters/Memory'
 import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
-import { createLink } from '../testutils/links'
+import { createLink } from './testutils/links'
+import create from "./core/PerspectivismCore";
+
+const DATA_RESOURCE_PATH = `${__dirname}/test-temp`
+const LANG_TO_TEST = "social-context-channel"
+
+jest.setTimeout(15000)
+
+const core = new create({
+    appDataPath: DATA_RESOURCE_PATH,
+    appResourcePath: DATA_RESOURCE_PATH,
+    builtInLangPath: DATA_RESOURCE_PATH,
+    builtInLangs: [LANG_TO_TEST]
+})
+
+const ready = new Promise<void>(async (resolve)=>{
+    
+    resolve()
+})
 
 
-const did = 'did:local-test-agent'
-const agentService = {
-    did,
-    createSignedExpression: jest.fn(data => {
-        return {
-            author: { did },
-            timestamp: "now",
-            data,
-            proof: {
-                signature: "abcdefgh",
-                key: `${did}#primary`
-            }
+describe(LANG_TO_TEST, () => {
+
+    beforeAll(async () => {
+        await core.initServices()
+        await core.agentService.createNewKeys()
+        core.agentService.save('')
+        core.initControllers()
+        await core.initLanguages()
+    })
+
+    afterAll(async () => {
+        console.log("afterAll 1")
+        await core.exit()
+        console.log("afterAll 2")
+        await new Promise((resolve)=>setTimeout(resolve, 1000))
+        console.log("afterAll 3")
+    })
+
+    it('has a linksAdapter', (done) => {
+        try {
+            throw "test throw"
+        } catch(e) {
+            console.log(e)
         }
-    }),
-    agent: { did }
-}
-
-const sharingLanguage = { 
-    address: "sharing-language-address",
-    name: "sharing-lanugage Name"
-} as LanguageRef
-
-function LinksAdapter() {
-    this.getLinks = jest.fn(args=>{return []})
-    this.addLink = jest.fn(args=>{return []})
-    this.updateLink = jest.fn(args=>{return []})
-    this.removeLink = jest.fn(args=>{return []})
-}
-
-let linksAdapter = new LinksAdapter()
-
-const languageController = {
-    getLinksAdapter: jest.fn(langRef => {
-        if(langRef.address === sharingLanguage.address)
-            return linksAdapter
-        else
-            return null
+        const langs = core.languageController.getLanguagesWithLinksAdapter()
+        expect(langs.length).toEqual(1)
+        expect(langs[0].name).toEqual(LANG_TO_TEST)
+        done()
     })
-}
-
-
-describe('Perspective', () => {
-    let perspective
-    let allLinks
-
-    beforeEach(() => {
-        const db = new PerspectivismDb(new Memory())
-        perspective = new Perspective(
-            {
-                uuid: uuidv4(),
-                name: "Test Perspective"
-            } as PerspectiveID,
-            // @ts-ignore
-            {
-                agentService,
-                db,
-                languageController
-            } as PerspectiveContext)
-        allLinks = []
-    })
+    /*
 
     it('wraps links in expressions on addLink', () => {
         const link = createLink()
+        core.languageController.getLanguagesWithLinksAdapter()
         const expression = perspective.addLink(link)
         expect(expression.author).toEqual(agentService.agent)
         expect(expression.data).toEqual(link)
@@ -197,6 +184,7 @@ describe('Perspective', () => {
         })
         
     })
+    */
 
 })
 
