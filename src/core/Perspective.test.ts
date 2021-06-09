@@ -7,22 +7,13 @@ import type { LinkQuery } from '@perspect3vism/ad4m/Links'
 import Memory from 'lowdb/adapters/Memory'
 import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import { createLink } from '../testutils/links'
+import { createMockExpression } from '../testutils/expression'
 
 
 const did = 'did:local-test-agent'
 const agentService = {
     did,
-    createSignedExpression: jest.fn(data => {
-        return {
-            author: { did },
-            timestamp: "now",
-            data,
-            proof: {
-                signature: "abcdefgh",
-                key: `${did}#primary`
-            }
-        }
-    }),
+    createSignedExpression: jest.fn(createMockExpression.bind(null, did)),
     agent: { did }
 }
 
