@@ -8,6 +8,7 @@ import { createLink } from './testutils/links'
 import create from "./core/PerspectivismCore";
 import { LinksAdapter } from '@perspect3vism/ad4m/Language'
 import { createMockExpression } from './testutils/expression'
+import Expression from '@perspect3vism/ad4m/Expression'
 
 const DATA_RESOURCE_PATH = `${__dirname}/test-temp`
 const LANG_TO_TEST = "social-context-channel"
@@ -44,7 +45,7 @@ describe(LANG_TO_TEST, () => {
     })
 
     describe('after adding 5 links', () => {
-        let allLinks = []
+        let allLinks = [] as Expression[]
         let linkLanguage: LinksAdapter
 
         beforeAll(async () => {
@@ -66,6 +67,37 @@ describe(LANG_TO_TEST, () => {
             }
         })
 
+
+        it('can get a link by source', async () => {
+            const addedLink = allLinks[0]
+            const source = addedLink.data['source']
+            const result = await linkLanguage.getLinks({source} as LinkQuery)
+            expect(result.length).toEqual(1)
+            expect(result[0]).toEqual(addedLink)
+        })
+
+
+        it('can get a link by predicate', async () => {
+            const addedLink = allLinks[0]
+            const predicate = addedLink.data['predicate']
+            const result = await linkLanguage.getLinks({predicate} as LinkQuery)
+            expect(result.length).toEqual(1)
+            expect(result[0]).toEqual(addedLink)
+        })
+
+        it('can get a link by target', async () => {
+            const addedLink = allLinks[0]
+            const target = addedLink.data['target']
+            const result = await linkLanguage.getLinks({target} as LinkQuery)
+            expect(result.length).toEqual(1)
+            expect(result[0]).toEqual(addedLink)
+        })
+
+        it('can get multiple links by source', async () => {
+            const result = await linkLanguage.getLinks({source: 'root'} as LinkQuery)
+            expect(result.length).toEqual(3)
+        })
+
         it('can get all links', async () => {
             const result = await linkLanguage.getLinks({} as LinkQuery)
 
@@ -78,11 +110,6 @@ describe(LANG_TO_TEST, () => {
                     )
                 )
             }
-        })
-
-        it('can get links by source', async () => {
-            const result = await linkLanguage.getLinks({source: 'root'} as LinkQuery)
-            expect(result.length).toEqual(3)
         })
     })
 })
