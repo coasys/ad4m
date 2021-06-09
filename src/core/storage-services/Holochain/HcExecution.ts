@@ -12,7 +12,7 @@ function sleep(ms) {
 }
 
 export function stopProcesses(hcDataPath, hcProcess, lairProcess) {
-    fs.unlinkSync(`${escapeShellArg(hcDataPath)}/keystore/pid`)
+    // fs.unlinkSync(`${escapeShellArg(hcDataPath)}/keystore/pid`)
     hcProcess.kill("SIGINT");
     lairProcess.kill("SIGINT");
 }
@@ -106,7 +106,7 @@ export async function runHolochain(resourcePath, conductorConfigPath, hcDataPath
         }
     );
     process.on("SIGINT", function () {
-        fs.unlinkSync(`${escapeShellArg(holochainDataPath)}/keystore/pid`)
+        // fs.unlinkSync(`${escapeShellArg(holochainDataPath)}/keystore/pid`)
         hcProcess.kill("SIGINT");
         lairProcess.kill("SIGINT");
         process.exit();
