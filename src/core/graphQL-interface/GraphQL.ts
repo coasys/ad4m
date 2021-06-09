@@ -1,5 +1,4 @@
 import { ApolloServer, gql, withFilter } from 'apollo-server'
-import type Agent from '@perspect3vism/ad4m/Agent'
 import { exprRef2String, parseExprURL } from '@perspect3vism/ad4m/ExpressionRef'
 import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -92,10 +91,7 @@ function createResolvers(core: PerspectivismCore) {
                 return dump
             },
             updateAgentProfile: (parent, args, context, info) => {
-                const { name, email } = args.input
                 const agentProfile = core.agentService.agent
-                agentProfile.name = name
-                agentProfile.email = email
                 core.agentService.updateAgent(agentProfile)
                 return core.agentService.dump()
             },
@@ -252,34 +248,6 @@ function createResolvers(core: PerspectivismCore) {
                     return { code }
                 else
                     return null
-            }
-        },
-
-        Agent: {
-            name: async (agent) => {
-                //console.debug("GQL| AGENT.name:", agent)
-                if(agent.name && agent.name !== "")
-                    return agent.name
-                else {
-                    const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
-                    if(agentExpression)
-                        return (agentExpression.data as Agent).name
-                    else
-                        return ''
-                }
-            },
-
-            email: async (agent) => {
-                //console.debug("GQL| AGENT.email:", agent)
-                if(agent.email && agent.email !== "")
-                    return agent.email
-                else {
-                    const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
-                    if(agentExpression)
-                        return (agentExpression.data as Agent).email
-                    else
-                        return ''
-                }
             }
         },
 
