@@ -70,7 +70,7 @@ describe(LANG_TO_TEST, () => {
 
 
         it('can get a link by source', async () => {
-            const addedLink = allLinks[0]
+            const addedLink = allLinks[1]
             const source = addedLink.data['source']
             const result = await linkLanguage.getLinks({source} as LinkQuery)
             expect(result.length).toEqual(1)
@@ -101,13 +101,12 @@ describe(LANG_TO_TEST, () => {
 
         it('can get all links', async () => {
             const result = await linkLanguage.getLinks({} as LinkQuery)
-
             expect(result.length).toEqual(5)
 
             for(let i=0; i<5; i++) {
                 expect(result).toEqual(
                     expect.arrayContaining(
-                        [expect.objectContaining({data: allLinks[i]})]
+                        [expect.objectContaining(allLinks[i])]
                     )
                 )
             }
