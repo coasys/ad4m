@@ -70,7 +70,8 @@ export default class PerspectivismCore {
     async initServices() {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
         this.#holochain = new HolochainService(Config.holochainConductorPath, Config.holochainDataPath, Config.resourcePath)
-        this.#IPFS = await IPFS.init()
+        let [ipfs, _] = await Promise.all([IPFS.init(), this.#holochain.run()]);
+        this.#IPFS = ipfs;
     }
 
     async waitForAgent(): Promise<void> {
