@@ -1,9 +1,8 @@
-import type { LinkQuery } from '@perspect3vism/ad4m/Links'
+import type { LinkQuery } from '@perspect3vism/ad4m'
+import { Expression, LinksAdapter } from '@perspect3vism/ad4m'
 import { createLink } from './testutils/links'
 import create from "./core/PerspectivismCore";
-import { LinksAdapter } from '@perspect3vism/ad4m/Language'
 import { createMockExpression } from './testutils/expression'
-import Expression from '@perspect3vism/ad4m/Expression'
 import PerspectivismCore from './core/PerspectivismCore'
 import fs from 'fs-extra'
 import path from 'path'
