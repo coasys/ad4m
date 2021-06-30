@@ -243,6 +243,9 @@ function createResolvers(core: PerspectivismCore) {
             constructorIcon: (language) => {
                 return { code: core.languageController.getConstructorIcon(language) }
             },
+            iconFor: (language) => {
+                return { code: core.languageController.getIcon(language) }
+            },
             settings: (language) => {
                 return JSON.stringify(core.languageController.getSettings(language))
             },

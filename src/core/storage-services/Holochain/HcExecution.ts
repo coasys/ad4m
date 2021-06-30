@@ -86,10 +86,26 @@ network:
 
 export async function startLair(lairPath, hcDataPath): Promise<child_process.ChildProcess> {
     let lairProcess = child_process.spawn(`${escapeShellArg(lairPath)}`, [], {
-        stdio: "inherit",
         env: { ...process.env, LAIR_DIR: `${escapeShellArg(hcDataPath)}/keystore` },
     });
-    await sleep(500);
+    
+    //Log lair process stdout to out
+    lairProcess.stdout.on('data', (data) => {
+        console.log(`${data}`);
+    });
+    //Log lair process stderr to out
+    lairProcess.stderr.on('data', (data) => {
+        console.log(`${data}`);
+    });
+
+    let isReady = new Promise((resolve, reject) => {
+        lairProcess.stdout.on('data', (data) => {
+            if (data.includes("#lair-keystore-ready#")) {
+                resolve(null);
+            };
+        });
+    });
+    await isReady;
     return lairProcess
 }
 
@@ -98,7 +114,6 @@ export async function runHolochain(resourcePath, conductorConfigPath, hcDataPath
 
     let hcProcess = child_process.spawn(`${escapeShellArg(path.join(resourcePath, "holochain"))}`, ["-c", escapeShellArg(conductorConfigPath)],
         {
-            stdio: "inherit",
             env: {
                 ...process.env,
                 RUST_LOG: process.env.RUST_LOG ? process.env.RUST_LOG : "info",
@@ -112,6 +127,22 @@ export async function runHolochain(resourcePath, conductorConfigPath, hcDataPath
         process.exit();
     });
 
-    await sleep(5000);
+    //Log holochain process stdout to out
+    hcProcess.stdout.on('data', (data) => {
+        console.log(`${data}`);
+    });
+    //Log holochain process stderr to out
+    hcProcess.stderr.on('data', (data) => {
+        console.log(`${data}`);
+    });
+
+    let isReady = new Promise((resolve, reject) => {
+        hcProcess.stdout.on('data', (data) => {
+            if (data.includes("Conductor ready")) {
+                resolve(null);
+            };
+        });
+    });
+    await isReady;
     return [hcProcess, lairProcess];
 }

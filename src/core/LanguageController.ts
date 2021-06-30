@@ -46,13 +46,17 @@ export default class LanguageController {
     }
 
     async loadLanguages() {
-        await this.loadBuiltInLanguages()
-        await this.loadInstalledLanguages()
+        try {
+            await this.loadBuiltInLanguages()
+            await this.loadInstalledLanguages()
+        } catch (e) {
+            throw new Error(`Error loading languages ${e}`);
+        }
     }
 
-    async loadBuiltInLanguages() {
+    loadBuiltInLanguages() {
         console.log("loadBuiltInLanguages: Built in languages:", this.#builtInLanguages);
-        await Promise.all(this.#builtInLanguages.map( async bundle => {
+        return Promise.all(this.#builtInLanguages.map( async bundle => {
             const { hash, language } = await this.loadLanguage(bundle)
             
             // Do special stuff for AD4M languages:
@@ -76,7 +80,7 @@ export default class LanguageController {
 
     async loadInstalledLanguages() {
         const files = fs.readdirSync(Config.languagesPath)
-        await Promise.all(files.map(async file => {
+        return Promise.all(files.map(async file => {
             const bundlePath = path.join(Config.languagesPath, file, 'bundle.js')
             if(fs.existsSync(bundlePath)) {
                 try {
