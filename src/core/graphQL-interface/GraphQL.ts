@@ -1,10 +1,9 @@
 import { ApolloServer, gql, withFilter } from 'apollo-server'
 import type { Agent, LanguageRef } from '@perspect3vism/ad4m'
-import { exprRef2String, parseExprURL } from '@perspect3vism/ad4m'
+import { exprRef2String, parseExprURL, typeDefs } from '@perspect3vism/ad4m'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
-import typeDefs from './typeDefs'
 
 function createResolvers(core: PerspectivismCore) {
     const pubsub = PubSub.get()
