@@ -98,9 +98,11 @@ export default class PerspectivismCore {
         })
     }
 
-    async initLanguages() {
+    async initLanguages(omitLanguageFactory: boolean|void) {
         await this.#languageController.loadLanguages()
-        this.#languageFactory = new LanguageFactory(this.#agentService, this.#languageController.getLanguageLanguage(), this.#holochain)
+        if(!omitLanguageFactory) {
+            this.#languageFactory = new LanguageFactory(this.#agentService, this.#languageController.getLanguageLanguage(), this.#holochain)
+        }
     }
 
     async publishPerspective(uuid: string, name: string, description: string, sharingType: SharingType, 

@@ -3,32 +3,16 @@ import type PerspectiveContext from './PerspectiveContext'
 import type PerspectiveID from './PerspectiveID'
 import { PerspectivismDb } from './db'
 import { v4 as uuidv4 } from 'uuid'
-import faker from 'faker'
 import type { LanguageRef, Link, LinkQuery } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
+import { createLink } from '../testutils/links'
+import { createMockExpression } from '../testutils/expression'
 
-function createLink(): Link {
-    return {
-        source: faker.internet.url(),
-        target: faker.internet.url(),
-        predicate: faker.internet.url(),
-    } as Link
-}
 
 const did = 'did:local-test-agent'
 const agentService = {
     did,
-    createSignedExpression: jest.fn(data => {
-        return {
-            author: { did },
-            timestamp: "now",
-            data,
-            proof: {
-                signature: "abcdefgh",
-                key: `${did}#primary`
-            }
-        }
-    }),
+    createSignedExpression: jest.fn(createMockExpression.bind(null, did)),
     agent: { did }
 }
 
