@@ -1,3 +1,6 @@
+import type { Address, LanguageRef, SharingType, PublicSharing  } from '@perspect3vism/ad4m'
+import { parseExprURL, Neighbourhood as SharedPerspective } from '@perspect3vism/ad4m'
+
 import * as Config from './Config'
 import * as Db from './db'
 import type { PerspectivismDb } from './db'
@@ -6,19 +9,13 @@ import * as IPFS from './storage-services/IPFS'
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
-import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import * as GraphQL from './graphQL-interface/GraphQL'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
-import SharedPerspective from '@perspect3vism/ad4m/SharedPerspective'
-import type { SharingType } from '@perspect3vism/ad4m/SharedPerspective'
 import LanguageFactory from './LanguageFactory'
-import type { PublicSharing } from '@perspect3vism/ad4m/Language'
-import type Address from "@perspect3vism/ad4m/Address"
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveID from './PerspectiveID'
-import { parseExprURL } from '@perspect3vism/ad4m/ExpressionRef'
 
 export default class PerspectivismCore {
     #holochain: HolochainService
@@ -120,7 +117,7 @@ export default class PerspectivismCore {
         sharedPerspective.allowedExpressionLanguages = allowedExpressionLanguages
         sharedPerspective.requiredExpressionLanguages = requiredExpressionLanguages
 
-        await this.#languageController.installLanguage(linkLanguageRef.address)
+        await this.#languageController.installLanguage(linkLanguageRef.address, null)
         let installs = allowedExpressionLanguages.concat(requiredExpressionLanguages);
         installs = Array.from(new Set(installs));
         console.log("\x1b[32m", "PerspectivismCore.publishPerspective: Attempting to install expression languages", installs);

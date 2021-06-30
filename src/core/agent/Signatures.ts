@@ -1,4 +1,4 @@
-import type Expression from "@perspect3vism/ad4m/Expression"
+import type { Expression } from "@perspect3vism/ad4m"
 import type { DIDResolver } from ".//DIDs"
 import sha256 from 'sha256'
 import secp256k1 from 'secp256k1'

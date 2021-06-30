@@ -1,17 +1,14 @@
-import type Expression from '@perspect3vism/ad4m/Expression';
-import ExpressionRef from '@perspect3vism/ad4m/ExpressionRef';
-import type Language from '@perspect3vism/ad4m/Language'
-import type { LinksAdapter } from '@perspect3vism/ad4m/Language'
-import type { InteractionCall } from '@perspect3vism/ad4m/Language'
-import type LanguageContext from '@perspect3vism/ad4m/LanguageContext';
-import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
+import type { 
+    Address, Expression, Language, LanguageContext, LanguageRef, 
+    LinksAdapter, InteractionCall 
+} from '@perspect3vism/ad4m';
+import { ExpressionRef } from '@perspect3vism/ad4m';
 import fs from 'fs'
 import path from 'path'
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
-import type Address from '@perspect3vism/ad4m/Address';
 import { builtInLangs, builtInLangPath, languageAliases, bootstrapFixtures } from "./Config";
 import * as PubSub from './graphQL-interface/PubSub'
 

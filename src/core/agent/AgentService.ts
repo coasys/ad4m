@@ -1,14 +1,12 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
-import type Expression from '@perspect3vism/ad4m/Expression';
-import { ExpressionProof } from '@perspect3vism/ad4m/Expression';
+import type { Language, Expression } from '@perspect3vism/ad4m';
+import { Agent, ExpressionProof } from '@perspect3vism/ad4m';
 import secp256k1 from 'secp256k1'
 import * as ed25519 from '@transmute/did-key-ed25519';
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
-import Agent from '@perspect3vism/ad4m/Agent';
-import type Language from '@perspect3vism/ad4m/Language';
 import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'apollo-server';
 import crypto from 'crypto'

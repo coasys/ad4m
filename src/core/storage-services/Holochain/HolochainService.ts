@@ -5,7 +5,7 @@ import path from 'path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, ConductorConfiguration} from "./HcExecution"
-import type { Dna } from '@perspect3vism/ad4m/LanguageContext'
+import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')

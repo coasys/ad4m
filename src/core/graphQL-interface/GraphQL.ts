@@ -1,7 +1,6 @@
 import { ApolloServer, gql, withFilter } from 'apollo-server'
-import type Agent from '@perspect3vism/ad4m/Agent'
-import { exprRef2String, parseExprURL } from '@perspect3vism/ad4m/ExpressionRef'
-import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
+import type { Agent, LanguageRef } from '@perspect3vism/ad4m'
+import { exprRef2String, parseExprURL } from '@perspect3vism/ad4m'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";

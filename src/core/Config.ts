@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import Expression from '@perspect3vism/ad4m/Expression';
+import { Expression } from '@perspect3vism/ad4m';
 
 export let rootConfigPath = path.join('', 'ad4m')
 export let dataPath = path.join(rootConfigPath, 'data')

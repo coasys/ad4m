@@ -4,10 +4,8 @@ import type PerspectiveID from './PerspectiveID'
 import { PerspectivismDb } from './db'
 import { v4 as uuidv4 } from 'uuid'
 import faker from 'faker'
-import type Link from '@perspect3vism/ad4m/Links'
-import type { LinkQuery } from '@perspect3vism/ad4m/Links'
+import type { LanguageRef, Link, LinkQuery } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
-import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 
 function createLink(): Link {
     return {

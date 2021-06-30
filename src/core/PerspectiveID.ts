@@ -1,11 +1,10 @@
-import type Agent from "@perspect3vism/ad4m/Agent";
-import type SharedPerspective from "@perspect3vism/ad4m/SharedPerspective";
+import type { Agent, Neighbourhood } from "@perspect3vism/ad4m";
 
 export default class PerspectiveID {
     name: string;
     uuid: string;
     author: Agent;
     timestamp: string;
-    sharedPerspective: SharedPerspective;
+    sharedPerspective: Neighbourhood;
     sharedURL: string;
 }

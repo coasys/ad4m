@@ -2,11 +2,9 @@ import * as fs from 'fs';
 import path from 'path'
 import multihashing from 'multihashing'
 import baseX from 'base-x'
-import SharedPerspective, { SharingType } from "@perspect3vism/ad4m/SharedPerspective";
+import { SharedPerspective, SharingType } from "@perspect3vism/ad4m";
+import type { Language, LanguageRef, PublicSharing } from "@perspect3vism/ad4m";
 import type AgentService from "./agent/AgentService";
-import type Language from "@perspect3vism/ad4m/Language";
-import type { PublicSharing } from "@perspect3vism/ad4m/Language";
-import type LanguageRef from "@perspect3vism/ad4m/LanguageRef";
 import * as Config from "./Config";
 import { builtInLangPath } from "./Config";
 import type HolochainService from './storage-services/Holochain/HolochainService';
