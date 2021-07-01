@@ -1,7 +1,11 @@
 import PerspectivismCore from "./core/PerspectivismCore";
 import create from "./core/PerspectivismCore";
 import { BootstrapFixtures, BootstrapLanguages } from "./core/Config"
-
+// Patch Reflect to have missing getOwnPropertyDescriptor()
+// which should be there in any ES6 runtime but for some reason
+// is missing on some machines...
+import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
+Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 interface OuterConfig {
   resourcePath: string
   appDataPath: string
