@@ -1,9 +1,8 @@
 import Perspective from './Perspective'
 import type PerspectiveContext from './PerspectiveContext'
-import type PerspectiveID from './PerspectiveID'
 import { PerspectivismDb } from './db'
 import { v4 as uuidv4 } from 'uuid'
-import type { LanguageRef, Link, LinkQuery } from '@perspect3vism/ad4m'
+import type { LanguageRef, Link, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
 import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
@@ -50,7 +49,7 @@ describe('Perspective', () => {
             {
                 uuid: uuidv4(),
                 name: "Test Perspective"
-            } as PerspectiveID,
+            } as PerspectiveHandle,
             // @ts-ignore
             {
                 agentService,

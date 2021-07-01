@@ -81,13 +81,17 @@ export default class PerspectivesController {
         return perspective
     }
 
+    replace(perspectiveHandle: PerspectiveHandle) {
+        this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle)
+    }
+
     remove(uuid) {
         this.#perspectiveHandles.delete(uuid)
         this.save()
         this.#pubsub.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, { uuid })
     }
 
-    update(uuid, name) {
+    update(uuid: string, name: string) {
         let perspective = this.perspective(uuid);
         perspective.name = name;
         this.#perspectiveHandles.set(uuid, perspective)

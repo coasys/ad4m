@@ -1,4 +1,4 @@
-import type { Address, LanguageRef, SharingType, PublicSharing  } from '@perspect3vism/ad4m'
+import type { Address, LanguageRef, SharingType, PublicSharing, PerspectiveHandle  } from '@perspect3vism/ad4m'
 import { parseExprURL, Neighbourhood as SharedPerspective } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
@@ -15,7 +15,6 @@ import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
-import type PerspectiveID from './PerspectiveID'
 
 export default class PerspectivismCore {
     #holochain: HolochainService
@@ -132,13 +131,12 @@ export default class PerspectivismCore {
         const perspectiveUrl = `perspective://${perspectiveAddress}`
 
         //Add shared perspective to original perpspective and then update controller
-        perspectiveID.sharedPerspective = sharedPerspective
         perspectiveID.sharedURL = perspectiveUrl
-        this.#perspectivesController.update(perspectiveID)
+        this.#perspectivesController.replace(perspectiveID)
         return sharedPerspective
     }
 
-    async installSharedPerspective(url: Address): Promise<PerspectiveID> {
+    async installSharedPerspective(url: Address): Promise<PerspectiveHandle> {
         let sharedPerspectiveExp = await this.languageController.getPerspective(parseExprURL(url).expression);
         if (sharedPerspectiveExp == null) {
             throw Error(`Could not find sharedPerspective with URL ${url}`);
