@@ -81,7 +81,7 @@ export default class LanguageFactory {
         return dnaCode
     }
 
-    async createUniqueHolochainExpressionLanguageFromTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
+    async languageCloneHolochainTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
         console.debug("LanguageFactory: creating new expression language")
         //Load the language to get the name
         //NOTE: path code below is a little funky; it assumes that languagePath points to language/bundle and that dna would be found at /language/dnaNick.dna

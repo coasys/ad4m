@@ -333,7 +333,7 @@ export default class LanguageController {
         this.#languages.set(lang.address, newInstance)
     }
 
-    async createPublicExpression(lang: LanguageRef, content: object): Promise<ExpressionRef> {
+    async expressionCreate(lang: LanguageRef, content: object): Promise<ExpressionRef> {
         const putAdapter = this.languageByRef(lang).expressionAdapter.putAdapter
         let address = null
 
