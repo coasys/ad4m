@@ -1,6 +1,6 @@
-import { ApolloServer, withFilter } from 'apollo-server'
+import { ApolloServer, withFilter, gql } from 'apollo-server'
 import { Agent, LanguageRef } from '@perspect3vism/ad4m'
-import { exprRef2String, parseExprURL, typeDefs } from '@perspect3vism/ad4m'
+import { exprRef2String, parseExprURL, typeDefsString } from '@perspect3vism/ad4m'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
@@ -308,6 +308,7 @@ function createResolvers(core: PerspectivismCore) {
 
 export async function startServer(core: PerspectivismCore, mocks: boolean) {
     const resolvers = createResolvers(core)
+    const typeDefs = gql(typeDefsString)
     const server = new ApolloServer({ typeDefs, resolvers, mocks: mocks });
     const { url, subscriptionsUrl } = await server.listen()
     return { url, subscriptionsUrl }
