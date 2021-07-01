@@ -1,5 +1,5 @@
 import { ApolloServer, gql, withFilter } from 'apollo-server'
-import type { Agent, LanguageRef } from '@perspect3vism/ad4m'
+import { Agent, LanguageRef, ExpressionStringified } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprURL, typeDefs } from '@perspect3vism/ad4m'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
@@ -10,23 +10,15 @@ function createResolvers(core: PerspectivismCore) {
 
     return {
         Query: {
-            hello: () => 'Hello world!',
             agent: () => {
-                // console.log("GQL agent - AgentService:", agent)
+                return core.agentService.agent()
+            },
+            agentByDID: (parent, args, context, info) => {
+                const { did } = args;
+                return new Agent("");
+            },
+            agentStatus: () => {
                 return core.agentService.dump()
-            },
-            perspective: (parent, args, context, info) => {
-                console.log("GQL perspective", args.uuid)
-                return core.perspectivesController.perspectiveID(args.uuid)
-            },
-            perspectives: (parent, args, context, info) => {
-                return core.perspectivesController.allPerspectiveIDs()
-            },
-            links: async (parent, args, context, info) => {
-                // console.log("GQL: Links query: ", args);
-                const { perspectiveUUID, query } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                return await perspective.getLinks(query)
             },
             expression: async (parent, args, context, info) => {
                 const ref = parseExprURL(args.url.toString())
@@ -54,14 +46,25 @@ function createResolvers(core: PerspectivismCore) {
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
             },
-            pubKeyForLanguage: async (parent, args, context, info) => {
-                const { lang } = args;
-                let val = await core.pubKeyForLanguage(lang);
-                return val.toString('hex');
-            }
+            perspective: (parent, args, context, info) => {
+                console.log("GQL perspective", args.uuid)
+                return core.perspectivesController.perspectiveID(args.uuid)
+            },
+            perspectiveQueryLinks: async (parent, args, context, info) => {
+                const { uuid, query } = args
+                const perspective = core.perspectivesController.perspective(uuid)
+                return await perspective.getLinks(query)
+            },
+            perspectiveSnapshot: (args) => {
+                const { uuid } = args
+                return core.perspectivesController.perspectiveID(uuid)
+            },
+            perspectives: (parent, args, context, info) => {
+                return core.perspectivesController.allPerspectiveIDs()
+            },
         },
         Mutation: {
-            initializeAgent: async (parent, args, context, info) => {
+            agentInitialize: async (parent, args, context, info) => {
                 const { did, didDocument, keystore, passphrase } = args.input
                 if(did)
                     core.agentService.initialize(did, didDocument, keystore, passphrase)
@@ -69,11 +72,11 @@ function createResolvers(core: PerspectivismCore) {
                     await core.agentService.createNewKeys()
                 return core.agentService.dump()
             },
-            lockAgent: (parent, args, context, info) => {
+            agentLock: (parent, args, context, info) => {
                 core.agentService.save(args.passphrase)
                 return core.agentService.dump()
             },
-            unlockAgent:  (parent, args, context, info) => {
+            agentUnlock:  (parent, args, context, info) => {
                 let failed = false
                 try {
                     core.agentService.unlock(args.passphrase)
@@ -89,46 +92,33 @@ function createResolvers(core: PerspectivismCore) {
 
                 return dump
             },
-            updateAgentProfile: (parent, args, context, info) => {
-                const { name, email } = args.input
-                const agentProfile = core.agentService.agent
-                agentProfile.name = name
-                agentProfile.email = email
-                core.agentService.updateAgent(agentProfile)
-                return core.agentService.dump()
+            agentUpdateInboxLanguage: (parent, args, context, info) => { 
+                //Psuedo code
+                const { inboxLanguageAddress } = args;
+                let currentAgent = core.agentService.agent();
+                currentAgent.inboxLanguageAddress = inboxLanguageAddress;
+                core.agentService.updateAgent(currentAgent);
+                return currentAgent;
             },
-            addLink: (parent, args, context, info) => {
-                // console.log("GQL| addLink:", args)
-                const { perspectiveUUID, link } = args.input
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                const parsedLink = JSON.parse(link)
-                // console.log("returning response", parsedLink);
-                return perspective.addLink(parsedLink)
+            agentUpdatePublicPerspective: (parent, args, context, info) => { 
+                //Psuedo code
+                const {perspective} = args;
+                let currentAgent = core.agentService.agent();
+                currentAgent.perspective = perspective;
+                core.agentService.updateAgent(currentAgent);
+                return currentAgent;
             },
-            updateLink: (parent, args, context, info) => {
-                // console.log("GQL| updateLink:", args)
-                const { perspectiveUUID, oldLink, newLink } = args.input
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                const parsedOldLink = JSON.parse(oldLink)
-                const parsedNewLink = JSON.parse(newLink)
-                perspective.updateLink(parsedOldLink, parsedNewLink)
-                return newLink
-            },
-            removeLink: (parent, args, context, info) => {
-                // console.log("GQL| removeLink:", args)
-                const { perspectiveUUID, link } = args.input
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                const parsedLink = JSON.parse(link)
-                perspective.removeLink(parsedLink)
-                return true
-            },
-            createExpression: async (parent, args, context, info) => {
+            expressionCreate: async (parent, args, context, info) => {
                 const { languageAddress, content } = args.input
                 const langref = { address: languageAddress } as LanguageRef
                 const expref = await core.languageController.createPublicExpression(langref, JSON.parse(content))
                 return exprRef2String(expref)
             },
-            setLanguageSettings: (parent, args, context, info) => {
+            languageCloneHolochainTemplate: async (parent, args, context, info) => {
+                const {languagePath, dnaNick, uid} = args.input;
+                return await core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid);
+            },
+            languageWriteSettings: (parent, args, context, info) => {
                 // console.log("GQL| settings", args)
                 const { languageAddress, settings } = args.input
                 const langref = { name: '', address: languageAddress }
@@ -137,15 +127,13 @@ function createResolvers(core: PerspectivismCore) {
                 core.languageController.putSettings(langref, JSON.parse(settings))
                 return true
             },
-            addPerspective: (parent, args, context, info) => {
-                return core.perspectivesController.add(args.input)
+            neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
+                // console.log(new Date(), "GQL install shared perspective", args);
+                const { url } = args;
+                return await core.installSharedPerspective(url);
             },
-            updatePerspective: (parent, args, context, info) => {
-                const perspective = args.input
-                core.perspectivesController.update(perspective)
-                return perspective
-            },
-            publishPerspective: async (parent, args, context, info) => {
+            neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
+                //TODO: this code needs to be updated: does not match resolver currently
                 const { uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages } = args.input
                 //Note: this code is being executed twice in fn call, once here and once in publishPerspective
                 const perspective = core.perspectivesController.perspectiveID(uuid)
@@ -154,27 +142,53 @@ function createResolvers(core: PerspectivismCore) {
                     throw new Error(`Perspective ${name} (${uuid}) is already shared`)
                 return await core.publishPerspective(uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages)
             },
-            installSharedPerspective: async (parent, args, context, info) => {
-                // console.log(new Date(), "GQL install shared perspective", args);
-                const { url } = args;
-                return await core.installSharedPerspective(url);
+            perspectiveAdd: (parent, args, context, info) => {
+                //TODO: this code needs to be updated: does not match resolver currently
+                return core.perspectivesController.add(args.input)
             },
-            createUniqueHolochainExpressionLanguageFromTemplate: async (parent, args, context, info) => {
-                const {languagePath, dnaNick, uid} = args.input;
-                return await core.createUniqueHolochainExpressionLanguageFromTemplate(languagePath, dnaNick, uid);
+            perspectiveAddLink: (parent, args, context, info) => {
+                // console.log("GQL| addLink:", args)
+                const { uuid, link } = args.input
+                const perspective = core.perspectivesController.perspective(uuid)
+                const parsedLink = JSON.parse(link)
+                // console.log("returning response", parsedLink);
+                return perspective.addLink(parsedLink)
             },
-            removePerspective: (parent, args, context, info) => {
+            perspectiveRemove: (parent, args, context, info) => {
                 const { uuid } = args
                 core.perspectivesController.remove(uuid)
                 return true
             },
-            openLinkExtern: (parent, args) => {
+            perspectiveRemoveLink: (parent, args, context, info) => {
+                // console.log("GQL| removeLink:", args)
+                const { uuid, link } = args.input
+                const perspective = core.perspectivesController.perspective(uuid)
+                const parsedLink = JSON.parse(link)
+                perspective.removeLink(parsedLink)
+                return true
+            },
+            perspectiveUpdate: (parent, args, context, info) => {
+                //TODO: this code needs to be updated: does not match resolver currently
+                const perspective = args.input
+                core.perspectivesController.update(perspective)
+                return perspective
+            },
+            perspectiveUpdateLink: (parent, args, context, info) => {
+                // console.log("GQL| updateLink:", args)
+                const { uuid, oldLink, newLink } = args.input
+                const perspective = core.perspectivesController.perspective(uuid)
+                const parsedOldLink = JSON.parse(oldLink)
+                const parsedNewLink = JSON.parse(newLink)
+                perspective.updateLink(parsedOldLink, parsedNewLink)
+                return newLink
+            },
+            runtimeOpenLink: (parent, args) => {
                 const { url } = args
                 console.log("openLinkExtern:", url)
                 //shell.openExternal(url)
                 return true
             },
-            quit: () => {
+            runtimeQuit: () => {
                 process.exit(0)
                 return true
             }
@@ -189,15 +203,7 @@ function createResolvers(core: PerspectivismCore) {
                 subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_ADDED_TOPIC),
                 resolve: payload => payload.perspective
             },
-            perspectiveUpdated: {
-                subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_UPDATED_TOPIC),
-                resolve: payload => payload.perspective
-            },
-            perspectiveRemoved: {
-                subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC),
-                resolve: payload => payload.uuid
-            },
-            linkAdded: {
+            perspectiveLinkAdded: {
                 subscribe: (parent, args, context, info) => {
                     return withFilter(
                         () => pubsub.asyncIterator(PubSub.LINK_ADDED_TOPIC),
@@ -206,21 +212,20 @@ function createResolvers(core: PerspectivismCore) {
                 },
                 resolve: payload => payload.link
             },
-            linkRemoved: {
+            perspectiveLinkRemoved: {
                 subscribe: (parent, args, context, info) => withFilter(
                     () => pubsub.asyncIterator(PubSub.LINK_REMOVED_TOPIC),
                     (payload, variables) => payload.perspective.uuid === variables.perspectiveUUID
                 )(undefined, args),
                 resolve: payload => payload.link
             },
-            signal: {
-                subscribe: () => {
-                    console.log("GQL: Got a subscription to signal!");
-                    return pubsub.asyncIterator(PubSub.SIGNAL)
-                },
-                resolve: (payload) => {
-                    return payload
-                }
+            perspectiveUpdated: {
+                subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_UPDATED_TOPIC),
+                resolve: payload => payload.perspective
+            },
+            perspectiveRemoved: {
+                subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC),
+                resolve: payload => payload.uuid
             }
         },
 
