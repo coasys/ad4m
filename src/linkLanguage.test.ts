@@ -7,6 +7,12 @@ import PerspectivismCore from './core/PerspectivismCore'
 import fs from 'fs-extra'
 import path from 'path'
 
+// Patch Reflect to have missing getOwnPropertyDescriptor()
+// which should be there in any ES6 runtime but for some reason
+// is missing on some machines...
+import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
+Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
+
 const DATA_RESOURCE_PATH = `${__dirname}/test-temp`
 const LANG_TO_TEST = "social-context-channel"
 
