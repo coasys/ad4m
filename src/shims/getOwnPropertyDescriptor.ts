@@ -1,5 +1,5 @@
 
-module.exports = function( object, key ) {
+export default function( object, key ) {
   
     var hasSupport =
       typeof object.__lookupGetter__ === 'function' &&
