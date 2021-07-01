@@ -230,7 +230,7 @@ function createResolvers(core: PerspectivismCore) {
             }
         },
 
-        Expression: {
+        ExpressionRendered: {
             language: async (expression) => {
                 //console.log("GQL LANGUAGE", expression)
                 const lang = await core.languageController.languageForExpression(expression.ref) as any
@@ -243,11 +243,11 @@ function createResolvers(core: PerspectivismCore) {
             }
         },
 
-        Language: {
+        LanguageHandle: {
             constructorIcon: (language) => {
                 return { code: core.languageController.getConstructorIcon(language) }
             },
-            iconFor: (language) => {
+            icon: (language) => {
                 return { code: core.languageController.getIcon(language) }
             },
             settings: (language) => {
@@ -290,7 +290,7 @@ function createResolvers(core: PerspectivismCore) {
             }
         },
 
-        Date: new GraphQLScalarType({
+        DateTime: new GraphQLScalarType({
             name: 'Date',
             description: 'Date custom scalar type',
             parseValue(value) {
