@@ -4,7 +4,7 @@ import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
-import type PerspectiveID from "./PerspectiveID"
+import type PerspectiveHandle from "@perspect3vism/ad4m"
 import type PerspectiveContext from "./PerspectiveContext"
 
 export default class Perspective {
@@ -20,7 +20,7 @@ export default class Perspective {
     #languageController: LanguageController
     #pubsub: any
 
-    constructor(id: PerspectiveID, context: PerspectiveContext) {
+    constructor(id: PerspectiveHandle, context: PerspectiveContext) {
         this.updateFromId(id)
 
         this.#db = context.db
@@ -30,19 +30,16 @@ export default class Perspective {
         this.#pubsub = PubSub.get()
     }
 
-    plain(): PerspectiveID {
+    plain(): PerspectiveHandle {
         const { name, uuid, author, timestamp, sharedPerspective, sharedURL } = this
         return JSON.parse(JSON.stringify({
             name, uuid, author, timestamp
         }))
     }
 
-    updateFromId(id: PerspectiveID) {
+    updateFromId(id: PerspectiveHandle) {
         if(id.name) this.name = id.name
         if(id.uuid) this.uuid = id.uuid
-        if(id.author) this.author = id.author
-        if(id.timestamp) this.timestamp = id.timestamp
-        if(id.sharedPerspective) this.sharedPerspective = id.sharedPerspective
         if(id.sharedURL) this.sharedURL = id.sharedURL
     }
 

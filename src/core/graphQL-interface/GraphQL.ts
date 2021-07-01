@@ -63,7 +63,7 @@ function createResolvers(core: PerspectivismCore) {
                 return core.perspectivesController.perspectiveID(uuid)
             },
             perspectives: (parent, args, context, info) => {
-                return core.perspectivesController.allPerspectiveIDs()
+                return core.perspectivesController.allPerspectiveHandles()
             },
         },
         Mutation: {
@@ -132,7 +132,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
                 // console.log(new Date(), "GQL install shared perspective", args);
-                const { url } = args;
+                const { url } = args.input;
                 return await core.installSharedPerspective(url);
             },
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
@@ -146,8 +146,8 @@ function createResolvers(core: PerspectivismCore) {
                 return await core.publishPerspective(uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages)
             },
             perspectiveAdd: (parent, args, context, info) => {
-                //TODO: this code needs to be updated: does not match resolver currently
-                return core.perspectivesController.add(args.input)
+                const { name } = args.input;
+                return core.perspectivesController.add(name)
             },
             perspectiveAddLink: (parent, args, context, info) => {
                 // console.log("GQL| addLink:", args)
@@ -171,10 +171,8 @@ function createResolvers(core: PerspectivismCore) {
                 return true
             },
             perspectiveUpdate: (parent, args, context, info) => {
-                //TODO: this code needs to be updated: does not match resolver currently
-                const perspective = args.input
-                core.perspectivesController.update(perspective)
-                return perspective
+                const { uuid, name } = args.input
+                return core.perspectivesController.update(uuid, name);
             },
             perspectiveUpdateLink: (parent, args, context, info) => {
                 // console.log("GQL| updateLink:", args)
