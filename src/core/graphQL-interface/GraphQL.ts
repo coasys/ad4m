@@ -1,5 +1,5 @@
-import { ApolloServer, gql, withFilter } from 'apollo-server'
-import { Agent, LanguageRef, ExpressionStringified } from '@perspect3vism/ad4m'
+import { ApolloServer, withFilter } from 'apollo-server'
+import { Agent, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprURL, typeDefs } from '@perspect3vism/ad4m'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
