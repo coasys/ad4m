@@ -13,9 +13,12 @@ function createResolvers(core: PerspectivismCore) {
             agent: () => {
                 return core.agentService.agent()
             },
-            agentByDID: (parent, args, context, info) => {
+            agentByDID: async (parent, args, context, info) => {
+                //Psuedo code
                 const { did } = args;
-                return new Agent("");
+                const agentLanguage = core.languageController.getAgentLanguage();
+                const expr = await agentLanguage.expressionAdapter.get(did);
+                return new expr as Agent;
             },
             agentStatus: () => {
                 return core.agentService.dump()
@@ -262,27 +265,27 @@ function createResolvers(core: PerspectivismCore) {
         },
 
         Agent: {
-            name: async (agent) => {
+            directMessageLanguage: async (agent) => {
                 //console.debug("GQL| AGENT.name:", agent)
-                if(agent.name && agent.name !== "")
-                    return agent.name
+                if(agent.directMessageLanguage && agent.directMessageLanguage !== "")
+                    return agent.directMessageLanguage
                 else {
                     const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
                     if(agentExpression)
-                        return (agentExpression.data as Agent).name
+                        return (agentExpression.data as Agent).directMessageLanguage
                     else
                         return ''
                 }
             },
 
-            email: async (agent) => {
+            perspective: async (agent) => {
                 //console.debug("GQL| AGENT.email:", agent)
-                if(agent.email && agent.email !== "")
-                    return agent.email
+                if(agent.perspective && agent.perspective !== "")
+                    return agent.perspective
                 else {
                     const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
                     if(agentExpression)
-                        return (agentExpression.data as Agent).email
+                        return (agentExpression.data as Agent).perspective
                     else
                         return ''
                 }
