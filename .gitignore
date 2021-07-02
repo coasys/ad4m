@@ -1,6 +1,7 @@
 /src/**/*.js
 *.js.map
 *.js
+!scripts/*.js
 /build/*
 /node_modules
 !/src/rollup-plugin-hc-dna.js

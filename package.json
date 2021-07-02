@@ -12,8 +12,10 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
-    "prepare-test-links-lang": "nix-shell --run ./prepareLinkLanguageTest.sh",
-    "test-links-lang": "jest --forceExit src/linkLanguage.test.ts"
+    "get-test-langs": "node scripts/get-builtin-test-langs.js",
+    "prepare-test-links-lang": "nix-shell --run ./scripts/prepareLinkLanguageTest.sh",
+    "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
+    "test-perspective-gql": "jest --forceExit src/tests/perspective.test.ts"
   },
   "repository": {
     "type": "git",
@@ -40,6 +42,7 @@
     "faker": "^5.1.0",
     "fs-extra": "^9.1.0",
     "jest": "^27.0.4",
+    "node-fetch": "^2.6.1",
     "ts-jest": "^27.0.3",
     "typescript": "^4.2.4"
   },
