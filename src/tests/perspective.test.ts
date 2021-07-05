@@ -1,7 +1,6 @@
 import {
     ApolloClient,
     InMemoryCache,
-    gql,
     HttpLink
 } from "@apollo/client/core";
 import PerspectivismCore from '../core/PerspectivismCore'
@@ -9,6 +8,7 @@ import main from "../main";
 import fs from 'fs-extra'
 import path from 'path'
 import fetch from 'node-fetch';
+import { Ad4mClient } from "@perspect3vism/ad4m";
 
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
@@ -17,16 +17,6 @@ import getOwnPropertyDescriptor from '../shims/getOwnPropertyDescriptor'
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
-
-export const ADD_PERSPECTIVE = gql`
-mutation perspectiveAdd($name: String) {
-    perspectiveAdd(input: { name: $name }) {
-        name: String
-        sharedURL: String
-        uuid: String
-    }
-}
-`;
 
 fs.removeSync(path.join(DATA_RESOURCE_PATH, 'ad4m'))
 
@@ -38,8 +28,17 @@ const apolloClient = new ApolloClient({
         uri: 'http://localhost:4000/graphql',
         fetch: fetch,
     }),
-    cache: new InMemoryCache(),
+    cache: new InMemoryCache({resultCaching: false}),
+    defaultOptions: {
+        watchQuery: {
+            fetchPolicy: "no-cache",
+        },
+        query: {
+            fetchPolicy: "no-cache",
+        }
+    },
 });
+let ad4mClient: Ad4mClient | undefined = undefined;
 
 describe("Perspective-CRUD-tests", () => {
 
@@ -51,7 +50,7 @@ describe("Perspective-CRUD-tests", () => {
             ad4mBootstrapLanguages: {
               agents: "profiles",
               languages: "languages",
-              perspectives: "shared-perspectives",
+              neighbourhoods: "neighbourhoods",
             },
             ad4mBootstrapFixtures: {
               languages: [],
@@ -67,6 +66,8 @@ describe("Perspective-CRUD-tests", () => {
         core.agentService.save('')
         core.initControllers()
         await core.initLanguages(true)
+
+        ad4mClient = new Ad4mClient(apolloClient)
     })
 
     afterAll(async () => {
@@ -76,9 +77,17 @@ describe("Perspective-CRUD-tests", () => {
 
     describe('create, update, get, delete perspective', () => {
         it('can create perspective', async () => {
-            let create = await apolloClient.mutate({ mutation: ADD_PERSPECTIVE, variables: { name: "test" } });
+            const create = await ad4mClient!.perspective.add("test");
+            expect(create.name).toEqual("test");
 
-            console.log(create);
+            const get = await ad4mClient!.perspective.byUUID(create.uuid);
+            expect(get.name).toEqual("test");
+
+            const update = await ad4mClient!.perspective.update(create.uuid, "updated-test");
+            expect(update.name).toEqual("updated-test");
+
+            const getUpdated = await ad4mClient!.perspective.byUUID(update.uuid);
+            expect(getUpdated.name).toEqual("updated-test");
         })
     })
 })

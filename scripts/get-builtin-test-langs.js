@@ -10,13 +10,19 @@ const languages = {
   },
   languages: {
       targetDnaName: "languages",
-      dna: ""
-  }
+      dna: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.1/languages.dna",
+      bundle: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.1/bundle.js",
+  },
+  neighbourhoods: {
+    targetDnaName: "neighbourhood-store",
+    dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.1/neighbourhood-store.dna",
+    bundle: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.1/bundle.js",
+  } 
 };
 
 async function main() {
   for (const lang in languages) {
-    const dir = `./src/test-temp/ad4m/languages/temp/${lang}`;
+    const dir = `./src/test-temp/${lang}`;
     await fs.ensureDir(dir + "/build");
 
     // bundle

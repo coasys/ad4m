@@ -132,7 +132,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
                 // console.log(new Date(), "GQL install shared perspective", args);
-                const { url } = args.input;
+                const { url } = args;
                 return await core.installSharedPerspective(url);
             },
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
