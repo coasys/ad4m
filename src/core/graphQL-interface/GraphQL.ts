@@ -50,7 +50,6 @@ function createResolvers(core: PerspectivismCore) {
                 return core.languageController.filteredLanguageRefs(filter)
             },
             perspective: (parent, args, context, info) => {
-                console.log("GQL perspective", args.uuid)
                 return core.perspectivesController.perspectiveID(args.uuid)
             },
             perspectiveQueryLinks: async (parent, args, context, info) => {
@@ -163,8 +162,7 @@ function createResolvers(core: PerspectivismCore) {
                 // console.log("GQL| removeLink:", args)
                 const { uuid, link } = args
                 const perspective = core.perspectivesController.perspective(uuid)
-                const parsedLink = JSON.parse(link)
-                perspective.removeLink(parsedLink)
+                perspective.removeLink(link)
                 return true
             },
             perspectiveUpdate: (parent, args, context, info) => {
@@ -172,13 +170,9 @@ function createResolvers(core: PerspectivismCore) {
                 return core.perspectivesController.update(uuid, name);
             },
             perspectiveUpdateLink: (parent, args, context, info) => {
-                // console.log("GQL| updateLink:", args)
                 const { uuid, oldLink, newLink } = args
                 const perspective = core.perspectivesController.perspective(uuid)
-                const parsedOldLink = JSON.parse(oldLink)
-                const parsedNewLink = JSON.parse(newLink)
-                perspective.updateLink(parsedOldLink, parsedNewLink)
-                return newLink
+                return perspective.updateLink(oldLink, newLink)
             },
             runtimeOpenLink: (parent, args) => {
                 const { url } = args

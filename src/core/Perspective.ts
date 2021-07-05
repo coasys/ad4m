@@ -1,4 +1,4 @@
-import type { Agent, Expression, SharedPerspective } from "@perspect3vism/ad4m"
+import type { Agent, Expression, SharedPerspective, LinkExpressionInput, LinkInput } from "@perspect3vism/ad4m"
 import { Link, hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -6,6 +6,7 @@ import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveHandle from "@perspect3vism/ad4m"
 import type PerspectiveContext from "./PerspectiveContext"
+import { LinkExpression } from "../types";
 
 export default class Perspective {
     name: string;
@@ -106,7 +107,7 @@ export default class Perspective {
 
     }
 
-    addLink(link: Link | Expression): Expression {
+    addLink(link: LinkInput | LinkExpressionInput): LinkExpression {
         const linkExpression = this.ensureLinkExpression(link)
         this.callLinksAdapter('addLink', linkExpression)
         const hash = new SHA3(256);
@@ -127,9 +128,7 @@ export default class Perspective {
         return linkExpression
     }
 
-
-
-    private findLink(linkToFind: Expression): string {
+    private findLink(linkToFind: LinkExpressionInput): string {
         const allLinks = this.#db.getAllLinks(this.uuid)
         for(const {name, link} of allLinks) {
             if(linkEqual(linkToFind, link)) {
@@ -139,25 +138,26 @@ export default class Perspective {
         throw new Error(`Link not found in perspective "${this.plain()}": ${JSON.stringify(linkToFind)}`)
     }
 
-    async updateLink(oldLink: Expression, newLink: Expression) {
+    async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
         //console.debug("LINK REPO: updating link:", oldLink, newLink)
         const addr = this.findLink(oldLink)
         //console.debug("hash:", addr)
 
+        const newLinkExpression = this.ensureLinkExpression(newLink)
+
         const _old = oldLink.data as Link
-        const _new = newLink.data as Link
 
-        this.#db.updateLink(this.uuid, newLink, addr)
-        if(_old.source !== _new.source){
+        this.#db.updateLink(this.uuid, newLinkExpression, addr)
+        if(_old.source !== newLink.source){
             this.#db.removeSource(this.uuid, _old.source, addr)
-            this.#db.attachSource(this.uuid, _new.source, addr)
+            this.#db.attachSource(this.uuid, newLink.source, addr)
         }
-        if(_old.target !== _new.target){
+        if(_old.target !== newLink.target){
             this.#db.removeTarget(this.uuid, _old.target, addr)
-            this.#db.attachTarget(this.uuid, _new.target, addr)
+            this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
-        this.callLinksAdapter('updateLink', oldLink, newLink)
+        this.callLinksAdapter('updateLink', oldLink, newLinkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: newLink
@@ -166,9 +166,11 @@ export default class Perspective {
             perspective: this.plain(),
             link: oldLink
         })
+
+        return newLinkExpression
     }
 
-    async removeLink(linkExpression: Expression) {
+    async removeLink(linkExpression: LinkExpressionInput) {
         const addr = this.findLink(linkExpression)
         const link = linkExpression.data as Link
 
