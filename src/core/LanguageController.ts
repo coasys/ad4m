@@ -123,6 +123,10 @@ export default class LanguageController {
         return { hash, language }
     }
 
+    async loadMockLanguage(hash: string, language: Language) {
+        this.#languages.set(hash, language)
+    }
+
     async ipfsHash(data: Buffer|string): Promise<string> {
         // @ts-ignore
         const ipfsAddress = await this.#context.IPFS.add({content: data.toString()}, {onlyHash: true})

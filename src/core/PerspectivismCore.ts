@@ -1,4 +1,4 @@
-import type { Address, LanguageRef, SharingType, PublicSharing, PerspectiveHandle  } from '@perspect3vism/ad4m'
+import type { Address, LanguageRef, SharingType, PublicSharing, PerspectiveHandle, Language  } from '@perspect3vism/ad4m'
 import { parseExprURL, Neighbourhood as SharedPerspective } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
@@ -102,6 +102,12 @@ export default class PerspectivismCore {
         if(!omitLanguageFactory) {
             this.#languageFactory = new LanguageFactory(this.#agentService, this.#languageController.getLanguageLanguage(), this.#holochain)
         }
+    }
+
+    initMockLanguages(hashes: string[], languages: Language[]) {
+        languages.forEach((lang, index) => {
+            this.#languageController.loadMockLanguage(hashes[index], lang);
+        });
     }
 
     async publishPerspective(uuid: string, name: string, description: string, sharingType: SharingType, 
