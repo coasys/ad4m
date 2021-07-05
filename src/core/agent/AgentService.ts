@@ -64,12 +64,15 @@ export default class AgentService {
         const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey)
         const sigBuffer = Buffer.from(sigObj.signature)
         const sigHex = sigBuffer.toString('hex')
+        let proof = new ExpressionProof(sigHex, this.#signingKeyId);
+        proof.valid = true;
+        proof.invalid = false;
 
         const signedExpresssion = {
-            author: { did: this.#did },
+            author: this.#did,
             timestamp,
             data,
-            proof: new ExpressionProof(sigHex, this.#signingKeyId)
+            proof
         } as Expression
 
         return signedExpresssion
