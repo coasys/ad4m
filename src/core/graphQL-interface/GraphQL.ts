@@ -150,12 +150,9 @@ function createResolvers(core: PerspectivismCore) {
                 return core.perspectivesController.add(name)
             },
             perspectiveAddLink: (parent, args, context, info) => {
-                // console.log("GQL| addLink:", args)
                 const { uuid, link } = args
                 const perspective = core.perspectivesController.perspective(uuid)
-                const parsedLink = JSON.parse(link)
-                // console.log("returning response", parsedLink);
-                return perspective.addLink(parsedLink)
+                return perspective.addLink(link)
             },
             perspectiveRemove: (parent, args, context, info) => {
                 const { uuid } = args
