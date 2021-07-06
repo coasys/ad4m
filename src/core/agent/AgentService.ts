@@ -193,6 +193,11 @@ export default class AgentService {
         this.#readyPromiseResolve()
     }
 
+    lock(password) {
+        // @ts-ignore
+        this.#wallet.lock(password)
+    }
+
     save(password) {
         // @ts-ignore
         this.#wallet.lock(password)
