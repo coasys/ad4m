@@ -49,7 +49,7 @@ let testContext: TestContext = new TestContext()
 describe("Integration tests", () => {
 
     beforeAll(async () => {
-        let core = await main.init({
+        core = await main.init({
             appDataPath: DATA_RESOURCE_PATH,
             resourcePath: DATA_RESOURCE_PATH,
             appDefaultLangPath: DATA_RESOURCE_PATH,
