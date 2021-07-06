@@ -15,7 +15,8 @@
     "get-test-langs": "node scripts/get-builtin-test-langs.js",
     "prepare-test-links-lang": "nix-shell --run ./scripts/prepareLinkLanguageTest.sh",
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
-    "test-perspective-gql": "jest --forceExit src/tests/perspective.test.ts"
+    "test-perspective-gql": "jest --forceExit src/tests/perspective.test.ts",
+    "test": "npm run get-test-langs && npm run test-perspective-gql"
   },
   "repository": {
     "type": "git",
