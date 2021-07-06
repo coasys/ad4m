@@ -54,7 +54,7 @@ describe("Integration tests", () => {
             resourcePath: DATA_RESOURCE_PATH,
             appDefaultLangPath: DATA_RESOURCE_PATH,
             ad4mBootstrapLanguages: {
-              agents: "agent-store",
+              agents: "agent-expression-store",
               languages: "languages",
               neighbourhoods: "neighbourhood-store",
             },
@@ -67,10 +67,8 @@ describe("Integration tests", () => {
             mocks: false,
         })
 
-        core.waitForAgent().then(async () => {
-            core.initControllers()
-            await core.initLanguages(true)
-        })
+        core.initControllers()
+        await core.initLanguages(true)
 
         testContext.ad4mClient = new Ad4mClient(apolloClient)
     })

@@ -2,7 +2,7 @@ const fs = require("fs-extra");
 const wget = require("node-wget-js");
 
 const languages = {
-  "agent-store": {
+  "agent-expression-store": {
     targetDnaName: "agent-store",
     dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.1/agent-store.dna",
     bundle:
