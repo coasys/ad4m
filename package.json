@@ -16,7 +16,7 @@
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-perspective": "jest --forceExit src/tests/perspective.test.ts",
     "test-agent": "jest --forceExit src/tests/agent.test.ts",
-    "test": "npm run prepare-test && npm run test-perspective-gql"
+    "test": "npm run prepare-test && jest"
   },
   "repository": {
     "type": "git",
