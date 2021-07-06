@@ -180,7 +180,7 @@ export default class Perspective {
         this.callLinksAdapter('removeLink', linkExpression)
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
-            link
+            link: linkExpression
         })
     }
 
