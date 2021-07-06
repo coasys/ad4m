@@ -2,7 +2,7 @@ const fs = require("fs-extra");
 const wget = require("node-wget-js");
 
 const languages = {
-  profiles: {
+  "agent-store": {
     targetDnaName: "agent-store",
     dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.1/agent-store.dna",
     bundle:
@@ -13,7 +13,7 @@ const languages = {
       dna: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.1/languages.dna",
       bundle: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.1/bundle.js",
   },
-  neighbourhoods: {
+  "neighbourhood-store": {
     targetDnaName: "neighbourhood-store",
     dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.1/neighbourhood-store.dna",
     bundle: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.1/bundle.js",

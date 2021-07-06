@@ -48,9 +48,9 @@ describe("Perspective-CRUD-tests", () => {
             resourcePath: DATA_RESOURCE_PATH,
             appDefaultLangPath: DATA_RESOURCE_PATH,
             ad4mBootstrapLanguages: {
-              agents: "profiles",
+              agents: "agent-store",
               languages: "languages",
-              neighbourhoods: "neighbourhoods",
+              neighbourhoods: "neighbourhood-store",
             },
             ad4mBootstrapFixtures: {
               languages: [],
@@ -81,13 +81,25 @@ describe("Perspective-CRUD-tests", () => {
             expect(generate.isInitialized).toBe(true);
             expect(generate.isUnlocked).toBe(true);
 
+            // //Should be able to create a perspective
+            // const create = await ad4mClient.perspective.add("test");
+            // expect(create.name).toBe("test");
+
             const lockAgent = await ad4mClient.agent.lock("passphrase");
             expect(lockAgent.isInitialized).toBe(true);
             expect(lockAgent.isUnlocked).toBe(false);
 
+            // //Should not be able to create a perspective
+            // const createLocked = await ad4mClient.perspective.add("test2");
+            // console.log(createLocked);
+
             const unlockAgent = await ad4mClient.agent.unlock("passphrase");
             expect(unlockAgent.isInitialized).toBe(true);
             expect(unlockAgent.isUnlocked).toBe(true);
+
+            // //Should be able to create a perspective
+            // const create = await ad4mClient.perspective.add("test3");
+            // expect(create.name).toBe("test3");
 
             const agentDump = await ad4mClient.agent.status();
             expect(agentDump.isInitialized).toBe(true);
