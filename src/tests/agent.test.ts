@@ -77,20 +77,21 @@ describe("Perspective-CRUD-tests", () => {
 
     describe('basic agent operations', () => {
         it('can get and create agent store', async () => {
-            const did = "did:test:test"
-            const didDocument = "did document test"
-            const keystore = "test"
-            const passphrase = "secret"
+            const generate = await ad4mClient.agent.generate("passphrase")
+            expect(generate.isInitialized).toBe(true);
+            expect(generate.isUnlocked).toBe(true);
 
-            const agentStatus = await ad4mClient.agent.initialize({
-                did, didDocument, keystore, passphrase
-            })
-            console.log(agentStatus);
+            const lockAgent = await ad4mClient.agent.lock("passphrase");
+            expect(lockAgent.isInitialized).toBe(true);
+            expect(lockAgent.isUnlocked).toBe(false);
 
-            expect(agentStatus.did).toBe(did)
-            expect(agentStatus.didDocument).toBe(didDocument)
-            expect(agentStatus.isInitialized).toBe(true)
-            expect(agentStatus.isUnlocked).toBe(false)
+            const unlockAgent = await ad4mClient.agent.unlock("passphrase");
+            expect(unlockAgent.isInitialized).toBe(true);
+            expect(unlockAgent.isUnlocked).toBe(true);
+
+            const agentDump = await ad4mClient.agent.status();
+            expect(agentDump.isInitialized).toBe(true);
+            expect(agentDump.isUnlocked).toBe(true);
         })
     })
 })

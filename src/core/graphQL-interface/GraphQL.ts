@@ -66,16 +66,18 @@ function createResolvers(core: PerspectivismCore) {
             },
         },
         Mutation: {
-            agentInitialize: async (parent, args, context, info) => {
-                const { did, didDocument, keystore, passphrase } = args
-                if(did)
-                    core.agentService.initialize(did, didDocument, keystore, passphrase)
-                else
-                    await core.agentService.createNewKeys()
+            agentGenerate: async (parent, args, context, info) => {
+                await core.agentService.createNewKeys()
+                core.agentService.save(args.passphrase)
+                return core.agentService.dump()
+            },
+            agentImport: (parent, args, context, info) => {
+                const { did, didDocument, keystore, passphrase } = args;
+                core.agentService.initialize(did, didDocument, keystore, passphrase)
                 return core.agentService.dump()
             },
             agentLock: (parent, args, context, info) => {
-                core.agentService.save(args.passphrase)
+                core.agentService.lock(args.passphrase)
                 return core.agentService.dump()
             },
             agentUnlock:  (parent, args, context, info) => {
