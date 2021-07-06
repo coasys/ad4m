@@ -101,9 +101,15 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(linkAdded.mock.calls.length).toBe(1)
                 expect(linkAdded.mock.calls[0][0]).toEqual(linkExpression)
 
-                await ad4mClient.perspective.removeLink(p1.uuid, linkExpression)
+                const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid, linkExpression, {source: 'root', target: 'lang://456'})
+                expect(linkAdded.mock.calls.length).toBe(2)
+                expect(linkAdded.mock.calls[1][0]).toEqual(updatedLinkExpression)
                 expect(linkRemoved.mock.calls.length).toBe(1)
                 expect(linkRemoved.mock.calls[0][0]).toEqual(linkExpression)
+
+                await ad4mClient.perspective.removeLink(p1.uuid, updatedLinkExpression)
+                expect(linkRemoved.mock.calls.length).toBe(2)
+                expect(linkRemoved.mock.calls[1][0]).toEqual(updatedLinkExpression)
             })
         })
     }

@@ -160,7 +160,7 @@ export default class Perspective {
         this.callLinksAdapter('updateLink', oldLink, newLinkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
-            link: newLink
+            link: newLinkExpression
         })
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
