@@ -122,7 +122,7 @@ export class PerspectivismDb {
 
 
     remove(key: string, linkName: string) {
-        this.#db.get(key).remove(linkName).write()
+        this.#db.get(key).remove(l => l===linkName).write()
     }
 
 }

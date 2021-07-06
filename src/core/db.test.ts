@@ -124,4 +124,42 @@ describe('PerspectivismDb', () => {
             name: name2
         }])
     })
+
+    it('can updateLink', () => {
+        const obj1 = { test: 'object1' }
+        const name1 = 'linkName1'
+        db.storeLink(pUUID, obj1, name1)
+
+        expect(db.getLink(pUUID, name1)).toEqual(obj1)
+
+        const obj2 = { test: 'object2' }
+        db.updateLink(pUUID, obj2, name1)
+        expect(db.getLink(pUUID, name1)).toEqual(obj2)
+    })
+
+    it('can remove()', () => {
+        db.storeLink(pUUID, { test: 'object1' }, '1')
+        expect(db.getLink(pUUID, '1')).toEqual({ test: 'object1' })
+        db.remove
+    })
+
+    it('can removeTarget()', () => {
+        db.storeLink(pUUID, { test: 'object1' }, '1')
+        db.storeLink(pUUID, { test: 'object2' }, '2')
+
+        db.attachTarget(pUUID, '1', '2')
+
+        const result1 = db.getLinksByTarget(pUUID, '1')
+
+        expect(result1).toEqual([{
+            link: { test: 'object2' },
+            name: '2'
+        }])
+
+        db.removeTarget(pUUID, '1', '2')
+
+        const result2 = db.getLinksByTarget(pUUID, '1')
+
+        expect(result2).toEqual([])
+    })
 })
