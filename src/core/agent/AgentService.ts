@@ -116,7 +116,7 @@ export default class AgentService {
         }
 
         const key = keys[0]
-        console.log(key)
+        //console.log(key)
         return key
     }
 

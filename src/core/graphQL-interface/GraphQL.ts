@@ -96,18 +96,16 @@ function createResolvers(core: PerspectivismCore) {
 
                 return dump
             },
-            agentUpdateInboxLanguage: (parent, args, context, info) => { 
-                //Psuedo code
-                const { inboxLanguageAddress } = args;
-                let currentAgent = core.agentService.agent();
-                currentAgent.inboxLanguageAddress = inboxLanguageAddress;
+            agentUpdateDirectMessageLanguage: (parent, args, context, info) => { 
+                const { directMessageLanguage } = args;
+                let currentAgent = core.agentService.agent;
+                currentAgent.directMessageLanguage = directMessageLanguage;
                 core.agentService.updateAgent(currentAgent);
                 return currentAgent;
             },
             agentUpdatePublicPerspective: (parent, args, context, info) => { 
-                //Psuedo code
                 const {perspective} = args;
-                let currentAgent = core.agentService.agent();
+                let currentAgent = core.agentService.agent;
                 currentAgent.perspective = perspective;
                 core.agentService.updateAgent(currentAgent);
                 return currentAgent;
@@ -257,28 +255,28 @@ function createResolvers(core: PerspectivismCore) {
 
         Agent: {
             directMessageLanguage: async (agent) => {
-                //console.debug("GQL| AGENT.name:", agent)
+                console.debug("GQL| AGENT.directMessageLanguage:", agent)
                 if(agent.directMessageLanguage && agent.directMessageLanguage !== "")
                     return agent.directMessageLanguage
                 else {
-                    const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
+                    const agentExpression = await core.languageController.getAgentLanguage().agentAdapter.getProfile(agent.did)
                     if(agentExpression)
                         return (agentExpression.data as Agent).directMessageLanguage
                     else
-                        return ''
+                        return null
                 }
             },
 
             perspective: async (agent) => {
-                //console.debug("GQL| AGENT.email:", agent)
+                console.debug("GQL| AGENT.perspective:", agent)
                 if(agent.perspective && agent.perspective !== "")
                     return agent.perspective
                 else {
-                    const agentExpression = await core.languageController.getExpression(parseExprURL(agent.did))
+                    const agentExpression = await core.languageController.getAgentLanguage().agentAdapter.getProfile(agent.did)
                     if(agentExpression)
                         return (agentExpression.data as Agent).perspective
                     else
-                        return ''
+                        return null
                 }
             }
         },

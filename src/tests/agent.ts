@@ -1,3 +1,4 @@
+import { Perspective, LinkExpression, Link, ExpressionProof } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 
 export default function agentTests(testContext: TestContext) {
@@ -33,6 +34,27 @@ export default function agentTests(testContext: TestContext) {
                 const agentDump = await ad4mClient.agent.status();
                 expect(agentDump.isInitialized).toBe(true);
                 expect(agentDump.isUnlocked).toBe(true);
+            }),
+            it('can get and create agent expression profile', async () => {
+                const ad4mClient = testContext.ad4mClient
+
+                const currentAgent = await ad4mClient.agent.me();
+                expect(currentAgent.perspective.links.length).toBe(0);
+                expect(currentAgent.directMessageLanguage).toBe(null);
+
+                const updatePerspective = await ad4mClient.agent.updatePublicPerspective(new Perspective([
+                    new LinkExpression("did:test", new Date().toISOString(), new Link({source: "src", target: "target", predicate: "pred"}), new ExpressionProof("sig", "key"))
+                ]))
+                expect(updatePerspective.perspective.links.length).toBe(1);
+
+                const updatePublicLanguage = await ad4mClient.agent.updateDirectMessageLanguage("newlang");
+                console.log(updatePublicLanguage);
+                expect(updatePublicLanguage.perspective.links.length).toBe(1);
+                expect(updatePublicLanguage.directMessageLanguage).toBe("newlang");
+
+                const currentAgentPostUpdate = await ad4mClient.agent.me();
+                expect(currentAgentPostUpdate.perspective.links.length).toBe(1);
+                expect(currentAgentPostUpdate.directMessageLanguage).toBe("newlang");
             })
         })
     }
