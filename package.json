@@ -12,11 +12,10 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
-    "get-test-langs": "node scripts/get-builtin-test-langs.js",
-    "prepare-test-links-lang": "nix-shell --run ./scripts/prepareLinkLanguageTest.sh",
+    "prepare-test": "nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-perspective-gql": "jest --forceExit src/tests/perspective.test.ts",
-    "test": "npm run get-test-langs && npm run test-perspective-gql"
+    "test": "npm run prepare-test && npm run test-perspective-gql"
   },
   "repository": {
     "type": "git",
