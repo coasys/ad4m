@@ -1,10 +1,13 @@
 import { Ad4mClient, Link, LinkQuery } from "@perspect3vism/ad4m";
+import { TestContext } from './integration.test'
 
-export default function tests(ad4mClient: Ad4mClient) {
+export default function tests(testContext: TestContext) {
     return  () => {
         describe('create, update, get, delete perspective', () => {
             it('can create perspective', async () => {
-                const create = await ad4mClient!.perspective.add("test");
+                const ad4mClient = testContext.ad4mClient
+
+                const create = await ad4mClient.perspective.add("test");
                 expect(create.name).toEqual("test");
 
                 const get = await ad4mClient!.perspective.byUUID(create.uuid);
@@ -24,6 +27,8 @@ export default function tests(ad4mClient: Ad4mClient) {
             })
 
             it('test local perspective links', async () => {
+                const ad4mClient = testContext.ad4mClient
+
                 const create = await ad4mClient!.perspective.add("test-links");
                 expect(create.name).toEqual("test-links");
 

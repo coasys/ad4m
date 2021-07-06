@@ -14,7 +14,7 @@ import { Ad4mClient, Link, LinkQuery } from "@perspect3vism/ad4m";
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
 import getOwnPropertyDescriptor from '../shims/getOwnPropertyDescriptor'
-import tests from "./perspective";
+import perspectiveTests from "./perspective";
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
@@ -39,7 +39,11 @@ const apolloClient = new ApolloClient({
         }
     },
 });
-let ad4mClient: Ad4mClient | undefined = undefined;
+
+export class TestContext {
+    ad4mClient: Ad4mClient | undefined
+}
+let testContext: TestContext = new TestContext()
 
 describe("Integration tests", () => {
 
@@ -68,7 +72,7 @@ describe("Integration tests", () => {
         core.initControllers()
         await core.initLanguages(true)
 
-        ad4mClient = new Ad4mClient(apolloClient)
+        testContext.ad4mClient = new Ad4mClient(apolloClient)
     })
 
     afterAll(async () => {
@@ -76,5 +80,5 @@ describe("Integration tests", () => {
         await new Promise((resolve)=>setTimeout(resolve, 1000))
     })
 
-    describe('Perspective CRUD', tests(ad4mClient))
+    describe('Perspective CRUD', perspectiveTests(testContext))
 })
