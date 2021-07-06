@@ -15,6 +15,7 @@ import { Ad4mClient, Link, LinkQuery } from "@perspect3vism/ad4m";
 // is missing on some machines...
 import getOwnPropertyDescriptor from '../shims/getOwnPropertyDescriptor'
 import perspectiveTests from "./perspective";
+import agentTests from "./agent";
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
@@ -48,14 +49,14 @@ let testContext: TestContext = new TestContext()
 describe("Integration tests", () => {
 
     beforeAll(async () => {
-        let init = await main.init({
+        let core = await main.init({
             appDataPath: DATA_RESOURCE_PATH,
             resourcePath: DATA_RESOURCE_PATH,
             appDefaultLangPath: DATA_RESOURCE_PATH,
             ad4mBootstrapLanguages: {
-              agents: "profiles",
+              agents: "agent-store",
               languages: "languages",
-              neighbourhoods: "neighbourhoods",
+              neighbourhoods: "neighbourhood-store",
             },
             ad4mBootstrapFixtures: {
               languages: [],
@@ -65,12 +66,11 @@ describe("Integration tests", () => {
             appLangAliases: null,
             mocks: false,
         })
-        core = init;
 
-        await core.agentService.createNewKeys()
-        core.agentService.save('')
-        core.initControllers()
-        await core.initLanguages(true)
+        core.waitForAgent().then(async () => {
+            core.initControllers()
+            await core.initLanguages(true)
+        })
 
         testContext.ad4mClient = new Ad4mClient(apolloClient)
     })
@@ -80,5 +80,6 @@ describe("Integration tests", () => {
         await new Promise((resolve)=>setTimeout(resolve, 1000))
     })
 
+    describe('Agent / Agent-Setup', agentTests(testContext))
     describe('Perspective CRUD', perspectiveTests(testContext))
 })

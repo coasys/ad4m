@@ -1,7 +1,7 @@
-import { Ad4mClient, Link, LinkQuery } from "@perspect3vism/ad4m";
+import { Link, LinkQuery } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 
-export default function tests(testContext: TestContext) {
+export default function perspectiveTests(testContext: TestContext) {
     return  () => {
         describe('create, update, get, delete perspective', () => {
             it('can create perspective', async () => {
