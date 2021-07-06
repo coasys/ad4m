@@ -3,12 +3,13 @@ import {
     InMemoryCache,
     HttpLink
 } from "@apollo/client/core";
+import { WebSocketLink } from '@apollo/client/link/ws';
 import PerspectivismCore from '../core/PerspectivismCore'
 import main from "../main";
 import fs from 'fs-extra'
 import path from 'path'
-import fetch from 'node-fetch';
-import { Ad4mClient, Link, LinkQuery } from "@perspect3vism/ad4m";
+import ws from "ws"
+import { Ad4mClient } from "@perspect3vism/ad4m";
 
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
@@ -26,9 +27,10 @@ jest.setTimeout(15000)
 let core: PerspectivismCore = null
 
 const apolloClient = new ApolloClient({
-    link: new HttpLink({
+    link: new WebSocketLink({
         uri: 'http://localhost:4000/graphql',
-        fetch: fetch,
+        options: { reconnect: true },
+        webSocketImpl: ws,
     }),
     cache: new InMemoryCache({resultCaching: false, addTypename: false}),
     defaultOptions: {
