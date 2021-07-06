@@ -1,9 +1,9 @@
-import { Link, LinkQuery } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkQuery } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
-        describe('create, update, get, delete perspective', () => {
+        describe('Perspectives', () => {
             it('can create perspective', async () => {
                 const ad4mClient = testContext.ad4mClient
 
@@ -71,6 +71,39 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 let queryLinksDeleted = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test2"}));
                 expect(queryLinksDeleted.length).toEqual(0);
+            })
+
+            it('subscriptions', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient
+
+                const perspectiveAdded = jest.fn(p=>console.log("Perspective added:", p))
+                ad4mClient.perspective.addPerspectiveAddedListener(perspectiveAdded)
+                const perspectiveUpdated = jest.fn(p=>console.log("Perspective updated:", p))
+                ad4mClient.perspective.addPerspectiveUpdatedListener(perspectiveUpdated)
+                const perspectiveRemoved = jest.fn(p=>console.log("Perspective removed:", p))
+                ad4mClient.perspective.addPerspectiveRemovedListener(perspectiveRemoved)
+
+                const name = "Subscription Test Perspective"
+                const p = await ad4mClient.perspective.add(name)
+                expect(perspectiveAdded.mock.calls.length).toBe(1)
+                expect(perspectiveAdded.mock.calls[0][0]).toEqual(p)
+
+                const p1 = await ad4mClient.perspective.update(p.uuid, "New Name")
+                expect(perspectiveUpdated.mock.calls.length).toBe(1)
+                expect(perspectiveUpdated.mock.calls[0][0]).toEqual(p1)
+
+                const linkAdded = jest.fn(l=>console.log("Link added:", l))
+                await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, linkAdded)
+                const linkRemoved = jest.fn(l=>console.log("Link removed:", l))
+                await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, linkRemoved)
+
+                const linkExpression = await ad4mClient.perspective.addLink(p1.uuid, {source: 'root', target: 'lang://123'})
+                expect(linkAdded.mock.calls.length).toBe(1)
+                expect(linkAdded.mock.calls[0][0]).toEqual(linkExpression)
+
+                await ad4mClient.perspective.removeLink(p1.uuid, linkExpression)
+                expect(linkRemoved.mock.calls.length).toBe(1)
+                expect(linkRemoved.mock.calls[0][0]).toEqual(linkExpression)
             })
         })
     }

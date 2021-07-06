@@ -81,5 +81,5 @@ describe("Integration tests", () => {
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
-    describe('Perspective CRUD', perspectiveTests(testContext))
+    describe('Perspective', perspectiveTests(testContext))
 })

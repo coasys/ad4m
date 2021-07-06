@@ -201,7 +201,7 @@ function createResolvers(core: PerspectivismCore) {
                 subscribe: (parent, args, context, info) => {
                     return withFilter(
                         () => pubsub.asyncIterator(PubSub.LINK_ADDED_TOPIC),
-                        (payload, argsInner) => payload.perspective.uuid === argsInner.perspectiveUUID
+                        (payload, argsInner) => payload.perspective.uuid === argsInner.uuid
                     )(undefined, args)
                 },
                 resolve: payload => payload?.link
@@ -209,7 +209,7 @@ function createResolvers(core: PerspectivismCore) {
             perspectiveLinkRemoved: {
                 subscribe: (parent, args, context, info) => withFilter(
                     () => pubsub.asyncIterator(PubSub.LINK_REMOVED_TOPIC),
-                    (payload, variables) => payload.perspective.uuid === variables.perspectiveUUID
+                    (payload, variables) => payload.perspective.uuid === variables.uuid
                 )(undefined, args),
                 resolve: payload => payload?.link
             },

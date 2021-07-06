@@ -122,7 +122,7 @@ export default class Perspective {
 
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
-            linkAdded: linkExpression
+            link: linkExpression
         })
 
         return linkExpression
