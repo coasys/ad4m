@@ -1,6 +1,10 @@
 import { Perspective, LinkExpression, Link, ExpressionProof } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export default function agentTests(testContext: TestContext) {
     return () => {
         describe('basic agent operations', () => {
@@ -38,6 +42,9 @@ export default function agentTests(testContext: TestContext) {
             it('can get and create agent expression profile', async () => {
                 const ad4mClient = testContext.ad4mClient
 
+                const agentUpdated = jest.fn(p=>console.warn("Agent updated:", p))
+                ad4mClient.agent.addUpdatedListener(agentUpdated)
+
                 const currentAgent = await ad4mClient.agent.me();
                 expect(currentAgent.perspective.links.length).toBe(0);
                 expect(currentAgent.directMessageLanguage).toBe(null);
@@ -46,11 +53,16 @@ export default function agentTests(testContext: TestContext) {
                     new LinkExpression("did:test", new Date().toISOString(), new Link({source: "src", target: "target", predicate: "pred"}), new ExpressionProof("sig", "key"))
                 ]))
                 expect(updatePerspective.perspective.links.length).toBe(1);
+                await sleep(500)
+                expect(agentUpdated.mock.calls.length).toBe(1)
+                expect(agentUpdated.mock.calls[0][0]).toEqual(updatePerspective)
 
                 const updatePublicLanguage = await ad4mClient.agent.updateDirectMessageLanguage("newlang");
-                console.log(updatePublicLanguage);
                 expect(updatePublicLanguage.perspective.links.length).toBe(1);
                 expect(updatePublicLanguage.directMessageLanguage).toBe("newlang");
+                await sleep(500)
+                expect(agentUpdated.mock.calls.length).toBe(2)
+                expect(agentUpdated.mock.calls[1][0]).toEqual(updatePublicLanguage)
 
                 const currentAgentPostUpdate = await ad4mClient.agent.me();
                 expect(currentAgentPostUpdate.perspective.links.length).toBe(1);
