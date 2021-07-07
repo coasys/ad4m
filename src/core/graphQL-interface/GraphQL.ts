@@ -118,13 +118,12 @@ function createResolvers(core: PerspectivismCore) {
                 const { languagePath, dnaNick, uid } = args;
                 return await core.languageCloneHolochainTemplate(languagePath, dnaNick, uid);
             },
-            languageWriteSettings: (parent, args, context, info) => {
-                // console.log("GQL| settings", args)
+            languageWriteSettings: async (parent, args, context, info) => {
                 const { languageAddress, settings } = args
                 const langref = { name: '', address: languageAddress }
-                const lang = core.languageController.languageByRef(langref)
+                const lang = await core.languageController.languageByRef(langref)
                 langref.name = lang.name
-                core.languageController.putSettings(langref, JSON.parse(settings))
+                await core.languageController.putSettings(langref, JSON.parse(settings))
                 return true
             },
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
