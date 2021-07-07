@@ -14,7 +14,7 @@ export default class Signatures {
 
     async verify(expr: Expression): Promise<boolean> {
         // @ts-ignore
-        const { didDocument } = await this.#didResolver.resolve(expr.author.did)
+        const { didDocument } = await this.#didResolver.resolve(expr.author)
         if(!didDocument) return false
 
 
