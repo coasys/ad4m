@@ -1,4 +1,4 @@
-import type { Address, LanguageRef, SharingType, PublicSharing, PerspectiveHandle, Language  } from '@perspect3vism/ad4m'
+import type { Address, LanguageRef, SharingType, PublicSharing, PerspectiveHandle, Language, Perspective  } from '@perspect3vism/ad4m'
 import { parseExprURL, Neighbourhood as SharedPerspective } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
@@ -130,6 +130,28 @@ export default class PerspectivismCore {
         console.log("\x1b[32m", "PerspectivismCore.publishPerspective: Attempting to install expression languages", installs);
         for (const language of installs) {
             await this.#languageController.installLanguage(language, null);
+        }
+
+        // Create SharedPerspective
+        const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(sharedPerspective)
+        const perspectiveUrl = `perspective://${perspectiveAddress}`
+
+        //Add shared perspective to original perpspective and then update controller
+        perspectiveID.sharedURL = perspectiveUrl
+        this.#perspectivesController.replace(perspectiveID)
+        return sharedPerspective
+    }
+
+    async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<SharedPerspective> {
+        // We only work on the PerspectiveID object.
+        // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
+        // instance object here
+        const perspectiveID = this.#perspectivesController.perspective(uuid).plain()
+
+        const sharedPerspective = new SharedPerspective(linkLanguage, meta);
+        let language = await this.#languageController.installLanguage(linkLanguage, null)
+        if (!language.linkLanguage) {
+            throw Error("Language used is not a link language");
         }
 
         // Create SharedPerspective

@@ -136,14 +136,12 @@ function createResolvers(core: PerspectivismCore) {
                 return await core.installSharedPerspective(url);
             },
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
-                //TODO: this code needs to be updated: does not match resolver currently
-                const { uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages } = args
-                //Note: this code is being executed twice in fn call, once here and once in publishPerspective
-                const perspective = core.perspectivesController.perspectiveID(uuid)
+                const { linkLanguage, meta, perspectiveUUID } = args
+                const perspective = core.perspectivesController.perspectiveID(perspectiveUUID)
                 // @ts-ignore
                 if(perspective.sharedPerspective && perspective.sharedURL)
-                    throw new Error(`Perspective ${name} (${uuid}) is already shared`)
-                return await core.publishPerspective(uuid, name, description, type, uid, requiredExpressionLanguages, allowedExpressionLanguages)
+                    throw new Error(`Perspective ${perspective.name} (${perspective.uuid}) is already shared`)
+                return await core.neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)
             },
             perspectiveAdd: (parent, args, context, info) => {
                 const { name } = args;

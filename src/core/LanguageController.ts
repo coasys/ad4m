@@ -17,6 +17,11 @@ const bs58 = baseX(BASE58)
 
 type LinkObservers = (added: Expression[], removed: Expression[], lang: LanguageRef)=>void;
 
+interface LoadedLanguage {
+    language: Language,
+    hash: String,
+}
+
 export default class LanguageController {
     #languages: Map<string, Language>
     #languageConstructors: Map<string, (LanguageContext)=>Language>
@@ -92,7 +97,7 @@ export default class LanguageController {
         }))
     }
 
-    async loadLanguage(sourceFilePath: string): Promise<any> {
+    async loadLanguage(sourceFilePath: string): Promise<LoadedLanguage> {
         if(!path.isAbsolute(sourceFilePath))
             sourceFilePath = path.join(process.env.PWD, sourceFilePath)
 
@@ -133,7 +138,7 @@ export default class LanguageController {
         return ipfsAddress.cid.toString()
     }
 
-    async installLanguage(address: Address, languageMeta: void|Expression) {
+    async installLanguage(address: Address, languageMeta: void|Expression): Promise<Language> {
         const language = this.#languages.get(address)
         
         if (language == undefined) {
@@ -153,7 +158,7 @@ export default class LanguageController {
                 console.error("LanguageController.installLanguage: COULDN'T GET SOURCE OF LANGUAGE TO INSTALL!")
                 console.error("LanguageController.installLanguage: Address:", address)
                 console.error("LanguageController.installLanguage:", languageMeta)
-                return
+                throw Error(`Could not find language source for language with address: ${address}`)
             }
             const hash = await this.ipfsHash(source)
             if(hash === 'asdf') {
@@ -188,7 +193,7 @@ export default class LanguageController {
             fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
             // console.log(new Date(), "LanguageController: installed language");
             try {
-                await this.loadLanguage(sourcePath)
+                return (await this.loadLanguage(sourcePath)).language
             } catch(e) {
                 console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
                 console.error("LanguageController.installLanguage: ======================================")
