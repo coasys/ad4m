@@ -171,6 +171,9 @@ export default class PerspectivismCore {
     }
 
     async languageCloneHolochainTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
+        if (!this.#languageFactory) {
+            throw Error("Language factory was not started when calling core.initLanguages()")
+        };
         return await this.#languageFactory.languageCloneHolochainTemplate(languagePath, dnaNick, uid)
     }
 

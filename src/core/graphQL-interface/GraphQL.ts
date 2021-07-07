@@ -38,9 +38,9 @@ function createResolvers(core: PerspectivismCore) {
                 const expression = await core.languageController.getExpression(ref) as any
                 return JSON.stringify(expression)
             },
-            language: (parent, args, context, info) => {
+            language: async (parent, args, context, info) => {
                 const { address } = args
-                const lang = core.languageController.languageByRef({address} as LanguageRef) as any
+                const lang = await core.languageController.languageByRef({address} as LanguageRef) as any
                 lang.address = address
                 return lang
             },
@@ -236,10 +236,20 @@ function createResolvers(core: PerspectivismCore) {
 
         LanguageHandle: {
             constructorIcon: (language) => {
-                return { code: core.languageController.getConstructorIcon(language) }
+                const code = core.languageController.getConstructorIcon(language);
+                if (code) {
+                    return { code }
+                } else {
+                    return { code: "" }
+                }
             },
             icon: (language) => {
-                return { code: core.languageController.getIcon(language) }
+                const code = core.languageController.getIcon(language);
+                if (code) {
+                    return { code }
+                } else {
+                    return { code: "" }
+                }
             },
             settings: (language) => {
                 return JSON.stringify(core.languageController.getSettings(language))
@@ -255,7 +265,7 @@ function createResolvers(core: PerspectivismCore) {
 
         Agent: {
             directMessageLanguage: async (agent) => {
-                console.debug("GQL| AGENT.directMessageLanguage:", agent)
+                //console.debug("GQL| AGENT.directMessageLanguage:", agent)
                 if(agent.directMessageLanguage && agent.directMessageLanguage !== "")
                     return agent.directMessageLanguage
                 else {
@@ -268,7 +278,7 @@ function createResolvers(core: PerspectivismCore) {
             },
 
             perspective: async (agent) => {
-                console.debug("GQL| AGENT.perspective:", agent)
+                //console.debug("GQL| AGENT.perspective:", agent)
                 if(agent.perspective && agent.perspective !== "")
                     return agent.perspective
                 else {
