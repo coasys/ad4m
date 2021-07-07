@@ -78,22 +78,17 @@ export default class AgentService {
         return signedExpresssion
     }
 
-    updateAgent(a: Agent) {
+    async updateAgent(a: Agent) {
         this.#agent = a
-        this.storeAgentProfile()
+        await this.storeAgentProfile()
         this.#pubsub.publish(PubSubInstance.AGENT_UPDATED, a)
     }
 
     setAgentLanguage(lang: Language) {
-        if(!lang?.agentAdapter) {
-            console.error("AgentService ERROR: Not an AgentLanguage:", lang)
-            return
-        }
-
         this.#agentLanguage = lang
     }
 
-    storeAgentProfile() {
+    async storeAgentProfile() {
         fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent))
 
         if(!this.#agentLanguage) {
@@ -102,7 +97,7 @@ export default class AgentService {
         }
 
         if(this.#agent?.did)
-            this.#agentLanguage.agentAdapter.setProfile(this.#agent)
+            await this.#agentLanguage.expressionAdapter.putAdapter.createPublic(this.#agent)
     }
 
     private getSigningKey() {
@@ -145,7 +140,7 @@ export default class AgentService {
         console.debug(JSON.stringify(key))
     }
 
-    initialize(did, didDocument, keystore, password) {
+    async initialize(did, didDocument, keystore, password) {
         this.#did = did
         this.#didDocument = didDocument
         this.#agent = new Agent(did)
@@ -186,10 +181,10 @@ export default class AgentService {
         return keys
     }
 
-    unlock(password) {
+    async unlock(password) {
         // @ts-ignore
         this.#wallet.unlock(password)
-        this.storeAgentProfile()
+        await this.storeAgentProfile()
         this.#readyPromiseResolve()
     }
 
@@ -198,7 +193,7 @@ export default class AgentService {
         this.#wallet.lock(password)
     }
 
-    save(password) {
+    async save(password) {
         // @ts-ignore
         this.#wallet.lock(password)
 
@@ -214,7 +209,7 @@ export default class AgentService {
         fs.writeFileSync(this.#file, JSON.stringify(dump))
 
         // @ts-ignore
-        this.#wallet.unlock(password)
+        await this.#wallet.unlock(password)
         this.#readyPromiseResolve()
     }
 

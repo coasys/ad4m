@@ -16,7 +16,7 @@ function createResolvers(core: PerspectivismCore) {
             agentByDID: async (parent, args, context, info) => {
                 const { did } = args;
                 const agentLanguage = core.languageController.getAgentLanguage();
-                const expr = await agentLanguage.agentAdapter.getProfile(did);
+                const expr = await agentLanguage.expressionAdapter.get(did);
                 if (expr != null) {
                     return expr.data;
                 } else {
@@ -70,12 +70,12 @@ function createResolvers(core: PerspectivismCore) {
         Mutation: {
             agentGenerate: async (parent, args, context, info) => {
                 await core.agentService.createNewKeys()
-                core.agentService.save(args.passphrase)
+                await core.agentService.save(args.passphrase)
                 return core.agentService.dump()
             },
-            agentImport: (parent, args, context, info) => {
+            agentImport: async (parent, args, context, info) => {
                 const { did, didDocument, keystore, passphrase } = args;
-                core.agentService.initialize(did, didDocument, keystore, passphrase)
+                await core.agentService.initialize(did, didDocument, keystore, passphrase)
                 return core.agentService.dump()
             },
             agentLock: (parent, args, context, info) => {
@@ -98,18 +98,18 @@ function createResolvers(core: PerspectivismCore) {
 
                 return dump
             },
-            agentUpdateDirectMessageLanguage: (parent, args, context, info) => { 
+            agentUpdateDirectMessageLanguage: async (parent, args, context, info) => { 
                 const { directMessageLanguage } = args;
                 let currentAgent = core.agentService.agent;
                 currentAgent.directMessageLanguage = directMessageLanguage;
-                core.agentService.updateAgent(currentAgent);
+                await core.agentService.updateAgent(currentAgent);
                 return currentAgent;
             },
-            agentUpdatePublicPerspective: (parent, args, context, info) => { 
+            agentUpdatePublicPerspective: async (parent, args, context, info) => { 
                 const {perspective} = args;
                 let currentAgent = core.agentService.agent;
                 currentAgent.perspective = perspective;
-                core.agentService.updateAgent(currentAgent);
+                await core.agentService.updateAgent(currentAgent);
                 return currentAgent;
             },
             expressionCreate: async (parent, args, context, info) => {
@@ -268,7 +268,7 @@ function createResolvers(core: PerspectivismCore) {
                 if(agent.directMessageLanguage && agent.directMessageLanguage !== "")
                     return agent.directMessageLanguage
                 else {
-                    const agentExpression = await core.languageController.getAgentLanguage().agentAdapter.getProfile(agent.did)
+                    const agentExpression = await core.languageController.getAgentLanguage().expressionAdapter.get(agent.did)
                     if(agentExpression)
                         return (agentExpression.data as Agent).directMessageLanguage
                     else
@@ -281,7 +281,7 @@ function createResolvers(core: PerspectivismCore) {
                 if(agent.perspective && agent.perspective !== "")
                     return agent.perspective
                 else {
-                    const agentExpression = await core.languageController.getAgentLanguage().agentAdapter.getProfile(agent.did)
+                    const agentExpression = await core.languageController.getAgentLanguage().expressionAdapter.get(agent.did)
                     if(agentExpression)
                         return (agentExpression.data as Agent).perspective
                     else
