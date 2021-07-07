@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid'
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
 import type PerspectiveHandle from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -69,6 +70,14 @@ export default class PerspectivesController {
         }
     }
 
+    async perspectiveSnapshot(uuid: string): Ad4mPerspective {
+        let perspective = this.#perspectiveInstances.get(uuid)
+        if (!perspective) {
+            throw Error(`Perspective not found: ${uuid}`)
+        }
+        return new Ad4mPerspective(await perspective.getLinks({}));
+    }
+
     add(name) {
         let perspective = {
             uuid: uuidv4(),
@@ -76,6 +85,7 @@ export default class PerspectivesController {
             sharedUrl: null
         } as PerspectiveHandle;
         this.#perspectiveHandles.set(perspective.uuid, perspective)
+        this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context))
         this.save()
         this.#pubsub.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
         return perspective
@@ -87,6 +97,7 @@ export default class PerspectivesController {
 
     remove(uuid) {
         this.#perspectiveHandles.delete(uuid)
+        this.#perspectiveInstances.delete(uuid)
         this.save()
         this.#pubsub.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, { uuid })
     }

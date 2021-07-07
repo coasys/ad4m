@@ -14,7 +14,6 @@ function createResolvers(core: PerspectivismCore) {
                 return core.agentService.agent
             },
             agentByDID: async (parent, args, context, info) => {
-                //Psuedo code
                 const { did } = args;
                 const agentLanguage = core.languageController.getAgentLanguage();
                 const expr = await agentLanguage.expressionAdapter.get(did);
@@ -57,9 +56,8 @@ function createResolvers(core: PerspectivismCore) {
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.getLinks(query)
             },
-            perspectiveSnapshot: (args) => {
-                const { uuid } = args
-                return core.perspectivesController.perspectiveID(uuid)
+            perspectiveSnapshot: async (parent, args, context, info) => {
+                return await core.perspectivesController.perspectiveSnapshot(args.uuid)
             },
             perspectives: (parent, args, context, info) => {
                 return core.perspectivesController.allPerspectiveHandles()

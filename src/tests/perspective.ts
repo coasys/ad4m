@@ -4,7 +4,7 @@ import { TestContext } from './integration.test'
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
         describe('Perspectives', () => {
-            it('can create perspective', async () => {
+            it('can create, get & delete perspective', async () => {
                 const ad4mClient = testContext.ad4mClient
 
                 const create = await ad4mClient.perspective.add("test");
@@ -19,8 +19,14 @@ export default function perspectiveTests(testContext: TestContext) {
                 const getUpdated = await ad4mClient!.perspective.byUUID(update.uuid);
                 expect(getUpdated.name).toEqual("updated-test");
 
+                const perspectives = await ad4mClient.perspective.all();
+                expect(perspectives.length).toBe(1);
+
+                const perspectiveSnaphot = await ad4mClient.perspective.snapshotByUUID(update.uuid);
+                expect(perspectiveSnaphot.links.length).toBe(0);
+
                 const deletePerspective = await ad4mClient!.perspective.remove(update.uuid);
-                console.log(deletePerspective);
+                expect(deletePerspective.perspectiveRemove).toBe(true);
 
                 const getDeleted = await ad4mClient!.perspective.byUUID(update.uuid);
                 expect(getDeleted).toEqual(null);
@@ -52,11 +58,17 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(queryLinksPredicate[0].data.target).toEqual("lang://test-target");
                 expect(queryLinksPredicate[0].data.source).toEqual("lang://test");
 
+                const perspectiveSnaphot = await ad4mClient.perspective.snapshotByUUID(create.uuid);
+                expect(perspectiveSnaphot.links.length).toBe(1);
+
                 //Update the link to new link
                 const updateLink = await ad4mClient.perspective.updateLink(create.uuid, addLink, 
                     new Link({source: "lang://test2", target: "lang://test-target2", predicate: "lang://predicate2"}));
                 expect(updateLink.data.target).toEqual("lang://test-target2");
                 expect(updateLink.data.source).toEqual("lang://test2");
+
+                const perspectiveSnaphotLinkUpdate = await ad4mClient.perspective.snapshotByUUID(create.uuid);
+                expect(perspectiveSnaphotLinkUpdate.links.length).toBe(1);
 
                 //Test cannot get old link
                 let queryLinksOld = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test"}));
