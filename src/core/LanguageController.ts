@@ -174,12 +174,13 @@ export default class LanguageController {
                 return
             }
     
-            const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
-            const metaPath = path.join(Config.languagesPath, address, 'meta.json')
+            const languagePath = path.join(Config.languagesPath, address);
+            const sourcePath = path.join(languagePath, 'bundle.js')
+            const metaPath = path.join(languagePath, 'meta.json')
             try {
-                fs.mkdirSync(path.join(Config.languagesPath, address))
+                fs.mkdirSync(languagePath)
             } catch(e) {
-                console.error("Error trying to create directory", path.join(Config.languagesPath, address))
+                console.error("Error trying to create directory", languagePath)
                 console.error("Will proceed with installing language anyway...")
             }
             
@@ -191,7 +192,8 @@ export default class LanguageController {
             } catch(e) {
                 console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
                 console.error("LanguageController.installLanguage: ======================================")
-                console.error(e)
+                fs.rmdirSync(languagePath, {recursive: true})
+                throw Error(e)
             }
         }
     }
@@ -206,20 +208,19 @@ export default class LanguageController {
         }
     }
 
-    //TODO: this will break if reference to encrypted language is passed
-    languageByRef(ref: LanguageRef): Language {
+    async languageByRef(ref: LanguageRef): Language {
         const address = languageAliases[ref.address] ? languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
         if(language) {
             return language
         } else {
-            this.getLanguageExpression(address).then(languageMeta => {
-                if(languageMeta) {
-                    this.installLanguage(address, languageMeta)
-                }
-            })
-            
-            throw new Error("Language not found by reference: " + JSON.stringify(ref))
+            let languageMeta = await this.getLanguageExpression(address);
+            if(languageMeta) {
+                await this.installLanguage(address, languageMeta)
+                return JSON.parse(languageMeta.data)
+            } else {
+                throw new Error("Language not found by reference: " + JSON.stringify(ref))
+            }
         }
     }
 
