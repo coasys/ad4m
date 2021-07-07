@@ -17,6 +17,7 @@ import { Ad4mClient } from "@perspect3vism/ad4m";
 import getOwnPropertyDescriptor from '../shims/getOwnPropertyDescriptor'
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
+import languageTests from "./language";
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
@@ -70,7 +71,7 @@ describe("Integration tests", () => {
         })
 
         core.initControllers()
-        await core.initLanguages(true)
+        await core.initLanguages(false)
 
         testContext.ad4mClient = new Ad4mClient(apolloClient)
     })
@@ -78,8 +79,17 @@ describe("Integration tests", () => {
     afterAll(async () => {
         await core.exit()
         await new Promise((resolve)=>setTimeout(resolve, 1000))
+        //Delete all languages created during test
+        fs.readdir(path.join(DATA_RESOURCE_PATH, "ad4m/languages"), (err, files) => {
+            if (err) throw err;
+          
+            for (const file of files) {
+              fs.rmdir(path.join(path.join(DATA_RESOURCE_PATH, "ad4m/languages"), file), {recursive: true});
+            }
+          });
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
+    describe('Language', languageTests(testContext))
 })
