@@ -9,7 +9,7 @@ export default function expressionTests(testContext: TestContext) {
                 const me = await ad4mClient.agent.me()
                 
                 const agent = await ad4mClient.expression.get(me.did)
-                expect(agent).toEqual(me);
+                expect(JSON.parse(agent.data)).toEqual(me);
             })
         })
     }
