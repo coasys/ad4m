@@ -323,7 +323,7 @@ export default class LanguageController {
         }
     }
 
-    putSettings(lang: LanguageRef, settings: object) {
+    async putSettings(lang: LanguageRef, settings: object) {
         const directory = path.join(Config.languagesPath, lang.name)
         if(!fs.existsSync(directory))
             fs.mkdirSync(directory)
@@ -332,10 +332,21 @@ export default class LanguageController {
 
         this.#languages.set(lang.address, null)
         const create = this.#languageConstructors.get(lang.address)
-        const context = this.#context
         const storageDirectory = Config.getLanguageStoragePath(lang.name)
-        const newInstance = create({...context, storageDirectory, customSettings: settings})
-        this.#languages.set(lang.address, newInstance)
+        const Holochain = this.#holochainService.getDelegateForLanguage(lang.address)
+        //@ts-ignore
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: lang.address, pubsub: this.pubSub});
+        const language = await create({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings: settings})
+
+        if(language.linksAdapter) {
+            language.linksAdapter.addCallback((added, removed) => {
+                this.#linkObservers.forEach(o => {
+                    o(added, removed, {name, address: lang.address} as LanguageRef)
+                })
+            })
+        }
+
+        this.#languages.set(lang.address, language)
     }
 
     async expressionCreate(lang: LanguageRef, content: object): Promise<ExpressionRef> {

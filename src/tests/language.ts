@@ -1,6 +1,5 @@
 import { TestContext } from './integration.test'
 import path from "path"
-import { create } from '../core/PerspectivismCore'
 
 export default function languageTests(testContext: TestContext) {
     return () => {
@@ -19,6 +18,12 @@ export default function languageTests(testContext: TestContext) {
 
                 const languagesPostInstall = await ad4mClient.languages.byFilter("");
                 expect(languagesPostInstall.length).toBe(4);
+
+                const writeSettings = await ad4mClient.languages.writeSettings(createUniqueLang.address, JSON.stringify({"setting": "test"}));
+                expect(writeSettings).toBe(true);
+
+                const language = await ad4mClient.languages.byAddress(createUniqueLang.address);
+                expect(JSON.parse(language.settings).setting).toBe("test");
             })
         })
     }
