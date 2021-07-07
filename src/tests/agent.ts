@@ -55,6 +55,14 @@ export default function agentTests(testContext: TestContext) {
                 const currentAgentPostUpdate = await ad4mClient.agent.me();
                 expect(currentAgentPostUpdate.perspective.links.length).toBe(1);
                 expect(currentAgentPostUpdate.directMessageLanguage).toBe("newlang");
+
+                const getByDid = await ad4mClient.agent.byDID(currentAgent.did);
+                expect(getByDid.did).toBe(currentAgent.did);
+                expect(getByDid.perspective.links.length).toBe(1);
+                expect(getByDid.directMessageLanguage).toBe("newlang");
+
+                const getInvalidDid = await ad4mClient.agent.byDID("na");
+                expect(getInvalidDid).toBe(null);
             })
         })
     }

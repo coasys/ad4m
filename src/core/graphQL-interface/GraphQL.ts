@@ -16,8 +16,12 @@ function createResolvers(core: PerspectivismCore) {
             agentByDID: async (parent, args, context, info) => {
                 const { did } = args;
                 const agentLanguage = core.languageController.getAgentLanguage();
-                const expr = await agentLanguage.expressionAdapter.get(did);
-                return new expr as Agent;
+                const expr = await agentLanguage.agentAdapter.getProfile(did);
+                if (expr != null) {
+                    return expr.data;
+                } else {
+                    return null
+                }
             },
             agentStatus: () => {
                 return core.agentService.dump()
