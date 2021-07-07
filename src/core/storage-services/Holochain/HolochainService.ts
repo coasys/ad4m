@@ -86,7 +86,7 @@ export default class HolochainService {
                 try {
                     await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
                 } catch {
-                    console.log("HolochainService: Could not attach app interface, assuming already attached...")
+                    console.warn("HolochainService: Could not attach app interface, assuming already attached...")
                 }
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
             };
@@ -147,7 +147,6 @@ export default class HolochainService {
             console.log("HolochainService: setting holochains signal callback for language", lang);
             this.signalCallbacks.set(pubKey.toString("base64"), [callback, lang]);
         };
-
         const activeApps = await this.#adminWebsocket.listActiveApps();
         //console.log("HolochainService: Found running apps:", activeApps);
         if(!activeApps.includes(lang)) {
