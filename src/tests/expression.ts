@@ -8,7 +8,7 @@ export default function expressionTests(testContext: TestContext) {
                 const me = await ad4mClient.agent.me()
                 
                 const agent = await ad4mClient.expression.get(me.did)
-                expect(JSON.parse(agent.data)).toEqual(me);
+
                 expect(agent.proof.valid).toBeTruthy()
                 expect(agent.proof.invalid).toBeFalsy()
             })
@@ -18,7 +18,8 @@ export default function expressionTests(testContext: TestContext) {
                 const me = await ad4mClient.agent.me()
                 
                 const agent = await ad4mClient.expression.getRaw(me.did)
-                expect(JSON.parse(agent).data).toEqual(me);
+                expect(JSON.parse(agent).data.did).toEqual(me.did);
+                expect(JSON.parse(agent).data.directMessageLanguage).toEqual(me.directMessageLanguage);
             })
 
             it('can create()', async () => {
@@ -41,8 +42,6 @@ export default function expressionTests(testContext: TestContext) {
                 const expr = await ad4mClient.expression.get(exprAddr)
                 expect(expr).toBeDefined()
                 expect(expr.proof.valid).toBeTruthy()
-
-
             })
         })
     }
