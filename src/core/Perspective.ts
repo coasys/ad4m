@@ -1,4 +1,4 @@
-import type { Agent, Expression, SharedPerspective, LinkExpressionInput, LinkInput } from "@perspect3vism/ad4m"
+import type { Agent, Expression, Neighbourhood, LinkExpressionInput, LinkInput, LanguageRef } from "@perspect3vism/ad4m"
 import { Link, hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -13,16 +13,17 @@ export default class Perspective {
     uuid: string;
     author: Agent;
     timestamp: string;
-    sharedPerspective: SharedPerspective;
-    sharedURL: string;
+    neighbourhood: Neighbourhood;
+    sharedUrl: string;
 
     #db: any;
     #agent: AgentService;
     #languageController: LanguageController
     #pubsub: any
 
-    constructor(id: PerspectiveHandle, context: PerspectiveContext) {
+    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
         this.updateFromId(id)
+        if (neighbourhood) this.neighbourhood = neighbourhood;
 
         this.#db = context.db
         this.#agent = context.agentService
@@ -32,7 +33,7 @@ export default class Perspective {
     }
 
     plain(): PerspectiveHandle {
-        const { name, uuid, author, timestamp, sharedPerspective, sharedURL } = this
+        const { name, uuid, author, timestamp } = this
         return JSON.parse(JSON.stringify({
             name, uuid, author, timestamp
         }))
@@ -41,7 +42,7 @@ export default class Perspective {
     updateFromId(id: PerspectiveHandle) {
         if(id.name) this.name = id.name
         if(id.uuid) this.uuid = id.uuid
-        if(id.sharedURL) this.sharedURL = id.sharedURL
+        if(id.sharedUrl) this.sharedUrl = id.sharedUrl
     }
 
     linkToExpression(link: Link): Expression {
@@ -61,22 +62,22 @@ export default class Perspective {
     }
 
     private callLinksAdapter(functionName: string, ...args): Promise<any> {
-        if(!this.sharedPerspective || !this.sharedPerspective.linkLanguages || this.sharedPerspective.linkLanguages.length === 0) {
+        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             return Promise.resolve([])
         }
 
         return new Promise(async (resolve, reject) => {
             setTimeout(() => resolve([]), 2000)
             try {
-                const langRef = this.sharedPerspective.linkLanguages[0]
-                const linksAdapter = this.#languageController.getLinksAdapter(langRef)
+                const address = this.neighbourhood.linkLanguage;
+                const linksAdapter = this.#languageController.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
-                    console.error("LinksSharingLanguage", langRef.address, "set in perspective '"+this.name+"' not installed!")
+                    console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
                     resolve([])
                 }

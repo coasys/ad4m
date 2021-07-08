@@ -1,5 +1,5 @@
-import type { Address, LanguageRef, SharingType, PublicSharing, PerspectiveHandle, Language, Perspective  } from '@perspect3vism/ad4m'
-import { parseExprURL, Neighbourhood as SharedPerspective } from '@perspect3vism/ad4m'
+import type { Address, LanguageRef, PublicSharing, PerspectiveHandle, Language, Perspective  } from '@perspect3vism/ad4m'
+import { parseExprUrl, Neighbourhood } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
 import * as Db from './db'
@@ -110,86 +110,37 @@ export default class PerspectivismCore {
         });
     }
 
-    async publishPerspective(uuid: string, name: string, description: string, sharingType: SharingType, 
-        passphrase: string, requiredExpressionLanguages: Address[], allowedExpressionLanguages: Address[]): Promise<SharedPerspective> {
+    async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<String> {
         // We only work on the PerspectiveID object.
         // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
         // instance object here
         const perspectiveID = this.#perspectivesController.perspective(uuid).plain()
 
-        const sharedPerspective = new SharedPerspective(name, description, sharingType)
-        // Create LinkLanguage
-        const linkLanguageRef = await this.#languageFactory.createLinkLanguageForSharedPerspective(sharedPerspective, passphrase)
-        sharedPerspective.linkLanguages = [linkLanguageRef]
-        sharedPerspective.allowedExpressionLanguages = allowedExpressionLanguages
-        sharedPerspective.requiredExpressionLanguages = requiredExpressionLanguages
-
-        await this.#languageController.installLanguage(linkLanguageRef.address, null)
-        let installs = allowedExpressionLanguages.concat(requiredExpressionLanguages);
-        installs = Array.from(new Set(installs));
-        console.log("\x1b[32m", "PerspectivismCore.publishPerspective: Attempting to install expression languages", installs);
-        for (const language of installs) {
-            await this.#languageController.installLanguage(language, null);
-        }
-
-        // Create SharedPerspective
-        const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(sharedPerspective)
-        const perspectiveUrl = `perspective://${perspectiveAddress}`
-
-        //Add shared perspective to original perpspective and then update controller
-        perspectiveID.sharedURL = perspectiveUrl
-        this.#perspectivesController.replace(perspectiveID)
-        return sharedPerspective
-    }
-
-    async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<SharedPerspective> {
-        // We only work on the PerspectiveID object.
-        // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
-        // instance object here
-        const perspectiveID = this.#perspectivesController.perspective(uuid).plain()
-
-        const sharedPerspective = new SharedPerspective(linkLanguage, meta);
+        const neighbourhood = new Neighbourhood(linkLanguage, meta);
         let language = await this.#languageController.installLanguage(linkLanguage, null)
-        if (!language.linkLanguage) {
+        if (!language.linksAdapter) {
             throw Error("Language used is not a link language");
         }
 
-        // Create SharedPerspective
-        const perspectiveAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(sharedPerspective)
-        const perspectiveUrl = `perspective://${perspectiveAddress}`
+        // Create neighbourhood
+        const neighbourhoodAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(neighbourhood)
+        const neighbourhoodUrl = `neighbourhood://${neighbourhoodAddress}`
 
         //Add shared perspective to original perpspective and then update controller
-        perspectiveID.sharedURL = perspectiveUrl
+        perspectiveID.sharedUrl = neighbourhoodUrl
         this.#perspectivesController.replace(perspectiveID)
-        return sharedPerspective
+        return neighbourhoodUrl
     }
 
-    async installSharedPerspective(url: Address): Promise<PerspectiveHandle> {
-        let sharedPerspectiveExp = await this.languageController.getPerspective(parseExprURL(url).expression);
-        if (sharedPerspectiveExp == null) {
-            throw Error(`Could not find sharedPerspective with URL ${url}`);
+    async installNeighbourhood(url: Address): Promise<PerspectiveHandle> {
+        let neighbourHoodExp = await this.languageController.getPerspective(parseExprUrl(url).expression);
+        if (neighbourHoodExp == null) {
+            throw Error(`Could not find neighbourhood with URL ${url}`);
         };
-        // console.log("Core.installSharedPerspective: Got shared perspective", sharedPerspectiveExp);
-        //@ts-ignore
-        let sharedPerspective: SharedPerspective = sharedPerspectiveExp.data!;
-        const languages = {}
-        sharedPerspective.requiredExpressionLanguages.forEach(l => languages[l] = l)
-        sharedPerspective.linkLanguages.forEach(l => languages[l.address] = l.address)
-        const installs: string[] = Object.values(languages)
-        console.log(new Date(), "Core.installSharedPerspective: Attempting to install languages", installs);
-        for (const language of installs) {
-            await this.#languageController.installLanguage(language, null);
-        }
+        // console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
+        let neighbourhood: Neighbourhood = neighbourHoodExp.data!;
         
-        let localPerspective = {
-            name: sharedPerspective.name, 
-            author: this.agentService.agent, 
-            timestamp: new Date().toISOString(), 
-            sharedPerspective: sharedPerspective, 
-            sharedURL: url
-        };
-        let perspective = this.#perspectivesController.add(localPerspective);
-        return perspective;        
+        return this.#perspectivesController.add("", url, neighbourhood);        
     }
 
     async languageCloneHolochainTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {

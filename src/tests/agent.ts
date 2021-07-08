@@ -42,7 +42,7 @@ export default function agentTests(testContext: TestContext) {
             it('can get and create agent expression profile', async () => {
                 const ad4mClient = testContext.ad4mClient
 
-                const agentUpdated = jest.fn(p=>console.warn("Agent updated:", p))
+                const agentUpdated = jest.fn()
                 ad4mClient.agent.addUpdatedListener(agentUpdated)
 
                 const currentAgent = await ad4mClient.agent.me();

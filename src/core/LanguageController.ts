@@ -72,7 +72,7 @@ export default class LanguageController {
                     if(alias === 'lang') {
                         this.#languageLanguage = language
                     }
-                    if(alias === 'perspective') {
+                    if(alias === 'neighbourhood') {
                         this.#perspectiveLanguage = language
                     }
                 }
