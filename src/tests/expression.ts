@@ -9,8 +9,8 @@ export default function expressionTests(testContext: TestContext) {
                 
                 const agent = await ad4mClient.expression.get(me.did)
                 expect(JSON.parse(agent.data)).toEqual(me);
-                //expect(agent.proof.valid).toBeTruthy()
-                //expect(agent.proof.invalid).toBeFalsy()
+                expect(agent.proof.valid).toBeTruthy()
+                expect(agent.proof.invalid).toBeFalsy()
             })
 
             it('can getRaw() my agent expression', async () => {

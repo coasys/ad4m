@@ -4,9 +4,9 @@ const wget = require("node-wget-js");
 const languages = {
   "agent-expression-store": {
     targetDnaName: "agent-store",
-    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.2/agent-store.dna",
+    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.3/agent-store.dna",
     bundle:
-      "https://github.com/perspect3vism/agent-language/releases/download/0.0.2/bundle.js",
+      "https://github.com/perspect3vism/agent-language/releases/download/0.0.3/bundle.js",
   },
   languages: {
       targetDnaName: "languages",
