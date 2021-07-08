@@ -11,6 +11,7 @@ import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'apollo-server';
 import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
+import stringify from 'json-stable-stringify'
 
 export default class AgentService {
     #did: string

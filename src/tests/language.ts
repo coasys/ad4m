@@ -8,7 +8,7 @@ export default function languageTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient
                 
                 const languages = await ad4mClient.languages.byFilter("");
-                expect(languages.length).toBe(3);
+                expect(languages.length).toBe(4);
 
                 const createUniqueLang = await ad4mClient.languages.cloneHolochainTemplate(path.join(__dirname, "../test-temp/agent-expression-store"), "agent-store", "b98e53a8-5800-47b6-adb9-86d55a74871e");
                 expect(createUniqueLang.name).toBe("agent-expression-store");
@@ -17,7 +17,7 @@ export default function languageTests(testContext: TestContext) {
                 expect(installLanguage.name).toBe("agent-expression-store");
 
                 const languagesPostInstall = await ad4mClient.languages.byFilter("");
-                expect(languagesPostInstall.length).toBe(4);
+                expect(languagesPostInstall.length).toBe(5);
 
                 const writeSettings = await ad4mClient.languages.writeSettings(createUniqueLang.address, JSON.stringify({"setting": "test"}));
                 expect(writeSettings).toBe(true);

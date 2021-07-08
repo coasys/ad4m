@@ -404,9 +404,11 @@ export default class LanguageController {
                 if(! await this.#context.signatures.verify(expr)) {
                     console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
                     expr.proof.invalid = true
+                    delete expr.proof.valid
                 } else {
                     // console.debug("Valid expr:", ref)
                     expr.proof.valid = true
+                    delete expr.proof.invalid
                 }
             } catch(e) {
                 console.error("Error trying to verify expression signature:", e)
