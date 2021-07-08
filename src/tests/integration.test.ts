@@ -18,7 +18,7 @@ import getOwnPropertyDescriptor from '../shims/getOwnPropertyDescriptor'
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
 import languageTests from "./language";
-import expressionTests from "./expresssion";
+import expressionTests from "./expression";
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
@@ -92,6 +92,6 @@ describe("Integration tests", () => {
 
     describe('Agent / Agent-Setup', agentTests(testContext))
     describe('Expression', expressionTests(testContext))
-    describe('Perspective', perspectiveTests(testContext))
     describe('Language', languageTests(testContext))
+    describe('Perspective', perspectiveTests(testContext))
 })

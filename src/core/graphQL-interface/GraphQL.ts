@@ -1,6 +1,6 @@
 import { ApolloServer, withFilter, gql } from 'apollo-server'
 import { Agent, LanguageRef } from '@perspect3vism/ad4m'
-import { exprRef2String, parseExprURL, typeDefsString } from '@perspect3vism/ad4m'
+import { exprRef2String, parseExprUrl, typeDefsString } from '@perspect3vism/ad4m'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
@@ -27,7 +27,7 @@ function createResolvers(core: PerspectivismCore) {
                 return core.agentService.dump()
             },
             expression: async (parent, args, context, info) => {
-                const ref = parseExprURL(args.url.toString())
+                const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 if(expression) {
                     expression.ref = ref
@@ -37,7 +37,7 @@ function createResolvers(core: PerspectivismCore) {
                 return expression
             },
             expressionRaw: async (parent, args, context, info) => {
-                const ref = parseExprURL(args.url.toString())
+                const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 return JSON.stringify(expression)
             },
@@ -133,14 +133,13 @@ function createResolvers(core: PerspectivismCore) {
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
                 // console.log(new Date(), "GQL install shared perspective", args);
                 const { url } = args;
-                return await core.installSharedPerspective(url);
+                return await core.installNeighbourhood(url);
             },
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
                 const { linkLanguage, meta, perspectiveUUID } = args
-                const perspective = core.perspectivesController.perspectiveID(perspectiveUUID)
-                // @ts-ignore
-                if(perspective.sharedPerspective && perspective.sharedURL)
-                    throw new Error(`Perspective ${perspective.name} (${perspective.uuid}) is already shared`)
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(perspective.neighbourhood && perspective.sharedUrl)
+                    throw new Error(`Perspective ${perspective.name} (${perspective.uuid}) is already shared`);
                 return await core.neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)
             },
             perspectiveAdd: (parent, args, context, info) => {

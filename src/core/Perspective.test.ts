@@ -2,7 +2,8 @@ import Perspective from './Perspective'
 import type PerspectiveContext from './PerspectiveContext'
 import { PerspectivismDb } from './db'
 import { v4 as uuidv4 } from 'uuid'
-import type { LanguageRef, Link, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
+import type { Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
 import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
@@ -15,10 +16,7 @@ const agentService = {
     agent: { did }
 }
 
-const sharingLanguage = { 
-    address: "sharing-language-address",
-    name: "sharing-lanugage Name"
-} as LanguageRef
+const sharingLanguage = "sharing-language-address";
 
 function LinksAdapter() {
     this.getLinks = jest.fn(args=>{return []})
@@ -31,7 +29,7 @@ let linksAdapter = new LinksAdapter()
 
 const languageController = {
     getLinksAdapter: jest.fn(langRef => {
-        if(langRef.address === sharingLanguage.address)
+        if(langRef.address === sharingLanguage)
             return linksAdapter
         else
             return null
@@ -106,9 +104,10 @@ describe('Perspective', () => {
 
     describe('with link sharing language', () => {
         beforeEach(() => {
-            perspective.sharedPerspective = {
-                linkLanguages: [sharingLanguage]
-            }
+            perspective.neighbourhood = {
+                linkLanguage: sharingLanguage,
+                perspective: new Ad4mPerspective([])
+            } as Neighbourhood
             linksAdapter = new LinksAdapter()
         })
 
@@ -169,14 +168,15 @@ describe('Perspective', () => {
 
         describe('syncWithSharingAdpater', () => {
             it('adds all missing links from local DB to linksAdapter', async () => {
-                perspective.sharedPerspective = null
+                perspective.neighbourhood = null
     
                 const link = createLink()
                 const linkExpression = await perspective.addLink(link)
     
-                perspective.sharedPerspective = {
-                    linkLanguages: [sharingLanguage]
-                }
+                perspective.neighbourhood = {
+                    linkLanguage: sharingLanguage,
+                    perspective: new Ad4mPerspective([])
+                } as Neighbourhood
 
                 await perspective.syncWithSharingAdapter()
 

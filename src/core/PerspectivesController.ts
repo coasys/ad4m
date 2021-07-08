@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid'
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
 import type PerspectiveHandle from '@perspect3vism/ad4m'
-import { Perspective as Ad4mPerspective } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -78,14 +78,14 @@ export default class PerspectivesController {
         return new Ad4mPerspective(await perspective.getLinks({}));
     }
 
-    add(name) {
+    add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood): PerspectiveHandle {
         let perspective = {
             uuid: uuidv4(),
             name,
-            sharedUrl: null
+            sharedUrl: sharedUrl
         } as PerspectiveHandle;
         this.#perspectiveHandles.set(perspective.uuid, perspective)
-        this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context))
+        this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood))
         this.save()
         this.#pubsub.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
         return perspective
