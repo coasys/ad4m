@@ -355,7 +355,8 @@ export default class LanguageController {
     }
 
     async expressionCreate(lang: LanguageRef, content: object): Promise<ExpressionRef> {
-        const putAdapter = this.languageByRef(lang).expressionAdapter.putAdapter
+        const language = await this.languageByRef(lang)
+        const putAdapter = language.expressionAdapter.putAdapter
         let address = null
 
         try {

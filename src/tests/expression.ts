@@ -18,6 +18,17 @@ export default function expressionTests(testContext: TestContext) {
                 const agent = await ad4mClient.expression.getRaw(me.did)
                 expect(JSON.parse(agent).data).toEqual(me);
             })
+
+            it('can create()', async () => {
+                const ad4mClient = testContext.ad4mClient
+                let me = await ad4mClient.agent.me()
+
+                me.directMessageLanguage = "test 2"
+                const result = await ad4mClient.expression.create(me, "did")
+                expect(result).toBe(me.did)
+
+
+            })
         })
     }
 }
