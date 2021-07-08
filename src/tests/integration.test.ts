@@ -86,7 +86,7 @@ describe("Integration tests", () => {
               languages: [],
               perspectives: [],
             },
-            appBuiltInLangs: [],
+            appBuiltInLangs: ['note-ipfs'],
             appLangAliases: null,
             mocks: false,
         })

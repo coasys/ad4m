@@ -9,6 +9,8 @@ export default function expressionTests(testContext: TestContext) {
                 
                 const agent = await ad4mClient.expression.get(me.did)
                 expect(JSON.parse(agent.data)).toEqual(me);
+                expect(agent.proof.valid).toBeTruthy()
+                expect(agent.proof.invalid).toBeFalsy()
             })
 
             it('can getRaw() my agent expression', async () => {
@@ -26,6 +28,19 @@ export default function expressionTests(testContext: TestContext) {
                 me.directMessageLanguage = "test 2"
                 const result = await ad4mClient.expression.create(me, "did")
                 expect(result).toBe(me.did)
+            })
+
+            it('can create valid signatures', async () => {
+                const ad4mClient = testContext.ad4mClient
+                const noteIpfs = (await ad4mClient.languages.byFilter('')).find(l=>l.name ==='note-ipfs')
+                expect(noteIpfs).toBeDefined()
+
+                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs.address)
+                expect(exprAddr).toBeDefined()
+
+                const expr = await ad4mClient.expression.get(exprAddr)
+                expect(expr).toBeDefined()
+                expect(expr.proof.valid).toBeTruthy()
 
 
             })
