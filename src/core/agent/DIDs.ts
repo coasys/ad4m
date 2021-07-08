@@ -7,11 +7,11 @@ import { resolver } from '@transmute/did-key.js';
 export class DIDResolver {
     #cacheDB: any
 
-    constructor(dbAdapter) {
+    constructor(dbAdapter: typeof FileSync) {
         this.#cacheDB = low(dbAdapter)
     }
 
-    async resolve(did: string): Promise<object> {
+    async resolve(did: string): Promise<object | null | undefined> {
         if(!did) return null
 
         if(this.#cacheDB.has(did).value()) {
@@ -45,7 +45,7 @@ export class DIDResolver {
     }
 }
 
-export function init(cacheDBFilePath) {
+export function init(cacheDBFilePath: string) {
     const adapter = new FileSync(path.join(cacheDBFilePath, 'DIDCache.json'))
     return new DIDResolver(adapter)
 }

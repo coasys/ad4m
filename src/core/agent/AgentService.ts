@@ -11,13 +11,12 @@ import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'apollo-server';
 import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
-import stringify from 'json-stable-stringify'
 
 export default class AgentService {
-    #did: string
-    #didDocument: string
-    #signingKeyId: string
-    #wallet: object
+    #did: string | undefined
+    #didDocument: string | undefined
+    #signingKeyId: string | undefined
+    #wallet: object | undefined
     #file: string
     #fileProfile: string
     #agent: Agent
@@ -25,7 +24,7 @@ export default class AgentService {
     #pubsub: PubSub
 
     #readyPromise: Promise<void>
-    #readyPromiseResolve
+    #readyPromiseResolve: ((value: void | PromiseLike<void>) => void) | undefined
 
     constructor(rootConfigPath: string) {
         this.#file = path.join(rootConfigPath, "agent.json")
@@ -131,7 +130,7 @@ export default class AgentService {
             type: 'assymetric',
             encoding: "hex",
             publicKey: key.publicKeyBuffer.toString('hex'),
-            privateKey: key.privateKeyBuffer.toString('hex'),
+            privateKey: key.privateKeyBuffer!.toString('hex'),
             tags: [key.type, key.id]
         }]
 
@@ -141,7 +140,7 @@ export default class AgentService {
         console.debug(JSON.stringify(key))
     }
 
-    async initialize(did, didDocument, keystore, password) {
+    async initialize(did: string, didDocument: string, keystore: string, password: string) {
         this.#did = did
         this.#didDocument = didDocument
         this.#agent = new Agent(did)
@@ -169,7 +168,7 @@ export default class AgentService {
         console.debug("Registering new DID with agent language...")
         this.storeAgentProfile()
         this.#pubsub.publish(PubSubInstance.AGENT_UPDATED, this.#agent)
-        this.#readyPromiseResolve()
+        this.#readyPromiseResolve!()
     }
 
     isInitialized() {
@@ -182,19 +181,19 @@ export default class AgentService {
         return keys
     }
 
-    async unlock(password) {
+    async unlock(password: string) {
         // @ts-ignore
         this.#wallet.unlock(password)
         await this.storeAgentProfile()
-        this.#readyPromiseResolve()
+        this.#readyPromiseResolve!()
     }
 
-    lock(password) {
+    lock(password: string) {
         // @ts-ignore
         this.#wallet.lock(password)
     }
 
-    async save(password) {
+    async save(password: string) {
         // @ts-ignore
         this.#wallet.lock(password)
 
@@ -211,7 +210,7 @@ export default class AgentService {
 
         // @ts-ignore
         await this.#wallet.unlock(password)
-        this.#readyPromiseResolve()
+        this.#readyPromiseResolve!()
     }
 
     load() {

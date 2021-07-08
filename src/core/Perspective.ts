@@ -9,12 +9,12 @@ import type PerspectiveContext from "./PerspectiveContext"
 import { LinkExpression } from "../types";
 
 export default class Perspective {
-    name: string;
-    uuid: string;
+    name: string | undefined;
+    uuid: string | undefined;
     author: Agent;
-    timestamp: string;
+    timestamp: string | undefined;
     neighbourhood: Neighbourhood;
-    sharedUrl: string;
+    sharedUrl: string | undefined;
 
     #db: any;
     #agent: AgentService;
@@ -26,8 +26,8 @@ export default class Perspective {
         if (neighbourhood) this.neighbourhood = neighbourhood;
 
         this.#db = context.db
-        this.#agent = context.agentService
-        this.#languageController = context.languageController
+        this.#agent = context.agentService!
+        this.#languageController = context.languageController!
 
         this.#pubsub = PubSub.get()
     }
@@ -61,7 +61,8 @@ export default class Perspective {
         throw new Error("Object is neither Link nor Expression: " + JSON.stringify(maybeLink))
     }
 
-    private callLinksAdapter(functionName: string, ...args): Promise<any> {
+    //@ts-ignore
+    private callLinksAdapter(functionName: string, ...args): Promise<Expression[]> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             return Promise.resolve([])
         }
@@ -91,7 +92,7 @@ export default class Perspective {
     async syncWithSharingAdapter() {
         const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link)
         const remoteLinks = await this.callLinksAdapter('getLinks')
-        const includes = (link, list) => {
+        const includes = (link: Expression, list: Expression[]) => {
             return undefined !== list.find(e =>
                 JSON.stringify(e.author) === JSON.stringify(link.author) &&
                 e.timestamp === link.timestamp &&

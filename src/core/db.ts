@@ -1,11 +1,12 @@
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
+import type { LinkExpression } from "@perspect3vism/ad4m";  
 
 export class PerspectivismDb {
     #db: any
 
-    constructor(adapter) {
+    constructor(adapter: typeof FileSync) {
         const db = low(adapter)
         this.#db = db
     }
@@ -52,7 +53,7 @@ export class PerspectivismDb {
             .write()
     }
 
-    getLink(pUUID: string, linkName: string): object|void {
+    getLink(pUUID: string, linkName: string): LinkExpression|void {
         const key = this.linkKey(pUUID, linkName)
         const versions = this.#db.get(key).value()
         return versions[versions.length-1]
@@ -122,12 +123,13 @@ export class PerspectivismDb {
 
 
     remove(key: string, linkName: string) {
+        //@ts-ignore
         this.#db.get(key).remove(l => l===linkName).write()
     }
 
 }
 
-export function init(dbFilePath): PerspectivismDb {
+export function init(dbFilePath: string): PerspectivismDb {
     const adapter = new FileSync(path.join(dbFilePath, 'db.json'))
     return new PerspectivismDb(adapter)
 }

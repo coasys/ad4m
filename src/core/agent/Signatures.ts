@@ -29,7 +29,7 @@ export default class Signatures {
             return false
         }
 
-        let pubKey
+        let pubKey: Uint8Array | undefined
         if(key.publicKeyHex)
             pubKey = Uint8Array.from(Buffer.from(key.publicKeyHex, "hex"))
         if(key.publicKeyBase58)
@@ -37,14 +37,14 @@ export default class Signatures {
         const sigBytes = Uint8Array.from(Buffer.from(expr.proof.signature, "hex"))
         const message = Signatures.buildMessage(expr.data, expr.timestamp)
 
-        return secp256k1.ecdsaVerify(sigBytes, message, pubKey)
+        return secp256k1.ecdsaVerify(sigBytes, message, pubKey!)
     }
 
     static buildMessage(data: any, timestamp: string): Uint8Array {
         const payload = { data, timestamp }
         const payloadString = stringify(payload)
         const payloadBuffer = Buffer.from(payloadString)
-        const payloadBytes = Uint8Array.from(sha256(Uint8Array.from(payloadBuffer), { asBytes: true }))
+        const payloadBytes = Uint8Array.from(sha256(Buffer.from(payloadBuffer), { asBytes: true }))
         return payloadBytes
     }
 }

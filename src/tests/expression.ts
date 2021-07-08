@@ -33,6 +33,7 @@ export default function expressionTests(testContext: TestContext) {
 
             it('can create valid signatures', async () => {
                 const ad4mClient = testContext.ad4mClient
+                //@ts-ignore
                 const noteIpfs = (await ad4mClient.languages.byFilter('')).find(l=>l.name ==='note-ipfs')
                 expect(noteIpfs).toBeDefined()
 

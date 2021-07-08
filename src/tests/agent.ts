@@ -1,7 +1,7 @@
 import { Perspective, LinkExpression, Link, ExpressionProof } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 
-function sleep(ms) {
+function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 

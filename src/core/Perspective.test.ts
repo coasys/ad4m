@@ -3,7 +3,7 @@ import type PerspectiveContext from './PerspectiveContext'
 import { PerspectivismDb } from './db'
 import { v4 as uuidv4 } from 'uuid'
 import type { Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
-import { Perspective as Ad4mPerspective } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
 import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
@@ -19,12 +19,17 @@ const agentService = {
 const sharingLanguage = "sharing-language-address";
 
 function LinksAdapter() {
+    //@ts-ignore
     this.getLinks = jest.fn(args=>{return []})
+    //@ts-ignore
     this.addLink = jest.fn(args=>{return []})
+    //@ts-ignore
     this.updateLink = jest.fn(args=>{return []})
+    //@ts-ignore
     this.removeLink = jest.fn(args=>{return []})
 }
 
+//@ts-ignore
 let linksAdapter = new LinksAdapter()
 
 const languageController = {
@@ -38,11 +43,11 @@ const languageController = {
 
 
 describe('Perspective', () => {
-    let perspective
-    let allLinks
+    let perspective: Perspective | undefined
+    let allLinks: LinkExpression[] | undefined
 
     beforeEach(() => {
-        const db = new PerspectivismDb(new Memory())
+        const db = new PerspectivismDb(new Memory(""))
         perspective = new Perspective(
             {
                 uuid: uuidv4(),
@@ -59,8 +64,8 @@ describe('Perspective', () => {
 
     it('wraps links in expressions on addLink', () => {
         const link = createLink()
-        const expression = perspective.addLink(link)
-        expect(expression.author.did).toEqual(agentService.agent.did)
+        const expression = perspective!.addLink(link)
+        expect(expression.author!.did).toEqual(agentService.agent.did)
         expect(expression.data).toEqual(link)
         expect(agentService.createSignedExpression.mock.calls.length).toBe(1)
         expect(agentService.createSignedExpression.mock.calls[0][0]).toEqual(link)
@@ -73,8 +78,8 @@ describe('Perspective', () => {
                 if(i%2 === 0) {
                     link.source = 'root'
                 }
-                allLinks.push(link)
-                perspective.addLink(link)
+                allLinks!.push(link)
+                perspective!.addLink(link)
             }
         })
 
@@ -83,37 +88,38 @@ describe('Perspective', () => {
         })
 
         it('can get all links', async () => {
-            const result = await perspective.getLinks({} as LinkQuery)
+            const result = await perspective!.getLinks({} as LinkQuery)
 
             expect(result.length).toEqual(5)
 
             for(let i=0; i<5; i++) {
                 expect(result).toEqual(
                     expect.arrayContaining(
-                        [expect.objectContaining({data: allLinks[i]})]
+                        [expect.objectContaining({data: allLinks![i]})]
                     )
                 )
             }
         })
 
         it('can get links by source', async () => {
-            const result = await perspective.getLinks({source: 'root'} as LinkQuery)
+            const result = await perspective!.getLinks({source: 'root'} as LinkQuery)
             expect(result.length).toEqual(3)
         })
     })
 
     describe('with link sharing language', () => {
         beforeEach(() => {
-            perspective.neighbourhood = {
+            perspective!.neighbourhood = {
                 linkLanguage: sharingLanguage,
                 perspective: new Ad4mPerspective([])
             } as Neighbourhood
+            //@ts-ignore
             linksAdapter = new LinksAdapter()
         })
 
         it('calls link language on getLinks() with the query once', async () => {
             const query = {source: 'root'}
-            await perspective.getLinks(query)
+            await perspective!.getLinks(query)
 
             expect(linksAdapter.getLinks.mock.calls.length).toBe(1)
             expect(linksAdapter.getLinks.mock.calls[0][0]).toEqual(query)
@@ -125,7 +131,7 @@ describe('Perspective', () => {
 
         it('calls link language on addLink() with link expression once', async () => {
             const link = createLink()
-            const linkExpression = await perspective.addLink(link)
+            const linkExpression = await perspective!.addLink(link)
 
             expect(linksAdapter.addLink.mock.calls.length).toBe(1)
             expect(linksAdapter.addLink.mock.calls[0][0]).toEqual(linkExpression)
@@ -139,9 +145,9 @@ describe('Perspective', () => {
             const link1 = createLink()
             const link2 = createLink()
 
-            const link1Expression = await perspective.addLink(link1)
-            const link2Expression = perspective.ensureLinkExpression(link2)
-            await perspective.updateLink(link1Expression, link2Expression)
+            const link1Expression = await perspective!.addLink(link1)
+            const link2Expression = perspective!.ensureLinkExpression(link2)
+            await perspective!.updateLink(link1Expression, link2Expression)
 
             expect(linksAdapter.updateLink.mock.calls.length).toBe(1)
             expect(linksAdapter.updateLink.mock.calls[0][0]).toEqual(link1Expression)
@@ -155,8 +161,8 @@ describe('Perspective', () => {
         it('calls link language on removeLink() with link expression once', async () => {
             const link = createLink()
 
-            const linkExpression = await perspective.addLink(link)
-            await perspective.removeLink(linkExpression)
+            const linkExpression = await perspective!.addLink(link)
+            await perspective!.removeLink(linkExpression)
 
             expect(linksAdapter.removeLink.mock.calls.length).toBe(1)
             expect(linksAdapter.removeLink.mock.calls[0][0]).toEqual(linkExpression)
@@ -168,17 +174,17 @@ describe('Perspective', () => {
 
         describe('syncWithSharingAdpater', () => {
             it('adds all missing links from local DB to linksAdapter', async () => {
-                perspective.neighbourhood = null
+                perspective!.neighbourhood = null
     
                 const link = createLink()
-                const linkExpression = await perspective.addLink(link)
+                const linkExpression = await perspective!.addLink(link)
     
-                perspective.neighbourhood = {
+                perspective!.neighbourhood = {
                     linkLanguage: sharingLanguage,
                     perspective: new Ad4mPerspective([])
                 } as Neighbourhood
 
-                await perspective.syncWithSharingAdapter()
+                await perspective!.syncWithSharingAdapter()
 
                 expect(linksAdapter.addLink.mock.calls.length).toBe(1)
                 expect(linksAdapter.addLink.mock.calls[0][0]).toEqual(linkExpression)

@@ -19,12 +19,12 @@ type LinkObservers = (added: Expression[], removed: Expression[], lang: Language
 
 interface LoadedLanguage {
     language: Language,
-    hash: String,
+    hash: string,
 }
 
 export default class LanguageController {
     #languages: Map<string, Language>
-    #languageConstructors: Map<string, (LanguageContext)=>Language>
+    #languageConstructors: Map<string, (context: LanguageContext)=>Language>
     #context: object;
     #linkObservers: LinkObservers[];
     #holochainService: HolochainService
@@ -99,7 +99,7 @@ export default class LanguageController {
 
     async loadLanguage(sourceFilePath: string): Promise<LoadedLanguage> {
         if(!path.isAbsolute(sourceFilePath))
-            sourceFilePath = path.join(process.env.PWD, sourceFilePath)
+            sourceFilePath = path.join(process.env.PWD!, sourceFilePath)
 
         const bundleBytes = fs.readFileSync(sourceFilePath)
         // @ts-ignore
@@ -115,7 +115,7 @@ export default class LanguageController {
         const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {
-            language.linksAdapter.addCallback((added, removed) => {
+            language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
                 this.#linkObservers.forEach(o => {
                     o(added, removed, {name, address: hash} as LanguageRef)
                 })
@@ -244,7 +244,7 @@ export default class LanguageController {
 
     async getLanguageExpression(address: string): Promise<void|Expression> {
         if(bootstrapFixtures) {
-            const fixtureLanguage = bootstrapFixtures.languages.find(f=>f.address===address)
+            const fixtureLanguage = bootstrapFixtures.languages!.find(f=>f.address===address)
             if(fixtureLanguage) {
                 return fixtureLanguage.meta
             }
@@ -255,7 +255,7 @@ export default class LanguageController {
 
     async getLanguageSource(address: string): Promise<void|string> {
         if(bootstrapFixtures) {
-            const fixtureLanguage = bootstrapFixtures.languages.find(f=>f.address===address)
+            const fixtureLanguage = bootstrapFixtures.languages!.find(f=>f.address===address)
             if(fixtureLanguage) {
                 return fixtureLanguage.bundle
             }
@@ -265,7 +265,7 @@ export default class LanguageController {
 
     async getPerspective(address: string): Promise<void|Expression> {
         if(bootstrapFixtures) {
-            const fixturePerspective = bootstrapFixtures.perspectives.find(f=>f.address===address)
+            const fixturePerspective = bootstrapFixtures.perspectives!.find(f=>f.address===address)
             if(fixturePerspective) {
                 return fixturePerspective.expression
             }
@@ -341,12 +341,12 @@ export default class LanguageController {
         const Holochain = this.#holochainService.getDelegateForLanguage(lang.address)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: lang.address, pubsub: this.pubSub});
-        const language = await create({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings: settings})
+        const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings: settings})
 
         if(language.linksAdapter) {
-            language.linksAdapter.addCallback((added, removed) => {
+            language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
                 this.#linkObservers.forEach(o => {
-                    o(added, removed, {name, address: lang.address} as LanguageRef)
+                    o(added, removed, {name: lang.name, address: lang.address} as LanguageRef)
                 })
             })
         }
@@ -389,11 +389,11 @@ export default class LanguageController {
 
     async getExpression(ref: ExpressionRef): Promise<void | Expression> {
         if(bootstrapFixtures && ref.language.address === "perspective") {
-            const fixturePerspective = bootstrapFixtures.perspectives.find(f=>f.address===ref.expression)
+            const fixturePerspective = bootstrapFixtures.perspectives!.find(f=>f.address===ref.expression)
             if(fixturePerspective) return fixturePerspective.expression
         }
         if(bootstrapFixtures && ref.language.address === "lang") {
-            const fixtureLang = bootstrapFixtures.languages.find(f=>f.address===ref.expression)
+            const fixtureLang = bootstrapFixtures.languages!.find(f=>f.address===ref.expression)
             if(fixtureLang) return fixtureLang.meta
         }
         const lang = this.languageForExpression(ref);
@@ -432,7 +432,7 @@ export default class LanguageController {
         
     }
 
-    addLinkObserver(observer) {
+    addLinkObserver(observer: LinkObservers) {
         this.#linkObservers.push(observer)
     }
 }

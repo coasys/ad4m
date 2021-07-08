@@ -95,7 +95,7 @@ export default class PerspectivesController {
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle)
     }
 
-    remove(uuid) {
+    remove(uuid: string) {
         this.#perspectiveHandles.delete(uuid)
         this.#perspectiveInstances.delete(uuid)
         this.save()
