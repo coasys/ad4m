@@ -1,6 +1,6 @@
 import type { 
     Address, Expression, Language, LanguageContext, LanguageRef, 
-    LinksAdapter, InteractionCall 
+    LinksAdapter, InteractionCall, ExpressionAdapter, PublicSharing, ReadOnlyLanguage 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef } from '@perspect3vism/ad4m';
 import fs from 'fs'
@@ -30,9 +30,9 @@ export default class LanguageController {
     #holochainService: HolochainService
     #builtInLanguages: string[];
 
-    #agentLanguage: Language
-    #languageLanguage: Language
-    #perspectiveLanguage: Language
+    #agentLanguage?: Language
+    #languageLanguage?: Language
+    #perspectiveLanguage?: Language
     pubSub
 
 
@@ -138,7 +138,7 @@ export default class LanguageController {
         return ipfsAddress.cid.toString()
     }
 
-    async installLanguage(address: Address, languageMeta: void|Expression): Promise<Language> {
+    async installLanguage(address: Address, languageMeta: null|Expression): Promise<Language | undefined> {
         const language = this.#languages.get(address)
         
         if (language == undefined) {
@@ -213,7 +213,7 @@ export default class LanguageController {
         }
     }
 
-    async languageByRef(ref: LanguageRef): Language {
+    async languageByRef(ref: LanguageRef): Promise<Language> {
         const address = languageAliases[ref.address] ? languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
         if(language) {
@@ -229,7 +229,7 @@ export default class LanguageController {
         }
     }
 
-    filteredLanguageRefs(propertyFilter: void | string): LanguageRef[] {
+    filteredLanguageRefs(propertyFilter?: string): LanguageRef[] {
         const refs: LanguageRef[] = []
         this.#languages.forEach((language, hash) => {
             if(!propertyFilter || Object.keys(language).includes(propertyFilter)) {
@@ -242,36 +242,45 @@ export default class LanguageController {
         return refs
     }
 
-    async getLanguageExpression(address: string): Promise<void|Expression> {
+    async getLanguageExpression(address: string): Promise<Expression | null> {
         if(bootstrapFixtures) {
-            const fixtureLanguage = bootstrapFixtures.languages!.find(f=>f.address===address)
-            if(fixtureLanguage) {
-                return fixtureLanguage.meta
+            const fixtures = bootstrapFixtures.languages;
+            if (fixtures) {
+                const fixtureLanguage = fixtures.find(f=>f.address===address)
+                if(fixtureLanguage && fixtureLanguage.meta) {
+                    return fixtureLanguage.meta
+                }
             }
         }
 
-        return await this.#languageLanguage.expressionAdapter.get(address)
+        return await this.#languageLanguage!.expressionAdapter!.get(address)
     }
 
-    async getLanguageSource(address: string): Promise<void|string> {
+    async getLanguageSource(address: string): Promise<string | null> {
         if(bootstrapFixtures) {
-            const fixtureLanguage = bootstrapFixtures.languages!.find(f=>f.address===address)
-            if(fixtureLanguage) {
-                return fixtureLanguage.bundle
+            const fixtures = bootstrapFixtures.languages;
+            if (fixtures) {
+                const fixtureLanguage = fixtures.find(f=>f.address===address)
+                if(fixtureLanguage && fixtureLanguage.bundle) {
+                    return fixtureLanguage.bundle
+                }
             }
         }
-        return await this.#languageLanguage.languageAdapter.getLanguageSource(address)
+        return await this.#languageLanguage!.languageAdapter!.getLanguageSource(address)
     }
 
-    async getPerspective(address: string): Promise<void|Expression> {
+    async getPerspective(address: string): Promise<Expression | null> {
         if(bootstrapFixtures) {
-            const fixturePerspective = bootstrapFixtures.perspectives!.find(f=>f.address===address)
-            if(fixturePerspective) {
-                return fixturePerspective.expression
+            const perspectives = bootstrapFixtures.perspectives;
+            if (perspectives) {
+                const perspective = perspectives.find(f=>f.address===address)
+                if(perspective && perspective.expression) {
+                    return perspective.expression
+                }
             }
         }
 
-        return await this.#perspectiveLanguage.expressionAdapter.get(address)
+        return await this.#perspectiveLanguage!.expressionAdapter!.get(address)
     }
 
     getInstalledLanguages(): LanguageRef[] {
@@ -307,16 +316,21 @@ export default class LanguageController {
         return this.#perspectiveLanguage
     }
 
-    getConstructorIcon(lang: LanguageRef): void | string {
-        return this.languageByRef(lang).expressionUI?.constructorIcon()
+    async getConstructorIcon(lang: LanguageRef): Promise<string | undefined> {
+        let grabbedLang = await this.languageByRef(lang);
+
+        return grabbedLang.expressionUI?.constructorIcon()
     }
 
-    getSettingsIcon(lang: LanguageRef): void | string {
-        return this.languageByRef(lang).settingsUI?.settingsIcon()
+    async getSettingsIcon(lang: LanguageRef): Promise<string | undefined> {
+        let grabbedLang = await this.languageByRef(lang);
+        return grabbedLang.settingsUI?.settingsIcon()
     }
 
-    getIcon(lang: LanguageRef): void | string {
-        return  this.languageByRef(lang).expressionUI?.icon()
+    async getIcon(lang: LanguageRef): Promise<string | undefined> {
+        let grabbedLang = await this.languageByRef(lang);
+
+        return grabbedLang.expressionUI?.icon()
     }
 
     getSettings(lang: LanguageRef): object {
@@ -335,12 +349,13 @@ export default class LanguageController {
         const FILEPATH = path.join(directory, 'settings.json')
         fs.writeFileSync(FILEPATH, JSON.stringify(settings))
 
-        this.#languages.set(lang.address, null)
+        this.#languages.delete(lang.address)
         const create = this.#languageConstructors.get(lang.address)
         const storageDirectory = Config.getLanguageStoragePath(lang.name)
         const Holochain = this.#holochainService.getDelegateForLanguage(lang.address)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: lang.address, pubsub: this.pubSub});
+        //@ts-ignore
         const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings: settings})
 
         if(language.linksAdapter) {
@@ -356,23 +371,27 @@ export default class LanguageController {
 
     async expressionCreate(lang: LanguageRef, content: object): Promise<ExpressionRef> {
         const language = await this.languageByRef(lang)
-        const putAdapter = language.expressionAdapter.putAdapter
+        if (!language.expressionAdapter) {
+            throw new Error("Language does not have an expressionAdapter")
+        }
+        if (!language.expressionAdapter.putAdapter) {
+            throw new Error("Language does not have an expressionAdapter.putAdapter")
+        }
+        const putAdapter = language.expressionAdapter.putAdapter;
         let address = null
 
+        let isPublic = function isPublic(adapter: PublicSharing | ReadOnlyLanguage): adapter is PublicSharing {
+            return (adapter as PublicSharing).createPublic !== undefined;
+        }
+
         try {
-            // Ok, first we assume its a PublicSharing put adapter...
-            // @ts-ignore
-            address = await putAdapter.createPublic(content)
-        } catch(e1) {
-            try {
-                // ...and if it's not, let's try to treat it like a
-                // ReadOnlyLangauge..
-                // @ts-ignore
-                address = await putAdapter.addressOf(content)
-            } catch(e2) {
-                // If both don't work, we don't know what to do with this put adapter :/
-                throw new Error(`Incompatible putAdapter in Languge ${JSON.stringify(lang)}\nPutAdapter: ${Object.keys(putAdapter)}\nError was: ${e1.toString()}\nand: ${e2.toString()}`)
+            if (isPublic(putAdapter)) {
+                address = await putAdapter.createPublic(content);
+            } else {
+                address = await putAdapter.addressOf(content);
             }
+        } catch (e) {
+            throw new Error(`Incompatible putAdapter in Languge ${JSON.stringify(lang)}\nError was: ${e}`)
         }
 
         // This makes sure that Expression references used in Links (i.e. in Perspectives) use the aliased Language schemas.
@@ -384,19 +403,22 @@ export default class LanguageController {
             }
         }
 
-        return new ExpressionRef(lang, address)
+        return new ExpressionRef(lang, address!)
     }
 
-    async getExpression(ref: ExpressionRef): Promise<void | Expression> {
-        if(bootstrapFixtures && ref.language.address === "perspective") {
+    async getExpression(ref: ExpressionRef): Promise<Expression | null> {
+        if(bootstrapFixtures && ref.language.address === "neighbourhood") {
             const fixturePerspective = bootstrapFixtures.perspectives!.find(f=>f.address===ref.expression)
-            if(fixturePerspective) return fixturePerspective.expression
+            if(fixturePerspective && fixturePerspective.expression) return fixturePerspective.expression
         }
         if(bootstrapFixtures && ref.language.address === "lang") {
             const fixtureLang = bootstrapFixtures.languages!.find(f=>f.address===ref.expression)
-            if(fixtureLang) return fixtureLang.meta
+            if(fixtureLang && fixtureLang.meta) return fixtureLang.meta
         }
         const lang = this.languageForExpression(ref);
+        if (!lang.expressionAdapter) {
+            throw Error("Language does not have an expresionAdapter!")
+        };
         const expr = await lang.expressionAdapter.get(ref.expression);
         if(expr) {
             try{
@@ -423,9 +445,14 @@ export default class LanguageController {
         console.log("TODO")
     }
 
-    getLinksAdapter(lang: LanguageRef): void | LinksAdapter {
+    async getLinksAdapter(lang: LanguageRef): Promise<LinksAdapter | null> {
         try {
-            return this.languageByRef(lang).linksAdapter
+            let gotLang = await this.languageByRef(lang)
+            if (gotLang.linksAdapter) {
+                return gotLang.linksAdapter
+            } else {
+                return null
+            }
         } catch(e) {
             return null
         }

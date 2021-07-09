@@ -113,7 +113,7 @@ export default class LanguageFactory {
         }
 
         try {
-            const address = await (this.#languageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
+            const address = await (this.#languageLanguage.expressionAdapter!.putAdapter as PublicSharing).createPublic(newLanguageObj)
             return {
                 address,
                 name,

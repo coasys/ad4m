@@ -1,10 +1,9 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
-import type { Language, Expression } from '@perspect3vism/ad4m';
+import type { Language, Expression, PublicSharing, ReadOnlyLanguage } from '@perspect3vism/ad4m';
 import { Agent, ExpressionProof } from '@perspect3vism/ad4m';
 import secp256k1 from 'secp256k1'
-import * as ed25519 from '@transmute/did-key-ed25519';
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
 import * as PubSubInstance from '../graphQL-interface/PubSub'
@@ -13,18 +12,18 @@ import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
 
 export default class AgentService {
-    #did: string | undefined
-    #didDocument: string | undefined
-    #signingKeyId: string | undefined
-    #wallet: object | undefined
+    #did?: string
+    #didDocument?: string
+    #signingKeyId?: string
+    #wallet?: object
     #file: string
     #fileProfile: string
-    #agent: Agent
-    #agentLanguage: Language
+    #agent?: Agent
+    #agentLanguage?: Language
     #pubsub: PubSub
 
     #readyPromise: Promise<void>
-    #readyPromiseResolve: ((value: void | PromiseLike<void>) => void) | undefined
+    #readyPromiseResolve?: ((value: void | PromiseLike<void>) => void)
 
     constructor(rootConfigPath: string) {
         this.#file = path.join(rootConfigPath, "agent.json")
@@ -53,6 +52,9 @@ export default class AgentService {
         }
         if(!this.isUnlocked()) {
             throw new Error("Can't sign with locked keystore")
+        }
+        if(!this.#signingKeyId) {
+            throw new Error("Can't sign without signingKeyId")
         }
 
         const timestamp = new Date().toISOString()
@@ -96,8 +98,27 @@ export default class AgentService {
             return
         }
 
-        if(this.#agent?.did)
-            await this.#agentLanguage.expressionAdapter.putAdapter.createPublic(this.#agent)
+        if (!this.#agentLanguage.expressionAdapter) {
+            throw Error("Agent language does not have an expression adapater");
+        }
+
+        if(this.#agent?.did) {
+            let adapter = this.#agentLanguage.expressionAdapter.putAdapter;
+
+            let isPublic = function isPublic(adapter: PublicSharing | ReadOnlyLanguage): adapter is PublicSharing {
+                return (adapter as PublicSharing).createPublic !== undefined;
+            }
+    
+            try {
+                if (isPublic(adapter)) {
+                    await adapter.createPublic(this.#agent);
+                } else {
+                    console.warn("Got a ReadOnlyLanguage for agent language")
+                }
+            } catch (e) {
+                throw new Error(`Incompatible putAdapter in AgentLanguage}\nError was: ${e}`)
+            }
+        }
     }
 
     private getSigningKey() {
@@ -121,6 +142,10 @@ export default class AgentService {
             secureRandom: () => crypto.randomBytes(32)
         });
 
+        if (!key.privateKeyBuffer) {
+            throw Error("Cannot create keys without privateKeyBuffer")
+        };
+
         this.#did = key.controller
         this.#didDocument = JSON.stringify(await resolver.resolve(this.#did))
         this.#agent = new Agent(this.#did)
@@ -130,7 +155,7 @@ export default class AgentService {
             type: 'assymetric',
             encoding: "hex",
             publicKey: key.publicKeyBuffer.toString('hex'),
-            privateKey: key.privateKeyBuffer!.toString('hex'),
+            privateKey: key.privateKeyBuffer.toString('hex'),
             tags: [key.type, key.id]
         }]
 
@@ -225,7 +250,7 @@ export default class AgentService {
         if(fs.existsSync(this.#fileProfile))
             this.#agent = JSON.parse(fs.readFileSync(this.#fileProfile).toString())
         else {
-            this.#agent = new Agent(this.#did)
+            this.#agent = new Agent(this.#did!)
         }
     }
 

@@ -78,17 +78,17 @@ export interface BootstrapLanguages {
 }
 
 export class BootstrapFixtures {
-    languages: BootstrapLanguageFixture[] | undefined
-    perspectives: BootstrapPerspectiveFixture[] | undefined
+    languages?: BootstrapLanguageFixture[]
+    perspectives?: BootstrapPerspectiveFixture[]
 }
   
 export class BootstrapLanguageFixture {
-    address: string | undefined
-    meta: Expression
-    bundle: string | undefined
+    address?: string
+    meta?: Expression
+    bundle?: string
 }
   
 export class BootstrapPerspectiveFixture {
-    address: string | undefined
-    expression: Expression
+    address?: string
+    expression?: Expression
 }

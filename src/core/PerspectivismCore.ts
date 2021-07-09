@@ -17,7 +17,7 @@ import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
 
 export default class PerspectivismCore {
-    #holochain: HolochainService | undefined
+    #holochain?: HolochainService
     #IPFS: any
 
     #agentService: AgentService
@@ -25,10 +25,10 @@ export default class PerspectivismCore {
     #didResolver: DIDResolver
     #signatures: Signatures
 
-    #perspectivesController: PerspectivesController | undefined
-    #languageController: LanguageController | undefined
+    #perspectivesController?: PerspectivesController
+    #languageController?: LanguageController
 
-    #languageFactory: LanguageFactory | undefined
+    #languageFactory?: LanguageFactory
 
     constructor(config: Config.CoreConfig) {
         Config.init(config)
@@ -45,16 +45,22 @@ export default class PerspectivismCore {
     }
 
     get perspectivesController(): PerspectivesController {
-        return this.#perspectivesController!
+        if (!this.#perspectivesController) {
+            throw Error("No perspectiveController")
+        }
+        return this.#perspectivesController
     }
 
     get languageController(): LanguageController {
+        if (!this.#languageController) {
+            throw Error("No languageController")
+        }
         return this.#languageController!
     }
 
     async exit() {
         this.#IPFS.stop();
-        await this.#holochain!.stop();
+        await this.#holochain?.stop();
     }
 
     async startGraphQLServer(mocks: boolean) {
@@ -110,7 +116,7 @@ export default class PerspectivismCore {
         });
     }
 
-    async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<String> {
+    async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<string> {
         // We only work on the PerspectiveID object.
         // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
         // instance object here
@@ -118,12 +124,12 @@ export default class PerspectivismCore {
 
         const neighbourhood = new Neighbourhood(linkLanguage, meta);
         let language = await this.#languageController!.installLanguage(linkLanguage, null)
-        if (!language.linksAdapter) {
+        if (!language!.linksAdapter) {
             throw Error("Language used is not a link language");
         }
 
         // Create neighbourhood
-        const neighbourhoodAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter.putAdapter as PublicSharing).createPublic(neighbourhood)
+        const neighbourhoodAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
         const neighbourhoodUrl = `neighbourhood://${neighbourhoodAddress}`
 
         //Add shared perspective to original perpspective and then update controller
@@ -138,7 +144,7 @@ export default class PerspectivismCore {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
         // console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
-        let neighbourhood: Neighbourhood = neighbourHoodExp.data!;
+        let neighbourhood: Neighbourhood = neighbourHoodExp.data;
         
         return this.#perspectivesController!.add("", url, neighbourhood);        
     }

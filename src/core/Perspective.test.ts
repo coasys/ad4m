@@ -2,7 +2,7 @@ import Perspective from './Perspective'
 import type PerspectiveContext from './PerspectiveContext'
 import { PerspectivismDb } from './db'
 import { v4 as uuidv4 } from 'uuid'
-import type { Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
+import { Neighbourhood, LinkQuery, PerspectiveHandle, LinkInput } from '@perspect3vism/ad4m'
 import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
 import { createLink } from '../testutils/links'
@@ -51,7 +51,8 @@ describe('Perspective', () => {
         perspective = new Perspective(
             {
                 uuid: uuidv4(),
-                name: "Test Perspective"
+                name: "Test Perspective",
+                sharedUrl: undefined
             } as PerspectiveHandle,
             // @ts-ignore
             {
@@ -111,14 +112,15 @@ describe('Perspective', () => {
         beforeEach(() => {
             perspective!.neighbourhood = {
                 linkLanguage: sharingLanguage,
-                perspective: new Ad4mPerspective([])
+                perspective: new Ad4mPerspective([]),
+                meta: new Ad4mPerspective()
             } as Neighbourhood
             //@ts-ignore
             linksAdapter = new LinksAdapter()
         })
 
         it('calls link language on getLinks() with the query once', async () => {
-            const query = {source: 'root'}
+            const query = {source: 'root'} as LinkQuery;
             await perspective!.getLinks(query)
 
             expect(linksAdapter.getLinks.mock.calls.length).toBe(1)
@@ -147,6 +149,7 @@ describe('Perspective', () => {
 
             const link1Expression = await perspective!.addLink(link1)
             const link2Expression = perspective!.ensureLinkExpression(link2)
+            //@ts-ignore
             await perspective!.updateLink(link1Expression, link2Expression)
 
             expect(linksAdapter.updateLink.mock.calls.length).toBe(1)
@@ -174,14 +177,15 @@ describe('Perspective', () => {
 
         describe('syncWithSharingAdpater', () => {
             it('adds all missing links from local DB to linksAdapter', async () => {
-                perspective!.neighbourhood = null
+                perspective!.neighbourhood = undefined
     
                 const link = createLink()
                 const linkExpression = await perspective!.addLink(link)
     
                 perspective!.neighbourhood = {
                     linkLanguage: sharingLanguage,
-                    perspective: new Ad4mPerspective([])
+                    perspective: new Ad4mPerspective([]),
+                    meta: new Ad4mPerspective()
                 } as Neighbourhood
 
                 await perspective!.syncWithSharingAdapter()

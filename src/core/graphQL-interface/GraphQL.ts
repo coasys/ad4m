@@ -16,8 +16,11 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             agentByDID: async (parent, args, context, info) => {
                 const { did } = args;
-                const agentLanguage = core.languageController.getAgentLanguage();
-                const expr = await agentLanguage.expressionAdapter.get(did);
+                const agentLanguage = core.languageController.getAgentLanguage().expressionAdapter;
+                if (!agentLanguage) {
+                    throw Error("Agent language does not have an expression adapter")
+                }
+                const expr = await agentLanguage.get(did);
                 if (expr != null) {
                     return expr.data;
                 } else {
@@ -115,6 +118,9 @@ function createResolvers(core: PerspectivismCore) {
             agentUpdateDirectMessageLanguage: async (parent, args, context, info) => { 
                 const { directMessageLanguage } = args;
                 let currentAgent = core.agentService.agent;
+                if (!currentAgent) {
+                    throw Error("No current agent init'd")
+                }
                 currentAgent.directMessageLanguage = directMessageLanguage;
                 await core.agentService.updateAgent(currentAgent);
                 return currentAgent;
@@ -123,6 +129,9 @@ function createResolvers(core: PerspectivismCore) {
             agentUpdatePublicPerspective: async (parent, args, context, info) => { 
                 const {perspective} = args;
                 let currentAgent = core.agentService.agent;
+                if (!currentAgent) {
+                    throw Error("No current agent init'd")
+                }
                 currentAgent.perspective = perspective;
                 await core.agentService.updateAgent(currentAgent);
                 return currentAgent;
@@ -271,8 +280,8 @@ function createResolvers(core: PerspectivismCore) {
 
         LanguageHandle: {
             //@ts-ignore
-            constructorIcon: (language) => {
-                const code = core.languageController.getConstructorIcon(language);
+            constructorIcon: async (language) => {
+                const code = await core.languageController.getConstructorIcon(language);
                 if (code) {
                     return { code }
                 } else {
@@ -280,8 +289,8 @@ function createResolvers(core: PerspectivismCore) {
                 }
             },
             //@ts-ignore
-            icon: (language) => {
-                const code = core.languageController.getIcon(language);
+            icon: async (language) => {
+                const code = await core.languageController.getIcon(language);
                 if (code) {
                     return { code }
                 } else {
@@ -289,12 +298,12 @@ function createResolvers(core: PerspectivismCore) {
                 }
             },
             //@ts-ignore
-            settings: (language) => {
+            settings: async (language) => {
                 return JSON.stringify(core.languageController.getSettings(language))
             },
             //@ts-ignore
-            settingsIcon: (language) => {
-                const code =  core.languageController.getSettingsIcon(language)
+            settingsIcon: async (language) => {
+                const code = await core.languageController.getSettingsIcon(language)
                 if(code)
                     return { code }
                 else
@@ -309,7 +318,11 @@ function createResolvers(core: PerspectivismCore) {
                 if(agent.directMessageLanguage && agent.directMessageLanguage !== "")
                     return agent.directMessageLanguage
                 else {
-                    const agentExpression = await core.languageController.getAgentLanguage().expressionAdapter.get(agent.did)
+                    const exprAdapter = core.languageController.getAgentLanguage().expressionAdapter;
+                    if (!exprAdapter) {
+                        throw Error("Agent language does not have an expression adapter")
+                    }
+                    const agentExpression = await exprAdapter.get(agent.did)
                     if(agentExpression)
                         return (agentExpression.data as Agent).directMessageLanguage
                     else
@@ -322,7 +335,11 @@ function createResolvers(core: PerspectivismCore) {
                 if(agent.perspective && agent.perspective !== "")
                     return agent.perspective
                 else {
-                    const agentExpression = await core.languageController.getAgentLanguage().expressionAdapter.get(agent.did)
+                    const exprAdapter = core.languageController.getAgentLanguage().expressionAdapter;
+                    if (!exprAdapter) {
+                        throw Error("Agent language does not have an expression adapter")
+                    }
+                    const agentExpression = await exprAdapter.get(agent.did)
                     if(agentExpression)
                         return (agentExpression.data as Agent).perspective
                     else

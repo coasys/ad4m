@@ -11,7 +11,7 @@ export class DIDResolver {
         this.#cacheDB = low(dbAdapter)
     }
 
-    async resolve(did: string): Promise<object | null | undefined> {
+    async resolve(did: string): Promise<object | null> {
         if(!did) return null
 
         if(this.#cacheDB.has(did).value()) {
@@ -40,6 +40,7 @@ export class DIDResolver {
         } catch(e) {
             console.error("Could not resolve DID:", did)
             console.error("Error:", e)
+            return null
         }
 
     }

@@ -17,12 +17,12 @@ export default class HolochainService {
     #db: any
     #adminPort: number
     #appPort: number
-    #adminWebsocket: AdminWebsocket | undefined
-    #appWebsocket: AppWebsocket | undefined
+    #adminWebsocket?: AdminWebsocket
+    #appWebsocket?: AppWebsocket
     #dataPath: string
-    #ready: Promise<void> | undefined
-    #hcProcess: ChildProcess | undefined
-    #lairProcess: ChildProcess | undefined
+    #ready?: Promise<void>
+    #hcProcess?: ChildProcess
+    #lairProcess?: ChildProcess
     #resourcePath: string
     #conductorPath: string
     #didResolveError: boolean
@@ -112,7 +112,9 @@ export default class HolochainService {
         if (this.#didResolveError) {
             console.error("HolochainService.stop: Warning attempting to close holochain processes when they did not start error free...")
         }
-        stopProcesses(this.#hcProcess!, this.#lairProcess!)
+        if (this.#hcProcess && this.#lairProcess) {
+            stopProcesses(this.#hcProcess, this.#lairProcess)
+        }
     }
 
     unpackDna(dnaPath: string): string {
