@@ -57,15 +57,19 @@ export default class PerspectivismCore {
         await this.#holochain.stop();
     }
 
-    async startGraphQLServer(mocks: boolean) {
-        const { url, subscriptionsUrl } = await GraphQL.startServer(this, mocks)
+    async startGraphQLServer(port: number, mocks: boolean) {
+        const { url, subscriptionsUrl } = await GraphQL.startServer({
+            core: this, 
+            mocks,
+            port
+        })
         console.log(`🚀  GraphQL Server ready at ${url}`)
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
 
-    async initServices() {
+    async initServices(portHCAdmin?: number, portHCApp?: number) {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
-        this.#holochain = new HolochainService(Config.holochainConductorPath, Config.holochainDataPath, Config.resourcePath)
+        this.#holochain = new HolochainService(Config.holochainConductorPath, Config.holochainDataPath, Config.resourcePath, portHCAdmin, portHCApp)
         let [ipfs, _] = await Promise.all([IPFS.init(), this.#holochain.run()]);
         this.#IPFS = ipfs;
     }
@@ -138,6 +142,7 @@ export default class PerspectivismCore {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
         // console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
+        //@ts-ignore
         let neighbourhood: Neighbourhood = neighbourHoodExp.data!;
         
         return this.#perspectivesController.add("", url, neighbourhood);        

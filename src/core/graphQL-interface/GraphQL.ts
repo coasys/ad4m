@@ -302,11 +302,17 @@ function createResolvers(core: PerspectivismCore) {
     }
 }
 
+export interface StartServerParams {
+    core: PerspectivismCore, 
+    mocks: boolean,
+    port: number,
+}
 
-export async function startServer(core: PerspectivismCore, mocks: boolean) {
+export async function startServer(params: StartServerParams) {
+    const { core, mocks, port } = params
     const resolvers = createResolvers(core)
     const typeDefs = gql(typeDefsString)
-    const server = new ApolloServer({ typeDefs, resolvers, mocks: mocks });
-    const { url, subscriptionsUrl } = await server.listen()
+    const server = new ApolloServer({ typeDefs, resolvers, mocks });
+    const { url, subscriptionsUrl } = await server.listen({ port })
     return { url, subscriptionsUrl }
 }
