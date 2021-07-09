@@ -1,18 +1,17 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
-import type Expression from '@perspect3vism/ad4m/Expression';
-import { ExpressionProof } from '@perspect3vism/ad4m/Expression';
+import type { Language, Expression } from '@perspect3vism/ad4m';
+import { Agent, ExpressionProof } from '@perspect3vism/ad4m';
 import secp256k1 from 'secp256k1'
 import * as ed25519 from '@transmute/did-key-ed25519';
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
-import Agent from '@perspect3vism/ad4m/Agent';
-import type Language from '@perspect3vism/ad4m/Language';
 import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'apollo-server';
 import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
+import stringify from 'json-stable-stringify'
 
 export default class AgentService {
     #did: string
@@ -66,33 +65,31 @@ export default class AgentService {
         const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey)
         const sigBuffer = Buffer.from(sigObj.signature)
         const sigHex = sigBuffer.toString('hex')
+        let proof = new ExpressionProof(sigHex, this.#signingKeyId);
+        proof.valid = true;
+        proof.invalid = false;
 
         const signedExpresssion = {
-            author: { did: this.#did },
+            author: this.#did,
             timestamp,
             data,
-            proof: new ExpressionProof(sigHex, this.#signingKeyId)
+            proof
         } as Expression
 
         return signedExpresssion
     }
 
-    updateAgent(a: Agent) {
+    async updateAgent(a: Agent) {
         this.#agent = a
-        this.storeAgentProfile()
+        await this.storeAgentProfile()
         this.#pubsub.publish(PubSubInstance.AGENT_UPDATED, a)
     }
 
     setAgentLanguage(lang: Language) {
-        if(!lang?.agentAdapter) {
-            console.error("AgentService ERROR: Not an AgentLanguage:", lang)
-            return
-        }
-
         this.#agentLanguage = lang
     }
 
-    storeAgentProfile() {
+    async storeAgentProfile() {
         fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent))
 
         if(!this.#agentLanguage) {
@@ -101,7 +98,7 @@ export default class AgentService {
         }
 
         if(this.#agent?.did)
-            this.#agentLanguage.agentAdapter.setProfile(this.#agent)
+            await this.#agentLanguage.expressionAdapter.putAdapter.createPublic(this.#agent)
     }
 
     private getSigningKey() {
@@ -115,7 +112,7 @@ export default class AgentService {
         }
 
         const key = keys[0]
-        console.log(key)
+        //console.log(key)
         return key
     }
 
@@ -144,7 +141,7 @@ export default class AgentService {
         console.debug(JSON.stringify(key))
     }
 
-    initialize(did, didDocument, keystore, password) {
+    async initialize(did, didDocument, keystore, password) {
         this.#did = did
         this.#didDocument = didDocument
         this.#agent = new Agent(did)
@@ -185,14 +182,19 @@ export default class AgentService {
         return keys
     }
 
-    unlock(password) {
+    async unlock(password) {
         // @ts-ignore
         this.#wallet.unlock(password)
-        this.storeAgentProfile()
+        await this.storeAgentProfile()
         this.#readyPromiseResolve()
     }
 
-    save(password) {
+    lock(password) {
+        // @ts-ignore
+        this.#wallet.lock(password)
+    }
+
+    async save(password) {
         // @ts-ignore
         this.#wallet.lock(password)
 
@@ -208,7 +210,7 @@ export default class AgentService {
         fs.writeFileSync(this.#file, JSON.stringify(dump))
 
         // @ts-ignore
-        this.#wallet.unlock(password)
+        await this.#wallet.unlock(password)
         this.#readyPromiseResolve()
     }
 

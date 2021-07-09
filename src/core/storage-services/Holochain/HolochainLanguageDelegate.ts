@@ -1,4 +1,4 @@
-import type { Dna } from '@perspect3vism/ad4m/LanguageContext'
+import type { Dna } from '@perspect3vism/ad4m'
 import type HolochainService from './HolochainService'
 import type { AppSignalCb } from '@holochain/conductor-api'
 

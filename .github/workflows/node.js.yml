@@ -1,0 +1,36 @@
+# This workflow will do a clean install of node dependencies, cache/restore them, build the source code and run tests across different versions of node
+# For more information see: https://help.github.com/actions/language-and-framework-guides/using-nodejs-with-github-actions
+
+name: Node.js CI
+
+on:
+  [push]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [14.x]
+        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+
+    steps:
+    - uses: actions/checkout@v2
+    - uses: cachix/install-nix-action@v13
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    - uses: cachix/cachix-action@v9
+      with:
+        name: perspect3vism
+        # If you chose API tokens for write access OR if you have a private cache
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v2
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    - run: npm i
+    - run: npm run build --if-present
+    - run: npm test

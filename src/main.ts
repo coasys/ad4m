@@ -1,7 +1,11 @@
 import PerspectivismCore from "./core/PerspectivismCore";
 import create from "./core/PerspectivismCore";
 import { BootstrapFixtures, BootstrapLanguages } from "./core/Config"
-
+// Patch Reflect to have missing getOwnPropertyDescriptor()
+// which should be there in any ES6 runtime but for some reason
+// is missing on some machines...
+import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
+Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 interface OuterConfig {
   resourcePath: string
   appDataPath: string
@@ -20,13 +24,13 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let builtInLangs = [
       ad4mBootstrapLanguages.agents, 
       ad4mBootstrapLanguages.languages, 
-      ad4mBootstrapLanguages.perspectives
+      ad4mBootstrapLanguages.neighbourhoods
     ]
 
     let languageAliases = {
       'did': ad4mBootstrapLanguages.agents,
       'lang': ad4mBootstrapLanguages.languages,
-      'perspective': ad4mBootstrapLanguages.perspectives
+      'neighbourhood': ad4mBootstrapLanguages.neighbourhoods
     }
 
     if(appBuiltInLangs) {

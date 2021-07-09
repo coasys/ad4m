@@ -1,29 +1,29 @@
-import type Agent from "@perspect3vism/ad4m/Agent"
-import Link, { hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m/Links";
+import type { Agent, Expression, Neighbourhood, LinkExpressionInput, LinkInput, LanguageRef } from "@perspect3vism/ad4m"
+import { Link, hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
-import type Expression from "@perspect3vism/ad4m/Expression";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
-import type PerspectiveID from "./PerspectiveID"
-import type SharedPerspective from "@perspect3vism/ad4m/SharedPerspective";
+import type PerspectiveHandle from "@perspect3vism/ad4m"
 import type PerspectiveContext from "./PerspectiveContext"
+import { LinkExpression } from "../types";
 
 export default class Perspective {
     name: string;
     uuid: string;
     author: Agent;
     timestamp: string;
-    sharedPerspective: SharedPerspective;
-    sharedURL: string;
+    neighbourhood: Neighbourhood;
+    sharedUrl: string;
 
     #db: any;
     #agent: AgentService;
     #languageController: LanguageController
     #pubsub: any
 
-    constructor(id: PerspectiveID, context: PerspectiveContext) {
+    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
         this.updateFromId(id)
+        if (neighbourhood) this.neighbourhood = neighbourhood;
 
         this.#db = context.db
         this.#agent = context.agentService
@@ -32,20 +32,17 @@ export default class Perspective {
         this.#pubsub = PubSub.get()
     }
 
-    plain(): PerspectiveID {
-        const { name, uuid, author, timestamp, sharedPerspective, sharedURL } = this
+    plain(): PerspectiveHandle {
+        const { name, uuid, author, timestamp } = this
         return JSON.parse(JSON.stringify({
             name, uuid, author, timestamp
         }))
     }
 
-    updateFromId(id: PerspectiveID) {
+    updateFromId(id: PerspectiveHandle) {
         if(id.name) this.name = id.name
         if(id.uuid) this.uuid = id.uuid
-        if(id.author) this.author = id.author
-        if(id.timestamp) this.timestamp = id.timestamp
-        if(id.sharedPerspective) this.sharedPerspective = id.sharedPerspective
-        if(id.sharedURL) this.sharedURL = id.sharedURL
+        if(id.sharedUrl) this.sharedUrl = id.sharedUrl
     }
 
     linkToExpression(link: Link): Expression {
@@ -65,22 +62,22 @@ export default class Perspective {
     }
 
     private callLinksAdapter(functionName: string, ...args): Promise<any> {
-        if(!this.sharedPerspective || !this.sharedPerspective.linkLanguages || this.sharedPerspective.linkLanguages.length === 0) {
+        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             return Promise.resolve([])
         }
 
         return new Promise(async (resolve, reject) => {
             setTimeout(() => resolve([]), 2000)
             try {
-                const langRef = this.sharedPerspective.linkLanguages[0]
-                const linksAdapter = this.#languageController.getLinksAdapter(langRef)
+                const address = this.neighbourhood.linkLanguage;
+                const linksAdapter = this.#languageController.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
-                    console.error("LinksSharingLanguage", langRef.address, "set in perspective '"+this.name+"' not installed!")
+                    console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
                     resolve([])
                 }
@@ -111,7 +108,7 @@ export default class Perspective {
 
     }
 
-    addLink(link: Link | Expression): Expression {
+    addLink(link: LinkInput | LinkExpressionInput): LinkExpression {
         const linkExpression = this.ensureLinkExpression(link)
         this.callLinksAdapter('addLink', linkExpression)
         const hash = new SHA3(256);
@@ -126,15 +123,13 @@ export default class Perspective {
 
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
-            linkAdded: linkExpression
+            link: linkExpression
         })
 
         return linkExpression
     }
 
-
-
-    private findLink(linkToFind: Expression): string {
+    private findLink(linkToFind: LinkExpressionInput): string {
         const allLinks = this.#db.getAllLinks(this.uuid)
         for(const {name, link} of allLinks) {
             if(linkEqual(linkToFind, link)) {
@@ -144,36 +139,39 @@ export default class Perspective {
         throw new Error(`Link not found in perspective "${this.plain()}": ${JSON.stringify(linkToFind)}`)
     }
 
-    async updateLink(oldLink: Expression, newLink: Expression) {
+    async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
         //console.debug("LINK REPO: updating link:", oldLink, newLink)
         const addr = this.findLink(oldLink)
         //console.debug("hash:", addr)
 
+        const newLinkExpression = this.ensureLinkExpression(newLink)
+
         const _old = oldLink.data as Link
-        const _new = newLink.data as Link
 
-        this.#db.updateLink(this.uuid, newLink, addr)
-        if(_old.source !== _new.source){
+        this.#db.updateLink(this.uuid, newLinkExpression, addr)
+        if(_old.source !== newLink.source){
             this.#db.removeSource(this.uuid, _old.source, addr)
-            this.#db.attachSource(this.uuid, _new.source, addr)
+            this.#db.attachSource(this.uuid, newLink.source, addr)
         }
-        if(_old.target !== _new.target){
+        if(_old.target !== newLink.target){
             this.#db.removeTarget(this.uuid, _old.target, addr)
-            this.#db.attachTarget(this.uuid, _new.target, addr)
+            this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
-        this.callLinksAdapter('updateLink', oldLink, newLink)
+        this.callLinksAdapter('updateLink', oldLink, newLinkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
-            link: newLink
+            link: newLinkExpression
         })
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
             link: oldLink
         })
+
+        return newLinkExpression
     }
 
-    async removeLink(linkExpression: Expression) {
+    async removeLink(linkExpression: LinkExpressionInput) {
         const addr = this.findLink(linkExpression)
         const link = linkExpression.data as Link
 
@@ -183,7 +181,7 @@ export default class Perspective {
         this.callLinksAdapter('removeLink', linkExpression)
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
-            link
+            link: linkExpression
         })
     }
 

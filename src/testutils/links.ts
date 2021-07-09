@@ -1,4 +1,4 @@
-import Link from '@perspect3vism/ad4m/Links'
+import { Link } from '@perspect3vism/ad4m'
 import faker from 'faker'
 
 export function createLink(): Link {

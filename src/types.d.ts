@@ -28,7 +28,7 @@ export interface Config {
   bootstrapFixtures: BootstrapFixtures|void
 }
 
-export function init(config: Config): Promise<PerspectivismCore>;
+export function init(config: OuterConfig): Promise<PerspectivismCore>;
 
 export {PerspectivismCore};
 

@@ -5,7 +5,7 @@ import path from 'path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, ConductorConfiguration} from "./HcExecution"
-import type { Dna } from '@perspect3vism/ad4m/LanguageContext'
+import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
@@ -86,7 +86,7 @@ export default class HolochainService {
                 try {
                     await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
                 } catch {
-                    console.log("HolochainService: Could not attach app interface, assuming already attached...")
+                    console.warn("HolochainService: Could not attach app interface, assuming already attached...")
                 }
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
             };
@@ -147,7 +147,6 @@ export default class HolochainService {
             console.log("HolochainService: setting holochains signal callback for language", lang);
             this.signalCallbacks.set(pubKey.toString("base64"), [callback, lang]);
         };
-
         const activeApps = await this.#adminWebsocket.listActiveApps();
         //console.log("HolochainService: Found running apps:", activeApps);
         if(!activeApps.includes(lang)) {

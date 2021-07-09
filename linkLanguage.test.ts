@@ -1,12 +1,17 @@
-import type { LinkQuery } from '@perspect3vism/ad4m/Links'
-import { createLink } from './testutils/links'
-import create from "./core/PerspectivismCore";
-import { LinksAdapter } from '@perspect3vism/ad4m/Language'
-import { createMockExpression } from './testutils/expression'
-import Expression from '@perspect3vism/ad4m/Expression'
-import PerspectivismCore from './core/PerspectivismCore'
+import type { LinkQuery } from '@perspect3vism/ad4m'
+import { Expression, LinksAdapter } from '@perspect3vism/ad4m'
+import { createLink } from './src/testutils/links'
+import create from "./src/core/PerspectivismCore";
+import { createMockExpression } from './src/testutils/expression'
+import PerspectivismCore from './src/core/PerspectivismCore'
 import fs from 'fs-extra'
 import path from 'path'
+
+// Patch Reflect to have missing getOwnPropertyDescriptor()
+// which should be there in any ES6 runtime but for some reason
+// is missing on some machines...
+import getOwnPropertyDescriptor from './src/shims/getOwnPropertyDescriptor'
+Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const DATA_RESOURCE_PATH = `${__dirname}/test-temp`
 const LANG_TO_TEST = "social-context-channel"

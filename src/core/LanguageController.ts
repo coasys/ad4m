@@ -1,17 +1,14 @@
-import type Expression from '@perspect3vism/ad4m/Expression';
-import ExpressionRef from '@perspect3vism/ad4m/ExpressionRef';
-import type Language from '@perspect3vism/ad4m/Language'
-import type { LinksAdapter } from '@perspect3vism/ad4m/Language'
-import type { InteractionCall } from '@perspect3vism/ad4m/Language'
-import type LanguageContext from '@perspect3vism/ad4m/LanguageContext';
-import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
+import type { 
+    Address, Expression, Language, LanguageContext, LanguageRef, 
+    LinksAdapter, InteractionCall 
+} from '@perspect3vism/ad4m';
+import { ExpressionRef } from '@perspect3vism/ad4m';
 import fs from 'fs'
 import path from 'path'
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
 import baseX from 'base-x'
-import type Address from '@perspect3vism/ad4m/Address';
 import { builtInLangs, builtInLangPath, languageAliases, bootstrapFixtures } from "./Config";
 import * as PubSub from './graphQL-interface/PubSub'
 
@@ -19,6 +16,11 @@ const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const bs58 = baseX(BASE58)
 
 type LinkObservers = (added: Expression[], removed: Expression[], lang: LanguageRef)=>void;
+
+interface LoadedLanguage {
+    language: Language,
+    hash: String,
+}
 
 export default class LanguageController {
     #languages: Map<string, Language>
@@ -70,7 +72,7 @@ export default class LanguageController {
                     if(alias === 'lang') {
                         this.#languageLanguage = language
                     }
-                    if(alias === 'perspective') {
+                    if(alias === 'neighbourhood') {
                         this.#perspectiveLanguage = language
                     }
                 }
@@ -95,7 +97,7 @@ export default class LanguageController {
         }))
     }
 
-    async loadLanguage(sourceFilePath: string): Promise<any> {
+    async loadLanguage(sourceFilePath: string): Promise<LoadedLanguage> {
         if(!path.isAbsolute(sourceFilePath))
             sourceFilePath = path.join(process.env.PWD, sourceFilePath)
 
@@ -126,13 +128,17 @@ export default class LanguageController {
         return { hash, language }
     }
 
+    async loadMockLanguage(hash: string, language: Language) {
+        this.#languages.set(hash, language)
+    }
+
     async ipfsHash(data: Buffer|string): Promise<string> {
         // @ts-ignore
         const ipfsAddress = await this.#context.IPFS.add({content: data.toString()}, {onlyHash: true})
         return ipfsAddress.cid.toString()
     }
 
-    async installLanguage(address: Address, languageMeta: void|Expression) {
+    async installLanguage(address: Address, languageMeta: void|Expression): Promise<Language> {
         const language = this.#languages.get(address)
         
         if (language == undefined) {
@@ -152,7 +158,7 @@ export default class LanguageController {
                 console.error("LanguageController.installLanguage: COULDN'T GET SOURCE OF LANGUAGE TO INSTALL!")
                 console.error("LanguageController.installLanguage: Address:", address)
                 console.error("LanguageController.installLanguage:", languageMeta)
-                return
+                throw Error(`Could not find language source for language with address: ${address}`)
             }
             const hash = await this.ipfsHash(source)
             if(hash === 'asdf') {
@@ -173,12 +179,13 @@ export default class LanguageController {
                 return
             }
     
-            const sourcePath = path.join(Config.languagesPath, address, 'bundle.js')
-            const metaPath = path.join(Config.languagesPath, address, 'meta.json')
+            const languagePath = path.join(Config.languagesPath, address);
+            const sourcePath = path.join(languagePath, 'bundle.js')
+            const metaPath = path.join(languagePath, 'meta.json')
             try {
-                fs.mkdirSync(path.join(Config.languagesPath, address))
+                fs.mkdirSync(languagePath)
             } catch(e) {
-                console.error("Error trying to create directory", path.join(Config.languagesPath, address))
+                console.error("Error trying to create directory", languagePath)
                 console.error("Will proceed with installing language anyway...")
             }
             
@@ -186,11 +193,12 @@ export default class LanguageController {
             fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
             // console.log(new Date(), "LanguageController: installed language");
             try {
-                await this.loadLanguage(sourcePath)
+                return (await this.loadLanguage(sourcePath)).language
             } catch(e) {
                 console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
                 console.error("LanguageController.installLanguage: ======================================")
-                console.error(e)
+                fs.rmdirSync(languagePath, {recursive: true})
+                throw Error(e)
             }
         }
     }
@@ -205,20 +213,19 @@ export default class LanguageController {
         }
     }
 
-    //TODO: this will break if reference to encrypted language is passed
-    languageByRef(ref: LanguageRef): Language {
+    async languageByRef(ref: LanguageRef): Language {
         const address = languageAliases[ref.address] ? languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
         if(language) {
             return language
         } else {
-            this.getLanguageExpression(address).then(languageMeta => {
-                if(languageMeta) {
-                    this.installLanguage(address, languageMeta)
-                }
-            })
-            
-            throw new Error("Language not found by reference: " + JSON.stringify(ref))
+            let languageMeta = await this.getLanguageExpression(address);
+            if(languageMeta) {
+                await this.installLanguage(address, languageMeta)
+                return JSON.parse(languageMeta.data)
+            } else {
+                throw new Error("Language not found by reference: " + JSON.stringify(ref))
+            }
         }
     }
 
@@ -321,7 +328,7 @@ export default class LanguageController {
         }
     }
 
-    putSettings(lang: LanguageRef, settings: object) {
+    async putSettings(lang: LanguageRef, settings: object) {
         const directory = path.join(Config.languagesPath, lang.name)
         if(!fs.existsSync(directory))
             fs.mkdirSync(directory)
@@ -330,14 +337,26 @@ export default class LanguageController {
 
         this.#languages.set(lang.address, null)
         const create = this.#languageConstructors.get(lang.address)
-        const context = this.#context
         const storageDirectory = Config.getLanguageStoragePath(lang.name)
-        const newInstance = create({...context, storageDirectory, customSettings: settings})
-        this.#languages.set(lang.address, newInstance)
+        const Holochain = this.#holochainService.getDelegateForLanguage(lang.address)
+        //@ts-ignore
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: lang.address, pubsub: this.pubSub});
+        const language = await create({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings: settings})
+
+        if(language.linksAdapter) {
+            language.linksAdapter.addCallback((added, removed) => {
+                this.#linkObservers.forEach(o => {
+                    o(added, removed, {name, address: lang.address} as LanguageRef)
+                })
+            })
+        }
+
+        this.#languages.set(lang.address, language)
     }
 
-    async createPublicExpression(lang: LanguageRef, content: object): Promise<ExpressionRef> {
-        const putAdapter = this.languageByRef(lang).expressionAdapter.putAdapter
+    async expressionCreate(lang: LanguageRef, content: object): Promise<ExpressionRef> {
+        const language = await this.languageByRef(lang)
+        const putAdapter = language.expressionAdapter.putAdapter
         let address = null
 
         try {
@@ -385,9 +404,11 @@ export default class LanguageController {
                 if(! await this.#context.signatures.verify(expr)) {
                     console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
                     expr.proof.invalid = true
+                    delete expr.proof.valid
                 } else {
                     // console.debug("Valid expr:", ref)
                     expr.proof.valid = true
+                    delete expr.proof.invalid
                 }
             } catch(e) {
                 console.error("Error trying to verify expression signature:", e)

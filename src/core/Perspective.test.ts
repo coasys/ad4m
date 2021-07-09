@@ -1,11 +1,10 @@
 import Perspective from './Perspective'
 import type PerspectiveContext from './PerspectiveContext'
-import type PerspectiveID from './PerspectiveID'
 import { PerspectivismDb } from './db'
 import { v4 as uuidv4 } from 'uuid'
-import type { LinkQuery } from '@perspect3vism/ad4m/Links'
+import type { Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
-import type LanguageRef from '@perspect3vism/ad4m/LanguageRef'
 import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
 
@@ -17,10 +16,7 @@ const agentService = {
     agent: { did }
 }
 
-const sharingLanguage = { 
-    address: "sharing-language-address",
-    name: "sharing-lanugage Name"
-} as LanguageRef
+const sharingLanguage = "sharing-language-address";
 
 function LinksAdapter() {
     this.getLinks = jest.fn(args=>{return []})
@@ -33,7 +29,7 @@ let linksAdapter = new LinksAdapter()
 
 const languageController = {
     getLinksAdapter: jest.fn(langRef => {
-        if(langRef.address === sharingLanguage.address)
+        if(langRef.address === sharingLanguage)
             return linksAdapter
         else
             return null
@@ -51,7 +47,7 @@ describe('Perspective', () => {
             {
                 uuid: uuidv4(),
                 name: "Test Perspective"
-            } as PerspectiveID,
+            } as PerspectiveHandle,
             // @ts-ignore
             {
                 agentService,
@@ -64,7 +60,7 @@ describe('Perspective', () => {
     it('wraps links in expressions on addLink', () => {
         const link = createLink()
         const expression = perspective.addLink(link)
-        expect(expression.author).toEqual(agentService.agent)
+        expect(expression.author.did).toEqual(agentService.agent.did)
         expect(expression.data).toEqual(link)
         expect(agentService.createSignedExpression.mock.calls.length).toBe(1)
         expect(agentService.createSignedExpression.mock.calls[0][0]).toEqual(link)
@@ -108,9 +104,10 @@ describe('Perspective', () => {
 
     describe('with link sharing language', () => {
         beforeEach(() => {
-            perspective.sharedPerspective = {
-                linkLanguages: [sharingLanguage]
-            }
+            perspective.neighbourhood = {
+                linkLanguage: sharingLanguage,
+                perspective: new Ad4mPerspective([])
+            } as Neighbourhood
             linksAdapter = new LinksAdapter()
         })
 
@@ -171,14 +168,15 @@ describe('Perspective', () => {
 
         describe('syncWithSharingAdpater', () => {
             it('adds all missing links from local DB to linksAdapter', async () => {
-                perspective.sharedPerspective = null
+                perspective.neighbourhood = null
     
                 const link = createLink()
                 const linkExpression = await perspective.addLink(link)
     
-                perspective.sharedPerspective = {
-                    linkLanguages: [sharingLanguage]
-                }
+                perspective.neighbourhood = {
+                    linkLanguage: sharingLanguage,
+                    perspective: new Ad4mPerspective([])
+                } as Neighbourhood
 
                 await perspective.syncWithSharingAdapter()
 
