@@ -86,7 +86,7 @@ export default class HolochainService {
                 try {
                     await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
                 } catch {
-                    console.warn("HolochainService: Could not attach app interface, assuming already attached...")
+                    console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...")
                 }
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
             };

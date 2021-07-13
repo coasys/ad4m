@@ -24,8 +24,8 @@ interface OuterConfig {
 export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let { resourcePath, appDataPath, appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, appBuiltInLangs, appLangAliases, mocks, portGraphQL, portHCAdmin, portHCApp } = config
     if(!portGraphQL) portGraphQL = 4000
-    if(!portHCAdmin) portHCAdmin = 1337
-    if(!portHCApp) portHCApp = 2000
+    if(!portHCAdmin) portHCAdmin = 2000
+    if(!portHCApp) portHCApp = 1337
     let builtInLangPath = appDefaultLangPath;
     let builtInLangs = [
       ad4mBootstrapLanguages.agents, 
@@ -73,7 +73,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       bootstrapFixtures,
     });
     console.log("\x1b[34m", "Init services...");
-    await core.initServices(portHCAdmin, portHCAdmin);
+    await core.initServices(portHCAdmin, portHCApp);
     console.log("\x1b[31m", "GraphQL server starting...");
     await core.startGraphQLServer(portGraphQL, mocks)
 
