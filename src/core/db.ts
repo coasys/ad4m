@@ -1,11 +1,12 @@
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
+import type { LinkExpression } from "@perspect3vism/ad4m";  
 
 export class PerspectivismDb {
     #db: any
 
-    constructor(adapter) {
+    constructor(adapter: typeof FileSync) {
         const db = low(adapter)
         this.#db = db
     }
@@ -26,7 +27,7 @@ export class PerspectivismDb {
         return `${pUUID}-to_target-${target}`
     }
 
-    storeLink(pUUID: string, link: object, linkName: string) {
+    storeLink(pUUID: string, link: object, linkName: string): void {
         this.#db.set(this.linkKey(pUUID, linkName), [link]).write()
 
         const key = this.allLinksKey(pUUID)
@@ -39,7 +40,7 @@ export class PerspectivismDb {
             .write()
     }
 
-    updateLink(pUUID: string, link: object, linkName: string) {
+    updateLink(pUUID: string, link: object, linkName: string): void {
         const key = this.linkKey(pUUID, linkName)
 
         if(!this.#db.has(key).value()) {
@@ -52,27 +53,27 @@ export class PerspectivismDb {
             .write()
     }
 
-    getLink(pUUID: string, linkName: string): object|void {
+    getLink(pUUID: string, linkName: string): object | null {
         const key = this.linkKey(pUUID, linkName)
         const versions = this.#db.get(key).value()
         return versions[versions.length-1]
     }
 
-    getAllLinks(pUUID: string): any[] {
+    getAllLinks(pUUID: string): object[] {
         return this.getLinksByKey(pUUID, this.allLinksKey(pUUID))
     }
 
-    getLinksBySource(pUUID: string, source: string): any[] {
+    getLinksBySource(pUUID: string, source: string): object[] {
         const key = this.sourceKey(pUUID, source)
         return this.getLinksByKey(pUUID, key)
     }
 
-    getLinksByTarget(pUUID: string, target: string): any[] {
+    getLinksByTarget(pUUID: string, target: string): object[] {
         const key = this.targetKey(pUUID, target)
         return this.getLinksByKey(pUUID, key)
     }
 
-    getLinksByKey(pUUID: string, key: string): any[] {
+    getLinksByKey(pUUID: string, key: string): object[] {
         let allLinkNames = this.#db.get(key).value()
         if(!allLinkNames) {
             allLinkNames = []
@@ -88,17 +89,17 @@ export class PerspectivismDb {
         return allLinks
     }
 
-    attachSource(pUUID: string, source: string, linkName: string) {
+    attachSource(pUUID: string, source: string, linkName: string): void {
         const key = this.sourceKey(pUUID, source)
         this.attach(key, linkName)
     }
 
-    attachTarget(pUUID: string, target: string, linkName: string) {
+    attachTarget(pUUID: string, target: string, linkName: string): void {
         const key = this.targetKey(pUUID, target)
         this.attach(key, linkName)
     }
 
-    attach(key: string, linkName: string) {
+    attach(key: string, linkName: string): void {
         if(!this.#db.has(key).value()) {
             this.#db.set(key, []).write()
         }
@@ -110,24 +111,25 @@ export class PerspectivismDb {
         }
     }
 
-    removeSource(pUUID: string, source: string, linkName: string) {
+    removeSource(pUUID: string, source: string, linkName: string): void {
         const key = this.sourceKey(pUUID, source)
         this.remove(key, linkName)
     }
 
-    removeTarget(pUUID: string, target: string, linkName: string) {
+    removeTarget(pUUID: string, target: string, linkName: string): void {
         const key = this.targetKey(pUUID, target)
         this.remove(key, linkName)
     }
 
 
-    remove(key: string, linkName: string) {
+    remove(key: string, linkName: string): void {
+        //@ts-ignore
         this.#db.get(key).remove(l => l===linkName).write()
     }
 
 }
 
-export function init(dbFilePath): PerspectivismDb {
+export function init(dbFilePath: string): PerspectivismDb {
     const adapter = new FileSync(path.join(dbFilePath, 'db.json'))
     return new PerspectivismDb(adapter)
 }

@@ -1,6 +1,6 @@
 import PerspectivismCore from "./core/PerspectivismCore";
 import create from "./core/PerspectivismCore";
-import { BootstrapFixtures, BootstrapLanguages } from "./core/Config"
+import { BootstrapFixtures, BootstrapLanguages, LanguageAlias } from "./core/Config"
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
@@ -11,9 +11,9 @@ interface OuterConfig {
   appDataPath: string
   appDefaultLangPath: string
   ad4mBootstrapLanguages: BootstrapLanguages,
-  ad4mBootstrapFixtures: BootstrapFixtures | void,
-  appBuiltInLangs: string[] | void,
-  appLangAliases: object | void,
+  ad4mBootstrapFixtures: BootstrapFixtures,
+  appBuiltInLangs: string[] | null,
+  appLangAliases: object | null,
   mocks: boolean,
   portGraphQL?: number,
   portHCAdmin?: number,

@@ -1,4 +1,7 @@
 {
+  "include": [
+    "src/**/*"
+  ],
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig.json to read more about this file */
 
@@ -16,7 +19,7 @@
     // "sourceMap": true,                           /* Generates corresponding '.map' file. */
     // "outFile": "./",                             /* Concatenate and emit output to single file. */
     "outDir": "./lib",                              /* Redirect output structure to the directory. */
-    // "rootDir": "./",                             /* Specify the root directory of input files. Use to control the output directory structure with --outDir. */
+    "rootDir": "./src",                             /* Specify the root directory of input files. Use to control the output directory structure with --outDir. */
     // "composite": true,                           /* Enable project compilation */
     // "tsBuildInfoFile": "./",                     /* Specify file to store incremental compilation information */
     // "removeComments": true,                      /* Do not emit comments to output. */
@@ -26,7 +29,7 @@
     // "isolatedModules": true,                     /* Transpile each file as a separate module (similar to 'ts.transpileModule'). */
 
     /* Strict Type-Checking Options */
-    "strict": false,                                 /* Enable all strict type-checking options. */
+    "strict": true,                                 /* Enable all strict type-checking options. */
     // "noImplicitAny": true,                       /* Raise error on expressions and declarations with an implied 'any' type. */
     // "strictNullChecks": true,                    /* Enable strict null checks. */
     // "strictFunctionTypes": true,                 /* Enable strict checking of function types. */
@@ -71,5 +74,13 @@
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "allowSyntheticDefaultImports": true
-  }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.vue",
+    "tests/**/*.ts",
+    "tests/**/*.tsx"
+  ],
+  "typedef": [ true, "call-signature", "arrow-call-signature" ]
 }

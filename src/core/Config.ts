@@ -12,18 +12,22 @@ export let holochainConductorPath = path.join(holochainPath, 'c')
 export let resourcePath = ''
 
 export let builtInLangPath = "";
-export let builtInLangs = [];
-export let languageAliases = {};
-export let bootstrapFixtures: BootstrapFixtures|void = null;
+export let builtInLangs: string[] = [];
+export let languageAliases: LanguageAlias = {};
+export let bootstrapFixtures: BootstrapFixtures|null = null;
 
+
+export type LanguageAlias = {
+    [key: string]: string;
+}
 
 export interface CoreConfig {
     appDataPath: string
     appResourcePath: string
     builtInLangPath: string
     builtInLangs: string[]
-    languageAliases?: object|void
-    bootstrapFixtures?: BootstrapFixtures|void
+    languageAliases?: LanguageAlias
+    bootstrapFixtures?: BootstrapFixtures
 }
 
 
@@ -49,10 +53,15 @@ export function init(c: CoreConfig) {
     builtInLangs = c.builtInLangs
     if(c.languageAliases)
         languageAliases = c.languageAliases
-    bootstrapFixtures = c.bootstrapFixtures
+
+    if (c.bootstrapFixtures) {
+        bootstrapFixtures = c.bootstrapFixtures!;
+    } else {
+        bootstrapFixtures = null
+    }
 }
 
-export function getLanguageStoragePath(name) {
+export function getLanguageStoragePath(name: string) {
     const languageConfigPath = path.join(languagesPath, name)
     if(!fs.existsSync(languageConfigPath))
         fs.mkdirSync(languageConfigPath)
@@ -69,17 +78,17 @@ export interface BootstrapLanguages {
 }
 
 export class BootstrapFixtures {
-    languages: BootstrapLanguageFixture[]
-    perspectives: BootstrapPerspectiveFixture[]
+    languages?: BootstrapLanguageFixture[]
+    perspectives?: BootstrapPerspectiveFixture[]
 }
   
 export class BootstrapLanguageFixture {
-    address: string
-    meta: Expression
-    bundle: string
+    address?: string
+    meta?: Expression
+    bundle?: string
 }
   
 export class BootstrapPerspectiveFixture {
-    address: string
-    expression: Expression
+    address?: string
+    expression?: Expression
 }

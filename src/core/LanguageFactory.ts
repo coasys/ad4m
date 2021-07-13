@@ -33,6 +33,7 @@ export default class LanguageFactory {
 
         //Read the dna.yaml and insert uid to make unique
         let dnaYaml = yaml.load(fs.readFileSync(hcDnaConfigPath, 'utf8'));
+        //@ts-ignore
         dnaYaml.uid = uid;
         let dnaYamlDump = yaml.dump(dnaYaml);
         //console.log("LanguageFactory: writing new language DNA bundle", dnaYamlDump);
@@ -112,7 +113,7 @@ export default class LanguageFactory {
         }
 
         try {
-            const address = await (this.#languageLanguage.expressionAdapter.putAdapter as PublicSharing).createPublic(newLanguageObj)
+            const address = await (this.#languageLanguage.expressionAdapter!.putAdapter as PublicSharing).createPublic(newLanguageObj)
             return {
                 address,
                 name,

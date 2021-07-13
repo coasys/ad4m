@@ -6,35 +6,35 @@ export default function perspectiveTests(testContext: TestContext) {
     return  () => {
         describe('Perspectives', () => {
             it('can create, get & delete perspective', async () => {
-                const ad4mClient = testContext.ad4mClient
+                const ad4mClient = testContext.ad4mClient!
 
                 const create = await ad4mClient.perspective.add("test");
                 expect(create.name).toEqual("test");
 
                 const get = await ad4mClient!.perspective.byUUID(create.uuid);
-                expect(get.name).toEqual("test");
+                expect(get!.name).toEqual("test");
 
                 const update = await ad4mClient!.perspective.update(create.uuid, "updated-test");
                 expect(update.name).toEqual("updated-test");
 
-                const getUpdated = await ad4mClient!.perspective.byUUID(update.uuid);
-                expect(getUpdated.name).toEqual("updated-test");
+                const getUpdated = await ad4mClient!.perspective.byUUID(update.uuid );
+                expect(getUpdated!.name).toEqual("updated-test");
 
                 const perspectives = await ad4mClient.perspective.all();
                 expect(perspectives.length).toBe(1);
 
-                const perspectiveSnaphot = await ad4mClient.perspective.snapshotByUUID(update.uuid);
-                expect(perspectiveSnaphot.links.length).toBe(0);
+                const perspectiveSnaphot = await ad4mClient.perspective.snapshotByUUID(update.uuid );
+                expect(perspectiveSnaphot!.links.length).toBe(0);
 
-                const deletePerspective = await ad4mClient!.perspective.remove(update.uuid);
+                const deletePerspective = await ad4mClient!.perspective.remove(update.uuid );
                 expect(deletePerspective.perspectiveRemove).toBe(true);
 
-                const getDeleted = await ad4mClient!.perspective.byUUID(update.uuid);
+                const getDeleted = await ad4mClient!.perspective.byUUID(update.uuid );
                 expect(getDeleted).toEqual(null);
             })
 
             it('can publish and join perspective', async () => {
-                const ad4mClient = testContext.ad4mClient;
+                const ad4mClient = testContext.ad4mClient!;
 
                 const create = await ad4mClient!.perspective.add("publish-test");
                 expect(create.name).toEqual("publish-test");
@@ -43,23 +43,25 @@ export default function perspectiveTests(testContext: TestContext) {
                 const createUniqueLang = await ad4mClient.languages.cloneHolochainTemplate(path.join(__dirname, "../test-temp/social-context"), "social-context", "b98e53a8-5800-47b6-adb9-86d55a74871e");
                 expect(createUniqueLang.name).toBe("social-context-channel");
 
+                let link = new LinkExpression()
+                link.author = "did:test";
+                link.timestamp = new Date().toISOString();
+                link.data = new Link({source: "src", target: "target", predicate: "pred"});
+                link.proof = new ExpressionProof("sig", "key");
                 const publishPerspective = await ad4mClient.neighbourhood.publishFromPerspective(create.uuid, createUniqueLang.address, 
                     new Perspective(
-                        new LinkExpression("did:test", new Date().toISOString(), 
-                            new Link({source: "src", target: "target", predicate: "pred"}), 
-                            new ExpressionProof("sig", "key")
-                        )
+                        [link]
                     )
                 );
                 //Check that we got an ad4m url back
                 expect(publishPerspective.split("://").length).toBe(2);
 
-                const join = await ad4mClient.neighbourhood.joinFromUrl(publishPerspective);
+                const join = await ad4mClient.neighbourhood.joinFromUrl(publishPerspective );
                 expect(join.sharedUrl).toBe(publishPerspective);
             })
 
             it('test local perspective links', async () => {
-                const ad4mClient = testContext.ad4mClient
+                const ad4mClient = testContext.ad4mClient!
 
                 const create = await ad4mClient!.perspective.add("test-links");
                 expect(create.name).toEqual("test-links");
@@ -84,8 +86,8 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(queryLinksPredicate[0].data.target).toEqual("lang://test-target");
                 expect(queryLinksPredicate[0].data.source).toEqual("lang://test");
 
-                const perspectiveSnaphot = await ad4mClient.perspective.snapshotByUUID(create.uuid);
-                expect(perspectiveSnaphot.links.length).toBe(1);
+                const perspectiveSnaphot = await ad4mClient.perspective.snapshotByUUID(create.uuid );
+                expect(perspectiveSnaphot!.links.length).toBe(1);
 
                 //Update the link to new link
                 const updateLink = await ad4mClient.perspective.updateLink(create.uuid, addLink, 
@@ -93,8 +95,8 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(updateLink.data.target).toEqual("lang://test-target2");
                 expect(updateLink.data.source).toEqual("lang://test2");
 
-                const perspectiveSnaphotLinkUpdate = await ad4mClient.perspective.snapshotByUUID(create.uuid);
-                expect(perspectiveSnaphotLinkUpdate.links.length).toBe(1);
+                const perspectiveSnaphotLinkUpdate = await ad4mClient.perspective.snapshotByUUID(create.uuid );
+                expect(perspectiveSnaphotLinkUpdate!.links.length).toBe(1);
 
                 //Test cannot get old link
                 let queryLinksOld = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test"}));
@@ -112,7 +114,7 @@ export default function perspectiveTests(testContext: TestContext) {
             })
 
             it('subscriptions', async () => {
-                const ad4mClient: Ad4mClient = testContext.ad4mClient
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
 
                 const perspectiveAdded = jest.fn()
                 ad4mClient.perspective.addPerspectiveAddedListener(perspectiveAdded)
@@ -126,7 +128,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(perspectiveAdded.mock.calls.length).toBe(1)
                 expect(perspectiveAdded.mock.calls[0][0]).toEqual(p)
 
-                const p1 = await ad4mClient.perspective.update(p.uuid, "New Name")
+                const p1 = await ad4mClient.perspective.update(p.uuid , "New Name")
                 expect(perspectiveUpdated.mock.calls.length).toBe(1)
                 expect(perspectiveUpdated.mock.calls[0][0]).toEqual(p1)
 
@@ -135,17 +137,17 @@ export default function perspectiveTests(testContext: TestContext) {
                 const linkRemoved = jest.fn()
                 await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, linkRemoved)
 
-                const linkExpression = await ad4mClient.perspective.addLink(p1.uuid, {source: 'root', target: 'lang://123'})
+                const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'root', target: 'lang://123'})
                 expect(linkAdded.mock.calls.length).toBe(1)
                 expect(linkAdded.mock.calls[0][0]).toEqual(linkExpression)
 
-                const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid, linkExpression, {source: 'root', target: 'lang://456'})
+                const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'root', target: 'lang://456'})
                 expect(linkAdded.mock.calls.length).toBe(2)
                 expect(linkAdded.mock.calls[1][0]).toEqual(updatedLinkExpression)
                 expect(linkRemoved.mock.calls.length).toBe(1)
                 expect(linkRemoved.mock.calls[0][0]).toEqual(linkExpression)
 
-                await ad4mClient.perspective.removeLink(p1.uuid, updatedLinkExpression)
+                await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
                 expect(linkRemoved.mock.calls.length).toBe(2)
                 expect(linkRemoved.mock.calls[1][0]).toEqual(updatedLinkExpression)
             })

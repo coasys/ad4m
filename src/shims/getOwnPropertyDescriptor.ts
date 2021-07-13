@@ -1,4 +1,4 @@
-
+//@ts-ignore
 export default function( object, key ) {
   
     var hasSupport =

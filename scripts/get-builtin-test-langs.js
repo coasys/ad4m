@@ -20,8 +20,8 @@ const languages = {
   },
   "social-context": {
     targetDnaName: "social-context",
-    dna: "https://github.com/juntofoundation/Social-Context/releases/download/0.0.5/social-context.dna",
-    bundle: "https://github.com/juntofoundation/Social-Context/releases/download/0.0.5/bundle.js",
+    dna: "https://github.com/juntofoundation/Social-Context/releases/download/0.0.6/social-context.dna",
+    bundle: "https://github.com/juntofoundation/Social-Context/releases/download/0.0.6/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.1/bundle.js",

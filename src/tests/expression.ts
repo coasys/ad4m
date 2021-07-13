@@ -4,7 +4,7 @@ export default function expressionTests(testContext: TestContext) {
     return () => {
         describe('Expressions', () => {
             it('can get() my agent expression', async () => {
-                const ad4mClient = testContext.ad4mClient
+                const ad4mClient = testContext.ad4mClient!
                 const me = await ad4mClient.agent.me()
                 
                 const agent = await ad4mClient.expression.get(me.did)
@@ -14,7 +14,7 @@ export default function expressionTests(testContext: TestContext) {
             })
 
             it('can getRaw() my agent expression', async () => {
-                const ad4mClient = testContext.ad4mClient
+                const ad4mClient = testContext.ad4mClient!
                 const me = await ad4mClient.agent.me()
                 
                 const agent = await ad4mClient.expression.getRaw(me.did)
@@ -23,7 +23,7 @@ export default function expressionTests(testContext: TestContext) {
             })
 
             it('can create()', async () => {
-                const ad4mClient = testContext.ad4mClient
+                const ad4mClient = testContext.ad4mClient!
                 let me = await ad4mClient.agent.me()
 
                 me.directMessageLanguage = "test 2"
@@ -32,11 +32,12 @@ export default function expressionTests(testContext: TestContext) {
             })
 
             it('can create valid signatures', async () => {
-                const ad4mClient = testContext.ad4mClient
+                const ad4mClient = testContext.ad4mClient!
+                //@ts-ignore
                 const noteIpfs = (await ad4mClient.languages.byFilter('')).find(l=>l.name ==='note-ipfs')
                 expect(noteIpfs).toBeDefined()
 
-                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs.address)
+                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs!.address)
                 expect(exprAddr).toBeDefined()
 
                 const expr = await ad4mClient.expression.get(exprAddr)
