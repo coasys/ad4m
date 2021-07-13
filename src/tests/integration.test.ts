@@ -154,7 +154,9 @@ describe("Integration tests", () => {
         let bob: PerspectivismCore | null = null
         beforeAll(async () => {
             const appDataPath = path.join(DATA_RESOURCE_PATH, 'bob')
-            fs.mkdirSync(appDataPath)
+            const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
+            if(!fs.existsSync(appDataPath))
+              fs.mkdirSync(appDataPath)
 
             bob = await main.init({
                 appDataPath,
@@ -175,6 +177,7 @@ describe("Integration tests", () => {
                 portGraphQL: 14000,
                 portHCAdmin: 12000,
                 portHCApp: 11337,
+                ipfsRepoPath
           })
 
           bob.initControllers()

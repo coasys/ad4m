@@ -12,11 +12,12 @@ const uint8ArrayConcat = (chunks: Uint8Array) => {
     return chunks.reduce(_appendBuffer)
 }
 
-export async function init () {
+export async function init (repo?: string) {
     const node = await IPFS.create({
         EXPERIMENTAL: {
             ipnsPubsub: true
-        }
+        },
+        repo
     });
     const version = await node.version()
 

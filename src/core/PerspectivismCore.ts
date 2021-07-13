@@ -16,6 +16,11 @@ import Signatures from './agent/Signatures'
 import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
 
+export interface InitServicesParams {
+    portHCAdmin?: number, 
+    portHCApp?: number,
+    ipfsRepoPath?: string
+}
 export default class PerspectivismCore {
     #holochain?: HolochainService
     #IPFS: any
@@ -73,11 +78,17 @@ export default class PerspectivismCore {
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
 
-    async initServices(portHCAdmin?: number, portHCApp?: number) {
+    async initServices(params: InitServicesParams) {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
-        console.log(`Holochain ports: admin=${portHCAdmin} app=${portHCApp}`)
-        this.#holochain = new HolochainService(Config.holochainConductorPath, Config.holochainDataPath, Config.resourcePath, portHCAdmin, portHCApp)
-        let [ipfs, _] = await Promise.all([IPFS.init(), this.#holochain.run()]);
+        console.log(`Holochain ports: admin=${params.portHCAdmin} app=${params.portHCApp}`)
+        this.#holochain = new HolochainService(
+            Config.holochainConductorPath, 
+            Config.holochainDataPath, 
+            Config.resourcePath, 
+            params.portHCAdmin, 
+            params.portHCApp
+        )
+        let [ipfs, _] = await Promise.all([IPFS.init(params.ipfsRepoPath), this.#holochain.run()]);
         this.#IPFS = ipfs;
     }
 
