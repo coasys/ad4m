@@ -4,7 +4,7 @@ require('gun/lib/then.js')
 require('gun/lib/unset.js')
 
 const gun = {
-    init: (dbFilePath) => {
+    init: (dbFilePath: string) => {
         return Gun({
             file: dbFilePath,
             localStorage: false,

@@ -17,19 +17,19 @@ export default class HolochainService {
     #db: any
     #adminPort: number
     #appPort: number
-    #adminWebsocket: AdminWebsocket
-    #appWebsocket: AppWebsocket
+    #adminWebsocket?: AdminWebsocket
+    #appWebsocket?: AppWebsocket
     #dataPath: string
-    #ready: Promise<void>
-    #hcProcess: ChildProcess
-    #lairProcess: ChildProcess
+    #ready?: Promise<void>
+    #hcProcess?: ChildProcess
+    #lairProcess?: ChildProcess
     #resourcePath: string
     #conductorPath: string
     #didResolveError: boolean
     #conductorConfigPath: string
     signalCallbacks: Map<string, [AppSignalCb, string]>;
 
-    constructor(conductorPath, dataPath, resourcePath) {
+    constructor(conductorPath: string, dataPath: string, resourcePath: string) {
         this.#didResolveError = false;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
@@ -63,14 +63,14 @@ export default class HolochainService {
         // console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
         if (this.signalCallbacks.size != 0) {
             let callbacks = this.signalCallbacks.get(signal.data.cellId[1].toString("base64"))
-            if (callbacks[0] != undefined) {
-                callbacks[0](signal);
+            if (callbacks![0] != undefined) {
+                callbacks![0](signal);
             };
         };
     }
 
     async run() {
-        let resolveReady
+        let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)
 
         let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath);
@@ -98,12 +98,12 @@ export default class HolochainService {
                     throw new Error(e)
                 }
             };
-            resolveReady()
+            resolveReady!()
             this.#didResolveError = false;
         } catch(e) {
             console.error("HolochainService: Error intializing Holochain conductor:", e)
             this.#didResolveError = true;
-            resolveReady()
+            resolveReady!()
         }
     }
 
@@ -112,7 +112,9 @@ export default class HolochainService {
         if (this.#didResolveError) {
             console.error("HolochainService.stop: Warning attempting to close holochain processes when they did not start error free...")
         }
-        stopProcesses(this.#conductorPath, this.#hcProcess, this.#lairProcess)
+        if (this.#hcProcess && this.#lairProcess) {
+            stopProcesses(this.#hcProcess, this.#lairProcess)
+        }
     }
 
     unpackDna(dnaPath: string): string {
@@ -130,7 +132,7 @@ export default class HolochainService {
             console.debug("Found existing pubKey", pubKey.toString("base64"), "for language:", lang)
             return pubKey
         } else {
-            const pubKey = await this.#adminWebsocket.generateAgentPubKey()
+            const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
             this.#db.get('pubKeys').push({lang, pubKey}).write()
             console.debug("Created new pubKey", pubKey.toString("base64"), "for language", lang)
             return pubKey
@@ -147,7 +149,7 @@ export default class HolochainService {
             console.log("HolochainService: setting holochains signal callback for language", lang);
             this.signalCallbacks.set(pubKey.toString("base64"), [callback, lang]);
         };
-        const activeApps = await this.#adminWebsocket.listActiveApps();
+        const activeApps = await this.#adminWebsocket!.listActiveApps();
         //console.log("HolochainService: Found running apps:", activeApps);
         if(!activeApps.includes(lang)) {
 
@@ -164,10 +166,10 @@ export default class HolochainService {
                     //console.log("HolochainService: Installing DNA:", dna, "at data path:", this.#dataPath, "\n");
                     const p = path.join(this.#dataPath, `${lang}-${dna.nick}.dna`);
                     fs.writeFileSync(p, dna.file);
-                    const hash = await this.#adminWebsocket.registerDna({
+                    const hash = await this.#adminWebsocket!.registerDna({
                         path: p
                     })
-                    await this.#adminWebsocket.installApp({
+                    await this.#adminWebsocket!.installApp({
                         installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick}]
                     })
                 }
@@ -186,7 +188,7 @@ export default class HolochainService {
 
             // 2. activate app
             try {
-                await this.#adminWebsocket.activateApp({installed_app_id: lang})
+                await this.#adminWebsocket!.activateApp({installed_app_id: lang})
             } catch(e) {
                 console.error("HolochainService: ERROR activating app", lang, " - ", e)
             }
@@ -201,18 +203,18 @@ export default class HolochainService {
         return `${languageHash}-${dnaNick}`
     }
 
-    async callZomeFunction(lang: string, dnaNick: string, zomeName: string, fnName: string, payload: object): Promise<any> {
+    async callZomeFunction(lang: string, dnaNick: string, zomeName: string, fnName: string, payload: object|string): Promise<any> {
         await this.#ready
         if (this.#didResolveError) {
             console.error("HolochainService.callZomeFunction: Warning attempting to call zome function when conductor did not start error free...")
         }
         const installed_app_id = lang
         //console.debug("HolochainService.callZomefunction: getting info for app:", installed_app_id)
-        let infoResult = await this.#appWebsocket.appInfo({installed_app_id})
+        let infoResult = await this.#appWebsocket!.appInfo({installed_app_id})
         let tries = 1
         while(!infoResult && tries < 10) {
             await sleep(500)
-            infoResult = await this.#appWebsocket.appInfo({installed_app_id})
+            infoResult = await this.#appWebsocket!.appInfo({installed_app_id})
             tries++
         }
 
@@ -242,7 +244,7 @@ export default class HolochainService {
 
         try {
             console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload)
-            const result = await this.#appWebsocket.callZome({
+            const result = await this.#appWebsocket!.callZome({
                 cap: fakeCapSecret(),
                 cell_id,
                 zome_name: zomeName,
@@ -259,5 +261,5 @@ export default class HolochainService {
     }
 }
 
-const sleep = (ms) =>
+const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(() => resolve(), ms));

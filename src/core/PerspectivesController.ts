@@ -3,8 +3,7 @@ import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
-import type PerspectiveHandle from '@perspect3vism/ad4m'
-import { Perspective as Ad4mPerspective, Neighbourhood } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -39,6 +38,7 @@ export default class PerspectivesController {
         const FILEPATH = path.join(this.#rootConfigPath, FILENAME)
         const obj = {}
         this.#perspectiveHandles.forEach((perspectiveHandle, uuid) => {
+            //@ts-ignore
             obj[uuid] = perspectiveHandle
         })
         fs.writeFileSync(FILEPATH, JSON.stringify(obj))
@@ -70,12 +70,12 @@ export default class PerspectivesController {
         }
     }
 
-    async perspectiveSnapshot(uuid: string): Ad4mPerspective {
+    async perspectiveSnapshot(uuid: string): Promise<Ad4mPerspective> {
         let perspective = this.#perspectiveInstances.get(uuid)
         if (!perspective) {
             throw Error(`Perspective not found: ${uuid}`)
         }
-        return new Ad4mPerspective(await perspective.getLinks({}));
+        return new Ad4mPerspective(await perspective.getLinks({} as LinkQuery));
     }
 
     add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood): PerspectiveHandle {
@@ -95,7 +95,7 @@ export default class PerspectivesController {
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle)
     }
 
-    remove(uuid) {
+    remove(uuid: string) {
         this.#perspectiveHandles.delete(uuid)
         this.#perspectiveInstances.delete(uuid)
         this.save()
@@ -105,7 +105,9 @@ export default class PerspectivesController {
     update(uuid: string, name: string) {
         let perspective = this.perspective(uuid);
         perspective.name = name;
-        this.#perspectiveHandles.set(uuid, perspective)
+        let perspectiveHandle = new PerspectiveHandle(uuid, name);
+        perspectiveHandle.sharedUrl = perspective.sharedUrl;
+        this.#perspectiveHandles.set(uuid, perspectiveHandle)
         this.save()
         const instance = this.#perspectiveInstances.get(uuid)
         if(instance) {

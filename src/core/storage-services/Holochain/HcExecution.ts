@@ -1,27 +1,22 @@
 import child_process from "child_process";
 import fs from "fs";
 import path from "path";
-import { holochainDataPath } from "../../Config";
 
-function escapeShellArg (arg) {
+function escapeShellArg (arg: string) {
     return arg.replace(" ", "\ ");
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-export function stopProcesses(hcDataPath, hcProcess, lairProcess) {
+export function stopProcesses(hcProcess: child_process.ChildProcess, lairProcess: child_process.ChildProcess) {
     // fs.unlinkSync(`${escapeShellArg(hcDataPath)}/keystore/pid`)
     hcProcess.kill("SIGINT");
     lairProcess.kill("SIGINT");
 }
 
-export function unpackDna(hcPath, dnaPath): string {
+export function unpackDna(hcPath: string, dnaPath: string): string {
     return child_process.execFileSync(`${escapeShellArg(hcPath)}`, ["dna", "unpack", `${escapeShellArg(dnaPath)}`]).toString();
 }
 
-export function packDna(hcPath, workdirPath): string {
+export function packDna(hcPath: string, workdirPath: string): string {
     return child_process.execFileSync(`${escapeShellArg(hcPath)}`, ["dna", "pack", `${escapeShellArg(workdirPath)}`]).toString();
 }
 
@@ -84,7 +79,7 @@ network:
     fs.writeFileSync(conductorConfig.conductorConfigPath, conductorStringConfig);
 }
 
-export async function startLair(lairPath, hcDataPath): Promise<child_process.ChildProcess> {
+export async function startLair(lairPath: string, hcDataPath: string): Promise<child_process.ChildProcess> {
     let lairProcess = child_process.spawn(`${escapeShellArg(lairPath)}`, [], {
         env: { ...process.env, LAIR_DIR: `${escapeShellArg(hcDataPath)}/keystore` },
     });
@@ -109,7 +104,7 @@ export async function startLair(lairPath, hcDataPath): Promise<child_process.Chi
     return lairProcess
 }
 
-export async function runHolochain(resourcePath, conductorConfigPath, hcDataPath): Promise<[child_process.ChildProcess, child_process.ChildProcess]> {
+export async function runHolochain(resourcePath: string, conductorConfigPath: string, hcDataPath: string): Promise<[child_process.ChildProcess, child_process.ChildProcess]> {
     let lairProcess = await startLair(path.join(resourcePath, "lair-keystore"), hcDataPath)
 
     let hcProcess = child_process.spawn(`${escapeShellArg(path.join(resourcePath, "holochain"))}`, ["-c", escapeShellArg(conductorConfigPath)],
