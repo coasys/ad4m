@@ -1,7 +1,6 @@
 import {
     ApolloClient,
     InMemoryCache,
-    HttpLink
 } from "@apollo/client/core";
 import { WebSocketLink } from '@apollo/client/link/ws';
 import PerspectivismCore from '../core/PerspectivismCore'
@@ -20,6 +19,7 @@ import perspectiveTests from "./perspective";
 import agentTests from "./agent";
 import languageTests from "./language";
 import expressionTests from "./expression";
+import neighbourhoodTests from "./neighbourhood";
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
@@ -29,9 +29,10 @@ fs.removeSync(path.join(DATA_RESOURCE_PATH, 'ad4m'))
 jest.setTimeout(15000)
 let core: PerspectivismCore | null = null
 
-const apolloClient = new ApolloClient({
+function apolloClient(port: number): ApolloClient<any> {
+  return new ApolloClient({
     link: new WebSocketLink({
-        uri: 'http://localhost:4000/graphql',
+        uri: `http://localhost:${port}/graphql`,
         options: { reconnect: true },
         webSocketImpl: ws,
     }),
@@ -45,9 +46,33 @@ const apolloClient = new ApolloClient({
         }
     },
 });
+}
+
 
 export class TestContext {
-    ad4mClient: Ad4mClient | undefined
+    //#ad4mClient: Ad4mClient | undefined
+    #alice: Ad4mClient | undefined
+    #bob: Ad4mClient | undefined
+
+    get ad4mClient(): Ad4mClient {
+      return this.#alice!
+    }
+
+    get alice(): Ad4mClient {
+      return this.#alice!
+    }
+
+    get bob(): Ad4mClient {
+      return this.#bob!
+    }
+
+    set alice(client: Ad4mClient) {
+      this.#alice = client
+    }
+
+    set bob(client: Ad4mClient) {
+      this.#bob
+    }
 }
 let testContext: TestContext = new TestContext()
 
@@ -94,7 +119,7 @@ describe("Integration tests", () => {
         core.initControllers()
         await core.initLanguages(false)
 
-        testContext.ad4mClient = new Ad4mClient(apolloClient)
+        testContext.alice = new Ad4mClient(apolloClient(4000))
     })
 
     afterAll(async () => {
@@ -124,4 +149,45 @@ describe("Integration tests", () => {
     describe('Expression', expressionTests(testContext))
     describe('Language', languageTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
+
+    describe('with Alice and Bob', () => {
+        let bob: PerspectivismCore | null = null
+        beforeAll(async () => {
+            const appDataPath = path.join(DATA_RESOURCE_PATH, 'bob')
+            fs.mkdirSync(appDataPath)
+
+            bob = await main.init({
+                appDataPath,
+                resourcePath: DATA_RESOURCE_PATH,
+                appDefaultLangPath: DATA_RESOURCE_PATH,
+                ad4mBootstrapLanguages: {
+                  agents: "agent-expression-store",
+                  languages: "languages",
+                  neighbourhoods: "neighbourhood-store",
+                },
+                ad4mBootstrapFixtures: {
+                  languages: [],
+                  perspectives: [],
+                },
+                appBuiltInLangs: ['note-ipfs'],
+                appLangAliases: null,
+                mocks: false,
+                portGraphQL: 14000,
+                portHCAdmin: 12000,
+                portHCApp: 11337,
+          })
+
+          bob.initControllers()
+          await bob.initLanguages(false)
+
+          testContext.bob = new Ad4mClient(apolloClient(14000))
+        })
+
+        afterAll(async () => {
+            await bob!.exit();
+            await new Promise((resolve)=>setTimeout(resolve, 1000))
+        })
+
+        describe('Neighbourhood', neighbourhoodTests(testContext))
+    })
 })
