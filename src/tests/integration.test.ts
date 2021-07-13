@@ -27,7 +27,7 @@ const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
 fs.removeSync(path.join(DATA_RESOURCE_PATH, 'ad4m'))
 
 jest.setTimeout(15000)
-let core: PerspectivismCore = null
+let core: PerspectivismCore | null = null
 
 const apolloClient = new ApolloClient({
     link: new WebSocketLink({
@@ -102,7 +102,7 @@ describe("Integration tests", () => {
         expect(await isProcessRunning("lair-keystore")).toBe(true);
         expect(fs.existsSync(path.join(os.homedir(), ".jsipfs/repo.lock"))).toBe(true);
 
-        await core.exit();
+        await core!.exit();
         await new Promise((resolve)=>setTimeout(resolve, 1000))
         
         expect(await isProcessRunning("holochain")).toBe(false);
@@ -110,6 +110,7 @@ describe("Integration tests", () => {
         expect(fs.existsSync(path.join(os.homedir(), ".jsipfs/repo.lock"))).toBe(false);
 
         //Delete all languages created during test
+        //@ts-ignore
         fs.readdir(path.join(DATA_RESOURCE_PATH, "ad4m/languages"), (err, files) => {
             if (err) throw err;
           

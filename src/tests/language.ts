@@ -5,7 +5,7 @@ export default function languageTests(testContext: TestContext) {
     return () => {
         describe('basic language operations', () => {
             it('can get and create unique language', async () => {
-                const ad4mClient = testContext.ad4mClient
+                const ad4mClient = testContext.ad4mClient!
                 
                 const languages = await ad4mClient.languages.byFilter("");
                 expect(languages.length).toBe(4);
@@ -23,7 +23,8 @@ export default function languageTests(testContext: TestContext) {
                 expect(writeSettings).toBe(true);
 
                 const language = await ad4mClient.languages.byAddress(createUniqueLang.address);
-                expect(JSON.parse(language.settings).setting).toBe("test");
+                expect(language.settings).toBeDefined()
+                expect(JSON.parse(language.settings!).setting).toBe("test");
             })
         })
     }

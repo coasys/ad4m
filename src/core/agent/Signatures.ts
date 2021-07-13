@@ -23,13 +23,14 @@ export default class Signatures {
 
 
         const availableKeys = didDocument.publicKey ? didDocument.publicKey : didDocument.verificationMethod
+        //@ts-ignore
         const key = availableKeys.find(k => k.id === expr.proof.key)
         if(!key) {
             console.debug("Key not found in DID document", expr.proof.key, didDocument)
             return false
         }
 
-        let pubKey
+        let pubKey: Uint8Array | undefined
         if(key.publicKeyHex)
             pubKey = Uint8Array.from(Buffer.from(key.publicKeyHex, "hex"))
         if(key.publicKeyBase58)
@@ -37,6 +38,9 @@ export default class Signatures {
         const sigBytes = Uint8Array.from(Buffer.from(expr.proof.signature, "hex"))
         const message = Signatures.buildMessage(expr.data, expr.timestamp)
 
+        if (!pubKey) {
+            throw Error("Could not find publicKeyHex or publicKeyBase58 in did document")
+        }
         return secp256k1.ecdsaVerify(sigBytes, message, pubKey)
     }
 
@@ -44,7 +48,7 @@ export default class Signatures {
         const payload = { data, timestamp }
         const payloadString = stringify(payload)
         const payloadBuffer = Buffer.from(payloadString)
-        const payloadBytes = Uint8Array.from(sha256(Uint8Array.from(payloadBuffer), { asBytes: true }))
+        const payloadBytes = Uint8Array.from(sha256(Buffer.from(payloadBuffer), { asBytes: true }))
         return payloadBytes
     }
 }

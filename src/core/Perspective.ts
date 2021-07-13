@@ -1,24 +1,23 @@
-import type { Agent, Expression, Neighbourhood, LinkExpressionInput, LinkInput, LanguageRef } from "@perspect3vism/ad4m"
+import type { Agent, Expression, Neighbourhood, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle } from "@perspect3vism/ad4m"
 import { Link, hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
-import type PerspectiveHandle from "@perspect3vism/ad4m"
 import type PerspectiveContext from "./PerspectiveContext"
 import { LinkExpression } from "../types";
 
 export default class Perspective {
-    name: string;
-    uuid: string;
-    author: Agent;
-    timestamp: string;
-    neighbourhood: Neighbourhood;
-    sharedUrl: string;
+    name?: string;
+    uuid?: string;
+    author?: Agent;
+    timestamp?: string;
+    neighbourhood?: Neighbourhood;
+    sharedUrl?: string;
 
     #db: any;
     #agent: AgentService;
-    #languageController: LanguageController
+    #languageController?: LanguageController
     #pubsub: any
 
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
@@ -26,8 +25,8 @@ export default class Perspective {
         if (neighbourhood) this.neighbourhood = neighbourhood;
 
         this.#db = context.db
-        this.#agent = context.agentService
-        this.#languageController = context.languageController
+        this.#agent = context.agentService!
+        this.#languageController = context.languageController!
 
         this.#pubsub = PubSub.get()
     }
@@ -51,7 +50,7 @@ export default class Perspective {
 
     ensureLinkExpression(maybeLink: any): Expression {
         if(maybeLink.author && maybeLink.timestamp && maybeLink.data) {
-            return maybeLink as Expression
+            return maybeLink as LinkExpression
         }
 
         if(maybeLink.target) {
@@ -61,7 +60,8 @@ export default class Perspective {
         throw new Error("Object is neither Link nor Expression: " + JSON.stringify(maybeLink))
     }
 
-    private callLinksAdapter(functionName: string, ...args): Promise<any> {
+    //@ts-ignore
+    private callLinksAdapter(functionName: string, ...args): Promise<Expression[]> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             return Promise.resolve([])
         }
@@ -69,10 +69,11 @@ export default class Perspective {
         return new Promise(async (resolve, reject) => {
             setTimeout(() => resolve([]), 2000)
             try {
-                const address = this.neighbourhood.linkLanguage;
-                const linksAdapter = this.#languageController.getLinksAdapter({address} as LanguageRef);
+                const address = this.neighbourhood!.linkLanguage;
+                const linksAdapter = this.#languageController!.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
                     resolve(result)
@@ -89,9 +90,10 @@ export default class Perspective {
     }
 
     async syncWithSharingAdapter() {
+        //@ts-ignore
         const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link)
         const remoteLinks = await this.callLinksAdapter('getLinks')
-        const includes = (link, list) => {
+        const includes = (link: Expression, list: Expression[]) => {
             return undefined !== list.find(e =>
                 JSON.stringify(e.author) === JSON.stringify(link.author) &&
                 e.timestamp === link.timestamp &&
@@ -188,6 +190,7 @@ export default class Perspective {
     private getLinksLocal(query: LinkQuery): Expression[] {
         // console.debug("getLinks 1")
         if(!query || !query.source && !query.predicate && !query.target) {
+            //@ts-ignore
             return this.#db.getAllLinks(this.uuid).map(e => e.link)
         }
 
@@ -195,6 +198,7 @@ export default class Perspective {
 
         if(query.source) {
             // console.debug("query.source", query.source)
+            //@ts-ignore
             let result = this.#db.getLinksBySource(this.uuid, query.source).map(e => e.link)
             // @ts-ignore
             if(query.target) result = result.filter(l => l.data.target === query.target)
@@ -209,6 +213,7 @@ export default class Perspective {
         // console.debug("getLinks 3")
 
         if(query.target) {
+            //@ts-ignore
             let result = this.#db.getLinksByTarget(this.uuid, query.target).map(e => e.link)
             // @ts-ignore
             if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
@@ -217,6 +222,7 @@ export default class Perspective {
 
         // console.debug("getLinks 4")
 
+        //@ts-ignore
         return this.#db.getAllLinks(this.uuid).map(e => e.link).filter(link => link.data.predicate === query.predicate)
     }
 
@@ -227,7 +233,7 @@ export default class Perspective {
         // console.debug("getLinks remote...")
         const remoteLinks = await this.callLinksAdapter('getLinks', query)
         // console.debug("getLinks remote", remoteLinks)
-        const mergedLinks = {}
+        const mergedLinks: {[key: number]: Expression} = {};
         localLinks.forEach(l => mergedLinks[hashLinkExpression(l)] = l)
         remoteLinks.forEach(l => mergedLinks[hashLinkExpression(l)] = l)
 
