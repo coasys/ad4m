@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
-    "prepare-test": "nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
+    "prepare-test": "rm -rf src/test-temp && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-perspective": "jest --forceExit src/tests/perspective.test.ts",
     "test-agent": "jest --forceExit src/tests/agent.test.ts",
