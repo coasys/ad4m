@@ -19,6 +19,7 @@ import * as PubSub from './graphQL-interface/PubSub'
 export interface InitServicesParams {
     portHCAdmin?: number, 
     portHCApp?: number,
+    ipfsSwarmPort?: number,
     ipfsRepoPath?: string
 }
 export default class PerspectivismCore {
@@ -88,7 +89,12 @@ export default class PerspectivismCore {
             params.portHCAdmin, 
             params.portHCApp
         )
-        let [ipfs, _] = await Promise.all([IPFS.init(params.ipfsRepoPath), this.#holochain.run()]);
+        const ipfsPromise = IPFS.init(
+            params.ipfsSwarmPort, 
+            params.ipfsRepoPath
+        )
+
+        let [ipfs, _] = await Promise.all([ipfsPromise, this.#holochain.run()]);
         this.#IPFS = ipfs;
     }
 

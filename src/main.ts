@@ -18,6 +18,7 @@ interface OuterConfig {
   portGraphQL?: number,
   portHCAdmin?: number,
   portHCApp?: number,
+  ipfsSwarmPort?: number,
   ipfsRepoPath?: string
 }
 
@@ -28,6 +29,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       appBuiltInLangs, appLangAliases, 
       mocks, 
       portGraphQL, portHCAdmin, portHCApp,
+      ipfsSwarmPort,
       ipfsRepoPath
     } = config
     if(!portGraphQL) portGraphQL = 4000
@@ -80,7 +82,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       bootstrapFixtures,
     });
     console.log("\x1b[34m", "Init services...");
-    await core.initServices({ portHCAdmin, portHCApp, ipfsRepoPath });
+    await core.initServices({ portHCAdmin, portHCApp, ipfsSwarmPort, ipfsRepoPath });
     console.log("\x1b[31m", "GraphQL server starting...");
     await core.startGraphQLServer(portGraphQL, mocks)
 

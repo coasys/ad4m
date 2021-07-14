@@ -177,6 +177,7 @@ describe("Integration tests", () => {
                 portGraphQL: 14000,
                 portHCAdmin: 12000,
                 portHCApp: 11337,
+                ipfsSwarmPort: 14002,
                 ipfsRepoPath
           })
 
