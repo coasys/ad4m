@@ -1,11 +1,14 @@
 import path from "path"
-import { Link, Perspective, LinkExpression, ExpressionProof } from "@perspect3vism/ad4m";
+import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveHandle } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
+import sleep from "./sleep";
 
 
 export default function neighbourhoodTests(testContext: TestContext) {
     return () => {
         describe('Neighbourhood', () => {
+            let neighbourhoodUrl
+
             it('can publish and join locally @alice', async () => {
                 const ad4mClient = testContext.alice!;
 
@@ -31,6 +34,38 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 const join = await ad4mClient.neighbourhood.joinFromUrl(publishPerspective );
                 expect(join.sharedUrl).toBe(publishPerspective);
+            })
+
+            it('can be created by Alice and joined by Bob', async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
+
+                const aliceP1 = await alice.perspective.add("friends")
+                const createUniqueLang = await alice.languages.cloneHolochainTemplate(path.join(__dirname, "../test-temp/social-context"), "social-context", "b98e53a8-5800-47b6-adb9-alice-bob-friends");
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, createUniqueLang.address, new Perspective())
+
+                let bobP1: PerspectiveHandle | null = null 
+                let tries = 0
+                while(!bobP1 && tries < 10) {
+                    await sleep(10000)
+                    tries++
+                    try {
+                        bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl)
+                    } catch(e) {
+                        console.log(`Getting Neigbourhood error on try ${tries}:`, e)
+                    }
+                }
+                
+                expect(bobP1).toBeDefined()
+                expect(bobP1!.name).toBeDefined()
+                expect(bobP1!.sharedUrl).toEqual(neighbourhoodUrl)
+
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
+
+                await sleep(5000)
+
+                const bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                expect(bobLinks.length).toBe(1)
             })
         })
     }

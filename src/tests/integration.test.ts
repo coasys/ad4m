@@ -25,8 +25,9 @@ Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
 
 fs.removeSync(path.join(DATA_RESOURCE_PATH, 'ad4m'))
+fs.removeSync(path.join(DATA_RESOURCE_PATH, 'bob'))
 
-jest.setTimeout(15000)
+jest.setTimeout(105000)
 let core: PerspectivismCore | null = null
 
 function apolloClient(port: number): ApolloClient<any> {
@@ -71,7 +72,7 @@ export class TestContext {
     }
 
     set bob(client: Ad4mClient) {
-      this.#bob
+      this.#bob = client
     }
 }
 let testContext: TestContext = new TestContext()
