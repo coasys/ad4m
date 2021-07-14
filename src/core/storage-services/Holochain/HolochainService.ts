@@ -63,7 +63,7 @@ export default class HolochainService {
         // console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
         if (this.signalCallbacks.size != 0) {
             let callbacks = this.signalCallbacks.get(signal.data.cellId[1].toString("base64"))
-            if (callbacks![0] != undefined) {
+            if (callbacks && callbacks![0] != undefined) {
                 callbacks![0](signal);
             };
         };

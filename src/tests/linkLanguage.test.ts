@@ -16,14 +16,15 @@ Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 const TEST_DIR = `${__dirname}/../test-temp`
 const LANG_TO_TEST = "social-context-channel"
 
-jest.setTimeout(15000)
+jest.setTimeout(35000)
 let core: PerspectivismCore|null = null
 
 describe(LANG_TO_TEST, () => {
 
     beforeAll(async () => {
         const appDataPath = path.join(TEST_DIR, 'agents', 'linksLangTest')
-        fs.mkdirSync(appDataPath)
+        if(!fs.existsSync(appDataPath))
+            fs.mkdirSync(appDataPath)
         const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
         core = new create({
             appDataPath,

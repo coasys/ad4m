@@ -66,7 +66,7 @@ describe('Perspective', () => {
     it('wraps links in expressions on addLink', () => {
         const link = createLink()
         const expression = perspective!.addLink(link)
-        expect(expression.author!.did).toEqual(agentService.agent.did)
+        expect(expression.author).toEqual(agentService.agent.did)
         expect(expression.data).toEqual(link)
         expect(agentService.createSignedExpression.mock.calls.length).toBe(1)
         expect(agentService.createSignedExpression.mock.calls[0][0]).toEqual(link)
