@@ -94,10 +94,10 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
   }
 
 describe("Integration tests", () => {
+    const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
+    const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
 
-    beforeAll(async () => {
-        const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
-        const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
+    beforeAll(async () => {    
         if(!fs.existsSync(appDataPath))
             fs.mkdirSync(appDataPath)
         core = await main.init({
@@ -128,14 +128,14 @@ describe("Integration tests", () => {
     afterAll(async () => {
         expect(await isProcessRunning("holochain")).toBe(true);
         expect(await isProcessRunning("lair-keystore")).toBe(true);
-        expect(fs.existsSync(path.join(os.homedir(), ".jsipfs/repo.lock"))).toBe(true);
+        expect(fs.existsSync(path.join(ipfsRepoPath, ".jsipfs/repo.lock"))).toBe(true);
 
         await core!.exit();
         await new Promise((resolve)=>setTimeout(resolve, 1000))
         
         expect(await isProcessRunning("holochain")).toBe(false);
         expect(await isProcessRunning("lair-keystore")).toBe(false);
-        expect(fs.existsSync(path.join(os.homedir(), ".jsipfs/repo.lock"))).toBe(false);
+        expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(false);
 
         //Delete all languages created during test
         //@ts-ignore
