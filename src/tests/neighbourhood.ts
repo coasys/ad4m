@@ -63,8 +63,15 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
 
                 await sleep(5000)
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                tries = 1
 
-                const bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                while(bobLinks.length < 1 && tries < 20) {
+                    await sleep(5000)
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    tries++
+                }
+                
                 expect(bobLinks.length).toBe(1)
             })
         })

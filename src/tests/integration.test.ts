@@ -27,7 +27,7 @@ const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
 fs.removeSync(path.join(DATA_RESOURCE_PATH, 'ad4m'))
 fs.removeSync(path.join(DATA_RESOURCE_PATH, 'bob'))
 
-jest.setTimeout(105000)
+jest.setTimeout(205000)
 let core: PerspectivismCore | null = null
 
 function apolloClient(port: number): ApolloClient<any> {
