@@ -3,6 +3,7 @@ import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, Perspect
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
 
+const LINK_LANGUAGE_PATH = path.join(__dirname, "../test-temp/languages/social-context-channel")
 
 export default function neighbourhoodTests(testContext: TestContext) {
     return () => {
@@ -16,7 +17,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(create.name).toEqual("publish-test");
 
                 //Create unique social-context to simulate real scenario
-                const createUniqueLang = await ad4mClient.languages.cloneHolochainTemplate(path.join(__dirname, "../test-temp/social-context"), "social-context", "b98e53a8-5800-47b6-adb9-86d55a74871e");
+                const createUniqueLang = await ad4mClient.languages.cloneHolochainTemplate(LINK_LANGUAGE_PATH, "social-context", "b98e53a8-5800-47b6-adb9-86d55a74871e");
                 expect(createUniqueLang.name).toBe("social-context-channel");
 
                 let link = new LinkExpression()
@@ -41,7 +42,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const createUniqueLang = await alice.languages.cloneHolochainTemplate(path.join(__dirname, "../test-temp/social-context"), "social-context", "b98e53a8-5800-47b6-adb9-alice-bob-friends");
+                const createUniqueLang = await alice.languages.cloneHolochainTemplate(LINK_LANGUAGE_PATH, "social-context", "b98e53a8-5800-47b6-adb9-alice-bob-friends");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, createUniqueLang.address, new Perspective())
 
                 let bobP1: PerspectiveHandle | null = null 
@@ -56,7 +57,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     }
                 }
                 
-                expect(bobP1).toBeDefined()
+                expect(bobP1).toBeTruthy()
                 expect(bobP1!.name).toBeDefined()
                 expect(bobP1!.sharedUrl).toEqual(neighbourhoodUrl)
 

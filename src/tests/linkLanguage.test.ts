@@ -1,37 +1,43 @@
 import type { LinkQuery } from '@perspect3vism/ad4m'
 import { Expression, LinksAdapter } from '@perspect3vism/ad4m'
-import { createLink } from './src/testutils/links'
-import create from "./src/core/PerspectivismCore";
-import { createMockExpression } from './src/testutils/expression'
-import PerspectivismCore from './src/core/PerspectivismCore'
+import { createLink } from '../testutils/links'
+import create from "../core/PerspectivismCore";
+import { createMockExpression } from '../testutils/expression'
+import PerspectivismCore from '../core/PerspectivismCore'
 import fs from 'fs-extra'
 import path from 'path'
 
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
-import getOwnPropertyDescriptor from './src/shims/getOwnPropertyDescriptor'
+import getOwnPropertyDescriptor from '../shims/getOwnPropertyDescriptor'
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
-const DATA_RESOURCE_PATH = `${__dirname}/test-temp`
+const TEST_DIR = `${__dirname}/../test-temp`
 const LANG_TO_TEST = "social-context-channel"
 
-fs.removeSync(path.join(DATA_RESOURCE_PATH, 'ad4m'))
-
 jest.setTimeout(15000)
-let core: PerspectivismCore = null
+let core: PerspectivismCore|null = null
 
 describe(LANG_TO_TEST, () => {
 
     beforeAll(async () => {
+        const appDataPath = path.join(TEST_DIR, 'agents', 'linksLangTest')
+        fs.mkdirSync(appDataPath)
+        const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
         core = new create({
-            appDataPath: DATA_RESOURCE_PATH,
-            appResourcePath: DATA_RESOURCE_PATH,
-            builtInLangPath: DATA_RESOURCE_PATH,
-            builtInLangs: [LANG_TO_TEST]
+            appDataPath,
+            appResourcePath: TEST_DIR,
+            builtInLangPath: path.join(TEST_DIR, 'languages'),
+            builtInLangs: [LANG_TO_TEST],
         })
 
-        await core.initServices()
+        await core.initServices({
+            portHCAdmin: 22000,
+            portHCApp: 21337,
+            ipfsSwarmPort: 24002,
+            ipfsRepoPath
+        })
         await core.agentService.createNewKeys()
         core.agentService.save('')
         core.initControllers()
@@ -39,12 +45,12 @@ describe(LANG_TO_TEST, () => {
     })
 
     afterAll(async () => {
-        await core.exit()
+        await core!.exit()
         await new Promise((resolve)=>setTimeout(resolve, 1000))
     })
 
     it('has a linksAdapter', (done) => {
-        const langs = core.languageController.getLanguagesWithLinksAdapter()
+        const langs = core!.languageController.getLanguagesWithLinksAdapter()
         expect(langs.length).toEqual(1)
         expect(langs[0].name).toEqual(LANG_TO_TEST)
         done()
@@ -55,8 +61,8 @@ describe(LANG_TO_TEST, () => {
         let linkLanguage: LinksAdapter
 
         beforeAll(async () => {
-            const langs = core.languageController.getLanguagesWithLinksAdapter()
-            const maybeLang = core.languageController.getLinksAdapter(langs[0])
+            const langs = core!.languageController.getLanguagesWithLinksAdapter()
+            const maybeLang = await core!.languageController.getLinksAdapter(langs[0])
             if(!maybeLang) throw "Couldn't get linksAdapter of test language"
             else linkLanguage = maybeLang
 

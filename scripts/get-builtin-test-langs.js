@@ -18,7 +18,7 @@ const languages = {
     dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.1/neighbourhood-store.dna",
     bundle: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.1/bundle.js",
   },
-  "social-context": {
+  "social-context-channel": {
     targetDnaName: "social-context",
     dna: "https://github.com/juntofoundation/Social-Context/releases/download/0.0.6/social-context.dna",
     bundle: "https://github.com/juntofoundation/Social-Context/releases/download/0.0.6/bundle.js",
@@ -30,7 +30,7 @@ const languages = {
 
 async function main() {
   for (const lang in languages) {
-    const dir = `./src/test-temp/${lang}`;
+    const dir = `./src/test-temp/languages/${lang}`;
     await fs.ensureDir(dir + "/build");
 
     // bundle

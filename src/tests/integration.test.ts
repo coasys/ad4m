@@ -22,10 +22,7 @@ import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
-const DATA_RESOURCE_PATH = `${__dirname}/../test-temp`
-
-fs.removeSync(path.join(DATA_RESOURCE_PATH, 'ad4m'))
-fs.removeSync(path.join(DATA_RESOURCE_PATH, 'bob'))
+const TEST_DIR = `${__dirname}/../test-temp`
 
 jest.setTimeout(205000)
 let core: PerspectivismCore | null = null
@@ -99,10 +96,14 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
 describe("Integration tests", () => {
 
     beforeAll(async () => {
+        const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
+        const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
+        if(!fs.existsSync(appDataPath))
+            fs.mkdirSync(appDataPath)
         core = await main.init({
-            appDataPath: DATA_RESOURCE_PATH,
-            resourcePath: DATA_RESOURCE_PATH,
-            appDefaultLangPath: DATA_RESOURCE_PATH,
+            appDataPath,
+            resourcePath: TEST_DIR,
+            appDefaultLangPath: path.join(TEST_DIR, 'languages'),
             ad4mBootstrapLanguages: {
               agents: "agent-expression-store",
               languages: "languages",
@@ -115,6 +116,7 @@ describe("Integration tests", () => {
             appBuiltInLangs: ['note-ipfs'],
             appLangAliases: null,
             mocks: false,
+            ipfsRepoPath
         })
 
         core.initControllers()
@@ -137,11 +139,11 @@ describe("Integration tests", () => {
 
         //Delete all languages created during test
         //@ts-ignore
-        fs.readdir(path.join(DATA_RESOURCE_PATH, "ad4m/languages"), (err, files) => {
+        fs.readdir(path.join(TEST_DIR, 'agent', 'alice', 'ad4m', 'languages'), (err, files) => {
             if (err) throw err;
           
             for (const file of files) {
-              fs.rmdir(path.join(path.join(DATA_RESOURCE_PATH, "ad4m/languages"), file), {recursive: true});
+              fs.rmdir(path.join(path.join(TEST_DIR, 'agent', 'alice', 'ad4m', 'languages'), file), {recursive: true});
             }
           });
     })
@@ -154,15 +156,15 @@ describe("Integration tests", () => {
     describe('with Alice and Bob', () => {
         let bob: PerspectivismCore | null = null
         beforeAll(async () => {
-            const appDataPath = path.join(DATA_RESOURCE_PATH, 'bob')
+            const appDataPath = path.join(TEST_DIR, 'agents', 'bob')
             const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
             if(!fs.existsSync(appDataPath))
               fs.mkdirSync(appDataPath)
 
             bob = await main.init({
                 appDataPath,
-                resourcePath: DATA_RESOURCE_PATH,
-                appDefaultLangPath: DATA_RESOURCE_PATH,
+                resourcePath: TEST_DIR,
+                appDefaultLangPath: path.join(TEST_DIR, 'languages'),
                 ad4mBootstrapLanguages: {
                   agents: "agent-expression-store",
                   languages: "languages",
