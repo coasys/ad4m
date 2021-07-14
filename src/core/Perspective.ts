@@ -70,7 +70,7 @@ export default class Perspective {
             setTimeout(() => resolve([]), 2000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
-                const linksAdapter = this.#languageController!.getLinksAdapter({address} as LanguageRef);
+                const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     //@ts-ignore
