@@ -58,7 +58,7 @@
     "typescript": "^4.2.4"
   },
   "dependencies": {
-    "@holochain/conductor-api": "0.0.2",
+    "@holochain/conductor-api": "0.1.1",
     "@perspect3vism/ad4m": "0.1.4",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
