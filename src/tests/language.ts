@@ -1,5 +1,6 @@
 import { TestContext } from './integration.test'
 import path from "path"
+import { create } from '../core/PerspectivismCore'
 
 export default function languageTests(testContext: TestContext) {
     return () => {
@@ -15,6 +16,13 @@ export default function languageTests(testContext: TestContext) {
 
                 const installLanguage = await ad4mClient.languages.byAddress(createUniqueLang.address);
                 expect(installLanguage.name).toBe("agent-expression-store");
+
+                expect(await async function() {
+                    let me = await ad4mClient.agent.me()
+                    me.directMessageLanguage = "test"
+                    //Test that we can use the language after creating the unique version
+                    await ad4mClient.expression.create(me, installLanguage.address!)
+                }).not.toThrow()
 
                 const languagesPostInstall = await ad4mClient.languages.byFilter("");
                 expect(languagesPostInstall.length).toBe(5);

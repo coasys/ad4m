@@ -221,8 +221,8 @@ export default class LanguageController {
         } else {
             let languageMeta = await this.getLanguageExpression(address);
             if(languageMeta) {
-                await this.installLanguage(address, languageMeta)
-                return JSON.parse(languageMeta.data)
+                const lang = await this.installLanguage(address, languageMeta)
+                return lang!
             } else {
                 throw new Error("Language not found by reference: " + JSON.stringify(ref))
             }
