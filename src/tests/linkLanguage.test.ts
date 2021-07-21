@@ -23,6 +23,8 @@ describe(LANG_TO_TEST, () => {
 
     beforeAll(async () => {
         const appDataPath = path.join(TEST_DIR, 'agents', 'linksLangTest')
+        if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
+            fs.mkdirSync(path.join(TEST_DIR, 'agents'))
         if(!fs.existsSync(appDataPath))
             fs.mkdirSync(appDataPath)
         const ipfsRepoPath = path.join(appDataPath, '.jsipfs')

@@ -98,6 +98,10 @@ describe("Integration tests", () => {
     const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
 
     beforeAll(async () => {    
+        if(!fs.existsSync(TEST_DIR)) 
+          fs.mkdirSync(TEST_DIR)
+        if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
+          fs.mkdirSync(path.join(TEST_DIR, 'agents'))
         if(!fs.existsSync(appDataPath))
             fs.mkdirSync(appDataPath)
         core = await main.init({
@@ -158,6 +162,8 @@ describe("Integration tests", () => {
         beforeAll(async () => {
             const appDataPath = path.join(TEST_DIR, 'agents', 'bob')
             const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
+            if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
+              fs.mkdirSync(path.join(TEST_DIR, 'agents'))
             if(!fs.existsSync(appDataPath))
               fs.mkdirSync(appDataPath)
 
