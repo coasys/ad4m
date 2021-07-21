@@ -5,7 +5,7 @@ import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
-import { LinkExpression } from "../types";
+import { LinkExpression } from "@perspect3vism/ad4m";
 
 export default class Perspective {
     name?: string;
