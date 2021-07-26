@@ -16,7 +16,7 @@
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-perspective": "jest --forceExit src/tests/perspective.test.ts",
     "test-agent": "jest --forceExit src/tests/agent.test.ts",
-    "test": "npm run prepare-test && jest --forceExit"
+    "test": "jest --forceExit"
   },
   "repository": {
     "type": "git",
@@ -59,7 +59,7 @@
   },
   "dependencies": {
     "@holochain/conductor-api": "0.0.2",
-    "@perspect3vism/ad4m": "0.1.4",
+    "@perspect3vism/ad4m": "file:../ad4m",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^11.2.0",

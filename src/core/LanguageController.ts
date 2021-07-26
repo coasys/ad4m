@@ -216,12 +216,14 @@ export default class LanguageController {
     async languageByRef(ref: LanguageRef): Promise<Language> {
         const address = languageAliases[ref.address] ? languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
+        //console.warn("Got language", language);
         if(language) {
             return language
         } else {
             let languageMeta = await this.getLanguageExpression(address);
             if(languageMeta) {
                 const lang = await this.installLanguage(address, languageMeta)
+                console.warn("returning ", lang);
                 return lang!
             } else {
                 throw new Error("Language not found by reference: " + JSON.stringify(ref))

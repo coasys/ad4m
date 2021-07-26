@@ -144,6 +144,11 @@ function createResolvers(core: PerspectivismCore) {
                 return exprRef2String(expref)
             },
             //@ts-ignore
+            expressionSign: async (parent, args, context, info) => {
+                const { data } = args;
+                return await core.agentService.createSignedExpression(data)
+            },
+            //@ts-ignore
             languageCloneHolochainTemplate: async (parent, args, context, info) => {
                 const { languagePath, dnaNick, uid } = args;
                 return await core.languageCloneHolochainTemplate(languagePath, dnaNick, uid);
