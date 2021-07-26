@@ -54,6 +54,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       "=> All auto-loaded languages:", builtInLangs, "\n",
       "Language aliases:", languageAliases, "\n", 
       "Resource path:", resourcePath, "\n", 
+      "\x1b[0m"
     );
 
     let bootstrapFixtures = ad4mBootstrapFixtures
@@ -66,12 +67,12 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       languageAliases,
       bootstrapFixtures,
     });
-    console.log("\x1b[34m", "Init services...");
+    console.log("\x1b[34m", "Init services...", "\x1b[0m");
     await core.initServices();
-    console.log("\x1b[31m", "GraphQL server starting...");
+    console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
     await core.startGraphQLServer(mocks)
 
-    console.log("\x1b[32m", "AD4M init complete");
+    console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
     return core
 }
 
