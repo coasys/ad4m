@@ -68,6 +68,7 @@ function createResolvers(core: PerspectivismCore) {
             perspectiveQueryLinks: async (parent, args, context, info) => {
                 const { uuid, query } = args
                 const perspective = core.perspectivesController.perspective(uuid)
+                //console.log("querying on", perspective, query, uuid);
                 return await perspective.getLinks(query)
             },
             //@ts-ignore

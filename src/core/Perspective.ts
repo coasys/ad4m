@@ -63,6 +63,7 @@ export default class Perspective {
     //@ts-ignore
     private callLinksAdapter(functionName: string, ...args): Promise<Expression[]> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+            console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve([])
         }
 
