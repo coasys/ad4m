@@ -165,8 +165,9 @@ export default class PerspectivismCore {
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
-        // console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
-        let neighbourhood: Neighbourhood = neighbourHoodExp.data!;
+        console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
+        let neighbourhood: Neighbourhood = neighbourHoodExp.data;
+        this.languageController.installLanguage(neighbourhood.linkLanguage, null);
         
         return this.#perspectivesController!.add("", url, neighbourhood);        
     }
