@@ -3,7 +3,7 @@ import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, PerspectiveHandle } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -75,7 +75,8 @@ export default class PerspectivesController {
         if (!perspective) {
             throw Error(`Perspective not found: ${uuid}`)
         }
-        return new Ad4mPerspective(await perspective.getLinks({} as LinkQuery));
+        let neighbourhoodLinks = perspective.neighbourhood?.meta.links;
+        return new Ad4mPerspective(neighbourhoodLinks);
     }
 
     add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood): PerspectiveHandle {
