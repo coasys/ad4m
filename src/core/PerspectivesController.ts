@@ -24,11 +24,28 @@ export default class PerspectivesController {
         const FILENAME = 'perspectives.json'
         const FILEPATH = path.join(rootConfigPath, FILENAME)
 
+        const neighbourhoods = 'neighbourhoods.json'
+        const filepathNeighbourhoods = path.join(rootConfigPath, neighbourhoods);
+
         if(fs.existsSync(FILEPATH)) {
             const fileObject = JSON.parse(fs.readFileSync(FILEPATH).toString())
+            let neighbourhoodsFileObject = null as Object | null;
+            if(fs.existsSync(filepathNeighbourhoods))  {
+                neighbourhoodsFileObject = JSON.parse(fs.readFileSync(filepathNeighbourhoods).toString())
+            }
+
             const entries = Object.keys(fileObject).map(k => {
                 console.debug(`Found Perspective "${k}":`, fileObject[k])
                 this.#perspectiveHandles.set(k, fileObject[k])
+                if (neighbourhoodsFileObject) {
+                    //@ts-ignore
+                    let neighbourhood = neighbourhoodsFileObject[k];
+                    if (neighbourhood != {}) {
+                        let neighbourhoodTyped = neighbourhood as Neighbourhood;
+                        console.debug(`Found neighbourhood for perspective "${k}":`, neighbourhoodTyped)
+                        this.#perspectiveInstances.set(k, new Perspective(fileObject[k], this.#context, neighbourhoodTyped))
+                    }
+                }
             })
         }
     }
@@ -42,6 +59,15 @@ export default class PerspectivesController {
             obj[uuid] = perspectiveHandle
         })
         fs.writeFileSync(FILEPATH, JSON.stringify(obj))
+
+        const filenameInstances = "neighbourhoods.json"
+        const filePathInstances = path.join(this.#rootConfigPath, filenameInstances)
+        const objInstances = {}
+        this.#perspectiveInstances.forEach((perspectiveInstance: Perspective, uuid: string) => {
+            //@ts-ignore
+            objInstances[uuid] = perspectiveInstance.neighbourhood || {};
+        })
+        fs.writeFileSync(filePathInstances, JSON.stringify(objInstances))
     }
 
     perspectiveID(uuid: string): PerspectiveHandle|void {
@@ -91,8 +117,10 @@ export default class PerspectivesController {
         return perspective
     }
 
-    replace(perspectiveHandle: PerspectiveHandle) {
-        this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle)
+    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood) {
+        this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
+        this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood));
+        this.save()
     }
 
     remove(uuid: string) {

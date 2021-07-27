@@ -156,7 +156,7 @@ export default class PerspectivismCore {
 
         //Add shared perspective to original perpspective and then update controller
         perspectiveID.sharedUrl = neighbourhoodUrl
-        this.#perspectivesController!.replace(perspectiveID)
+        this.#perspectivesController!.replace(perspectiveID, neighbourhood)
         return neighbourhoodUrl
     }
 
