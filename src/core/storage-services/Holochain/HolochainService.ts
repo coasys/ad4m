@@ -244,7 +244,7 @@ export default class HolochainService {
         const [_dnaHash, provenance] = cell_id
 
         try {
-            console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\x1b[0m")
+            console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m")
             const result = await this.#appWebsocket!.callZome({
                 cap: fakeCapSecret(),
                 cell_id,
