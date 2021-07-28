@@ -144,16 +144,24 @@ export default class LanguageController {
         if (language == undefined) {
             console.log(new Date(), "installLanguage: installing language with address", address);
             if(!languageMeta) {
-                languageMeta = await this.getLanguageExpression(address)
+                try {
+                    languageMeta = await this.getLanguageExpression(address)
+                } catch (e) {
+                    throw Error(`Error getting language meta from language language: ${e}`)
+                }
 
                 if (languageMeta == null) {
                     //@ts-ignore
                     languageMeta = {data: {}};
                 }
             }
-            // @ts-ignore
             console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
-            const source = await this.getLanguageSource(address)
+            let source;
+            try {
+                source = await this.getLanguageSource(address);
+            } catch (e) {
+                throw Error(`Error getting language source from language language, language adapter: ${e}`)
+            }
             if(!source){
                 console.error("LanguageController.installLanguage: COULDN'T GET SOURCE OF LANGUAGE TO INSTALL!")
                 console.error("LanguageController.installLanguage: Address:", address)
@@ -253,7 +261,11 @@ export default class LanguageController {
             }
         }
 
-        return await this.#languageLanguage!.expressionAdapter!.get(address)
+        try {
+            return await this.#languageLanguage!.expressionAdapter!.get(address)
+        } catch (e) {
+            throw Error(`Error inside language language expression adapter: ${e}`)
+        }
     }
 
     async getLanguageSource(address: string): Promise<string | null> {
@@ -266,7 +278,11 @@ export default class LanguageController {
                 }
             }
         }
-        return await this.#languageLanguage!.languageAdapter!.getLanguageSource(address)
+        try {
+            return await this.#languageLanguage!.languageAdapter!.getLanguageSource(address)
+        } catch (e) {
+            throw Error(`Error inside language language getLanguageSource adapter: ${e}`)
+        }
     }
 
     async getPerspective(address: string): Promise<Expression | null> {
@@ -280,7 +296,11 @@ export default class LanguageController {
             }
         }
 
-        return await this.#perspectiveLanguage!.expressionAdapter!.get(address)
+        try {
+            return await this.#perspectiveLanguage!.expressionAdapter!.get(address)
+        } catch (e) {
+            throw Error(`Error inside perspective language expression get adapter: ${e}`)
+        }
     }
 
     getInstalledLanguages(): LanguageRef[] {
