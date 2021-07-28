@@ -15,6 +15,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 const create = await ad4mClient!.perspective.add("publish-test");
                 expect(create.name).toEqual("publish-test");
+                expect(create.neighbourhood).toBeNull();
 
                 //Create unique social-context to simulate real scenario
                 const createUniqueLang = await ad4mClient.languages.cloneHolochainTemplate(LINK_LANGUAGE_PATH, "social-context", "b98e53a8-5800-47b6-adb9-86d55a74871e");
@@ -33,8 +34,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 //Check that we got an ad4m url back
                 expect(publishPerspective.split("://").length).toBe(2);
 
+                const perspective = await ad4mClient.perspective.byUUID(create.uuid);
+                expect(perspective?.neighbourhood).toBeDefined();
+
                 const join = await ad4mClient.neighbourhood.joinFromUrl(publishPerspective );
                 expect(join.sharedUrl).toBe(publishPerspective);
+                expect(join.neighbourhood).toBeDefined();
             })
 
             it('can be created by Alice and joined by Bob', async () => {
@@ -50,6 +55,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1).toBeTruthy()
                 expect(bobP1!.name).toBeDefined()
                 expect(bobP1!.sharedUrl).toEqual(neighbourhoodUrl)
+                expect(bobP1!.neighbourhood).toBeDefined();
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
 
