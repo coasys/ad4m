@@ -15,16 +15,18 @@ import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
+import { IPFS as IPFSType } from 'ipfs'
 
 export interface InitServicesParams {
     portHCAdmin?: number, 
     portHCApp?: number,
     ipfsSwarmPort?: number,
     ipfsRepoPath?: string
+    useLocalHolochainProxy?: boolean
 }
 export default class PerspectivismCore {
     #holochain?: HolochainService
-    #IPFS: any
+    #IPFS?: IPFSType
 
     #agentService: AgentService
     #db: PerspectivismDb
@@ -65,7 +67,7 @@ export default class PerspectivismCore {
     }
 
     async exit() {
-        this.#IPFS.stop();
+        await this.#IPFS?.stop();
         await this.#holochain?.stop();
     }
 
@@ -87,14 +89,13 @@ export default class PerspectivismCore {
             Config.holochainDataPath, 
             Config.resourcePath, 
             params.portHCAdmin, 
-            params.portHCApp
+            params.portHCApp,
+            params.useLocalHolochainProxy
         )
-        const ipfsPromise = IPFS.init(
+        let [ipfs, _] = await Promise.all([IPFS.init(
             params.ipfsSwarmPort, 
             params.ipfsRepoPath
-        )
-
-        let [ipfs, _] = await Promise.all([ipfsPromise, this.#holochain.run()]);
+        ), this.#holochain.run()]);
         this.#IPFS = ipfs;
     }
 

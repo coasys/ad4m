@@ -29,7 +29,7 @@ export default class HolochainService {
     #conductorConfigPath: string
     signalCallbacks: Map<string, [AppSignalCb, string]>;
 
-    constructor(conductorPath: string, dataPath: string, resourcePath: string, adminPort?: number, appPort?: number) {
+    constructor(conductorPath: string, dataPath: string, resourcePath: string, adminPort?: number, appPort?: number, useLocalProxy?: boolean) {
         this.#didResolveError = false;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
@@ -55,6 +55,7 @@ export default class HolochainService {
                 appPort: holochainAppPort,
                 bootstrapService: bootstrapUrl,
                 conductorConfigPath: conductorConfigPath,
+                useLocalProxy: useLocalProxy || false
             } as ConductorConfiguration);
         };
     }
@@ -72,7 +73,6 @@ export default class HolochainService {
     async run() {
         let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)
-
         let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath);
         console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
         [this.#hcProcess, this.#lairProcess] = hcProcesses;
@@ -109,6 +109,7 @@ export default class HolochainService {
 
     async stop() {
         await this.#ready
+        console.log("HolochainService.stop(): Stopping holochain and lair processes");
         if (this.#didResolveError) {
             console.error("HolochainService.stop: Warning attempting to close holochain processes when they did not start error free...")
         }
