@@ -1,4 +1,5 @@
 #!/bin/bash
+[ -d "src/test-temp" ] && rm -rf src/test-temp
 mkdir src/test-temp
 cd src/test-temp
 mkdir agents
