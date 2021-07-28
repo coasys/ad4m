@@ -117,7 +117,7 @@ export async function runHolochain(resourcePath: string, conductorConfigPath: st
         {
             env: {
                 ...process.env,
-                RUST_LOG: process.env.RUST_LOG ? process.env.RUST_LOG : "wasmer_compiler_cranelift=error,holochain::conductor::manager=warn,info",
+                RUST_LOG: process.env.RUST_LOG ? process.env.RUST_LOG : "wasmer_compiler_cranelift=error,holochain::conductor::manager=warn,info,holochain::core::workflow::publish_dht_ops_workflow::publish_query=warn",
             },
         }
     );

@@ -32,9 +32,9 @@ export default class Perspective {
     }
 
     plain(): PerspectiveHandle {
-        const { name, uuid, author, timestamp } = this
+        const { name, uuid, author, timestamp, sharedUrl, neighbourhood } = this
         return JSON.parse(JSON.stringify({
-            name, uuid, author, timestamp
+            name, uuid, author, timestamp, sharedUrl, neighbourhood
         }))
     }
 
@@ -42,6 +42,7 @@ export default class Perspective {
         if(id.name) this.name = id.name
         if(id.uuid) this.uuid = id.uuid
         if(id.sharedUrl) this.sharedUrl = id.sharedUrl
+        if(id.neighbourhood) this.neighbourhood = id.neighbourhood
     }
 
     linkToExpression(link: Link): Expression {
