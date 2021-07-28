@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
-    "prepare-test": "nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
+    "prepare-test": "rm -rf src/test-temp && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-perspective": "jest --forceExit src/tests/perspective.test.ts",
     "test-agent": "jest --forceExit src/tests/agent.test.ts",
@@ -55,7 +55,8 @@
     "node-wget-js": "^1.0.1",
     "react": "^17.0.1",
     "ts-jest": "^27.0.3",
-    "typescript": "^4.2.4"
+    "typescript": "^4.2.4",
+    "unzipper": "^0.10.11"
   },
   "dependencies": {
     "@holochain/conductor-api": "0.0.2",

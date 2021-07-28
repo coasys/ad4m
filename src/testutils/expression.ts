@@ -3,7 +3,7 @@ import faker from 'faker'
 
 export function createMockExpression(did: string, data: object): Expression {
     return {
-        author: { did, name:'fix me', email: 'fix me' },
+        author: did,
         timestamp: faker.date.recent().toISOString(),
         data,
         proof: {

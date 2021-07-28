@@ -15,10 +15,18 @@ import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
+import { IPFS as IPFSType } from 'ipfs'
 
+export interface InitServicesParams {
+    portHCAdmin?: number, 
+    portHCApp?: number,
+    ipfsSwarmPort?: number,
+    ipfsRepoPath?: string
+    useLocalHolochainProxy?: boolean
+}
 export default class PerspectivismCore {
     #holochain?: HolochainService
-    #IPFS: any
+    #IPFS?: IPFSType
 
     #agentService: AgentService
     #db: PerspectivismDb
@@ -59,20 +67,35 @@ export default class PerspectivismCore {
     }
 
     async exit() {
-        this.#IPFS.stop();
+        await this.#IPFS?.stop();
         await this.#holochain?.stop();
     }
 
-    async startGraphQLServer(mocks: boolean) {
-        const { url, subscriptionsUrl } = await GraphQL.startServer(this, mocks)
+    async startGraphQLServer(port: number, mocks: boolean) {
+        const { url, subscriptionsUrl } = await GraphQL.startServer({
+            core: this, 
+            mocks,
+            port
+        })
         console.log(`🚀  GraphQL Server ready at ${url}`)
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
 
-    async initServices() {
+    async initServices(params: InitServicesParams) {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
-        this.#holochain = new HolochainService(Config.holochainConductorPath, Config.holochainDataPath, Config.resourcePath)
-        let [ipfs, _] = await Promise.all([IPFS.init(), this.#holochain.run()]);
+        console.log(`Holochain ports: admin=${params.portHCAdmin} app=${params.portHCApp}`)
+        this.#holochain = new HolochainService(
+            Config.holochainConductorPath, 
+            Config.holochainDataPath, 
+            Config.resourcePath, 
+            params.portHCAdmin, 
+            params.portHCApp,
+            params.useLocalHolochainProxy
+        )
+        let [ipfs, _] = await Promise.all([IPFS.init(
+            params.ipfsSwarmPort, 
+            params.ipfsRepoPath
+        ), this.#holochain.run()]);
         this.#IPFS = ipfs;
     }
 
@@ -134,7 +157,7 @@ export default class PerspectivismCore {
 
         //Add shared perspective to original perpspective and then update controller
         perspectiveID.sharedUrl = neighbourhoodUrl
-        this.#perspectivesController!.replace(perspectiveID)
+        this.#perspectivesController!.replace(perspectiveID, neighbourhood)
         return neighbourhoodUrl
     }
 
@@ -143,8 +166,9 @@ export default class PerspectivismCore {
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
-        // console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
+        console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
+        this.languageController.installLanguage(neighbourhood.linkLanguage, null);
         
         return this.#perspectivesController!.add("", url, neighbourhood);        
     }

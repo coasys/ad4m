@@ -63,6 +63,7 @@ export default class Perspective {
     //@ts-ignore
     private callLinksAdapter(functionName: string, ...args): Promise<Expression[]> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+            //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve([])
         }
 
@@ -70,7 +71,7 @@ export default class Perspective {
             setTimeout(() => resolve([]), 2000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
-                const linksAdapter = this.#languageController!.getLinksAdapter({address} as LanguageRef);
+                const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     //@ts-ignore

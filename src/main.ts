@@ -14,12 +14,29 @@ interface OuterConfig {
   ad4mBootstrapFixtures: BootstrapFixtures,
   appBuiltInLangs: string[] | null,
   appLangAliases: object | null,
-  mocks: boolean
+  mocks: boolean,
+  portGraphQL?: number,
+  portHCAdmin?: number,
+  portHCApp?: number,
+  ipfsSwarmPort?: number,
+  ipfsRepoPath?: string
+  useLocalHolochainProxy?: boolean,
 }
 
 
 export async function init(config: OuterConfig): Promise<PerspectivismCore> {
-    let { resourcePath, appDataPath, appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, appBuiltInLangs, appLangAliases, mocks } = config
+    let { 
+      resourcePath, appDataPath, appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, 
+      appBuiltInLangs, appLangAliases, 
+      mocks, 
+      portGraphQL, portHCAdmin, portHCApp,
+      ipfsSwarmPort,
+      ipfsRepoPath,
+      useLocalHolochainProxy
+    } = config
+    if(!portGraphQL) portGraphQL = 4000
+    if(!portHCAdmin) portHCAdmin = 2000
+    if(!portHCApp) portHCApp = 1337
     let builtInLangPath = appDefaultLangPath;
     let builtInLangs = [
       ad4mBootstrapLanguages.agents, 
@@ -67,9 +84,9 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       bootstrapFixtures,
     });
     console.log("\x1b[34m", "Init services...");
-    await core.initServices();
+    await core.initServices({ portHCAdmin, portHCApp, ipfsSwarmPort, ipfsRepoPath, useLocalHolochainProxy });
     console.log("\x1b[31m", "GraphQL server starting...");
-    await core.startGraphQLServer(mocks)
+    await core.startGraphQLServer(portGraphQL, mocks)
 
     console.log("\x1b[32m", "AD4M init complete");
     return core

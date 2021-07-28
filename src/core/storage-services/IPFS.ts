@@ -12,10 +12,30 @@ const uint8ArrayConcat = (chunks: Uint8Array) => {
     return chunks.reduce(_appendBuffer)
 }
 
-export async function init () {
+export async function init (swarmPort?: number, repo?: string) {
+    if(!swarmPort) swarmPort = 4002
+
     const node = await IPFS.create({
         EXPERIMENTAL: {
             ipnsPubsub: true
+        },
+        repo,
+        config: {
+            Addresses: {
+                Swarm: [
+                    `/ip4/0.0.0.0/tcp/${swarmPort}`,
+                    `/ip4/127.0.0.1/tcp/${swarmPort + 1}/ws`
+                ]
+            },
+            Discovery: {
+                MDNS: {
+                    Enabled: true,
+                    Interval: 10,
+                },
+                webRTCStar: {
+                    Enabled: true
+                }
+            }
         }
     });
     const version = await node.version()

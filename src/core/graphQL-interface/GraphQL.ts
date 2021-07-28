@@ -68,6 +68,7 @@ function createResolvers(core: PerspectivismCore) {
             perspectiveQueryLinks: async (parent, args, context, info) => {
                 const { uuid, query } = args
                 const perspective = core.perspectivesController.perspective(uuid)
+                //console.log("querying on", perspective, query, uuid);
                 return await perspective.getLinks(query)
             },
             //@ts-ignore
@@ -361,11 +362,17 @@ function createResolvers(core: PerspectivismCore) {
     }
 }
 
+export interface StartServerParams {
+    core: PerspectivismCore, 
+    mocks: boolean,
+    port: number,
+}
 
-export async function startServer(core: PerspectivismCore, mocks: boolean) {
+export async function startServer(params: StartServerParams) {
+    const { core, mocks, port } = params
     const resolvers = createResolvers(core)
     const typeDefs = gql(typeDefsString)
-    const server = new ApolloServer({ typeDefs, resolvers, mocks: mocks });
-    const { url, subscriptionsUrl } = await server.listen()
+    const server = new ApolloServer({ typeDefs, resolvers, mocks });
+    const { url, subscriptionsUrl } = await server.listen({ port })
     return { url, subscriptionsUrl }
 }

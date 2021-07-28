@@ -27,10 +27,17 @@ export interface ConductorConfiguration {
     appPort: number;
     bootstrapService: string;
     conductorConfigPath: string;
+    useLocalProxy: boolean;
 }
 
 export function writeDefaultConductor(conductorConfig: ConductorConfiguration) {
     console.log("HolochainService: Writing fresh conductor file...")
+    let proxyType;
+    if(conductorConfig.useLocalProxy) {
+        proxyType = "local_proxy_server"
+    } else {
+        proxyType = "remote_proxy_client"
+    }
     let conductorStringConfig = `
 ---
 environment_path: ${escapeShellArg(conductorConfig.environmentPath)}
@@ -54,7 +61,7 @@ network:
         override_host: ~
         override_port: ~
       proxy_config:
-        type: remote_proxy_client
+        type: ${proxyType}
         proxy_url: "${conductorConfig.proxyUrl}"
   bootstrap_service: "${conductorConfig.bootstrapService}"
   tuning_params:
@@ -106,7 +113,6 @@ export async function startLair(lairPath: string, hcDataPath: string): Promise<c
 
 export async function runHolochain(resourcePath: string, conductorConfigPath: string, hcDataPath: string): Promise<[child_process.ChildProcess, child_process.ChildProcess]> {
     let lairProcess = await startLair(path.join(resourcePath, "lair-keystore"), hcDataPath)
-
     let hcProcess = child_process.spawn(`${escapeShellArg(path.join(resourcePath, "holochain"))}`, ["-c", escapeShellArg(conductorConfigPath)],
         {
             env: {

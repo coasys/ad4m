@@ -29,7 +29,7 @@ export default class HolochainService {
     #conductorConfigPath: string
     signalCallbacks: Map<string, [AppSignalCb, string]>;
 
-    constructor(conductorPath: string, dataPath: string, resourcePath: string) {
+    constructor(conductorPath: string, dataPath: string, resourcePath: string, adminPort?: number, appPort?: number, useLocalProxy?: boolean) {
         this.#didResolveError = false;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
@@ -38,8 +38,8 @@ export default class HolochainService {
         this.#db.defaults({pubKeys: []}).write()
         this.signalCallbacks = new Map();
 
-        const holochainAppPort = 1337;
-        const holochainAdminPort = 2000;
+        const holochainAppPort = appPort ? appPort : 1337;
+        const holochainAdminPort = adminPort ? adminPort : 2000;
         this.#adminPort = holochainAdminPort;
         this.#appPort = holochainAppPort;
         this.#resourcePath = resourcePath;
@@ -55,6 +55,7 @@ export default class HolochainService {
                 appPort: holochainAppPort,
                 bootstrapService: bootstrapUrl,
                 conductorConfigPath: conductorConfigPath,
+                useLocalProxy: useLocalProxy || false
             } as ConductorConfiguration);
         };
     }
@@ -63,7 +64,7 @@ export default class HolochainService {
         // console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
         if (this.signalCallbacks.size != 0) {
             let callbacks = this.signalCallbacks.get(signal.data.cellId[1].toString("base64"))
-            if (callbacks![0] != undefined) {
+            if (callbacks && callbacks![0] != undefined) {
                 callbacks![0](signal);
             };
         };
@@ -72,7 +73,6 @@ export default class HolochainService {
     async run() {
         let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)
-
         let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath);
         console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
         [this.#hcProcess, this.#lairProcess] = hcProcesses;
@@ -86,7 +86,7 @@ export default class HolochainService {
                 try {
                     await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
                 } catch {
-                    console.warn("HolochainService: Could not attach app interface, assuming already attached...")
+                    console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...")
                 }
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
             };
@@ -109,6 +109,7 @@ export default class HolochainService {
 
     async stop() {
         await this.#ready
+        console.log("HolochainService.stop(): Stopping holochain and lair processes");
         if (this.#didResolveError) {
             console.error("HolochainService.stop: Warning attempting to close holochain processes when they did not start error free...")
         }
