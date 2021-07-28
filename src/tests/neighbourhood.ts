@@ -40,6 +40,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const join = await ad4mClient.neighbourhood.joinFromUrl(publishPerspective );
                 expect(join.sharedUrl).toBe(publishPerspective);
                 expect(join.neighbourhood).toBeDefined();
+                expect(join.neighbourhood!.linkLanguage).toBe(createUniqueLang.address);
+                expect(join.neighbourhood!.meta.links.length).toBe(1);
             })
 
             it('can be created by Alice and joined by Bob', async () => {
@@ -56,6 +58,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1!.name).toBeDefined()
                 expect(bobP1!.sharedUrl).toEqual(neighbourhoodUrl)
                 expect(bobP1!.neighbourhood).toBeDefined();
+                expect(bobP1!.neighbourhood!.linkLanguage).toBe(createUniqueLang.address);
+                expect(bobP1!.neighbourhood!.meta.links.length).toBe(0);
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
 
