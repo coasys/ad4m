@@ -8,7 +8,7 @@ import main from "../main";
 import fs from 'fs-extra'
 import path from 'path'
 import ws from "ws"
-import os from "os";
+import { isProcessRunning } from "./utils";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 
 // Patch Reflect to have missing getOwnPropertyDescriptor()
@@ -74,32 +74,14 @@ export class TestContext {
 }
 let testContext: TestContext = new TestContext()
 
-export async function isProcessRunning(processName: string): Promise<boolean> {
-    const cmd = (() => {
-      switch (process.platform) {
-        case 'win32': return `tasklist`
-        case 'darwin': return `ps -ax | grep ${processName}`
-        case 'linux': return `ps -A`
-        default: return false
-      }
-    })()
-  
-    return new Promise((resolve, reject) => {
-      require('child_process').exec(cmd, (err: Error, stdout: string, stderr: string) => {
-        if (err) reject(err)
-  
-        resolve(stdout.toLowerCase().indexOf(processName.toLowerCase()) > -1)
-      })
-    })
-  }
-
 describe("Integration tests", () => {
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
-    const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
+    const ipfsRepoPath = path.join(appDataPath, 'agents', 'alice', '.jsipfs')
 
     beforeAll(async () => {    
-        if(!fs.existsSync(TEST_DIR)) 
-          fs.mkdirSync(TEST_DIR)
+        if(!fs.existsSync(TEST_DIR)) {
+          throw Error("Please ensure that prepare-test is run before running tests!");
+        }
         if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
           fs.mkdirSync(path.join(TEST_DIR, 'agents'))
         if(!fs.existsSync(appDataPath))
@@ -120,7 +102,8 @@ describe("Integration tests", () => {
             appBuiltInLangs: ['note-ipfs'],
             appLangAliases: null,
             mocks: false,
-            ipfsRepoPath
+            ipfsRepoPath,
+            useLocalHolochainProxy: true
         })
 
         core.initControllers()
@@ -132,7 +115,7 @@ describe("Integration tests", () => {
     afterAll(async () => {
         expect(await isProcessRunning("holochain")).toBe(true);
         expect(await isProcessRunning("lair-keystore")).toBe(true);
-        expect(fs.existsSync(path.join(ipfsRepoPath, ".jsipfs/repo.lock"))).toBe(true);
+        expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(true);
 
         await core!.exit();
         await new Promise((resolve)=>setTimeout(resolve, 1000))
@@ -140,16 +123,6 @@ describe("Integration tests", () => {
         expect(await isProcessRunning("holochain")).toBe(false);
         expect(await isProcessRunning("lair-keystore")).toBe(false);
         expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(false);
-
-        //Delete all languages created during test
-        //@ts-ignore
-        fs.readdir(path.join(TEST_DIR, 'agent', 'alice', 'ad4m', 'languages'), (err, files) => {
-            if (err) throw err;
-          
-            for (const file of files) {
-              fs.rmdir(path.join(path.join(TEST_DIR, 'agent', 'alice', 'ad4m', 'languages'), file), {recursive: true});
-            }
-          });
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -187,7 +160,8 @@ describe("Integration tests", () => {
                 portHCAdmin: 12000,
                 portHCApp: 11337,
                 ipfsSwarmPort: 14002,
-                ipfsRepoPath
+                ipfsRepoPath,
+                useLocalHolochainProxy: true
           })
 
           bob.initControllers()
@@ -197,8 +171,8 @@ describe("Integration tests", () => {
         })
 
         afterAll(async () => {
-            await bob!.exit();
-            await new Promise((resolve)=>setTimeout(resolve, 1000))
+          await bob!.exit();
+          await new Promise((resolve)=>setTimeout(resolve, 1000))
         })
 
         describe('Neighbourhood', neighbourhoodTests(testContext))

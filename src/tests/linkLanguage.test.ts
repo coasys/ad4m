@@ -14,7 +14,7 @@ import getOwnPropertyDescriptor from '../shims/getOwnPropertyDescriptor'
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const TEST_DIR = `${__dirname}/../test-temp`
-const LANG_TO_TEST = "social-context-channel"
+const LANG_TO_TEST = "social-context"
 
 jest.setTimeout(35000)
 let core: PerspectivismCore|null = null
@@ -22,6 +22,9 @@ let core: PerspectivismCore|null = null
 describe(LANG_TO_TEST, () => {
 
     beforeAll(async () => {
+        if(!fs.existsSync(TEST_DIR)) {
+            throw Error("Please ensure that prepare-test is run before running tests!");
+        }
         const appDataPath = path.join(TEST_DIR, 'agents', 'linksLangTest')
         if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
             fs.mkdirSync(path.join(TEST_DIR, 'agents'))
@@ -42,8 +45,8 @@ describe(LANG_TO_TEST, () => {
             ipfsRepoPath
         })
         await core.agentService.createNewKeys()
-        core.agentService.save('')
-        core.initControllers()
+        await core.agentService.save('')
+        await core.initControllers()
         await core.initLanguages(true)
     })
 

@@ -3,7 +3,7 @@ import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, Perspect
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
 
-const LINK_LANGUAGE_PATH = path.join(__dirname, "../test-temp/languages/social-context-channel")
+const LINK_LANGUAGE_PATH = path.join(__dirname, "../test-temp/languages/social-context")
 
 export default function neighbourhoodTests(testContext: TestContext) {
     return () => {
@@ -18,7 +18,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 //Create unique social-context to simulate real scenario
                 const createUniqueLang = await ad4mClient.languages.cloneHolochainTemplate(LINK_LANGUAGE_PATH, "social-context", "b98e53a8-5800-47b6-adb9-86d55a74871e");
-                expect(createUniqueLang.name).toBe("social-context-channel");
+                expect(createUniqueLang.name).toBe("social-context");
 
                 let link = new LinkExpression()
                 link.author = "did:test";
@@ -42,20 +42,10 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const createUniqueLang = await alice.languages.cloneHolochainTemplate(LINK_LANGUAGE_PATH, "social-context", "b98e53a8-5800-47b6-adb9-alice-bob-friends");
+                const createUniqueLang = await alice.languages.cloneHolochainTemplate(LINK_LANGUAGE_PATH, "social-context", "b97e53a8-5800-47b6-adb9-alice-bob-friends");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, createUniqueLang.address, new Perspective())
 
-                let bobP1: PerspectiveHandle | null = null 
-                let tries = 0
-                while(!bobP1 && tries < 10) {
-                    await sleep(10000)
-                    tries++
-                    try {
-                        bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl)
-                    } catch(e) {
-                        console.log(`Getting Neigbourhood error on try ${tries}:`, e)
-                    }
-                }
+                let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                 
                 expect(bobP1).toBeTruthy()
                 expect(bobP1!.name).toBeDefined()
@@ -65,10 +55,10 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 await sleep(5000)
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
-                tries = 1
+                let tries = 1
 
                 while(bobLinks.length < 1 && tries < 20) {
-                    await sleep(5000)
+                    await sleep(1000)
                     bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
                 }
