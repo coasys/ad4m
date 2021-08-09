@@ -208,6 +208,10 @@ export default class Perspective {
 
 
             if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
+            //@ts-ignore
+            if (query.fromDate) result = result.filter(l => new Date(l.timestamp) >= query.fromDate!)
+            //@ts-ignore
+            if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
             // console.debug("result", result)
             return result
         }
@@ -219,6 +223,10 @@ export default class Perspective {
             let result = this.#db.getLinksByTarget(this.uuid, query.target).map(e => e.link)
             // @ts-ignore
             if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
+            //@ts-ignore
+            if (query.fromDate) result = result.filter(l => new Date(l.timestamp) >= query.fromDate!)
+            //@ts-ignore
+            if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
             return result
         }
 

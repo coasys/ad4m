@@ -1,5 +1,6 @@
 import { Ad4mClient, Link, LinkQuery, Perspective, LinkExpression, ExpressionProof } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
+import sleep from "./sleep";
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -30,6 +31,36 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 const getDeleted = await ad4mClient!.perspective.byUUID(update.uuid );
                 expect(getDeleted).toEqual(null);
+            })
+
+            it('test local perspective links - time query', async () => {
+                const ad4mClient = testContext.ad4mClient!
+
+                const create = await ad4mClient!.perspective.add("test-links-time");
+                expect(create.name).toEqual("test-links-time");
+
+                let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
+                await sleep(10)
+                let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
+                await sleep(10)
+                await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
+                await sleep(10)
+                await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
+                await sleep(10)
+                await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
+                await sleep(10)
+
+                //Test can get all links but first by querying from second timestamp
+                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date()}));
+                expect(queryLinks.length).toEqual(4);
+
+                //Test can get all links but first by querying from second timestamp
+                let queryLinksFirst = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({
+                    source: "lang://test", fromDate: new Date(addLink.timestamp), 
+                    untilDate: new Date(new Date(addLink2.timestamp).getTime() - 1)
+                }));
+                expect(queryLinksFirst.length).toEqual(1);
+                expect(queryLinksFirst[0].data.target).toEqual("lang://test-target");
             })
 
             it('test local perspective links', async () => {
