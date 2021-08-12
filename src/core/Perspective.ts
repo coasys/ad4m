@@ -237,16 +237,6 @@ export default class Perspective {
     }
 
     async getLinks(query: LinkQuery): Promise<Expression[]> {
-        // console.debug("getLinks local...")
-        const localLinks = await this.getLinksLocal(query)
-        // console.debug("getLinks local", localLinks)
-        // console.debug("getLinks remote...")
-        const remoteLinks = await this.callLinksAdapter('getLinks', query)
-        // console.debug("getLinks remote", remoteLinks)
-        const mergedLinks: {[key: number]: Expression} = {};
-        localLinks.forEach(l => mergedLinks[hashLinkExpression(l)] = l)
-        remoteLinks.forEach(l => mergedLinks[hashLinkExpression(l)] = l)
-
-        return Object.values(mergedLinks)
+        return await this.callLinksAdapter('getLinks', query)
     }
 }
