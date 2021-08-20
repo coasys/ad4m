@@ -16,6 +16,8 @@ import Signatures from './agent/Signatures'
 import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
+import path from 'path'
+import fs from 'fs'
 
 export interface InitServicesParams {
     portHCAdmin?: number, 
@@ -32,6 +34,7 @@ export default class PerspectivismCore {
     #db: PerspectivismDb
     #didResolver: DIDResolver
     #signatures: Signatures
+    #trustedAgents: string
 
     #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
@@ -46,6 +49,7 @@ export default class PerspectivismCore {
         this.#db = Db.init(Config.dataPath)
         this.#didResolver = DIDs.init(Config.dataPath)
         this.#signatures = new Signatures(this.#didResolver)
+        this.#trustedAgents = path.join(Config.rootConfigPath, "trustedAgents.json")
     }
 
     get agentService(): AgentService {
@@ -183,6 +187,38 @@ export default class PerspectivismCore {
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
         return await this.#holochain!.pubKeyForLanguage(lang)
+    }
+
+    addTrustedAgents(agents: string[]): void {
+        let trustedAgents: string[];
+        if (fs.existsSync(this.#trustedAgents)) {
+            trustedAgents = Array.from(JSON.parse(fs.readFileSync(this.#trustedAgents).toString()));
+            trustedAgents = trustedAgents.concat(agents);
+            trustedAgents = Array.from(new Set(trustedAgents));
+        } else {
+            trustedAgents = agents 
+        }
+
+        fs.writeFileSync(this.#trustedAgents, JSON.stringify(trustedAgents))
+    }
+
+    deleteTrustedAgents(agents: string[]): void {
+        if (fs.existsSync(this.#trustedAgents)) {
+            let trustedAgents = Array.from(JSON.parse(fs.readFileSync(this.#trustedAgents).toString()));
+            for (const agent of agents) {
+                trustedAgents.splice(trustedAgents.findIndex((value) => value == agent), 1);
+            }
+            fs.writeFileSync(this.#trustedAgents, JSON.stringify(trustedAgents))
+        }
+    }
+
+    getTrustedAgents(): string[] {
+        if (fs.existsSync(this.#trustedAgents)) {
+            let trustedAgents: string[] = Array.from(JSON.parse(fs.readFileSync(this.#trustedAgents).toString()));
+            return trustedAgents
+        } else {
+            return [] 
+        }
     }
 }
 

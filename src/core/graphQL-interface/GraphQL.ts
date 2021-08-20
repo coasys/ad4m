@@ -79,8 +79,24 @@ function createResolvers(core: PerspectivismCore) {
             perspectives: (parent, args, context, info) => {
                 return core.perspectivesController.allPerspectiveHandles()
             },
+            //@ts-ignore
+            getTrustedAgents: (parent, args, context, info) => {
+                return core.getTrustedAgents();
+            },
         },
         Mutation: {
+            //@ts-ignore
+            addTrustedAgents: (parent, args, context, info) => {
+                const { agents } = args;
+                core.addTrustedAgents(agents);
+                return core.getTrustedAgents();
+            },
+            //@ts-ignore
+            deleteTrustedAgents: (parent, args, context, info) => {
+                const { agents } = args;
+                core.deleteTrustedAgents(agents);
+                return core.getTrustedAgents();
+            },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {
                 await core.agentService.createNewKeys()
