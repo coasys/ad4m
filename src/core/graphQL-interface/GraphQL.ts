@@ -81,21 +81,21 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             getTrustedAgents: (parent, args, context, info) => {
-                return core.getTrustedAgents();
+                return core.agentService.getTrustedAgents();
             },
         },
         Mutation: {
             //@ts-ignore
             addTrustedAgents: (parent, args, context, info) => {
                 const { agents } = args;
-                core.addTrustedAgents(agents);
-                return core.getTrustedAgents();
+                core.agentService.addTrustedAgents(agents);
+                return core.agentService.getTrustedAgents();
             },
             //@ts-ignore
             deleteTrustedAgents: (parent, args, context, info) => {
                 const { agents } = args;
-                core.deleteTrustedAgents(agents);
-                return core.getTrustedAgents();
+                core.agentService.deleteTrustedAgents(agents);
+                return core.agentService.getTrustedAgents();
             },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {
