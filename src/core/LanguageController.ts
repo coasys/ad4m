@@ -228,11 +228,50 @@ export default class LanguageController {
             return language
         } else {
             let languageMeta = await this.getLanguageExpression(address);
-            if(languageMeta) {
-                const lang = await this.installLanguage(address, languageMeta)
-                return lang!
-            } else {
+            if(!languageMeta) {
                 throw new Error("Language not found by reference: " + JSON.stringify(ref))
+            }
+            //@ts-ignore
+            const trustedAgents: string[] = this.#context.agent.getTrustedAgents();
+            if (trustedAgents.find((agent) => agent == languageMeta!.author)) {
+                const languageSource = await this.getLanguageSource(address);
+                if (!languageSource) {
+                    throw new Error("Could not get languageSource for language")
+                }
+                const languageHash = await this.ipfsHash(languageSource);
+                if (!languageMeta["languageHash"]) {
+                    throw new Error("Could not find languageHash value inside languageMeta object")
+                }
+                if (languageHash == languageMeta["languageHash"]) {
+                    //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
+                    const lang = await this.installLanguage(address, languageMeta)
+                    return lang!
+                } else {
+                    throw new Error("Calculated langaugeHash did not match languageHash found in meta information")
+                }
+            } else {
+                //Person who created this language is not trusted so lets try and get a source language template
+                if (!languageMeta["templateParams"]) {
+                    throw new Error("Language not created by trusted agent and is not templated... aborting language install")
+                }
+                if (Object.keys(languageMeta["templateParams"]).length == 0) {
+                    throw new Error("Language not created by trusted agent and is not templated... aborting language install")
+                }
+                if (!languageMeta["sourceLanguageHash"]) {
+                    throw new Error("Could not find sourceLanguageHash for templating language being installed with address: " + ref.address);
+                }
+                //Get the meta information of the source language
+                const sourceLanguageMeta = await this.getLanguageExpression(languageMeta["sourceLanguageHash"]);
+                //@ts-ignore
+                const trustedAgents: string[] = this.#context.agent.getTrustedAgents();
+                if (trustedAgents.find((agent) => agent == sourceLanguageMeta!.author)) {
+                    const languageSource = await this.getLanguageSource(languageMeta["sourceLanguageHash"]);
+                    if (!languageSource) {
+                        throw new Error("Could not get languageSource for language")
+                    }
+                } else {
+                    throw new Error("Agent which created source language for language trying to be installed is not a trustedAgent... aborting language install")
+                }
             }
         }
     }
