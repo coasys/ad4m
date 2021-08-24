@@ -403,7 +403,7 @@ export default class LanguageController {
         //@ts-ignore
         const name = templateData["name"] || sourceLanguageMeta.data["name"] || "undefined";
         //@ts-ignore
-        const description = templateData["name"] || sourceLanguageMeta.data["name"] || "undefined";
+        const description = templateData["description"] || sourceLanguageMeta.data["description"] || "undefined";
         var newLanguageObj = {
             name: name,
             description: description,
