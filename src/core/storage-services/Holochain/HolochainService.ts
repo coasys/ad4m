@@ -119,11 +119,23 @@ export default class HolochainService {
     }
 
     unpackDna(dnaPath: string): string {
-        return unpackDna(`${this.#resourcePath}/hc`, dnaPath)
+        let result = unpackDna(`${this.#resourcePath}/hc`, dnaPath);
+        let splitResult = result.split("Unpacked to directory ");
+        if (splitResult.length == 2) {
+            return splitResult[1]
+        } else {
+            return result
+        }
     }
 
     packDna(workdirPath: string): string {
-        return packDna(`${this.#resourcePath}/hc`, workdirPath)
+        let result = packDna(`${this.#resourcePath}/hc`, workdirPath);
+        let splitResult = result.split("Wrote bundle ");
+        if (splitResult.length == 2) {
+            return splitResult[1]
+        } else {
+            return result
+        }
     }
 
     async pubKeyForLanguage(lang: string): Promise<AgentPubKey> {

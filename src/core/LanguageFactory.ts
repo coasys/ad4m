@@ -1,16 +1,18 @@
 import * as fs from 'fs';
 import path from 'path'
 import type { Language, LanguageRef, PublicSharing } from "@perspect3vism/ad4m";
-import type AgentService from "./agent/AgentService";
 import * as Config from "./Config";
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import yaml from "js-yaml";
+import LanguageController from './LanguageController';
 
 export default class LanguageFactory {
     #languageLanguage: Language
+    #languageController: LanguageController
     #holochainService: HolochainService
 
-    constructor(agentService: AgentService, languageLanguage: Language, holochainService: HolochainService) {
+    constructor(languageController: LanguageController, languageLanguage: Language, holochainService: HolochainService) {
+        this.#languageController = languageController
         if(!languageLanguage.languageAdapter)
             throw new Error(`Error creating LanguageFactory! Not a Language Language: ${JSON.stringify(languageLanguage)}`)
         this.#languageLanguage = languageLanguage
@@ -109,7 +111,7 @@ export default class LanguageFactory {
             name,
             description: "",
             bundleFile: code.toString(),
-            uid: ""
+            uid: uid
         }
 
         try {

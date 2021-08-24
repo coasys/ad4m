@@ -161,9 +161,9 @@ function createResolvers(core: PerspectivismCore) {
                 return exprRef2String(expref)
             },
             //@ts-ignore
-            languageCloneHolochainTemplate: async (parent, args, context, info) => {
-                const { languagePath, dnaNick, uid } = args;
-                return await core.languageCloneHolochainTemplate(languagePath, dnaNick, uid);
+            languageApplyTemplateAndPublish: async (parent, args, context, info) => {
+                const { sourceLanguageHash, templateData } = args;
+                return await core.languageApplyTemplateAndPublish(sourceLanguageHash, JSON.parse(templateData));
             },
             //@ts-ignore
             languageWriteSettings: async (parent, args, context, info) => {

@@ -131,7 +131,7 @@ export default class PerspectivismCore {
     async initLanguages(omitLanguageFactory: boolean|void) {
         await this.#languageController!.loadLanguages()
         if(!omitLanguageFactory) {
-            this.#languageFactory = new LanguageFactory(this.#agentService, this.#languageController!.getLanguageLanguage(), this.#holochain!)
+            this.#languageFactory = new LanguageFactory(this.#languageController!, this.#languageController!.getLanguageLanguage(), this.#holochain!)
         }
     }
 
@@ -169,18 +169,29 @@ export default class PerspectivismCore {
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
-        console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
+        console.log("Core.installNeighbourhood(): Got neighbourhood", neighbourHoodExp);
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
         this.languageController.installLanguage(neighbourhood.linkLanguage, null);
         
         return this.#perspectivesController!.add("", url, neighbourhood);        
     }
 
-    async languageCloneHolochainTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
-        if (!this.#languageFactory) {
-            throw Error("Language factory was not started when calling core.initLanguages()")
+    async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
+        if (!this.#languageController) {
+            throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
-        return await this.#languageFactory.languageCloneHolochainTemplate(languagePath, dnaNick, uid)
+        let languageObject = await this.#languageController.languageApplyTemplate(sourceLanguageHash, templateData);
+        try {
+            const address = await (this.#languageController.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageObject)
+            return {
+                address,
+                //@ts-ignore
+                name: languageObject["name"],
+            } as LanguageRef
+        } catch(e) {
+            console.error("Core.languageApplyTemplateAndPublish(): ERROR creating new language:", e)
+            throw e
+        } 
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
