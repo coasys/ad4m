@@ -222,6 +222,7 @@ export default class LanguageController {
     async languageByRef(ref: LanguageRef): Promise<Language> {
         const address = languageAliases[ref.address] ? languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
+        //If the language is already installed then just return it
         if(language) {
             return language
         } else {
@@ -233,7 +234,9 @@ export default class LanguageController {
             const languageAuthor = languageMeta.author;
             //@ts-ignore
             const trustedAgents: string[] = this.#context.agent.getTrustedAgents();
+            //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
             if (trustedAgents.find((agent) => agent === languageAuthor)) {
+                //Get the language source so we can generate a hash and check against the hash given in the language meta information
                 const languageSource = await this.getLanguageSource(address);
                 if (!languageSource) {
                     throw new Error("Could not get languageSource for language")
@@ -242,6 +245,7 @@ export default class LanguageController {
                 if (!languageMetaData["languageHash"]) {
                     throw new Error("Could not find languageHash value inside languageMetaData object")
                 }
+                //Check the hash matches and then install!
                 if (languageHash == languageMetaData["languageHash"]) {
                     //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                     const lang = await this.installLanguage(address, languageMeta)
@@ -254,9 +258,11 @@ export default class LanguageController {
                 if (!languageMetaData["templateParams"]) {
                     throw new Error("Language not created by trusted agent and is not templated... aborting language install")
                 }
+                //Check that there are some template params to even apply
                 if (Object.keys(languageMetaData["templateParams"]).length == 0) {
                     throw new Error("Language not created by trusted agent and is not templated... aborting language install")
                 }
+                //Check that there is a sourceLanguage that we can follow to
                 if (!languageMetaData["sourceLanguageHash"]) {
                     throw new Error("Could not find sourceLanguageHash for templating language being installed with address: " + ref.address);
                 }
@@ -268,12 +274,16 @@ export default class LanguageController {
                 }
                 //@ts-ignore
                 const trustedAgents: string[] = this.#context.agent.getTrustedAgents();
+                //Check that the agent who authored the original template language is in the current agents trust list
                 if (trustedAgents.find((agent) => agent === sourceLanguageMeta.author)) {
+                    //Apply the template information supplied in the language to be installed to the source language and make sure that the resulting
+                    //language hash is equal to the one trying to be installed. This ensures that the only thing changed between language versions is the template data
                     const sourceLanguageTemplated = await this.languageApplyTemplate(sourceLanguageHash, languageMetaData["templateParams"]);
                     const languageSource = await this.getLanguageSource(address);
                     if (!languageSource) {
                         throw new Error("Could not get languageSource for language")
                     }
+                    //Hash the language source and ensure its the same as the templated language 
                     const languageHash = await this.ipfsHash(languageSource);
                     //@ts-ignore
                     if (sourceLanguageTemplated.hash === languageHash) {
