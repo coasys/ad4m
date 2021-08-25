@@ -47,7 +47,9 @@ encryption_service_uri: ~
 decryption_service_uri: ~
 dpki: ~
 keystore_path: ${escapeShellArg(conductorConfig.environmentPath)}/keystore
-passphrase_service: ~
+passphrase_service: 
+    type: danger_insecure_from_config
+    passphrase: "foobar"
 admin_interfaces:
   - driver:
       type: websocket
