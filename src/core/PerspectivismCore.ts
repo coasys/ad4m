@@ -13,7 +13,6 @@ import * as GraphQL from './graphQL-interface/GraphQL'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
-import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
 import path from 'path'
@@ -37,8 +36,6 @@ export default class PerspectivismCore {
 
     #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
-
-    #languageFactory?: LanguageFactory
 
     constructor(config: Config.CoreConfig) {
         Config.init(config)
@@ -128,11 +125,8 @@ export default class PerspectivismCore {
         })
     }
 
-    async initLanguages(omitLanguageFactory: boolean|void) {
+    async initLanguages() {
         await this.#languageController!.loadLanguages()
-        if(!omitLanguageFactory) {
-            this.#languageFactory = new LanguageFactory(this.#languageController!, this.#languageController!.getLanguageLanguage(), this.#holochain!)
-        }
     }
 
     initMockLanguages(hashes: string[], languages: Language[]) {
@@ -180,7 +174,25 @@ export default class PerspectivismCore {
         if (!this.#languageController) {
             throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
-        let languageObject = await this.#languageController.languageApplyTemplate(sourceLanguageHash, templateData);
+        let languageObject = await this.#languageController.languageApplyTemplateOnSource(sourceLanguageHash, templateData);
+        try {
+            const address = await (this.#languageController.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageObject)
+            return {
+                address,
+                //@ts-ignore
+                name: languageObject["name"],
+            } as LanguageRef
+        } catch(e) {
+            console.error("Core.languageApplyTemplateAndPublish(): ERROR creating new language:", e)
+            throw e
+        } 
+    }
+
+    async languagePublish(languagePath: string, templateData: object): Promise<LanguageRef> {
+        if (!this.#languageController) {
+            throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
+        };
+        let languageObject = await this.#languageController.languageApplyTemplate(languagePath, templateData);
         try {
             const address = await (this.#languageController.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageObject)
             return {

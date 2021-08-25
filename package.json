@@ -17,6 +17,7 @@
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-perspective": "jest --forceExit src/tests/perspective.test.ts",
     "test-agent": "jest --forceExit src/tests/agent.test.ts",
+    "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test": "npm run prepare-test && jest --forceExit"
   },
   "repository": {
@@ -70,14 +71,12 @@
     "@transmute/did-wallet": "lucksus/did-wallet",
     "@types/json-stable-stringify": "^1.0.33",
     "apollo-server": "^2.18.2",
-    "base-x": "^3.0.8",
     "graphql": "^15.3.0",
     "ipfs": "^0.54.4",
     "js-yaml": "^4.0.0",
     "json-stable-stringify": "^1.0.1",
     "liquidcore": "^0.7.10",
     "lowdb": "^1.0.0",
-    "multihashing": "^0.3.3",
     "rollup": "^2.41.3",
     "rollup-plugin-typescript2": "^0.30.0",
     "sha256": "^0.2.0",

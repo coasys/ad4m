@@ -120,6 +120,7 @@ export default class HolochainService {
 
     unpackDna(dnaPath: string): string {
         let result = unpackDna(`${this.#resourcePath}/hc`, dnaPath);
+        console.warn("Unpack result", result);
         let splitResult = result.split("Unpacked to directory ");
         if (splitResult.length == 2) {
             return splitResult[1]
