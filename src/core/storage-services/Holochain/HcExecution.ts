@@ -67,7 +67,7 @@ network:
         proxy_url: "${conductorConfig.proxyUrl}"
   bootstrap_service: "${conductorConfig.bootstrapService}"
   tuning_params:
-    gossip_strategy: simple-bloom
+    gossip_strategy: sharded-gossip
     gossip_loop_iteration_delay_ms: "1000"
     gossip_outbound_target_mbps: "0.5"
     gossip_inbound_target_mbps: "0.5"
