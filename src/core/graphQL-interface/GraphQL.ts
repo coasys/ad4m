@@ -42,6 +42,24 @@ function createResolvers(core: PerspectivismCore) {
                 return expression
             },
             //@ts-ignore
+            expressionMany: async (parent, args, context, info) => {
+                const { urls } = args;
+                const expressionPromises = [];
+                for (const url of urls) {
+                    expressionPromises.push(core.languageController.getExpression(parseExprUrl(url)));
+                };
+                const results = await Promise.all(expressionPromises);
+
+                return results.map((expression, index) => {
+                    if(expression) {
+                        expression.ref = parseExprUrl(urls[index]);
+                        expression.url = urls[index];
+                        expression.data = JSON.stringify(expression.data);
+                    }
+                    return expression
+                })
+            },
+            //@ts-ignore
             expressionRaw: async (parent, args, context, info) => {
                 const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
