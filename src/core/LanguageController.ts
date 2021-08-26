@@ -424,7 +424,7 @@ export default class LanguageController {
             bundleFile: languageData.toString(),
         }
 
-        console.log("LanguageController.languageApplyTemplate: Templating complete creating new language with language meta object: ", newLanguageObj);
+        //console.log("LanguageController.languageApplyTemplate: Templating complete creating new language with language meta object: ", newLanguageObj);
         return newLanguageObj
     }
 
@@ -450,9 +450,9 @@ export default class LanguageController {
 
         //Create the language object
         //@ts-ignore
-        const name = templateData["name"] || undefined;
+        const name = templateData["name"] || null;
         //@ts-ignore
-        const description = templateData["description"] || undefined;
+        const description = templateData["description"] || null;
         return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, dnaYamlHash, dnaZomeWasmHash, sourceLanguageHash: null})
     }
 
@@ -482,9 +482,9 @@ export default class LanguageController {
         delete templateData["dna"];
 
         //@ts-ignore
-        const name = templateData["name"] || sourceLanguageMeta.data["name"] || "undefined";
+        const name = templateData["name"] || sourceLanguageMeta.data["name"] || null;
         //@ts-ignore
-        const description = templateData["description"] || sourceLanguageMeta.data["description"] || "undefined";
+        const description = templateData["description"] || sourceLanguageMeta.data["description"] || null;
         return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, dnaYamlHash, dnaZomeWasmHash, sourceLanguageHash})
     }
 

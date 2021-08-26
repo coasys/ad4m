@@ -13,10 +13,18 @@ export default function languageTests(testContext: TestContext) {
                 //TODO/NOTE: this will break if the social-context language version is changed
                 expect(sourceLanguage.address).toBe("QmU2CmiD6wKExCZ2tfEfcY17c5xD6iNevLTsKBu5AF6Sqd");
 
+                const sourceLanguageMeta = await ad4mClient.expression.get(`lang://${sourceLanguage.address}`);
+                const sourceLanguageMetaData = JSON.parse(sourceLanguageMeta.data);
+                expect(sourceLanguageMetaData).toBe(JSON.stringify({"name":"A templated social-context","description":null,"templateParams":{"name":"A templated social-context","uid":"001eb380-0dba-48fb-86d8-b3e58ea71b00"},"hash":"QmU2CmiD6wKExCZ2tfEfcY17c5xD6iNevLTsKBu5AF6Sqd","sourceLanguageHash":null,"dnaYamlHash":"QmdEHSaBxfEKE2BRSN7MLevPg3KiUaQkbaCBMB2mdCuWFi","dnaZomeWasmHash":"QmWiBzrV1qGwnWuH8ktawuTVqVTb3YEfGtg1KpaxJUG85Z"}))
+
                 const canPublishNonHolochainLang = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/note-ipfs/build/bundle.js"), JSON.stringify({uid: "001eb380-0dba-48fb-86d8-b3e58ea71b00", name: "A templated note language"}))
                 expect(canPublishNonHolochainLang.name).toBe("A templated note language");
                 //TODO/NOTE: this will break if the note-ipfs language version is changed
                 expect(canPublishNonHolochainLang.address).toBe("QmU4ZoFvxXn4i16CcaU3ZBMLk2RM33HdQLjYWywoYKtWc7");
+            
+                const sourceLanguageMetaNonHC = await ad4mClient.expression.get(`lang://${canPublishNonHolochainLang.address}`);
+                const sourceLanguageMetaNonHCData = JSON.parse(sourceLanguageMetaNonHC.data);
+                expect(sourceLanguageMetaNonHCData).toBe(JSON.stringify({"name":"A templated note language","description":null,"templateParams":{"name":"A templated note language","uid":"001eb380-0dba-48fb-86d8-b3e58ea71b00"},"hash":"QmU4ZoFvxXn4i16CcaU3ZBMLk2RM33HdQLjYWywoYKtWc7","sourceLanguageHash":null,"dnaYamlHash":null,"dnaZomeWasmHash":null}));
             })
 
             // it('can get and create unique language', async () => {
