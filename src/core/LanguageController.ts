@@ -230,6 +230,9 @@ export default class LanguageController {
             if(!languageMeta) {
                 throw new Error("Language not found by reference: " + JSON.stringify(ref))
             }
+            if (languageMeta.proof.valid != true) {
+                throw new Error("Language to be installed does not have valid proof");
+            }
             const languageMetaData = languageMeta.data;
             const languageAuthor = languageMeta.author;
             //@ts-ignore
@@ -310,14 +313,11 @@ export default class LanguageController {
             if (!sourceLanguageHash) {
                 sourceLanguageHash = uuidv4();
             }
-            console.warn("found dna line in language lines");
             //Create a directory for all of our DNA templating operations
             const tempTemplatingPath = path.join(Config.tempLangPath, sourceLanguageHash);
-            console.warn("creating temp path at", tempTemplatingPath);
             fs.mkdirSync(tempTemplatingPath);
             //The place where we will put the .dna from the b64
             const tempDnaPath = path.join(tempTemplatingPath, `${sourceLanguageHash}.dna`);
-            console.warn("dna path", tempDnaPath);
             const wasmPath = path.join(tempTemplatingPath, "target/wasm32-unknown-unknown/release/")
 
             //Write the DNA code to a file

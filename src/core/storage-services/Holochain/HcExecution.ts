@@ -55,17 +55,14 @@ admin_interfaces:
       type: websocket
       port: ${conductorConfig.adminPort}
 network:
+  network_type: quic_bootstrap
   transport_pool:
     - type: proxy
       sub_transport:
         type: quic
-        bind_to: ~
-        override_host: ~
-        override_port: ~
       proxy_config:
         type: ${proxyType}
         proxy_url: "${conductorConfig.proxyUrl}"
-  bootstrap_service: "${conductorConfig.bootstrapService}"
   tuning_params:
     gossip_strategy: sharded-gossip
     gossip_loop_iteration_delay_ms: "1000"
@@ -89,7 +86,6 @@ network:
     tx2_channel_count_per_connection: "16"
     tx2_implicit_timeout_ms: "30000"
     tx2_initial_connect_retry_delay_ms: "200"
-  network_type: quic_bootstrap
 `
     fs.writeFileSync(conductorConfig.conductorConfigPath, conductorStringConfig);
 }
