@@ -13,10 +13,7 @@ export function stopProcesses(hcProcess: child_process.ChildProcess, lairProcess
 }
 
 export function unpackDna(hcPath: string, dnaPath: string): string {
-    console.warn(hcPath);
-    const rawRes = child_process.execFileSync(`${escapeShellArg(hcPath)}`, ["dna", "unpack", `${escapeShellArg(dnaPath)}`]);
-    console.warn("raw res", rawRes);
-    return rawRes.toString();
+    return child_process.execFileSync(`${escapeShellArg(hcPath)}`, ["dna", "unpack", `${escapeShellArg(dnaPath)}`]).toString();
 }
 
 export function packDna(hcPath: string, workdirPath: string): string {

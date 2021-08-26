@@ -300,16 +300,16 @@ export default class LanguageController {
         }
     }
 
-    async readAndTemplateHolochainDNA(sourceLanguageLines: string[], sourceLanguageHash?: string): Promise<{dnaYamlHash: string | null, dnaZomeWasmHash: string | null, dnaCode: string | null}> {
+    async readAndTemplateHolochainDNA(sourceLanguageLines: string[], templateData: object, sourceLanguageHash?: string): Promise<{dnaYamlHash: string | null, dnaZomeWasmHash: string | null, dnaCode: string | null}> {
         //Look for var dna in languageSource which would tell us its a holochain language and then apply templating to the holochain language also
         const dnaIndex = sourceLanguageLines.findIndex(element => element.includes(`var dna = `));
-        if (!sourceLanguageHash) {
-            sourceLanguageHash = uuidv4();
-        }
         let dnaYamlHash: null | string = null;
         let dnaZomeWasmHash: null | string = null;
-        let dnaCode: null | string = null;
+        let dnaCodeRes: null | string = null;
         if (dnaIndex != -1) {
+            if (!sourceLanguageHash) {
+                sourceLanguageHash = uuidv4();
+            }
             console.warn("found dna line in language lines");
             //Create a directory for all of our DNA templating operations
             const tempTemplatingPath = path.join(Config.tempLangPath, sourceLanguageHash);
@@ -321,16 +321,14 @@ export default class LanguageController {
             const wasmPath = path.join(tempTemplatingPath, "target/wasm32-unknown-unknown/release/")
 
             //Write the DNA code to a file
-            console.warn(sourceLanguageLines[dnaIndex].split("var dna = ")[1]);
-            let dnaCode = Buffer.from(sourceLanguageLines[dnaIndex].split("var dna = ")[1]).toString();
-            console.warn(dnaCode);
-            fs.writeFileSync(tempDnaPath, dnaCode);
+            let dnaCode = sourceLanguageLines[dnaIndex].split("var dna = ")[1]
+            //TODO: here was are assuming that the first character is " and the last two "; we should check for this and not assume
+            dnaCode = dnaCode.substring(1, dnaCode.length-2);
+            fs.writeFileSync(tempDnaPath, Buffer.from(dnaCode, "base64"));
             
             //Unpack the DNA
-            console.warn("going to unpack dna");
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result 
-            let unpackPath = this.#holochainService.unpackDna(tempDnaPath);
-            console.warn("unpacked dna");
+            let unpackPath = this.#holochainService.unpackDna(tempDnaPath).replace(/(\r\n|\n|\r)/gm, "");
             //TODO: are all dna's using the same dna.yaml?
             const dnaYamlPath = path.join(unpackPath, "dna.yaml");
             if (!fs.existsSync(dnaYamlPath)) {
@@ -365,19 +363,18 @@ export default class LanguageController {
             dnaYamlHash = await this.ipfsHash(dnaYamlDump);
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result 
-            let packPath = this.#holochainService.packDna(unpackPath);
+            let packPath = this.#holochainService.packDna(unpackPath).replace(/(\r\n|\n|\r)/gm, "");
             const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
-            const templatedDnaCode = `var dna = "${base64}";`.trim();
 
             //Cleanup temp directory
             fs.unlinkSync(tempDnaPath);
             fs.rmdirSync(tempTemplatingPath, {recursive: true});
-            dnaCode = templatedDnaCode;
+            dnaCodeRes = base64;
         }
         return {
             dnaYamlHash,
             dnaZomeWasmHash,
-            dnaCode
+            dnaCode: dnaCodeRes
         }
     }
 
@@ -393,14 +390,18 @@ export default class LanguageController {
     }
 
     applyTemplateData(sourceLanguageLines: string[], templateData: object) {
+        let templateLines = [];
         for (const [templateKey, templateValue] of Object.entries(templateData)) {
             //NOTE: this could be risky and end up removing var ${templateKey} from areas in the code where it is used for normal language operations
             //We need to somehow split the bundle at a given point and only remove template variables above this point
             let index = sourceLanguageLines.findIndex(element => element.includes(`var ${templateKey} =`));
             if (index != -1) {
-                delete sourceLanguageLines[index];
+                sourceLanguageLines.splice(index, 1);
             };
-            sourceLanguageLines.unshift(`var ${templateKey} = ${templateValue}`);
+            templateLines.push(`var ${templateKey} = "${templateValue}";`);
+        };
+        for (const templateValue of templateLines.reverse()) {
+            sourceLanguageLines.unshift(templateValue);
         };
     }
 
@@ -432,29 +433,27 @@ export default class LanguageController {
             throw new Error("Language at path: " + languagePath + " does not exist");
         };
         const sourceLanguage = fs.readFileSync(languagePath).toString();
-        console.warn("read language");
         const sourceLanguageLines = sourceLanguage!.split("\n");
-        console.warn("got language lines", sourceLanguageLines.length);
-        const {dnaYamlHash, dnaZomeWasmHash, dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines);
-        console.warn("got dna hash information", dnaYamlHash, dnaZomeWasmHash);
+        templateData = this.orderObject(templateData);
+        const {dnaYamlHash, dnaZomeWasmHash, dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData);
         //Add the template data to the language data
         if (dnaCode) {
             //@ts-ignore
             templateData["dna"] = dnaCode;
         };
-        const orderedTemplateData = this.orderObject(templateData);
-        console.debug("LangugeFactory.languageApplyTemplate: Templating language with template data", orderedTemplateData);
-        this.applyTemplateData(sourceLanguageLines, orderedTemplateData);
+        templateData = this.orderObject(templateData);
+        //console.debug("LangugeFactory.languageApplyTemplate: Templating language with template data", templateData);
+        this.applyTemplateData(sourceLanguageLines, templateData);
 
         //@ts-ignore
-        delete orderedTemplateData["dna"];
+        delete templateData["dna"];
 
         //Create the language object
         //@ts-ignore
         const name = templateData["name"] || undefined;
         //@ts-ignore
         const description = templateData["description"] || undefined;
-        return await this.constructLanguageObject(sourceLanguageLines, orderedTemplateData, {name, description, dnaYamlHash, dnaZomeWasmHash, sourceLanguageHash: null})
+        return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, dnaYamlHash, dnaZomeWasmHash, sourceLanguageHash: null})
     }
 
     async languageApplyTemplateOnSource(sourceLanguageHash: string, templateData: object): Promise<object> {
@@ -467,25 +466,26 @@ export default class LanguageController {
             throw new Error("LanguageController.languageApplyTemplate: Could not get sourceLanguageMeta with hash: " + sourceLanguageHash)
         }
         const sourceLanguageLines = sourceLanguage!.split("\n");
-        const {dnaYamlHash, dnaZomeWasmHash, dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines, sourceLanguageHash);
+        templateData = this.orderObject(templateData);
+        const {dnaYamlHash, dnaZomeWasmHash, dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
 
         //If there was some dna code in the source language then lets also add that to the language bundle (but not to the templateData as we dont want that on the meta)
         if (dnaCode) {
             //@ts-ignore
             templateData["dna"] = dnaCode;
         }
-        const orderedTemplateData = this.orderObject(templateData);
-        console.debug("LangugeFactory.languageApplyTemplate: Templating language with template data", orderedTemplateData);
-        this.applyTemplateData(sourceLanguageLines, orderedTemplateData);
+        templateData = this.orderObject(templateData);
+        //console.debug("LangugeFactory.languageApplyTemplate: Templating language with template data", templateData);
+        this.applyTemplateData(sourceLanguageLines, templateData);
 
         //@ts-ignore
-        delete orderedTemplateData["dna"];
+        delete templateData["dna"];
 
         //@ts-ignore
         const name = templateData["name"] || sourceLanguageMeta.data["name"] || "undefined";
         //@ts-ignore
         const description = templateData["description"] || sourceLanguageMeta.data["description"] || "undefined";
-        return await this.constructLanguageObject(sourceLanguageLines, orderedTemplateData, {name, description, dnaYamlHash, dnaZomeWasmHash, sourceLanguageHash})
+        return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, dnaYamlHash, dnaZomeWasmHash, sourceLanguageHash})
     }
 
     filteredLanguageRefs(propertyFilter?: string): LanguageRef[] {

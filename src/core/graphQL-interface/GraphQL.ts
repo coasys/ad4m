@@ -167,11 +167,8 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             languagePublish: async (parent, args, context, info) => {
-                console.warn("Tring to publish language");
                 const { languagePath, templateData } = args;
-                const publish = await core.languagePublish(languagePath, JSON.parse(templateData));
-                console.warn("publish result", publish)
-                return publish
+                return await core.languagePublish(languagePath, JSON.parse(templateData));
             },
             //@ts-ignore
             languageWriteSettings: async (parent, args, context, info) => {

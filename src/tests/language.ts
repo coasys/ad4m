@@ -1,6 +1,5 @@
 import { TestContext } from './integration.test'
 import path from "path";
-import { v4 } from 'uuid'
 
 export default function languageTests(testContext: TestContext) {
     return () => {
@@ -9,8 +8,15 @@ export default function languageTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient;
 
                 //Publish a source language to start working from
-                const sourceLanguage = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: v4(), name: "A templated social-context"}))
-                console.warn("Published a language with result ", sourceLanguage);
+                const sourceLanguage = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: "001eb380-0dba-48fb-86d8-b3e58ea71b00", name: "A templated social-context"}))
+                expect(sourceLanguage.name).toBe("A templated social-context");
+                //TODO/NOTE: this will break if the social-context language version is changed
+                expect(sourceLanguage.address).toBe("QmU2CmiD6wKExCZ2tfEfcY17c5xD6iNevLTsKBu5AF6Sqd");
+
+                const canPublishNonHolochainLang = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/note-ipfs/build/bundle.js"), JSON.stringify({uid: "001eb380-0dba-48fb-86d8-b3e58ea71b00", name: "A templated note language"}))
+                expect(canPublishNonHolochainLang.name).toBe("A templated note language");
+                //TODO/NOTE: this will break if the note-ipfs language version is changed
+                expect(canPublishNonHolochainLang.address).toBe("QmU4ZoFvxXn4i16CcaU3ZBMLk2RM33HdQLjYWywoYKtWc7");
             })
 
             // it('can get and create unique language', async () => {
