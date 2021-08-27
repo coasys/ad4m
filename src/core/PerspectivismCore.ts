@@ -17,6 +17,7 @@ import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
 import EntanglementProofController from './EntanglementProof'
+import runDAppServer from "./DAppServer"
 
 export interface InitServicesParams {
     portHCAdmin?: number, 
@@ -89,6 +90,10 @@ export default class PerspectivismCore {
         })
         console.log(`🚀  GraphQL Server ready at ${url}`)
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
+    }
+
+    startDAppServer(port: number) {
+        runDAppServer(port)
     }
 
     async initServices(params: InitServicesParams) {

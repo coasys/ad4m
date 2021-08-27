@@ -6,3 +6,5 @@
 /node_modules
 !/src/rollup-plugin-hc-dna.js
 test-temp
+!rollup.config.js
+public/build
