@@ -1,4 +1,4 @@
-import { Perspective, LinkExpression, Link, ExpressionProof } from "@perspect3vism/ad4m";
+import { Perspective, LinkExpression, Link, ExpressionProof, EntanglementProofInput } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import sleep from './sleep'
 
@@ -80,6 +80,31 @@ export default function agentTests(testContext: TestContext) {
 
                 const getInvalidDid = await ad4mClient.agent.byDID("na");
                 expect(getInvalidDid).toBe(null);
+            })
+            it('can create entanglementProofPreFlight', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+
+                //Check can generate a preflight key
+                const preFlight = await ad4mClient.agent.entanglementProofPreFlight("ethAddr");
+                expect(preFlight.deviceKey).toBe("ethAddr");
+                expect(preFlight.didSignedByDeviceKey).toBeNull();
+
+                //Check can save a entanglement proof
+                preFlight.didSignedByDeviceKey = "ethSignedDID";
+                const addProof = await ad4mClient.agent.addEntanglementProofs([preFlight as EntanglementProofInput]);
+                expect(addProof[0]).toStrictEqual(preFlight);
+
+                //Check can get entanglment proofs
+                const getProofs = await ad4mClient.agent.getEntanglementProofs();
+                expect(getProofs[0]).toStrictEqual(preFlight);
+
+                //Check can delete entanglement proofs
+                const deleteProofs = await ad4mClient.agent.deleteEntanglementProofs([preFlight as EntanglementProofInput]);
+                expect(deleteProofs.length).toBe(0);
+
+                //Check entanglement proof is deleted on get
+                const getProofsPostDelete = await ad4mClient.agent.getEntanglementProofs();
+                expect(getProofsPostDelete.length).toBe(0);
             })
         })
     }

@@ -98,7 +98,6 @@ export default class PerspectivismCore {
             Config.holochainConductorPath, 
             Config.holochainDataPath, 
             Config.resourcePath, 
-            this.entanglementProofController,
             params.portHCAdmin, 
             params.portHCApp,
             params.useLocalHolochainProxy
