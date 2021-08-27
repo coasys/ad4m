@@ -56,6 +56,7 @@ admin_interfaces:
       port: ${conductorConfig.adminPort}
 network:
   network_type: quic_bootstrap
+  bootstrap_service: https://bootstrap-staging.holo.host
   transport_pool:
     - type: proxy
       sub_transport:
@@ -80,12 +81,6 @@ network:
     tls_in_mem_session_storage: "512"
     proxy_keepalive_ms: "120000"
     proxy_to_expire_ms: "300000"
-    concurrent_limit_per_thread: "4096"
-    tx2_quic_max_idle_timeout_ms: "30000"
-    tx2_pool_max_connection_count: "4096"
-    tx2_channel_count_per_connection: "16"
-    tx2_implicit_timeout_ms: "30000"
-    tx2_initial_connect_retry_delay_ms: "200"
 `
     fs.writeFileSync(conductorConfig.conductorConfigPath, conductorStringConfig);
 }
