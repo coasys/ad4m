@@ -3,6 +3,9 @@ import resolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import livereload from 'rollup-plugin-livereload';
 import { terser } from 'rollup-plugin-terser';
+import postcss from "rollup-plugin-postcss";
+import json from "@rollup/plugin-json";
+import nodePolyfills from 'rollup-plugin-node-polyfills';
 
 const production = !process.env.ROLLUP_WATCH;
 
@@ -53,9 +56,26 @@ export default {
 		// https://github.com/rollup/plugins/tree/master/packages/commonjs
 		resolve({
 			browser: true,
-			dedupe: ['svelte']
+			dedupe: ['svelte'],
+			preferBuiltins: false,
 		}),
 		commonjs(),
+
+		postcss({
+			extract: false,
+			minimize: true,
+			use: [
+				['sass', {
+				includePaths: [
+					'./src/theme',
+					'./node_modules'
+				]
+				}]
+			]
+		}),
+
+		json(),
+		nodePolyfills(),
 
 		// In dev mode, call `npm run start` once
 		// the bundle has been generated
