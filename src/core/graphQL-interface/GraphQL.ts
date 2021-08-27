@@ -79,8 +79,24 @@ function createResolvers(core: PerspectivismCore) {
             perspectives: (parent, args, context, info) => {
                 return core.perspectivesController.allPerspectiveHandles()
             },
+            //@ts-ignore
+            entanglementProofs: (parent, args, context, info) => {
+                return core.agentService.getEntanglementProofs();
+            }
         },
         Mutation: {
+            //@ts-ignore
+            addEntanglementProofs: (parent, args, context, info) => {
+                const { proofs } = args;
+                core.agentService.addEntanglementProof(proofs);
+                return core.agentService.getEntanglementProofs();
+            },
+            //@ts-ignore
+            deleteEntanglementProofs: (parent, args, context, info) => {
+                const { proofs } = args;
+                core.agentService.deleteEntanglementProof(proofs);
+                return core.agentService.getEntanglementProofs();  
+            },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {
                 await core.agentService.createNewKeys()

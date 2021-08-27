@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
-import type { Language, Expression, PublicSharing, ReadOnlyLanguage } from '@perspect3vism/ad4m';
+import type { Language, Expression, PublicSharing, ReadOnlyLanguage, EntanglementProof } from '@perspect3vism/ad4m';
 import { Agent, ExpressionProof } from '@perspect3vism/ad4m';
 import secp256k1 from 'secp256k1'
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
@@ -18,6 +18,7 @@ export default class AgentService {
     #wallet?: object
     #file: string
     #fileProfile: string
+    #entanglementProofs: string
     #agent?: Agent
     #agentLanguage?: Language
     #pubsub: PubSub
@@ -28,6 +29,7 @@ export default class AgentService {
     constructor(rootConfigPath: string) {
         this.#file = path.join(rootConfigPath, "agent.json")
         this.#fileProfile = path.join(rootConfigPath, "agentProfile.json")
+        this.#entanglementProofs = path.join(rootConfigPath, "entanglementProofs.json")
         this.#pubsub = PubSubInstance.get()
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
@@ -270,6 +272,38 @@ export default class AgentService {
             didDocument: this.#didDocument
         }
         return dump
+    }
+
+    addEntanglementProof(proofs: EntanglementProof[]): void {
+        let entanglementProofs: EntanglementProof[];
+        if (fs.existsSync(this.#entanglementProofs)) {
+            entanglementProofs = Array.from(JSON.parse(fs.readFileSync(this.#entanglementProofs).toString()));
+            entanglementProofs = entanglementProofs.concat(proofs);
+            entanglementProofs = Array.from(new Set(entanglementProofs));
+        } else {
+            entanglementProofs = proofs 
+        }
+
+        fs.writeFileSync(this.#entanglementProofs, JSON.stringify(entanglementProofs))
+    }
+
+    deleteEntanglementProof(proofs: EntanglementProof[]): void {
+        if (fs.existsSync(this.#entanglementProofs)) {
+            let entanglementProofs = Array.from(JSON.parse(fs.readFileSync(this.#entanglementProofs).toString()));
+            for (const agent of proofs) {
+                entanglementProofs.splice(entanglementProofs.findIndex((value) => value == agent), 1);
+            }
+            fs.writeFileSync(this.#entanglementProofs, JSON.stringify(entanglementProofs))
+        }
+    }
+
+    getEntanglementProofs(): EntanglementProof[] {
+        if (fs.existsSync(this.#entanglementProofs)) {
+            let entanglementProofs: EntanglementProof[] = Array.from(JSON.parse(fs.readFileSync(this.#entanglementProofs).toString()));
+            return entanglementProofs
+        } else {
+            return [] 
+        }
     }
 }
 
