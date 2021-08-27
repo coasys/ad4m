@@ -82,6 +82,29 @@ export default class AgentService {
         return signedExpresssion
     }
 
+    signString(data: string): string {
+        if(!this.isInitialized){
+            throw new Error("Can't sign without keystore")
+        }
+        if(!this.isUnlocked()) {
+            throw new Error("Can't sign with locked keystore")
+        }
+        if(!this.#signingKeyId) {
+            throw new Error("Can't sign without signingKeyId")
+        }
+
+        const timestamp = new Date().toISOString()
+        const payloadBytes = Signatures.buildMessage(data, timestamp)
+
+        const key = this.getSigningKey()
+        const privKey = Uint8Array.from(Buffer.from(key.privateKey, key.encoding))
+
+        const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey)
+        const sigBuffer = Buffer.from(sigObj.signature)
+        const sigHex = sigBuffer.toString('hex')
+        return sigHex
+    }
+
     async updateAgent(a: Agent) {
         this.#agent = a
         await this.storeAgentProfile()
@@ -272,38 +295,6 @@ export default class AgentService {
             didDocument: this.#didDocument
         }
         return dump
-    }
-
-    addEntanglementProof(proofs: EntanglementProof[]): void {
-        let entanglementProofs: EntanglementProof[];
-        if (fs.existsSync(this.#entanglementProofs)) {
-            entanglementProofs = Array.from(JSON.parse(fs.readFileSync(this.#entanglementProofs).toString()));
-            entanglementProofs = entanglementProofs.concat(proofs);
-            entanglementProofs = Array.from(new Set(entanglementProofs));
-        } else {
-            entanglementProofs = proofs 
-        }
-
-        fs.writeFileSync(this.#entanglementProofs, JSON.stringify(entanglementProofs))
-    }
-
-    deleteEntanglementProof(proofs: EntanglementProof[]): void {
-        if (fs.existsSync(this.#entanglementProofs)) {
-            let entanglementProofs = Array.from(JSON.parse(fs.readFileSync(this.#entanglementProofs).toString()));
-            for (const agent of proofs) {
-                entanglementProofs.splice(entanglementProofs.findIndex((value) => value == agent), 1);
-            }
-            fs.writeFileSync(this.#entanglementProofs, JSON.stringify(entanglementProofs))
-        }
-    }
-
-    getEntanglementProofs(): EntanglementProof[] {
-        if (fs.existsSync(this.#entanglementProofs)) {
-            let entanglementProofs: EntanglementProof[] = Array.from(JSON.parse(fs.readFileSync(this.#entanglementProofs).toString()));
-            return entanglementProofs
-        } else {
-            return [] 
-        }
     }
 }
 

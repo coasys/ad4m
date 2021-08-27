@@ -81,21 +81,21 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             entanglementProofs: (parent, args, context, info) => {
-                return core.agentService.getEntanglementProofs();
+                return core.entanglementProofController.getEntanglementProofs();
             }
         },
         Mutation: {
             //@ts-ignore
             addEntanglementProofs: (parent, args, context, info) => {
                 const { proofs } = args;
-                core.agentService.addEntanglementProof(proofs);
-                return core.agentService.getEntanglementProofs();
+                core.entanglementProofController.addEntanglementProofs(proofs);
+                return core.entanglementProofController.getEntanglementProofs();
             },
             //@ts-ignore
             deleteEntanglementProofs: (parent, args, context, info) => {
                 const { proofs } = args;
-                core.agentService.deleteEntanglementProof(proofs);
-                return core.agentService.getEntanglementProofs();  
+                core.entanglementProofController.addEntanglementProofs(proofs);
+                return core.entanglementProofController.getEntanglementProofs();  
             },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {

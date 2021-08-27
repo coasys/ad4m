@@ -16,6 +16,7 @@ import Signatures from './agent/Signatures'
 import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
+import EntanglementProofController from './EntanglementProof'
 
 export interface InitServicesParams {
     portHCAdmin?: number, 
@@ -37,6 +38,8 @@ export default class PerspectivismCore {
     #languageController?: LanguageController
 
     #languageFactory?: LanguageFactory
+
+    #entanglementProofController?: EntanglementProofController
 
     constructor(config: Config.CoreConfig) {
         Config.init(config)
@@ -66,6 +69,13 @@ export default class PerspectivismCore {
         return this.#languageController!
     }
 
+    get entanglementProofController(): EntanglementProofController {
+        if (!this.#entanglementProofController) {
+            throw Error("No entanglementProofController")
+        }
+        return this.#entanglementProofController
+    }
+
     async exit() {
         await this.#IPFS?.stop();
         await this.#holochain?.stop();
@@ -88,6 +98,7 @@ export default class PerspectivismCore {
             Config.holochainConductorPath, 
             Config.holochainDataPath, 
             Config.resourcePath, 
+            this.entanglementProofController,
             params.portHCAdmin, 
             params.portHCApp,
             params.useLocalHolochainProxy
@@ -124,6 +135,8 @@ export default class PerspectivismCore {
             agentService: this.agentService,
             languageController: this.#languageController
         })
+
+        this.#entanglementProofController = new EntanglementProofController(Config.rootConfigPath, this.#agentService);
     }
 
     async initLanguages(omitLanguageFactory: boolean|void) {
