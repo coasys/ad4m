@@ -8,3 +8,4 @@
 test-temp
 !rollup.config.js
 public/build
+!dapp/*.js
