@@ -98,6 +98,11 @@ function createResolvers(core: PerspectivismCore) {
                 return core.entanglementProofController.getEntanglementProofs();  
             },
             //@ts-ignore
+            entanglementProofPreflight: (parent, args, context, info) => {
+                const { devicekey } = args;
+                return core.entanglementProofController.signDeviceKey(devicekey);
+            },
+            //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
