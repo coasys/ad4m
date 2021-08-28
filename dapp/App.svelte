@@ -4,13 +4,48 @@
 	import Textfield from '@smui/textfield'
 	import Icon from '@smui/textfield/icon/index';
 	import { startEthereum, connectWallet, sign } from './ethereum'
-	import Web3 from 'web3'
+    import Web3 from 'web3'
+    import {
+        ApolloClient,
+        InMemoryCache
+    } from "@apollo/client/core";
+    import { gql } from "@apollo/client";
+    import { WebSocketLink } from '@apollo/client/link/ws';
+
+    const AGENT_SUBITEMS = `
+        did
+        directMessageLanguage
+        perspective { 
+            links {
+                author, timestamp, 
+                proof {
+                    signature, key, valid, invalid
+                }
+                data {
+                    source, predicate, target
+                }
+            }
+        }
+    `;
+    const gqlMe = gql`query agent { agent { ${AGENT_SUBITEMS} } }`;
 
 	let currentAccount = undefined;
 	let spinner = false;
-	let showSigning = false;
+    let showSigning = false;
 
-	function handleAccountsChanged(accounts) {
+    function constructApolloClient(port) {
+        return new ApolloClient({
+            link: new WebSocketLink({
+                uri: `ws://localhost:${port}/graphql`,
+                options: { reconnect: true },
+            }),
+            cache: new InMemoryCache(),
+        });
+    }
+    //TODO: we should use ad4m client here but I get compilation errors so for now I use standard apollo client
+    const apolloClient = constructApolloClient(4000)
+
+    function handleAccountsChanged(accounts) {
 		console.log('Accounts changed: ' + accounts)
 		if (accounts.length === 0) {
 			// MetaMask is locked or the user has not connected any accounts
@@ -28,10 +63,15 @@
         console.log("Wanting to connect to wallet connect");
     }
 
-    //TODO: get from ad4m
-    const staticDid = "did:key:hash";
     function signDid() {
-        const { data, signature, r, s, v } = sign(currentAccount, staticDid);
+        apolloClient.query({query: gqlMe}).then(result => {
+            const { agent } = result.data;
+            const did = agent.did;
+            sign(currentAccount, did).then(result => {
+                const { data, signature, r, s, v } = result;
+                console.log("got signature back", signature);
+            });
+        });
     }
 
 	startEthereum(handleAccountsChanged)

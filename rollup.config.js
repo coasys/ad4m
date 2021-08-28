@@ -6,6 +6,7 @@ import { terser } from 'rollup-plugin-terser';
 import postcss from "rollup-plugin-postcss";
 import json from "@rollup/plugin-json";
 import nodePolyfills from 'rollup-plugin-node-polyfills';
+import injectProcessEnv from 'rollup-plugin-inject-process-env';
 
 const production = !process.env.ROLLUP_WATCH;
 
@@ -76,6 +77,9 @@ export default {
 
 		json(),
 		nodePolyfills(),
+		injectProcessEnv({ 
+            NODE_ENV: process.env.NODE_ENV
+        }),
 
 		// In dev mode, call `npm run start` once
 		// the bundle has been generated
