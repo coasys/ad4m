@@ -78,11 +78,8 @@ export default class HolochainService {
         [this.#hcProcess, this.#lairProcess] = hcProcesses;
         try {
             if (this.#adminWebsocket == undefined) {
-                try {
-                    this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
-                } catch (e) {
-                    throw new Error(e)
-                }
+                this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
+
                 try {
                     await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
                 } catch {
@@ -91,12 +88,8 @@ export default class HolochainService {
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
             };
             if (this.#appWebsocket == undefined) {
-                try {
-                    this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
-                    console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
-                } catch (e) {
-                    throw new Error(e)
-                }
+                this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
+                console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
             };
             resolveReady!()
             this.#didResolveError = false;
