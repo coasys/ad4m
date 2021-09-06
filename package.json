@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.1.5",
+  "version": "0.1.8",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -61,7 +61,7 @@
   },
   "dependencies": {
     "@holochain/conductor-api": "0.2.0",
-    "@perspect3vism/ad4m": "file:../ad4m",
+    "@perspect3vism/ad4m": "0.1.11",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^11.2.0",
