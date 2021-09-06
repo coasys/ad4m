@@ -6,6 +6,9 @@ import { createMockExpression } from '../testutils/expression'
 import PerspectivismCore from '../core/PerspectivismCore'
 import fs from 'fs-extra'
 import path from 'path'
+import { Crypto } from "@peculiar/webcrypto"
+//@ts-ignore
+global.crypto = new Crypto();
 
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason

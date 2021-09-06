@@ -21,6 +21,9 @@ import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 import runtimeTests from "./runtime";
+import { Crypto } from "@peculiar/webcrypto"
+//@ts-ignore
+global.crypto = new Crypto();
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const TEST_DIR = `${__dirname}/../test-temp`
