@@ -44,7 +44,18 @@ export default function languageTests(testContext: TestContext) {
                 const applyTemplateFromSourceMeta = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
                 expect(applyTemplateFromSourceMeta.proof.valid).toBe(true);
                 const applyTemplateFromSourceMetaData = JSON.parse(applyTemplateFromSourceMeta.data);
-                expect(applyTemplateFromSourceMetaData).toBe(JSON.stringify({"name":"A templated note language","description":null,"templateParams":{"name":"A templated note language","uid":"001eb380-0dba-48fb-86d8-b3e58ea71b00"},"hash":"QmU4ZoFvxXn4i16CcaU3ZBMLk2RM33HdQLjYWywoYKtWc7","sourceLanguageHash":null,"dnaYamlHash":null,"dnaZomeWasmHash":null}));
+                expect(applyTemplateFromSourceMetaData).toBe(JSON.stringify({
+                    "name": "A templated templated social-context",
+                    "description": null,
+                    "templateParams": {
+                        "name": "A templated templated social-context",
+                        "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
+                    },
+                    "hash": "QmW196oBc3CncuUFMJqJEL8A5ZwCYDfXTKQQYgfrN1Qs5N",
+                    "sourceLanguageHash": "QmU2CmiD6wKExCZ2tfEfcY17c5xD6iNevLTsKBu5AF6Sqd",
+                    "dnaYamlHash": "QmS6yUbyM565LtDG2M4JqTCXdzXqychVqWaZseKpXzhWRA",
+                    "dnaZomeWasmHash": "QmWiBzrV1qGwnWuH8ktawuTVqVTb3YEfGtg1KpaxJUG85Z"
+                }));
 
                 //Test that bob cannot install source language which alice created since she is not in his trusted agents
                 const installSource = await bobAd4mClient.languages.byAddress(sourceLanguage.address);
