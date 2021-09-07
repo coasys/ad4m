@@ -18,19 +18,20 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(create.neighbourhood).toBeNull();
 
                 //Create unique social-context to simulate real scenario
-                const createUniqueLang = await ad4mClient.languages.cloneHolochainTemplate(LINK_LANGUAGE_PATH, "social-context", "b98e53a8-5800-47b6-adb9-86d55a74871e");
-                expect(createUniqueLang.name).toBe("social-context");
+                const socialContext = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: "41ce-8b054009", name: "Alice's social-context"}))
+                expect(socialContext.name).toBe("Alice's social-context");
 
                 let link = new LinkExpression()
                 link.author = "did:test";
                 link.timestamp = new Date().toISOString();
                 link.data = new Link({source: "src", target: "target", predicate: "pred"});
                 link.proof = new ExpressionProof("sig", "key");
-                const publishPerspective = await ad4mClient.neighbourhood.publishFromPerspective(create.uuid, createUniqueLang.address, 
+                const publishPerspective = await ad4mClient.neighbourhood.publishFromPerspective(create.uuid, socialContext.address, 
                     new Perspective(
                         [link]
                     )
                 );
+
                 //Check that we got an ad4m url back
                 expect(publishPerspective.split("://").length).toBe(2);
 
@@ -40,7 +41,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const join = await ad4mClient.neighbourhood.joinFromUrl(publishPerspective );
                 expect(join.sharedUrl).toBe(publishPerspective);
                 expect(join.neighbourhood).toBeDefined();
-                expect(join.neighbourhood!.linkLanguage).toBe(createUniqueLang.address);
+                expect(join.neighbourhood!.linkLanguage).toBe(socialContext.address);
                 expect(join.neighbourhood!.meta.links.length).toBe(1);
             })
 
@@ -49,8 +50,9 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const createUniqueLang = await alice.languages.cloneHolochainTemplate(LINK_LANGUAGE_PATH, "social-context", "b97e53a8-5800-47b6-adb9-alice-bob-friends");
-                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, createUniqueLang.address, new Perspective())
+                const socialContext = await alice.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: "41ce-8b054009-2222", name: "Alice's social-context"}))
+                expect(socialContext.name).toBe("Alice's social-context");
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                 
@@ -58,7 +60,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1!.name).toBeDefined()
                 expect(bobP1!.sharedUrl).toEqual(neighbourhoodUrl)
                 expect(bobP1!.neighbourhood).toBeDefined();
-                expect(bobP1!.neighbourhood!.linkLanguage).toBe(createUniqueLang.address);
+                expect(bobP1!.neighbourhood!.linkLanguage).toBe(socialContext.address);
                 expect(bobP1!.neighbourhood!.meta.links.length).toBe(0);
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
