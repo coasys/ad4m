@@ -1,20 +1,27 @@
 import { TestContext } from './integration.test'
 import path from "path";
 import sleep from './sleep';
+import { Ad4mClient, LanguageRef } from '@perspect3vism/ad4m';
 
 export default function languageTests(testContext: TestContext) {
     return () => {
-        describe('basic language operations', () => {
-            it('can apply language template to holochain language', async () => {
-                const ad4mClient = testContext.ad4mClient;
-                const bobAd4mClient = testContext.bob;
+        describe('with a social-context templated by Alice', () => {
+            let ad4mClient: Ad4mClient
+            let bobAd4mClient: Ad4mClient
+            let sourceLanguage: LanguageRef = new LanguageRef()
+
+            beforeAll(async () => {
+                ad4mClient = testContext.ad4mClient;
+                bobAd4mClient = testContext.bob;
 
                 //Publish a source language to start working from
-                const sourceLanguage = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: "001eb380-0dba-48fb-86d8-b3e58ea71b00", name: "A templated social-context"}))
+                sourceLanguage = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: "001eb380-0dba-48fb-86d8-b3e58ea71b00", name: "A templated social-context"}))
                 expect(sourceLanguage.name).toBe("A templated social-context");
                 //TODO/NOTE: this will break if the social-context language version is changed
                 expect(sourceLanguage.address).toBe("QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G");
+            })
 
+            it('Alice can get her own templated social-context and it provides correct meta data', async () => {
                 //Get the meta of the source language and make sure it is correct
                 const sourceLanguageMeta = await ad4mClient.expression.get(`lang://${sourceLanguage.address}`);
                 expect(sourceLanguageMeta.proof.valid).toBe(true);
@@ -29,7 +36,9 @@ export default function languageTests(testContext: TestContext) {
                     "hash": "QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G",
                     "sourceLanguageHash": null,
                 }))
+            })
 
+            it('can publish and template a non-Holochain language and provide correct meta data', async() => {
                 //Publish a source language without a holochain DNA
                 const canPublishNonHolochainLang = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/note-ipfs/build/bundle.js"), JSON.stringify({uid: "001eb380-0dba-48fb-86d8-b3e58ea71b00", name: "A templated note language"}))
                 expect(canPublishNonHolochainLang.name).toBe("A templated note language");
@@ -50,7 +59,10 @@ export default function languageTests(testContext: TestContext) {
                     "hash": "QmbSYsHoYn5cKt945JLW8xWDQQEA84dMp3zDwVH2XCehUN",
                     "sourceLanguageHash": null,
                 }));
-            
+            })
+
+
+            it("Bob can not get/install Alice's language since he doesn't trust her yet", async () => {
                 // Give Holochain gossip inside the Language Language time to settle, 
                 // so Bob sees the languages created above by Alice
                 await sleep(1000);
@@ -64,45 +76,53 @@ export default function languageTests(testContext: TestContext) {
                 }
 
                 //@ts-ignore
-                expect(error.toString()).toBe("Error: Language to be installed does not have valid proof")
+                expect(error.toString()).toBe("Error: Language not created by trusted agent and is not templated... aborting language install")
+            })
 
-                //Add alice as trusted agent for bob
-                const aliceDid = await ad4mClient.agent.me();
-                const aliceTrusted = await bobAd4mClient.runtime.addTrustedAgents([aliceDid.did]);
-                console.warn("Got result when adding trusted agent", aliceTrusted);
+            describe('with Bob having added Alice to list of trusted agents', () => {
+                let applyTemplateFromSource: LanguageRef = new LanguageRef()
 
-                //Apply template on above holochain language
-                const applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "A templated templated social-context"}))
-                expect(applyTemplateFromSource.name).toBe("A templated templated social-context");
-                expect(applyTemplateFromSource.address).toBe("QmPD5cuK2ygnJGAHkF5TGF1EvNBjtWiLN3AbU5guPQwm5g");
-                
-                //Get language meta for above language and make sure it is correct
-                const applyTemplateFromSourceMeta = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
-                expect(applyTemplateFromSourceMeta.proof.valid).toBe(true);
-                const applyTemplateFromSourceMetaData = JSON.parse(applyTemplateFromSourceMeta.data);
-                expect(applyTemplateFromSourceMetaData).toBe(JSON.stringify({
-                    "name": "A templated templated social-context",
-                    "description": null,
-                    "templateParams": {
+                beforeAll(async () => {
+                    //Add alice as trusted agent for bob
+                    const aliceDid = await ad4mClient.agent.me();
+                    const aliceTrusted = await bobAd4mClient.runtime.addTrustedAgents([aliceDid.did]);
+                    console.warn("Got result when adding trusted agent", aliceTrusted);
+                })
+
+                it("Bob can template Alice's social-context", async () => {
+                    //Apply template on above holochain language
+                    applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "A templated templated social-context"}))
+                    expect(applyTemplateFromSource.name).toBe("A templated templated social-context");
+                    expect(applyTemplateFromSource.address).toBe("QmPD5cuK2ygnJGAHkF5TGF1EvNBjtWiLN3AbU5guPQwm5g");
+                    
+                    //Get language meta for above language and make sure it is correct
+                    const applyTemplateFromSourceMeta = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
+                    expect(applyTemplateFromSourceMeta.proof.valid).toBe(true);
+                    const applyTemplateFromSourceMetaData = JSON.parse(applyTemplateFromSourceMeta.data);
+                    expect(applyTemplateFromSourceMetaData).toBe(JSON.stringify({
                         "name": "A templated templated social-context",
-                        "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
-                    },
-                    "hash": "QmPD5cuK2ygnJGAHkF5TGF1EvNBjtWiLN3AbU5guPQwm5g",
-                    "sourceLanguageHash": "QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G",
-                }));
+                        "description": null,
+                        "templateParams": {
+                            "name": "A templated templated social-context",
+                            "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
+                        },
+                        "hash": "QmPD5cuK2ygnJGAHkF5TGF1EvNBjtWiLN3AbU5guPQwm5g",
+                        "sourceLanguageHash": "QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G",
+                    }));
+                })
 
+                it("Bob can install Alice's social-context", async () => {
+                    //Test that bob can install source language when alice is in trusted agents
+                    const installSourceTrusted = await bobAd4mClient.languages.byAddress(sourceLanguage.address);
+                    console.warn("Got result when trying to install source language after trusted", installSourceTrusted);
+                })
 
-                
+                it("Bob can install his own templated language", async () => {
+                    //Test that bob can install language which is templated from source since source language was created by alice who is now a trusted agent
+                    const installTemplated = await bobAd4mClient.languages.byAddress(applyTemplateFromSource.address);
+                    console.warn("Got result when trying to install language which was templated from source", installTemplated);
 
-
-                //Test that bob can install source language when alice is in trusted agents
-                const installSourceTrusted = await bobAd4mClient.languages.byAddress(sourceLanguage.address);
-                console.warn("Got result when trying to install source language after trusted", installSourceTrusted);
-                
-                //Test that bob can install language which is templated from source since source language was created by alice who is now a trusted agent
-                const installTemplated = await bobAd4mClient.languages.byAddress(applyTemplateFromSource.address);
-                console.warn("Got result when trying to install language which was templated from source", installTemplated);
-
+                })
             })
 
             // it('can get and create unique language', async () => {
