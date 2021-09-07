@@ -53,7 +53,7 @@ export default function languageTests(testContext: TestContext) {
             
                 // Give Holochain gossip inside the Language Language time to settle, 
                 // so Bob sees the languages created above by Alice
-                await sleep(10000);
+                await sleep(1000);
 
                 //Test that bob cannot install source language which alice created since she is not in his trusted agents
                 let error
