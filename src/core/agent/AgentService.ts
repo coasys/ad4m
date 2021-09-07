@@ -298,12 +298,11 @@ export default class AgentService {
     }
 
     getTrustedAgents(): string[] {
+        let trustedAgents: string[] = [this.#did!]
         if (fs.existsSync(this.#trustedAgents)) {
-            let trustedAgents: string[] = Array.from(JSON.parse(fs.readFileSync(this.#trustedAgents).toString()));
-            return trustedAgents
-        } else {
-            return [] 
+            trustedAgents.push(...Array.from<string>(JSON.parse(fs.readFileSync(this.#trustedAgents).toString())));   
         }
+        return trustedAgents
     }
 }
 

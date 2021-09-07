@@ -21,6 +21,10 @@ export default function languageTests(testContext: TestContext) {
                 expect(sourceLanguage.address).toBe("QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G");
             })
 
+            it('Alice can install her own templated language', async () => {
+                await ad4mClient.languages.byAddress(sourceLanguage.address)
+            })
+
             it('Alice can get her own templated social-context and it provides correct meta data', async () => {
                 //Get the meta of the source language and make sure it is correct
                 const sourceLanguageMeta = await ad4mClient.expression.get(`lang://${sourceLanguage.address}`);
