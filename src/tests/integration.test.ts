@@ -107,7 +107,8 @@ describe("Integration tests", () => {
             appLangAliases: null,
             mocks: false,
             ipfsRepoPath,
-            useLocalHolochainProxy: false
+            useLocalHolochainProxy: false,
+            useMdnsHolochain: true
         })
 
         core.initControllers()
@@ -165,7 +166,8 @@ describe("Integration tests", () => {
                 portHCApp: 11337,
                 ipfsSwarmPort: 14002,
                 ipfsRepoPath,
-                useLocalHolochainProxy: false
+                useLocalHolochainProxy: false,
+                useMdnsHolochain: true
           })
 
           bob.initControllers()

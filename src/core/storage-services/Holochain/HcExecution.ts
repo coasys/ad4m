@@ -28,6 +28,7 @@ export interface ConductorConfiguration {
     bootstrapService: string;
     conductorConfigPath: string;
     useLocalProxy: boolean;
+    mdns: boolean;
 }
 
 export function writeDefaultConductor(conductorConfig: ConductorConfiguration) {
@@ -55,7 +56,7 @@ admin_interfaces:
       type: websocket
       port: ${conductorConfig.adminPort}
 network:
-  network_type: quic_bootstrap
+  network_type: ${conductorConfig.mdns? 'quic_mdns' : 'quic_bootstrap'}
   bootstrap_service: https://bootstrap-staging.holo.host
   transport_pool:
     - type: proxy

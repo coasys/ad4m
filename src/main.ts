@@ -21,6 +21,7 @@ interface OuterConfig {
   ipfsSwarmPort?: number,
   ipfsRepoPath?: string
   useLocalHolochainProxy?: boolean,
+  useMdnsHolochain?: boolean,
 }
 
 
@@ -32,7 +33,8 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       portGraphQL, portHCAdmin, portHCApp,
       ipfsSwarmPort,
       ipfsRepoPath,
-      useLocalHolochainProxy
+      useLocalHolochainProxy,
+      useMdnsHolochain
     } = config
     if(!portGraphQL) portGraphQL = 4000
     if(!portHCAdmin) portHCAdmin = 2000
@@ -85,7 +87,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       bootstrapFixtures,
     });
     console.log("\x1b[34m", "Init services...", "\x1b[0m");
-    await core.initServices({ portHCAdmin, portHCApp, ipfsSwarmPort, ipfsRepoPath, useLocalHolochainProxy });
+    await core.initServices({ portHCAdmin, portHCApp, ipfsSwarmPort, ipfsRepoPath, useLocalHolochainProxy, useMdnsHolochain });
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
     await core.startGraphQLServer(portGraphQL, mocks)
 

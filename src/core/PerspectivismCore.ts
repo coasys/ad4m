@@ -23,7 +23,8 @@ export interface InitServicesParams {
     portHCApp?: number,
     ipfsSwarmPort?: number,
     ipfsRepoPath?: string
-    useLocalHolochainProxy?: boolean
+    useLocalHolochainProxy?: boolean,
+    useMdnsHolochain?: boolean
 }
 export default class PerspectivismCore {
     #holochain?: HolochainService
@@ -89,7 +90,8 @@ export default class PerspectivismCore {
             Config.resourcePath, 
             params.portHCAdmin, 
             params.portHCApp,
-            params.useLocalHolochainProxy
+            params.useLocalHolochainProxy,
+            params.useMdnsHolochain
         )
         let [ipfs, _] = await Promise.all([IPFS.init(
             params.ipfsSwarmPort, 

@@ -29,7 +29,7 @@ export default class HolochainService {
     #conductorConfigPath: string
     signalCallbacks: Map<string, [AppSignalCb, string]>;
 
-    constructor(conductorPath: string, dataPath: string, resourcePath: string, adminPort?: number, appPort?: number, useLocalProxy?: boolean) {
+    constructor(conductorPath: string, dataPath: string, resourcePath: string, adminPort?: number, appPort?: number, useLocalProxy?: boolean, useMdns?: boolean) {
         this.#didResolveError = false;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
@@ -55,7 +55,8 @@ export default class HolochainService {
                 appPort: holochainAppPort,
                 bootstrapService: bootstrapUrl,
                 conductorConfigPath: conductorConfigPath,
-                useLocalProxy: useLocalProxy || false
+                useLocalProxy: useLocalProxy || false,
+                mdns: useMdns || false
             } as ConductorConfiguration);
         };
     }
