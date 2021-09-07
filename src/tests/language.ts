@@ -64,7 +64,7 @@ export default function languageTests(testContext: TestContext) {
                 }
 
                 //@ts-ignore
-                expect(error.toString()).toBe("Language to be installed does not have valid proof")
+                expect(error.toString()).toBe("Error: Language to be installed does not have valid proof")
 
                 //Add alice as trusted agent for bob
                 const aliceDid = await ad4mClient.agent.me();
