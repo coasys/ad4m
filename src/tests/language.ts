@@ -28,8 +28,6 @@ export default function languageTests(testContext: TestContext) {
                     },
                     "hash": "QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G",
                     "sourceLanguageHash": null,
-                    "dnaYamlHash": "QmdEHSaBxfEKE2BRSN7MLevPg3KiUaQkbaCBMB2mdCuWFi",
-                    "dnaZomeWasmHash": "QmWiBzrV1qGwnWuH8ktawuTVqVTb3YEfGtg1KpaxJUG85Z"
                 }))
 
                 //Publish a source language without a holochain DNA
@@ -51,8 +49,6 @@ export default function languageTests(testContext: TestContext) {
                     },
                     "hash": "QmbSYsHoYn5cKt945JLW8xWDQQEA84dMp3zDwVH2XCehUN",
                     "sourceLanguageHash": null,
-                    "dnaYamlHash": null,
-                    "dnaZomeWasmHash": null
                 }));
             
                 await sleep(5000);
@@ -75,8 +71,6 @@ export default function languageTests(testContext: TestContext) {
                     },
                     "hash": "QmPD5cuK2ygnJGAHkF5TGF1EvNBjtWiLN3AbU5guPQwm5g",
                     "sourceLanguageHash": "QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G",
-                    "dnaYamlHash": "QmS6yUbyM565LtDG2M4JqTCXdzXqychVqWaZseKpXzhWRA",
-                    "dnaZomeWasmHash": "QmWiBzrV1qGwnWuH8ktawuTVqVTb3YEfGtg1KpaxJUG85Z"
                 }));
 
                 //Test that bob cannot install source language which alice created since she is not in his trusted agents

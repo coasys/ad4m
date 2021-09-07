@@ -305,11 +305,9 @@ export default class LanguageController {
         }
     }
 
-    async readAndTemplateHolochainDNA(sourceLanguageLines: string[], templateData: object, sourceLanguageHash?: string): Promise<{dnaYamlHash: string | null, dnaZomeWasmHash: string | null, dnaCode: string | null}> {
+    async readAndTemplateHolochainDNA(sourceLanguageLines: string[], templateData: object, sourceLanguageHash?: string): Promise<{dnaCode: string | null}> {
         //Look for var dna in languageSource which would tell us its a holochain language and then apply templating to the holochain language also
         const dnaIndex = sourceLanguageLines.findIndex(element => element.includes(`var dna = `));
-        let dnaYamlHash: null | string = null;
-        let dnaZomeWasmHash: null | string = null;
         let dnaCodeRes: null | string = null;
         if (dnaIndex != -1) {
             if (!sourceLanguageHash) {
@@ -344,7 +342,6 @@ export default class LanguageController {
             }
             const completeWasmPath = path.join(wasmPath, wasmName[0]);
             const wasmData = fs.readFileSync(completeWasmPath);
-            dnaZomeWasmHash = await this.ipfsHash(wasmData);
 
             //Read the yaml file
             let dnaYaml = yaml.load(fs.readFileSync(dnaYamlPath, 'utf8'));
@@ -362,7 +359,6 @@ export default class LanguageController {
             let dnaYamlDump = yaml.dump(dnaYaml);
             console.log("LanguageController.languageApplyTemplate: writing new yaml file for dna", dnaYamlDump);
             fs.writeFileSync(dnaYamlPath, dnaYamlDump);
-            dnaYamlHash = await this.ipfsHash(dnaYamlDump);
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result 
             let packPath = this.#holochainService.packDna(unpackPath).replace(/(\r\n|\n|\r)/gm, "");
@@ -374,8 +370,6 @@ export default class LanguageController {
             dnaCodeRes = base64;
         }
         return {
-            dnaYamlHash,
-            dnaZomeWasmHash,
             dnaCode: dnaCodeRes
         }
     }
@@ -421,7 +415,7 @@ export default class LanguageController {
     async constructLanguageObject(
         sourceLanguageLines: string[], 
         templateData: object, 
-        otherMetaInformation: {name?: string, description?: string, dnaYamlHash: string | null, dnaZomeWasmHash: string | null, sourceLanguageHash: string | null}
+        otherMetaInformation: { name?: string, description?: string, sourceLanguageHash: string | null }
     ): Promise<object> {
         const languageData = sourceLanguageLines.join('\n');
         const languageHash = await this.ipfsHash(languageData);
@@ -432,8 +426,6 @@ export default class LanguageController {
             hash: languageHash,
             templateParams: templateData,
             sourceLanguageHash: otherMetaInformation.sourceLanguageHash,
-            dnaYamlHash: otherMetaInformation.dnaYamlHash,
-            dnaZomeWasmHash: otherMetaInformation.dnaZomeWasmHash,
             bundleFile: languageData.toString(),
         }
 
@@ -448,7 +440,7 @@ export default class LanguageController {
         const sourceLanguage = fs.readFileSync(languagePath).toString();
         const sourceLanguageLines = sourceLanguage!.split("\n");
         templateData = this.orderObject(templateData);
-        const {dnaYamlHash, dnaZomeWasmHash, dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData);
+        const { dnaCode } = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData);
         //Add the template data to the language data
         if (dnaCode) {
             //@ts-ignore
@@ -466,7 +458,7 @@ export default class LanguageController {
         const name = templateData["name"] || null;
         //@ts-ignore
         const description = templateData["description"] || null;
-        return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, dnaYamlHash, dnaZomeWasmHash, sourceLanguageHash: null})
+        return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, sourceLanguageHash: null})
     }
 
     async languageApplyTemplateOnSource(sourceLanguageHash: string, templateData: object): Promise<object> {
@@ -480,7 +472,7 @@ export default class LanguageController {
         }
         const sourceLanguageLines = sourceLanguage!.split("\n");
         templateData = this.orderObject(templateData);
-        const {dnaYamlHash, dnaZomeWasmHash, dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
+        const {dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
 
         //If there was some dna code in the source language then lets also add that to the language bundle (but not to the templateData as we dont want that on the meta)
         if (dnaCode) {
@@ -498,7 +490,7 @@ export default class LanguageController {
         const name = templateData["name"] || sourceLanguageMeta.data["name"] || null;
         //@ts-ignore
         const description = templateData["description"] || sourceLanguageMeta.data["description"] || null;
-        return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, dnaYamlHash, dnaZomeWasmHash, sourceLanguageHash})
+        return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, sourceLanguageHash})
     }
 
     filteredLanguageRefs(propertyFilter?: string): LanguageRef[] {
