@@ -1,6 +1,7 @@
 import { ApolloServer, withFilter, gql } from 'apollo-server'
 import { Agent, LanguageRef } from '@perspect3vism/ad4m'
-import { exprRef2String, parseExprUrl, typeDefsString } from '@perspect3vism/ad4m'
+import { exprRef2String, parseExprUrl } from '@perspect3vism/ad4m'
+import { typeDefsString } from '@perspect3vism/ad4m/lib/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
@@ -40,6 +41,24 @@ function createResolvers(core: PerspectivismCore) {
                     expression.data = JSON.stringify(expression.data)
                 }
                 return expression
+            },
+            //@ts-ignore
+            expressionMany: async (parent, args, context, info) => {
+                const { urls } = args;
+                const expressionPromises = [];
+                for (const url of urls) {
+                    expressionPromises.push(core.languageController.getExpression(parseExprUrl(url)));
+                };
+                const results = await Promise.all(expressionPromises);
+
+                return results.map((expression, index) => {
+                    if(expression) {
+                        expression.ref = parseExprUrl(urls[index]);
+                        expression.url = urls[index];
+                        expression.data = JSON.stringify(expression.data);
+                    }
+                    return expression
+                })
             },
             //@ts-ignore
             expressionRaw: async (parent, args, context, info) => {
