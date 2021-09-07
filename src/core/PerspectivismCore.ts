@@ -177,17 +177,7 @@ export default class PerspectivismCore {
             throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
         let languageObject = await this.#languageController.languageApplyTemplateOnSource(sourceLanguageHash, templateData);
-        try {
-            const address = await (this.#languageController.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageObject)
-            return {
-                address,
-                //@ts-ignore
-                name: languageObject["name"],
-            } as LanguageRef
-        } catch(e) {
-            console.error("Core.languageApplyTemplateAndPublish(): ERROR creating new language:", e)
-            throw e
-        } 
+        return this.publish(languageObject)
     }
 
     async languagePublish(languagePath: string, templateData: object): Promise<LanguageRef> {
@@ -195,15 +185,19 @@ export default class PerspectivismCore {
             throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
         let languageObject = await this.#languageController.languageApplyTemplate(languagePath, templateData);
+        return this.publish(languageObject)
+    }
+
+    async publish(languageObject: object): Promise<LanguageRef> {
         try {
-            const address = await (this.#languageController.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageObject)
+            const address = await (this.#languageController!.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageObject)
             return {
                 address,
                 //@ts-ignore
                 name: languageObject["name"],
             } as LanguageRef
         } catch(e) {
-            console.error("Core.languageApplyTemplateAndPublish(): ERROR creating new language:", e)
+            console.error("Core.installAndPublish(): ERROR creating new language:", e)
             throw e
         } 
     }
