@@ -203,6 +203,7 @@ export default class LanguageController {
             } catch(e) {
                 console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
                 console.error("LanguageController.installLanguage: ======================================")
+                console.error(e)
                 fs.rmdirSync(languagePath, {recursive: true})
                 //@ts-ignore
                 throw Error(e.toString())
