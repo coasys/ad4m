@@ -1,8 +1,8 @@
 import type { 
-    Address, Expression, Language, LanguageContext, LanguageRef, 
+    Address, Expression, Language, LanguageContext, 
     LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage 
 } from '@perspect3vism/ad4m';
-import { ExpressionRef } from '@perspect3vism/ad4m';
+import { ExpressionRef, LanguageRef } from '@perspect3vism/ad4m';
 import fs from 'fs'
 import path from 'path'
 import * as Config from './Config'
@@ -228,14 +228,14 @@ export default class LanguageController {
         if(language) {
             return language
         } else {
-            let languageMeta = await this.getLanguageExpression(address);
+            let languageMeta = await this.getExpression(new ExpressionRef(new LanguageRef('lang'), address));
             if(!languageMeta) {
                 throw new Error("Language not found by reference: " + JSON.stringify(ref))
             }
             if (languageMeta.proof.valid != true) {
-                throw new Error("Language to be installed does not have valid proof");
+                throw new Error(`Language to be installed does not have valid proof`);
             }
-            const languageMetaData = languageMeta.data;
+            const languageMetaData = JSON.parse(languageMeta.data);
             const languageAuthor = languageMeta.author;
             //@ts-ignore
             const trustedAgents: string[] = this.#context.agent.getTrustedAgents();
@@ -247,16 +247,16 @@ export default class LanguageController {
                     throw new Error("Could not get languageSource for language")
                 }
                 const languageHash = await this.ipfsHash(languageSource);
-                if (!languageMetaData["languageHash"]) {
-                    throw new Error("Could not find languageHash value inside languageMetaData object")
+                if (!languageMetaData["hash"]) {
+                    throw new Error(`Could not find 'hash' value inside languageMetaData object: ${languageMetaData["hash"]} - ${languageMetaData.hash} - ${JSON.stringify(languageMetaData)}`)
                 }
                 //Check the hash matches and then install!
-                if (languageHash == languageMetaData["languageHash"]) {
+                if (languageHash == languageMetaData["hash"]) {
                     //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                     const lang = await this.installLanguage(address, languageMeta)
                     return lang!
                 } else {
-                    throw new Error("Calculated langaugeHash did not match languageHash found in meta information")
+                    throw new Error("Calculated languageHash did not match languageHash found in meta information")
                 }
             } else {
                 //Person who created this language is not trusted so lets try and get a source language template
@@ -269,7 +269,7 @@ export default class LanguageController {
                 }
                 //Check that there is a sourceLanguage that we can follow to
                 if (!languageMetaData["sourceLanguageHash"]) {
-                    throw new Error("Could not find sourceLanguageHash for templating language being installed with address: " + ref.address);
+                    throw new Error("Language not created by trusted agent and is not templated... aborting language install");
                 }
                 //Get the meta information of the source language
                 const sourceLanguageHash = languageMetaData["sourceLanguageHash"];
