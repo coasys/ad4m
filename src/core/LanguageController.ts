@@ -396,7 +396,18 @@ export default class LanguageController {
         for (const [templateKey, templateValue] of Object.entries(templateData)) {
             //NOTE: this could be risky and end up removing var ${templateKey} from areas in the code where it is used for normal language operations
             //We need to somehow split the bundle at a given point and only remove template variables above this point
-            let index = sourceLanguageLines.findIndex(element => element.includes(`var ${templateKey} =`));
+            const patterns = [
+                `var ${templateKey} =`, `var ${templateKey}=`, 
+                `const ${templateKey} =`, `const ${templateKey}=`,
+                `let ${templateKey} =`, `let ${templateKey}=`
+            ]
+            let p = 0
+            let index = -1
+            while(index == -1 && p < patterns.length) {
+                index = sourceLanguageLines.findIndex(element => element.includes(patterns[p]));
+                p++
+            }
+            
             if (index != -1) {
                 sourceLanguageLines.splice(index, 1);
             };

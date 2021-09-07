@@ -13,32 +13,54 @@ export default function languageTests(testContext: TestContext) {
                 const sourceLanguage = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: "001eb380-0dba-48fb-86d8-b3e58ea71b00", name: "A templated social-context"}))
                 expect(sourceLanguage.name).toBe("A templated social-context");
                 //TODO/NOTE: this will break if the social-context language version is changed
-                expect(sourceLanguage.address).toBe("QmU2CmiD6wKExCZ2tfEfcY17c5xD6iNevLTsKBu5AF6Sqd");
+                expect(sourceLanguage.address).toBe("QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G");
 
                 //Get the meta of the source language and make sure it is correct
                 const sourceLanguageMeta = await ad4mClient.expression.get(`lang://${sourceLanguage.address}`);
                 expect(sourceLanguageMeta.proof.valid).toBe(true);
                 const sourceLanguageMetaData = JSON.parse(sourceLanguageMeta.data);
-                expect(sourceLanguageMetaData).toBe(JSON.stringify({"name":"A templated social-context","description":null,"templateParams":{"name":"A templated social-context","uid":"001eb380-0dba-48fb-86d8-b3e58ea71b00"},"hash":"QmU2CmiD6wKExCZ2tfEfcY17c5xD6iNevLTsKBu5AF6Sqd","sourceLanguageHash":null,"dnaYamlHash":"QmdEHSaBxfEKE2BRSN7MLevPg3KiUaQkbaCBMB2mdCuWFi","dnaZomeWasmHash":"QmWiBzrV1qGwnWuH8ktawuTVqVTb3YEfGtg1KpaxJUG85Z"}))
+                expect(sourceLanguageMetaData).toBe(JSON.stringify({
+                    "name": "A templated social-context",
+                    "description": null,
+                    "templateParams": {
+                        "name":"A templated social-context",
+                        "uid":"001eb380-0dba-48fb-86d8-b3e58ea71b00"
+                    },
+                    "hash": "QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G",
+                    "sourceLanguageHash": null,
+                    "dnaYamlHash": "QmdEHSaBxfEKE2BRSN7MLevPg3KiUaQkbaCBMB2mdCuWFi",
+                    "dnaZomeWasmHash": "QmWiBzrV1qGwnWuH8ktawuTVqVTb3YEfGtg1KpaxJUG85Z"
+                }))
 
                 //Publish a source language without a holochain DNA
                 const canPublishNonHolochainLang = await ad4mClient.languages.publish(path.join(__dirname, "../test-temp/languages/note-ipfs/build/bundle.js"), JSON.stringify({uid: "001eb380-0dba-48fb-86d8-b3e58ea71b00", name: "A templated note language"}))
                 expect(canPublishNonHolochainLang.name).toBe("A templated note language");
                 //TODO/NOTE: this will break if the note-ipfs language version is changed
-                expect(canPublishNonHolochainLang.address).toBe("QmU4ZoFvxXn4i16CcaU3ZBMLk2RM33HdQLjYWywoYKtWc7");
+                expect(canPublishNonHolochainLang.address).toBe("QmbSYsHoYn5cKt945JLW8xWDQQEA84dMp3zDwVH2XCehUN");
             
                 //Get meta for source language above and make sure it is correct
                 const sourceLanguageMetaNonHC = await ad4mClient.expression.get(`lang://${canPublishNonHolochainLang.address}`);
                 expect(sourceLanguageMetaNonHC.proof.valid).toBe(true);
                 const sourceLanguageMetaNonHCData = JSON.parse(sourceLanguageMetaNonHC.data);
-                expect(sourceLanguageMetaNonHCData).toBe(JSON.stringify({"name":"A templated note language","description":null,"templateParams":{"name":"A templated note language","uid":"001eb380-0dba-48fb-86d8-b3e58ea71b00"},"hash":"QmU4ZoFvxXn4i16CcaU3ZBMLk2RM33HdQLjYWywoYKtWc7","sourceLanguageHash":null,"dnaYamlHash":null,"dnaZomeWasmHash":null}));
+                expect(sourceLanguageMetaNonHCData).toBe(JSON.stringify({
+                    "name": "A templated note language",
+                    "description": null,
+                    "templateParams": {
+                        "name": "A templated note language",
+                        "uid":"001eb380-0dba-48fb-86d8-b3e58ea71b00"
+                    },
+                    "hash": "QmbSYsHoYn5cKt945JLW8xWDQQEA84dMp3zDwVH2XCehUN",
+                    "sourceLanguageHash": null,
+                    "dnaYamlHash": null,
+                    "dnaZomeWasmHash": null
+                }));
             
                 await sleep(5000);
 
                 //Apply template on above holochain language
                 const applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "A templated templated social-context"}))
                 expect(applyTemplateFromSource.name).toBe("A templated templated social-context");
-                expect(applyTemplateFromSource.address).toBe("QmW196oBc3CncuUFMJqJEL8A5ZwCYDfXTKQQYgfrN1Qs5N");
+                expect(applyTemplateFromSource.address).toBe("QmPD5cuK2ygnJGAHkF5TGF1EvNBjtWiLN3AbU5guPQwm5g");
                 
                 //Get language meta for above language and make sure it is correct
                 const applyTemplateFromSourceMeta = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
@@ -51,8 +73,8 @@ export default function languageTests(testContext: TestContext) {
                         "name": "A templated templated social-context",
                         "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
                     },
-                    "hash": "QmW196oBc3CncuUFMJqJEL8A5ZwCYDfXTKQQYgfrN1Qs5N",
-                    "sourceLanguageHash": "QmU2CmiD6wKExCZ2tfEfcY17c5xD6iNevLTsKBu5AF6Sqd",
+                    "hash": "QmPD5cuK2ygnJGAHkF5TGF1EvNBjtWiLN3AbU5guPQwm5g",
+                    "sourceLanguageHash": "QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G",
                     "dnaYamlHash": "QmS6yUbyM565LtDG2M4JqTCXdzXqychVqWaZseKpXzhWRA",
                     "dnaZomeWasmHash": "QmWiBzrV1qGwnWuH8ktawuTVqVTb3YEfGtg1KpaxJUG85Z"
                 }));
