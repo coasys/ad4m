@@ -51,7 +51,25 @@ export default function languageTests(testContext: TestContext) {
                     "sourceLanguageHash": null,
                 }));
             
-                await sleep(5000);
+                // Give Holochain gossip inside the Language Language time to settle, 
+                // so Bob sees the languages created above by Alice
+                await sleep(10000);
+
+                //Test that bob cannot install source language which alice created since she is not in his trusted agents
+                let error
+                try {
+                    await bobAd4mClient.languages.byAddress(sourceLanguage.address);
+                } catch(e) {
+                    error = e
+                }
+
+                //@ts-ignore
+                expect(error.toString()).toBe("Language to be installed does not have valid proof")
+
+                //Add alice as trusted agent for bob
+                const aliceDid = await ad4mClient.agent.me();
+                const aliceTrusted = await bobAd4mClient.runtime.addTrustedAgents([aliceDid.did]);
+                console.warn("Got result when adding trusted agent", aliceTrusted);
 
                 //Apply template on above holochain language
                 const applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "A templated templated social-context"}))
@@ -73,14 +91,9 @@ export default function languageTests(testContext: TestContext) {
                     "sourceLanguageHash": "QmbGbqAgfCw18ti34AvqgzBfQSkEcz9KyZAUvcXRwhib5G",
                 }));
 
-                //Test that bob cannot install source language which alice created since she is not in his trusted agents
-                const installSource = await bobAd4mClient.languages.byAddress(sourceLanguage.address);
-                console.warn("Got result when trying to install source language", installSource);
 
-                //Add alice as trusted agent for bob
-                const aliceDid = await ad4mClient.agent.me();
-                const aliceTrusted = await bobAd4mClient.runtime.addTrustedAgents([aliceDid.did]);
-                console.warn("Got result when adding trusted agent", aliceTrusted);
+                
+
 
                 //Test that bob can install source language when alice is in trusted agents
                 const installSourceTrusted = await bobAd4mClient.languages.byAddress(sourceLanguage.address);
@@ -89,6 +102,7 @@ export default function languageTests(testContext: TestContext) {
                 //Test that bob can install language which is templated from source since source language was created by alice who is now a trusted agent
                 const installTemplated = await bobAd4mClient.languages.byAddress(applyTemplateFromSource.address);
                 console.warn("Got result when trying to install language which was templated from source", installTemplated);
+
             })
 
             // it('can get and create unique language', async () => {
