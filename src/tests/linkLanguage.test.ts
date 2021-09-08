@@ -42,8 +42,8 @@ describe(LANG_TO_TEST, () => {
         })
 
         await core.initServices({
-            portHCAdmin: 22000,
-            portHCApp: 21337,
+            hcPortAdmin: 22000,
+            hcPortApp: 21337,
             ipfsSwarmPort: 24002,
             ipfsRepoPath
         })

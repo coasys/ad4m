@@ -25,12 +25,12 @@ export interface ConductorConfiguration {
     environmentPath: string;
     adminPort: number;
     appPort: number;
-    useBoostrap: boolean,
+    useBootstrap: boolean,
     bootstrapService: string;
     conductorConfigPath: string;
     useProxy: boolean,
     useLocalProxy: boolean;
-    mdns: boolean;
+    useMdns: boolean;
 }
 
 export function writeDefaultConductor(conductorConfig: ConductorConfiguration) {
@@ -58,8 +58,8 @@ admin_interfaces:
       type: websocket
       port: ${conductorConfig.adminPort}
 network:
-  network_type: ${conductorConfig.mdns? 'quic_mdns' : 'quic_bootstrap'}
-  ${conductorConfig.useBoostrap ? 'bootstrap_service: '+conductorConfig.bootstrapService : ''}
+  network_type: ${conductorConfig.useMdns? 'quic_mdns' : 'quic_bootstrap'}
+  ${conductorConfig.useBootstrap ? 'bootstrap_service: '+conductorConfig.bootstrapService : ''}
   transport_pool:
     - type: ${conductorConfig.useProxy ? 'proxy' : 'quic'}
       sub_transport:

@@ -15,13 +15,15 @@ interface OuterConfig {
   appBuiltInLangs: string[] | null,
   appLangAliases: object | null,
   mocks: boolean,
-  portGraphQL?: number,
-  portHCAdmin?: number,
-  portHCApp?: number,
+  gqlPort?: number,
+  hcPortAdmin?: number,
+  hcPortApp?: number,
   ipfsSwarmPort?: number,
   ipfsRepoPath?: string
-  useLocalHolochainProxy?: boolean,
-  useMdnsHolochain?: boolean,
+  hcUseLocalProxy?: boolean,
+  hcUseMdns?: boolean,
+  hcUseProxy?: boolean,
+  hcUseBootstrap?: boolean
 }
 
 
@@ -30,15 +32,20 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       resourcePath, appDataPath, appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, 
       appBuiltInLangs, appLangAliases, 
       mocks, 
-      portGraphQL, portHCAdmin, portHCApp,
+      gqlPort, hcPortAdmin, hcPortApp,
       ipfsSwarmPort,
       ipfsRepoPath,
-      useLocalHolochainProxy,
-      useMdnsHolochain
+      hcUseLocalProxy,
+      hcUseMdns,
+      hcUseProxy,
+      hcUseBootstrap
     } = config
-    if(!portGraphQL) portGraphQL = 4000
-    if(!portHCAdmin) portHCAdmin = 2000
-    if(!portHCApp) portHCApp = 1337
+    if(!gqlPort) gqlPort = 4000
+    if(!hcPortAdmin) hcPortAdmin = 2000
+    if(!hcPortApp) hcPortApp = 1337
+    if(hcUseMdns === undefined) hcUseMdns = true
+    if(hcUseProxy === undefined) hcUseProxy = true
+    if(hcUseBootstrap === undefined) hcUseBootstrap = true
     let builtInLangPath = appDefaultLangPath;
     let builtInLangs = [
       ad4mBootstrapLanguages.agents, 
@@ -87,9 +94,9 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       bootstrapFixtures,
     });
     console.log("\x1b[34m", "Init services...", "\x1b[0m");
-    await core.initServices({ portHCAdmin, portHCApp, ipfsSwarmPort, ipfsRepoPath, useLocalHolochainProxy, useMdnsHolochain });
+    await core.initServices({ hcPortAdmin, hcPortApp, ipfsSwarmPort, ipfsRepoPath, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap });
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
-    await core.startGraphQLServer(portGraphQL, mocks)
+    await core.startGraphQLServer(gqlPort, mocks)
 
     console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
     return core

@@ -14,6 +14,18 @@ export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').j
 const bootstrapUrl = "https://bootstrap-staging.holo.host"
 const kitsuneProxy = "kitsune-proxy://SYVd4CF3BdJ4DS7KwLLgeU3_DbHoZ34Y-qroZ79DOs8/kitsune-quic/h/165.22.32.11/p/5779/--"
 
+export interface HolochainConfiguration {
+    conductorPath: string, 
+    dataPath: string, 
+    resourcePath: string
+    adminPort?: number;
+    appPort?: number;
+    useBootstrap?: boolean,
+    useProxy?: boolean,
+    useLocalProxy?: boolean;
+    useMdns?: boolean;
+}
+
 export default class HolochainService {
     #db: any
     #adminPort: number
@@ -30,7 +42,19 @@ export default class HolochainService {
     #conductorConfigPath: string
     signalCallbacks: Map<string, [AppSignalCb, string]>;
 
-    constructor(conductorPath: string, dataPath: string, resourcePath: string, adminPort?: number, appPort?: number, useLocalProxy?: boolean, useMdns?: boolean) {
+    constructor(config: HolochainConfiguration) {
+        let {
+            conductorPath, 
+            dataPath, 
+            resourcePath,
+            adminPort,
+            appPort,
+            useBootstrap,
+            useProxy,
+            useLocalProxy,
+            useMdns,
+        } = config;
+
         this.#didResolveError = false;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
@@ -41,6 +65,10 @@ export default class HolochainService {
 
         const holochainAppPort = appPort ? appPort : 1337;
         const holochainAdminPort = adminPort ? adminPort : 2000;
+        if(useMdns === undefined) useMdns = true
+        if(useBootstrap === undefined) useBootstrap = true
+        if(useProxy === undefined) useProxy = true
+        if(useLocalProxy === undefined) useLocalProxy = false
         this.#adminPort = holochainAdminPort;
         this.#appPort = holochainAppPort;
         this.#resourcePath = resourcePath;
@@ -54,12 +82,12 @@ export default class HolochainService {
                 environmentPath: conductorPath,
                 adminPort: holochainAdminPort,
                 appPort: holochainAppPort,
-                useBoostrap: false,
+                useBootstrap,
                 bootstrapService: bootstrapUrl,
                 conductorConfigPath: conductorConfigPath,
-                useProxy: false,
-                useLocalProxy: useLocalProxy || false,
-                mdns: useMdns || false
+                useProxy,
+                useLocalProxy,
+                useMdns
             } as ConductorConfiguration);
         };
     }

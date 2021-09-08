@@ -125,8 +125,8 @@ describe("Integration tests", () => {
             appLangAliases: null,
             mocks: false,
             ipfsRepoPath,
-            useLocalHolochainProxy: false,
-            useMdnsHolochain: false
+            hcUseLocalProxy: false,
+            hcUseMdns: false
         })
 
         core.initControllers()
@@ -180,13 +180,13 @@ describe("Integration tests", () => {
                 appBuiltInLangs: ['note-ipfs'],
                 appLangAliases: null,
                 mocks: false,
-                portGraphQL: 14000,
-                portHCAdmin: 12000,
-                portHCApp: 11337,
+                gqlPort: 14000,
+                hcPortAdmin: 12000,
+                hcPortApp: 11337,
                 ipfsSwarmPort: 14002,
                 ipfsRepoPath,
-                useLocalHolochainProxy: false,
-                useMdnsHolochain: false
+                hcUseLocalProxy: false,
+                hcUseMdns: false
           })
 
           bob.initControllers()
@@ -197,6 +197,7 @@ describe("Integration tests", () => {
           const generate = await testContext.bob.agent.generate("passphrase")
           expect(generate.isInitialized).toBe(true);
           expect(generate.isUnlocked).toBe(true);
+          await testContext.makeAllNodesKnown()
         })
 
         afterAll(async () => {

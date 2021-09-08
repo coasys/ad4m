@@ -20,12 +20,14 @@ import fs from 'fs'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 
 export interface InitServicesParams {
-    portHCAdmin?: number, 
-    portHCApp?: number,
+    hcPortAdmin?: number, 
+    hcPortApp?: number,
     ipfsSwarmPort?: number,
     ipfsRepoPath?: string
-    useLocalHolochainProxy?: boolean,
-    useMdnsHolochain?: boolean
+    hcUseBootstrap?: boolean,
+    hcUseProxy?: boolean,
+    hcUseLocalProxy?: boolean,
+    hcUseMdns?: boolean
 }
 export default class PerspectivismCore {
     #holochain?: HolochainService
@@ -84,16 +86,18 @@ export default class PerspectivismCore {
 
     async initServices(params: InitServicesParams) {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
-        console.log(`Holochain ports: admin=${params.portHCAdmin} app=${params.portHCApp}`)
-        this.#holochain = new HolochainService(
-            Config.holochainConductorPath, 
-            Config.holochainDataPath, 
-            Config.resourcePath, 
-            params.portHCAdmin, 
-            params.portHCApp,
-            params.useLocalHolochainProxy,
-            params.useMdnsHolochain
-        )
+        console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
+        this.#holochain = new HolochainService({
+            conductorPath: Config.holochainConductorPath, 
+            dataPath: Config.holochainDataPath, 
+            resourcePath: Config.resourcePath, 
+            adminPort: params.hcPortAdmin, 
+            appPort: params.hcPortApp,
+            useBootstrap: params.hcUseBootstrap,
+            useProxy: params.hcUseProxy,
+            useLocalProxy: params.hcUseLocalProxy,
+            useMdns: params.hcUseMdns,
+        })
         let [ipfs, _] = await Promise.all([IPFS.init(
             params.ipfsSwarmPort, 
             params.ipfsRepoPath
