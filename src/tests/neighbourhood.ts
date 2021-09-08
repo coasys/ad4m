@@ -54,9 +54,9 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(socialContext.name).toBe("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
-                await sleep(2000)
-                
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+                await testContext.makeAllNodesKnown()
                 
                 expect(bobP1).toBeTruthy()
                 expect(bobP1!.name).toBeDefined()
@@ -64,8 +64,6 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1!.neighbourhood).toBeDefined();
                 expect(bobP1!.neighbourhood!.linkLanguage).toBe(socialContext.address);
                 expect(bobP1!.neighbourhood!.meta.links.length).toBe(0);
-
-                await sleep(2000)
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
 

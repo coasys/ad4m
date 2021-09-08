@@ -67,9 +67,12 @@ export default function languageTests(testContext: TestContext) {
 
 
             it("Bob can not get/install Alice's language since he doesn't trust her yet", async () => {
-                // Give Holochain gossip inside the Language Language time to settle, 
+                // Make sure all new Holochain cells get connected..
+                await testContext.makeAllNodesKnown()
+                // .. and have time to gossip inside the Language Language, 
                 // so Bob sees the languages created above by Alice
                 await sleep(1000);
+                
 
                 //Test that bob cannot install source language which alice created since she is not in his trusted agents
                 let error

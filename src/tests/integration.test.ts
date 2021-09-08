@@ -56,6 +56,9 @@ export class TestContext {
     #alice: Ad4mClient | undefined
     #bob: Ad4mClient | undefined
 
+    #aliceCore: PerspectivismCore | undefined
+    #bobCore: PerspectivismCore | undefined
+
     get ad4mClient(): Ad4mClient {
       return this.#alice!
     }
@@ -74,6 +77,21 @@ export class TestContext {
 
     set bob(client: Ad4mClient) {
       this.#bob = client
+    }
+
+    set aliceCore(aliceCore: PerspectivismCore) {
+      this.#aliceCore = aliceCore
+    }
+
+    set bobCore(bobCore: PerspectivismCore) {
+      this.#bobCore = bobCore
+    }
+
+    async makeAllNodesKnown() {
+      const aliceAgentInfo = await this.#aliceCore!.holochainRequestAgentInfos()
+      const bobAgentInfo = await this.#bobCore!.holochainRequestAgentInfos()
+      await this.#aliceCore!.holochainAddAgentInfos(bobAgentInfo)
+      await this.#bobCore!.holochainAddAgentInfos(aliceAgentInfo)
     }
 }
 let testContext: TestContext = new TestContext()
@@ -115,6 +133,7 @@ describe("Integration tests", () => {
         await core.initLanguages()
 
         testContext.alice = new Ad4mClient(apolloClient(4000))
+        testContext.aliceCore = core
     })
 
     afterAll(async () => {
@@ -173,12 +192,8 @@ describe("Integration tests", () => {
           bob.initControllers()
           await bob.initLanguages()
 
-          const aliceAgentInfo = await core!.holochainRequestAgentInfos()
-          const bobAgentInfo = await bob.holochainRequestAgentInfos()
-          await core?.holochainAddAgentInfos(bobAgentInfo)
-          bob.holochainAddAgentInfos(aliceAgentInfo)
-
           testContext.bob = new Ad4mClient(apolloClient(14000))
+          testContext.bobCore = bob
           const generate = await testContext.bob.agent.generate("passphrase")
           expect(generate.isInitialized).toBe(true);
           expect(generate.isUnlocked).toBe(true);
