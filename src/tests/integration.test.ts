@@ -173,6 +173,11 @@ describe("Integration tests", () => {
           bob.initControllers()
           await bob.initLanguages()
 
+          const aliceAgentInfo = await core!.holochainRequestAgentInfos()
+          const bobAgentInfo = await bob.holochainRequestAgentInfos()
+          await core?.holochainAddAgentInfos(bobAgentInfo)
+          bob.holochainAddAgentInfos(aliceAgentInfo)
+
           testContext.bob = new Ad4mClient(apolloClient(14000))
           const generate = await testContext.bob.agent.generate("passphrase")
           expect(generate.isInitialized).toBe(true);

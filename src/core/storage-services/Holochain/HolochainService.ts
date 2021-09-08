@@ -7,6 +7,7 @@ import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, ConductorConfiguration} from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
+import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
@@ -265,6 +266,14 @@ export default class HolochainService {
             console.error("\x1b[31m", "HolochainService: ERROR calling zome function:", e, "\x1b[0m")
             return e
         }
+    }
+
+    async requestAgentInfos(): Promise<RequestAgentInfoResponse> {
+        return await this.#adminWebsocket!.requestAgentInfo({cell_id: null})
+    }
+
+    async addAgentInfos(agent_infos: RequestAgentInfoResponse) {
+        await this.#adminWebsocket!.addAgentInfo({ agent_infos })
     }
 }
 

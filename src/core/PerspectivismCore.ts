@@ -17,6 +17,7 @@ import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
 import path from 'path'
 import fs from 'fs'
+import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 
 export interface InitServicesParams {
     portHCAdmin?: number, 
@@ -204,6 +205,14 @@ export default class PerspectivismCore {
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
         return await this.#holochain!.pubKeyForLanguage(lang)
+    }
+
+    async holochainRequestAgentInfos(): Promise<RequestAgentInfoResponse> {
+        return await this.#holochain!.requestAgentInfos()
+    }
+
+    async holochainAddAgentInfos(agent_infos: RequestAgentInfoResponse) {
+        await this.#holochain!.addAgentInfos(agent_infos)
     }
 }
 
