@@ -25,9 +25,12 @@ export interface ConductorConfiguration {
     environmentPath: string;
     adminPort: number;
     appPort: number;
+    useBootstrap: boolean,
     bootstrapService: string;
     conductorConfigPath: string;
+    useProxy: boolean,
     useLocalProxy: boolean;
+    useMdns: boolean;
 }
 
 export function writeDefaultConductor(conductorConfig: ConductorConfiguration) {
@@ -55,17 +58,15 @@ admin_interfaces:
       type: websocket
       port: ${conductorConfig.adminPort}
 network:
+  network_type: ${conductorConfig.useMdns? 'quic_mdns' : 'quic_bootstrap'}
+  ${conductorConfig.useBootstrap ? 'bootstrap_service: '+conductorConfig.bootstrapService : ''}
   transport_pool:
-    - type: proxy
+    - type: ${conductorConfig.useProxy ? 'proxy' : 'quic'}
       sub_transport:
         type: quic
-        bind_to: ~
-        override_host: ~
-        override_port: ~
       proxy_config:
         type: ${proxyType}
         proxy_url: "${conductorConfig.proxyUrl}"
-  bootstrap_service: "${conductorConfig.bootstrapService}"
   tuning_params:
     gossip_strategy: sharded-gossip
     gossip_loop_iteration_delay_ms: "1000"
@@ -83,13 +84,6 @@ network:
     tls_in_mem_session_storage: "512"
     proxy_keepalive_ms: "120000"
     proxy_to_expire_ms: "300000"
-    concurrent_limit_per_thread: "4096"
-    tx2_quic_max_idle_timeout_ms: "30000"
-    tx2_pool_max_connection_count: "4096"
-    tx2_channel_count_per_connection: "16"
-    tx2_implicit_timeout_ms: "30000"
-    tx2_initial_connect_retry_delay_ms: "200"
-  network_type: quic_bootstrap
 `
     fs.writeFileSync(conductorConfig.conductorConfigPath, conductorStringConfig);
 }

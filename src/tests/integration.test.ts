@@ -20,6 +20,10 @@ import agentTests from "./agent";
 import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
+import runtimeTests from "./runtime";
+import { Crypto } from "@peculiar/webcrypto"
+//@ts-ignore
+global.crypto = new Crypto();
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const TEST_DIR = `${__dirname}/../test-temp`
@@ -52,6 +56,9 @@ export class TestContext {
     #alice: Ad4mClient | undefined
     #bob: Ad4mClient | undefined
 
+    #aliceCore: PerspectivismCore | undefined
+    #bobCore: PerspectivismCore | undefined
+
     get ad4mClient(): Ad4mClient {
       return this.#alice!
     }
@@ -70,6 +77,21 @@ export class TestContext {
 
     set bob(client: Ad4mClient) {
       this.#bob = client
+    }
+
+    set aliceCore(aliceCore: PerspectivismCore) {
+      this.#aliceCore = aliceCore
+    }
+
+    set bobCore(bobCore: PerspectivismCore) {
+      this.#bobCore = bobCore
+    }
+
+    async makeAllNodesKnown() {
+      const aliceAgentInfo = await this.#aliceCore!.holochainRequestAgentInfos()
+      const bobAgentInfo = await this.#bobCore!.holochainRequestAgentInfos()
+      await this.#aliceCore!.holochainAddAgentInfos(bobAgentInfo)
+      await this.#bobCore!.holochainAddAgentInfos(aliceAgentInfo)
     }
 }
 let testContext: TestContext = new TestContext()
@@ -103,13 +125,17 @@ describe("Integration tests", () => {
             appLangAliases: null,
             mocks: false,
             ipfsRepoPath,
-            useLocalHolochainProxy: true
+            hcUseBootstrap: false,
+            hcUseProxy: false,
+            hcUseLocalProxy: false,
+            hcUseMdns: true
         })
 
         core.initControllers()
-        await core.initLanguages(false)
+        await core.initLanguages()
 
         testContext.alice = new Ad4mClient(apolloClient(4000))
+        testContext.aliceCore = core
     })
 
     afterAll(async () => {
@@ -126,8 +152,8 @@ describe("Integration tests", () => {
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
+    describe('Runtime', runtimeTests(testContext))
     describe('Expression', expressionTests(testContext))
-    describe('Language', languageTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
 
     describe('with Alice and Bob', () => {
@@ -156,18 +182,26 @@ describe("Integration tests", () => {
                 appBuiltInLangs: ['note-ipfs'],
                 appLangAliases: null,
                 mocks: false,
-                portGraphQL: 14000,
-                portHCAdmin: 12000,
-                portHCApp: 11337,
+                gqlPort: 14000,
+                hcPortAdmin: 12000,
+                hcPortApp: 11337,
                 ipfsSwarmPort: 14002,
                 ipfsRepoPath,
-                useLocalHolochainProxy: true
+                hcUseBootstrap: false,
+                hcUseProxy: false,
+                hcUseLocalProxy: false,
+                hcUseMdns: true
           })
 
           bob.initControllers()
-          await bob.initLanguages(false)
+          await bob.initLanguages()
 
           testContext.bob = new Ad4mClient(apolloClient(14000))
+          testContext.bobCore = bob
+          const generate = await testContext.bob.agent.generate("passphrase")
+          expect(generate.isInitialized).toBe(true);
+          expect(generate.isUnlocked).toBe(true);
+          await testContext.makeAllNodesKnown()
         })
 
         afterAll(async () => {
@@ -175,6 +209,7 @@ describe("Integration tests", () => {
           await new Promise((resolve)=>setTimeout(resolve, 1000))
         })
 
+        describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
     })
 })

@@ -6,6 +6,9 @@ import { createMockExpression } from '../testutils/expression'
 import PerspectivismCore from '../core/PerspectivismCore'
 import fs from 'fs-extra'
 import path from 'path'
+import { Crypto } from "@peculiar/webcrypto"
+//@ts-ignore
+global.crypto = new Crypto();
 
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
@@ -39,15 +42,15 @@ describe(LANG_TO_TEST, () => {
         })
 
         await core.initServices({
-            portHCAdmin: 22000,
-            portHCApp: 21337,
+            hcPortAdmin: 22000,
+            hcPortApp: 21337,
             ipfsSwarmPort: 24002,
             ipfsRepoPath
         })
         await core.agentService.createNewKeys()
         await core.agentService.save('')
         await core.initControllers()
-        await core.initLanguages(true)
+        await core.initLanguages()
     })
 
     afterAll(async () => {

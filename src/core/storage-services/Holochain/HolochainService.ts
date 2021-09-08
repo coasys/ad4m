@@ -7,11 +7,24 @@ import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, ConductorConfiguration} from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
+import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
 const bootstrapUrl = "https://bootstrap-staging.holo.host"
 const kitsuneProxy = "kitsune-proxy://SYVd4CF3BdJ4DS7KwLLgeU3_DbHoZ34Y-qroZ79DOs8/kitsune-quic/h/165.22.32.11/p/5779/--"
+
+export interface HolochainConfiguration {
+    conductorPath: string, 
+    dataPath: string, 
+    resourcePath: string
+    adminPort?: number;
+    appPort?: number;
+    useBootstrap?: boolean,
+    useProxy?: boolean,
+    useLocalProxy?: boolean;
+    useMdns?: boolean;
+}
 
 export default class HolochainService {
     #db: any
@@ -29,7 +42,19 @@ export default class HolochainService {
     #conductorConfigPath: string
     signalCallbacks: Map<string, [AppSignalCb, string]>;
 
-    constructor(conductorPath: string, dataPath: string, resourcePath: string, adminPort?: number, appPort?: number, useLocalProxy?: boolean) {
+    constructor(config: HolochainConfiguration) {
+        let {
+            conductorPath, 
+            dataPath, 
+            resourcePath,
+            adminPort,
+            appPort,
+            useBootstrap,
+            useProxy,
+            useLocalProxy,
+            useMdns,
+        } = config;
+
         this.#didResolveError = false;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
@@ -40,6 +65,10 @@ export default class HolochainService {
 
         const holochainAppPort = appPort ? appPort : 1337;
         const holochainAdminPort = adminPort ? adminPort : 2000;
+        if(useMdns === undefined) useMdns = true
+        if(useBootstrap === undefined) useBootstrap = true
+        if(useProxy === undefined) useProxy = true
+        if(useLocalProxy === undefined) useLocalProxy = false
         this.#adminPort = holochainAdminPort;
         this.#appPort = holochainAppPort;
         this.#resourcePath = resourcePath;
@@ -53,9 +82,12 @@ export default class HolochainService {
                 environmentPath: conductorPath,
                 adminPort: holochainAdminPort,
                 appPort: holochainAppPort,
+                useBootstrap,
                 bootstrapService: bootstrapUrl,
                 conductorConfigPath: conductorConfigPath,
-                useLocalProxy: useLocalProxy || false
+                useProxy,
+                useLocalProxy,
+                useMdns
             } as ConductorConfiguration);
         };
     }
@@ -78,11 +110,8 @@ export default class HolochainService {
         [this.#hcProcess, this.#lairProcess] = hcProcesses;
         try {
             if (this.#adminWebsocket == undefined) {
-                try {
-                    this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
-                } catch (e) {
-                    throw new Error(e)
-                }
+                this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
+
                 try {
                     await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
                 } catch {
@@ -91,12 +120,8 @@ export default class HolochainService {
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
             };
             if (this.#appWebsocket == undefined) {
-                try {
-                    this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
-                    console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
-                } catch (e) {
-                    throw new Error(e)
-                }
+                this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
+                console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
             };
             resolveReady!()
             this.#didResolveError = false;
@@ -119,11 +144,23 @@ export default class HolochainService {
     }
 
     unpackDna(dnaPath: string): string {
-        return unpackDna(`${this.#resourcePath}/hc`, dnaPath)
+        let result = unpackDna(`${this.#resourcePath}/hc`, dnaPath);
+        let splitResult = result.split("Unpacked to directory ");
+        if (splitResult.length == 2) {
+            return splitResult[1]
+        } else {
+            return result
+        }
     }
 
     packDna(workdirPath: string): string {
-        return packDna(`${this.#resourcePath}/hc`, workdirPath)
+        let result = packDna(`${this.#resourcePath}/hc`, workdirPath);
+        let splitResult = result.split("Wrote bundle ");
+        if (splitResult.length == 2) {
+            return splitResult[1]
+        } else {
+            return result
+        }
     }
 
     async pubKeyForLanguage(lang: string): Promise<AgentPubKey> {
@@ -259,6 +296,14 @@ export default class HolochainService {
             console.error("\x1b[31m", "HolochainService: ERROR calling zome function:", e, "\x1b[0m")
             return e
         }
+    }
+
+    async requestAgentInfos(): Promise<RequestAgentInfoResponse> {
+        return await this.#adminWebsocket!.requestAgentInfo({cell_id: null})
+    }
+
+    async addAgentInfos(agent_infos: RequestAgentInfoResponse) {
+        await this.#adminWebsocket!.addAgentInfo({ agent_infos })
     }
 }
 

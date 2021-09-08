@@ -13,16 +13,21 @@ import * as GraphQL from './graphQL-interface/GraphQL'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
-import LanguageFactory from './LanguageFactory'
 import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
+import path from 'path'
+import fs from 'fs'
+import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 
 export interface InitServicesParams {
-    portHCAdmin?: number, 
-    portHCApp?: number,
+    hcPortAdmin?: number, 
+    hcPortApp?: number,
     ipfsSwarmPort?: number,
     ipfsRepoPath?: string
-    useLocalHolochainProxy?: boolean
+    hcUseBootstrap?: boolean,
+    hcUseProxy?: boolean,
+    hcUseLocalProxy?: boolean,
+    hcUseMdns?: boolean
 }
 export default class PerspectivismCore {
     #holochain?: HolochainService
@@ -35,8 +40,6 @@ export default class PerspectivismCore {
 
     #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
-
-    #languageFactory?: LanguageFactory
 
     constructor(config: Config.CoreConfig) {
         Config.init(config)
@@ -83,15 +86,18 @@ export default class PerspectivismCore {
 
     async initServices(params: InitServicesParams) {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
-        console.log(`Holochain ports: admin=${params.portHCAdmin} app=${params.portHCApp}`)
-        this.#holochain = new HolochainService(
-            Config.holochainConductorPath, 
-            Config.holochainDataPath, 
-            Config.resourcePath, 
-            params.portHCAdmin, 
-            params.portHCApp,
-            params.useLocalHolochainProxy
-        )
+        console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
+        this.#holochain = new HolochainService({
+            conductorPath: Config.holochainConductorPath, 
+            dataPath: Config.holochainDataPath, 
+            resourcePath: Config.resourcePath, 
+            adminPort: params.hcPortAdmin, 
+            appPort: params.hcPortApp,
+            useBootstrap: params.hcUseBootstrap,
+            useProxy: params.hcUseProxy,
+            useLocalProxy: params.hcUseLocalProxy,
+            useMdns: params.hcUseMdns,
+        })
         let [ipfs, _] = await Promise.all([IPFS.init(
             params.ipfsSwarmPort, 
             params.ipfsRepoPath
@@ -126,11 +132,8 @@ export default class PerspectivismCore {
         })
     }
 
-    async initLanguages(omitLanguageFactory: boolean|void) {
+    async initLanguages() {
         await this.#languageController!.loadLanguages()
-        if(!omitLanguageFactory) {
-            this.#languageFactory = new LanguageFactory(this.#agentService, this.#languageController!.getLanguageLanguage(), this.#holochain!)
-        }
     }
 
     initMockLanguages(hashes: string[], languages: Language[]) {
@@ -167,22 +170,53 @@ export default class PerspectivismCore {
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
-        console.log("Core.installNeighbourhood: Got neighbourhood", neighbourHoodExp);
+        console.log("Core.installNeighbourhood(): Got neighbourhood", neighbourHoodExp);
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
         this.languageController.installLanguage(neighbourhood.linkLanguage, null);
         
         return this.#perspectivesController!.add("", url, neighbourhood);        
     }
 
-    async languageCloneHolochainTemplate(languagePath: string, dnaNick: string, uid: string): Promise<LanguageRef> {
-        if (!this.#languageFactory) {
-            throw Error("Language factory was not started when calling core.initLanguages()")
+    async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
+        if (!this.#languageController) {
+            throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
-        return await this.#languageFactory.languageCloneHolochainTemplate(languagePath, dnaNick, uid)
+        let languageObject = await this.#languageController.languageApplyTemplateOnSource(sourceLanguageHash, templateData);
+        return this.publish(languageObject)
+    }
+
+    async languagePublish(languagePath: string, templateData: object): Promise<LanguageRef> {
+        if (!this.#languageController) {
+            throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
+        };
+        let languageObject = await this.#languageController.languageApplyTemplate(languagePath, templateData);
+        return this.publish(languageObject)
+    }
+
+    async publish(languageObject: object): Promise<LanguageRef> {
+        try {
+            const address = await (this.#languageController!.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageObject)
+            return {
+                address,
+                //@ts-ignore
+                name: languageObject["name"],
+            } as LanguageRef
+        } catch(e) {
+            console.error("Core.installAndPublish(): ERROR creating new language:", e)
+            throw e
+        } 
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
         return await this.#holochain!.pubKeyForLanguage(lang)
+    }
+
+    async holochainRequestAgentInfos(): Promise<RequestAgentInfoResponse> {
+        return await this.#holochain!.requestAgentInfos()
+    }
+
+    async holochainAddAgentInfos(agent_infos: RequestAgentInfoResponse) {
+        await this.#holochain!.addAgentInfos(agent_infos)
     }
 }
 

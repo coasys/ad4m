@@ -98,8 +98,24 @@ function createResolvers(core: PerspectivismCore) {
             perspectives: (parent, args, context, info) => {
                 return core.perspectivesController.allPerspectiveHandles()
             },
+            //@ts-ignore
+            getTrustedAgents: (parent, args, context, info) => {
+                return core.agentService.getTrustedAgents();
+            },
         },
         Mutation: {
+            //@ts-ignore
+            addTrustedAgents: (parent, args, context, info) => {
+                const { agents } = args;
+                core.agentService.addTrustedAgents(agents);
+                return core.agentService.getTrustedAgents();
+            },
+            //@ts-ignore
+            deleteTrustedAgents: (parent, args, context, info) => {
+                const { agents } = args;
+                core.agentService.deleteTrustedAgents(agents);
+                return core.agentService.getTrustedAgents();
+            },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {
                 await core.agentService.createNewKeys()
@@ -164,9 +180,14 @@ function createResolvers(core: PerspectivismCore) {
                 return exprRef2String(expref)
             },
             //@ts-ignore
-            languageCloneHolochainTemplate: async (parent, args, context, info) => {
-                const { languagePath, dnaNick, uid } = args;
-                return await core.languageCloneHolochainTemplate(languagePath, dnaNick, uid);
+            languageApplyTemplateAndPublish: async (parent, args, context, info) => {
+                const { sourceLanguageHash, templateData } = args;
+                return await core.languageApplyTemplateAndPublish(sourceLanguageHash, JSON.parse(templateData));
+            },
+            //@ts-ignore
+            languagePublish: async (parent, args, context, info) => {
+                const { languagePath, templateData } = args;
+                return await core.languagePublish(languagePath, JSON.parse(templateData));
             },
             //@ts-ignore
             languageWriteSettings: async (parent, args, context, info) => {
