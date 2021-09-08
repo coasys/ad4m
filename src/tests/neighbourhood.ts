@@ -50,10 +50,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: "41ce-8b054009-2222", name: "Alice's social-context"}))
-                expect(socialContext.name).toBe("Alice's social-context");
+                const socialContext = await alice.languages.publish(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), JSON.stringify({uid: "41ce-8b054009-2222", name: "Alice's neighbourhood with Bob"}))
+                expect(socialContext.name).toBe("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
+                await sleep(2000)
+                
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                 
                 expect(bobP1).toBeTruthy()
@@ -62,6 +64,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1!.neighbourhood).toBeDefined();
                 expect(bobP1!.neighbourhood!.linkLanguage).toBe(socialContext.address);
                 expect(bobP1!.neighbourhood!.meta.links.length).toBe(0);
+
+                await sleep(2000)
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
 
