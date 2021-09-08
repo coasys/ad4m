@@ -25,8 +25,10 @@ export interface ConductorConfiguration {
     environmentPath: string;
     adminPort: number;
     appPort: number;
+    useBoostrap: boolean,
     bootstrapService: string;
     conductorConfigPath: string;
+    useProxy: boolean,
     useLocalProxy: boolean;
     mdns: boolean;
 }
@@ -57,9 +59,9 @@ admin_interfaces:
       port: ${conductorConfig.adminPort}
 network:
   network_type: ${conductorConfig.mdns? 'quic_mdns' : 'quic_bootstrap'}
-  bootstrap_service: https://bootstrap-staging.holo.host
+  ${conductorConfig.useBoostrap ? 'bootstrap_service: '+conductorConfig.bootstrapService : ''}
   transport_pool:
-    - type: proxy
+    - type: ${conductorConfig.useProxy ? 'proxy' : 'quic'}
       sub_transport:
         type: quic
       proxy_config:

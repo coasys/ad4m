@@ -54,8 +54,10 @@ export default class HolochainService {
                 environmentPath: conductorPath,
                 adminPort: holochainAdminPort,
                 appPort: holochainAppPort,
+                useBoostrap: false,
                 bootstrapService: bootstrapUrl,
                 conductorConfigPath: conductorConfigPath,
+                useProxy: false,
                 useLocalProxy: useLocalProxy || false,
                 mdns: useMdns || false
             } as ConductorConfiguration);
