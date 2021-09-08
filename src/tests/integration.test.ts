@@ -125,6 +125,8 @@ describe("Integration tests", () => {
             appLangAliases: null,
             mocks: false,
             ipfsRepoPath,
+            hcUseBootstrap: false,
+            hcUseProxy: false,
             hcUseLocalProxy: false,
             hcUseMdns: false
         })
@@ -185,6 +187,8 @@ describe("Integration tests", () => {
                 hcPortApp: 11337,
                 ipfsSwarmPort: 14002,
                 ipfsRepoPath,
+                hcUseBootstrap: false,
+                hcUseProxy: false,
                 hcUseLocalProxy: false,
                 hcUseMdns: false
           })
