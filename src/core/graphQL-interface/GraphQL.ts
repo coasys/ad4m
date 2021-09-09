@@ -238,7 +238,7 @@ function createResolvers(core: PerspectivismCore) {
                 try{
                     return await core.installNeighbourhood(url);
                 } catch(e) {
-                    console.log("JOIN ERROR:", e)
+                    console.error(`Error while trying to join neighbourhood '${url}':`, e)
                     throw e
                 }
                 
@@ -253,7 +253,7 @@ function createResolvers(core: PerspectivismCore) {
                 try{
                     return await core.neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)
                 } catch(e) {
-                    console.log("PUBLISH ERROR:", e)
+                    console.error(`Error while trying to publish:`, e)
                     throw e
                 }
                 
