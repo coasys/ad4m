@@ -69,8 +69,8 @@ async function main() {
           // }
 
           fs.copyFileSync(
-            path.join(__dirname, `../${dir}/bundle.js`),
-            path.join(__dirname, `../${dir}/build/bundle.js`)
+            path.join(`${dir}/bundle.js`),
+            path.join(`${dir}/build/bundle.js`)
           );
           fs.rmSync(`${dir}/lang.zip`);
           fs.rmSync(`${dir}/bundle.js`);
