@@ -1,6 +1,6 @@
 import { ApolloServer, withFilter, gql } from 'apollo-server'
 import { Agent, LanguageRef } from '@perspect3vism/ad4m'
-import { exprRef2String, parseExprUrl } from '@perspect3vism/ad4m'
+import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
@@ -186,8 +186,21 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             languagePublish: async (parent, args, context, info) => {
-                const { languagePath, templateData } = args;
-                return await core.languagePublish(languagePath, JSON.parse(templateData));
+                const { languagePath, languageMeta } = args;
+                const expression = await core.languagePublish(languagePath, languageMeta);
+                const internal = expression.data
+                let meta = new LanguageMeta()
+                meta.name = internal.name
+                meta.address = internal.address
+                meta.description = internal.description
+                meta.author = expression.author
+                meta.templated = internal.templateSourceLanguageAddress != undefined
+                meta.templateSourceLanguageAddress = internal.templateSourceLanguageAddress
+                meta.templateAppliedParams = internal.templateAppliedParams
+                meta.possibleTemplateParams = internal.possibleTemplateParams
+                meta.sourceCodeLink = internal.sourceCodeLink
+                console.debug("GQL publish:", meta, expression)
+                return meta
             },
             //@ts-ignore
             languageWriteSettings: async (parent, args, context, info) => {
@@ -202,7 +215,13 @@ function createResolvers(core: PerspectivismCore) {
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
                 // console.log(new Date(), "GQL install shared perspective", args);
                 const { url } = args;
-                return await core.installNeighbourhood(url);
+                try{
+                    return await core.installNeighbourhood(url);
+                } catch(e) {
+                    console.log("JOIN ERROR:", e)
+                    throw e
+                }
+                
             },
             //@ts-ignore
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
@@ -210,7 +229,14 @@ function createResolvers(core: PerspectivismCore) {
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(perspective.neighbourhood && perspective.sharedUrl)
                     throw new Error(`Perspective ${perspective.name} (${perspective.uuid}) is already shared`);
-                return await core.neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)
+
+                try{
+                    return await core.neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)
+                } catch(e) {
+                    console.log("PUBLISH ERROR:", e)
+                    throw e
+                }
+                
             },
             //@ts-ignore
             perspectiveAdd: (parent, args, context, info) => {

@@ -1,4 +1,4 @@
-import type { Address, LanguageRef, PublicSharing, PerspectiveHandle, Language, Perspective  } from '@perspect3vism/ad4m'
+import type { Address, LanguageRef, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageMetaInternal, LanguageLanguageInput, LanguageExpression  } from '@perspect3vism/ad4m'
 import { parseExprUrl, Neighbourhood } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
@@ -181,25 +181,33 @@ export default class PerspectivismCore {
         if (!this.#languageController) {
             throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
-        let languageObject = await this.#languageController.languageApplyTemplateOnSource(sourceLanguageHash, templateData);
-        return this.publish(languageObject)
+        let languageLanguageInput = await this.#languageController.languageApplyTemplateOnSource(sourceLanguageHash, templateData);
+        return this.publish(languageLanguageInput)
     }
 
-    async languagePublish(languagePath: string, templateData: object): Promise<LanguageRef> {
+    async languagePublish(languagePath: string, languageMeta: LanguageMetaInternal): Promise<LanguageExpression> {
+        if (!fs.existsSync(languagePath)) {
+            throw new Error("Language at path: " + languagePath + " does not exist");
+        };
         if (!this.#languageController) {
             throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
-        let languageObject = await this.#languageController.languageApplyTemplate(languagePath, templateData);
-        return this.publish(languageObject)
+        
+        const sourceLanguage = fs.readFileSync(languagePath).toString();
+        const sourceLanguageLines = sourceLanguage!.split("\n");
+
+        const languageLanguageInput = await this.#languageController.constructLanguageLanguageInput(sourceLanguageLines, languageMeta)
+        const languageRef = await this.publish(languageLanguageInput)
+        return await this.#languageController.getLanguageExpression(languageRef.address)
     }
 
-    async publish(languageObject: object): Promise<LanguageRef> {
+    async publish(languageLanguageInput: LanguageLanguageInput): Promise<LanguageRef> {
         try {
-            const address = await (this.#languageController!.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageObject)
+            const address = await (this.#languageController!.getLanguageLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(languageLanguageInput)
             return {
                 address,
                 //@ts-ignore
-                name: languageObject["name"],
+                name: languageLanguageInput.meta.name
             } as LanguageRef
         } catch(e) {
             console.error("Core.installAndPublish(): ERROR creating new language:", e)
