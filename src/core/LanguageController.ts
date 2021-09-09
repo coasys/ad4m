@@ -1,8 +1,8 @@
-import type { 
+import { 
     Address, Expression, Language, LanguageContext, 
-    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage 
+    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput 
 } from '@perspect3vism/ad4m';
-import { ExpressionRef, LanguageRef } from '@perspect3vism/ad4m';
+import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput } from '@perspect3vism/ad4m';
 import fs from 'fs'
 import path from 'path'
 import * as Config from './Config'
@@ -138,76 +138,75 @@ export default class LanguageController {
 
     async installLanguage(address: Address, languageMeta: null|Expression): Promise<Language | undefined> {
         const language = this.#languages.get(address)
-        
-        if (language == undefined) {
-            console.log(new Date(), "installLanguage: installing language with address", address);
-            if(!languageMeta) {
-                try {
-                    languageMeta = await this.getLanguageExpression(address)
-                } catch (e) {
-                    throw Error(`Error getting language meta from language language: ${e}`)
-                }
-
-                if (languageMeta == null) {
-                    //@ts-ignore
-                    languageMeta = {data: {}};
-                }
-            }
-            console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
-            let source;
-            try {
-                source = await this.getLanguageSource(address);
-            } catch (e) {
-                throw Error(`Error getting language source from language language, language adapter: ${e}`)
-            }
-            if(!source){
-                console.error("LanguageController.installLanguage: COULDN'T GET SOURCE OF LANGUAGE TO INSTALL!")
-                console.error("LanguageController.installLanguage: Address:", address)
-                console.error("LanguageController.installLanguage:", languageMeta)
-                throw Error(`Could not find language source for language with address: ${address}`)
-            }
-            const hash = await this.ipfsHash(source)
-            if(hash === 'asdf') {
-                console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
-                console.error("LanguageController.installLanguage: Address:", address)
-                console.error("LanguageController.installLanguage: Computed hash:", hash)
-                console.error("LanguageController.installLanguage: =================================")
-                console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-                console.error("LanguageController.installLanguage: =================================")
-                console.error("LanguageController.installLanguage:", languageMeta)
-                console.error("LanguageController.installLanguage: =================================")
-                console.error("LanguageController.installLanguage: =================================")
-                console.error("LanguageController.installLanguage: CONTENT:")
-                //console.error(source)
-                //console.error("LanguageController.installLanguage: =================================")
-                //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-                //console.error("LanguageController.installLanguage: =================================")
-                return
-            }
+        if (language) return language
     
-            const languagePath = path.join(Config.languagesPath, address);
-            const sourcePath = path.join(languagePath, 'bundle.js')
-            const metaPath = path.join(languagePath, 'meta.json')
+        console.log(new Date(), "installLanguage: installing language with address", address);
+        if(!languageMeta) {
             try {
-                fs.mkdirSync(languagePath)
-            } catch(e) {
-                console.error("Error trying to create directory", languagePath)
-                console.error("Will proceed with installing language anyway...")
+                languageMeta = await this.getLanguageExpression(address)
+            } catch (e) {
+                throw Error(`Error getting language meta from language language: ${e}`)
             }
-            
-            fs.writeFileSync(sourcePath, source)
-            fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
-            // console.log(new Date(), "LanguageController: installed language");
-            try {
-                return (await this.loadLanguage(sourcePath)).language
-            } catch(e) {
-                console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
-                console.error("LanguageController.installLanguage: ======================================")
-                console.error(e)
-                fs.rmdirSync(languagePath, {recursive: true})
+
+            if (languageMeta == null) {
                 //@ts-ignore
-                throw Error(e.toString())
+                languageMeta = {data: {}};
             }
+        }
+        console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
+        let source;
+        try {
+            source = await this.getLanguageSource(address);
+        } catch (e) {
+            throw Error(`Error getting language source from language language, language adapter: ${e}`)
+        }
+        if(!source){
+            console.error("LanguageController.installLanguage: COULDN'T GET SOURCE OF LANGUAGE TO INSTALL!")
+            console.error("LanguageController.installLanguage: Address:", address)
+            console.error("LanguageController.installLanguage:", languageMeta)
+            throw Error(`Could not find language source for language with address: ${address}`)
+        }
+        const hash = await this.ipfsHash(source)
+        if(hash === 'asdf') {
+            console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
+            console.error("LanguageController.installLanguage: Address:", address)
+            console.error("LanguageController.installLanguage: Computed hash:", hash)
+            console.error("LanguageController.installLanguage: =================================")
+            console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+            console.error("LanguageController.installLanguage: =================================")
+            console.error("LanguageController.installLanguage:", languageMeta)
+            console.error("LanguageController.installLanguage: =================================")
+            console.error("LanguageController.installLanguage: =================================")
+            console.error("LanguageController.installLanguage: CONTENT:")
+            //console.error(source)
+            //console.error("LanguageController.installLanguage: =================================")
+            //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+            //console.error("LanguageController.installLanguage: =================================")
+            return
+        }
+
+        const languagePath = path.join(Config.languagesPath, address);
+        const sourcePath = path.join(languagePath, 'bundle.js')
+        const metaPath = path.join(languagePath, 'meta.json')
+        try {
+            fs.mkdirSync(languagePath)
+        } catch(e) {
+            console.error("Error trying to create directory", languagePath)
+            console.error("Will proceed with installing language anyway...")
+        }
+        
+        fs.writeFileSync(sourcePath, source)
+        fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
+        // console.log(new Date(), "LanguageController: installed language");
+        try {
+            return (await this.loadLanguage(sourcePath)).language
+        } catch(e) {
+            console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
+            console.error("LanguageController.installLanguage: ======================================")
+            console.error(e)
+            fs.rmdirSync(languagePath, {recursive: true})
+            //@ts-ignore
+            throw Error(e.toString())
         }
     }
 
@@ -235,7 +234,7 @@ export default class LanguageController {
             if (languageMeta.proof.valid != true) {
                 throw new Error(`Language to be installed does not have valid proof`);
             }
-            const languageMetaData = JSON.parse(languageMeta.data);
+            const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
             //@ts-ignore
             const trustedAgents: string[] = this.#context.agent.getTrustedAgents();
@@ -247,32 +246,32 @@ export default class LanguageController {
                     throw new Error("Could not get languageSource for language")
                 }
                 const languageHash = await this.ipfsHash(languageSource);
-                if (!languageMetaData["hash"]) {
-                    throw new Error(`Could not find 'hash' value inside languageMetaData object: ${languageMetaData["hash"]} - ${languageMetaData.hash} - ${JSON.stringify(languageMetaData)}`)
+                if (!languageMetaData.address) {
+                    throw new Error(`Could not find 'address' value inside languageMetaData object: ${languageMetaData["address"]} - ${languageMetaData.address} - ${JSON.stringify(languageMetaData)}`)
                 }
                 //Check the hash matches and then install!
-                if (languageHash == languageMetaData["hash"]) {
+                if (languageHash == languageMetaData.address) {
                     //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                     const lang = await this.installLanguage(address, languageMeta)
                     return lang!
                 } else {
-                    throw new Error("Calculated languageHash did not match languageHash found in meta information")
+                    throw new Error("Calculated languageHash did not match address found in meta information")
                 }
             } else {
                 //Person who created this language is not trusted so lets try and get a source language template
-                if (!languageMetaData["templateParams"]) {
+                if (!languageMetaData.templateAppliedParams) {
                     throw new Error("Language not created by trusted agent and is not templated... aborting language install")
                 }
                 //Check that there are some template params to even apply
-                if (Object.keys(languageMetaData["templateParams"]).length == 0) {
+                if (Object.keys(languageMetaData.templateAppliedParams).length == 0) {
                     throw new Error("Language not created by trusted agent and is not templated... aborting language install")
                 }
                 //Check that there is a sourceLanguage that we can follow to
-                if (!languageMetaData["sourceLanguageHash"]) {
+                if (!languageMetaData.templateSourceLanguageAddress) {
                     throw new Error("Language not created by trusted agent and is not templated... aborting language install");
                 }
                 //Get the meta information of the source language
-                const sourceLanguageHash = languageMetaData["sourceLanguageHash"];
+                const sourceLanguageHash = languageMetaData.templateSourceLanguageAddress;
                 const sourceLanguageMeta = await this.getLanguageExpression(sourceLanguageHash);
                 if (!sourceLanguageMeta) {
                     throw new Error("Could not get the meta for the source language");
@@ -283,7 +282,7 @@ export default class LanguageController {
                 if (trustedAgents.find((agent) => agent === sourceLanguageMeta.author)) {
                     //Apply the template information supplied in the language to be installed to the source language and make sure that the resulting
                     //language hash is equal to the one trying to be installed. This ensures that the only thing changed between language versions is the template data
-                    const sourceLanguageTemplated = await this.languageApplyTemplateOnSource(sourceLanguageHash, languageMetaData["templateParams"]);
+                    const sourceLanguageTemplated = await this.languageApplyTemplateOnSource(sourceLanguageHash, languageMetaData.templateAppliedParams);
                     const languageSource = await this.getLanguageSource(address);
                     if (!languageSource) {
                         throw new Error("Could not get languageSource for language")
@@ -291,7 +290,7 @@ export default class LanguageController {
                     //Hash the language source and ensure its the same as the templated language 
                     const languageHash = await this.ipfsHash(languageSource);
                     //@ts-ignore
-                    if (sourceLanguageTemplated.hash === languageHash) {
+                    if (sourceLanguageTemplated.address === languageHash) {
                         //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                         const lang = await this.installLanguage(address, languageMeta)
                         return lang!
@@ -412,27 +411,23 @@ export default class LanguageController {
         };
     }
 
-    async constructLanguageObject(
+    async constructLanguageLanguageInput(
         sourceLanguageLines: string[], 
-        templateData: object, 
-        otherMetaInformation: { name?: string, description?: string, sourceLanguageHash: string | null }
-    ): Promise<object> {
+        internal: LanguageMetaInternal
+    ): Promise<LanguageLanguageInput> {
         const languageData = sourceLanguageLines.join('\n');
         const languageHash = await this.ipfsHash(languageData);
 
-        const newLanguageObj = {
-            name: otherMetaInformation.name,
-            description: otherMetaInformation.description,
-            hash: languageHash,
-            templateParams: templateData,
-            sourceLanguageHash: otherMetaInformation.sourceLanguageHash,
-            bundleFile: languageData.toString(),
-        }
+        internal.address = languageHash
 
-        //console.log("LanguageController.languageApplyTemplate: Templating complete creating new language with language meta object: ", newLanguageObj);
-        return newLanguageObj
+        let input = new LanguageLanguageInput()
+        input.bundle = languageData
+        input.meta = internal
+
+        return input
     }
 
+    /*
     async languageApplyTemplate(languagePath: string, templateData: object): Promise<object> {
         if (!fs.existsSync(languagePath)) {
             throw new Error("Language at path: " + languagePath + " does not exist");
@@ -460,14 +455,16 @@ export default class LanguageController {
         const description = templateData["description"] || null;
         return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, sourceLanguageHash: null})
     }
+    */
 
-    async languageApplyTemplateOnSource(sourceLanguageHash: string, templateData: object): Promise<object> {
+    async languageApplyTemplateOnSource(sourceLanguageHash: string, templateData: object): Promise<LanguageLanguageInput> {
+        const sourceLanguageExpr = await this.getLanguageExpression(sourceLanguageHash);
+        if(!sourceLanguageExpr) throw new Error(`Language not found: ${sourceLanguageHash}`)
         const sourceLanguage = await this.getLanguageSource(sourceLanguageHash);
-        const sourceLanguageMeta = await this.getLanguageExpression(sourceLanguageHash);
         if (!sourceLanguage) {
             throw new Error("LanguageController.languageApplyTemplate: Could not get sourceLanguage with hash: " + sourceLanguageHash)
         }
-        if (!sourceLanguageMeta) {
+        if (!sourceLanguageExpr) {
             throw new Error("LanguageController.languageApplyTemplate: Could not get sourceLanguageMeta with hash: " + sourceLanguageHash)
         }
         const sourceLanguageLines = sourceLanguage!.split("\n");
@@ -486,11 +483,22 @@ export default class LanguageController {
         //@ts-ignore
         delete templateData["dna"];
 
+        const meta = sourceLanguageExpr.data
+
         //@ts-ignore
-        const name = templateData["name"] || sourceLanguageMeta.data["name"] || null;
+        if(templateData["name"])
+            //@ts-ignore
+            meta.name = templateData["name"]
+
         //@ts-ignore
-        const description = templateData["description"] || sourceLanguageMeta.data["description"] || null;
-        return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, sourceLanguageHash})
+        if(templateData["description"])
+            //@ts-ignore
+            meta.description = templateData["description"]
+
+        meta.templateAppliedParams = JSON.stringify(templateData)
+        meta.templateSourceLanguageAddress = sourceLanguageHash
+
+        return await this.constructLanguageLanguageInput(sourceLanguageLines, meta)
     }
 
     filteredLanguageRefs(propertyFilter?: string): LanguageRef[] {
@@ -506,7 +514,7 @@ export default class LanguageController {
         return refs
     }
 
-    async getLanguageExpression(address: string): Promise<Expression | null> {
+    async getLanguageExpression(address: string): Promise<LanguageExpression | null> {
         if(bootstrapFixtures) {
             const fixtures = bootstrapFixtures.languages;
             if (fixtures) {
