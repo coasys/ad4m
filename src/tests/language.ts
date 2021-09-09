@@ -28,6 +28,15 @@ export default function languageTests(testContext: TestContext) {
                 await ad4mClient.languages.byAddress(sourceLanguage.address)
             })
 
+            it('Alice can use language.meta() to get meta info of her Language', async() => {
+                const meta = await ad4mClient.languages.meta(sourceLanguage.address)
+                expect(meta.address).toBe(sourceLanguage.address)
+                expect(meta.name).toBe("Newly published social-context")
+                expect(meta.description).toBe("..here for you template")
+                expect(meta.author).toBe((await ad4mClient.agent.status()).did)
+                expect(meta.templated).toBeFalsy()
+            })
+
             it('Alice can get her own templated social-context and it provides correct meta data', async () => {
                 //Get the meta of the source language and make sure it is correct
                 const sourceLanguageMeta = await ad4mClient.expression.get(`lang://${sourceLanguage.address}`);
@@ -95,18 +104,18 @@ export default function languageTests(testContext: TestContext) {
                     expect(applyTemplateFromSource.address).toBe("QmTT1eLg8kHN8AHVXdfKcy7k2cbT7gM9gt8YsF1ExH4VK4");
                     
                     //Get language meta for above language and make sure it is correct
-                    const applyTemplateFromSourceMeta = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
-                    expect(applyTemplateFromSourceMeta.proof.valid).toBe(true);
-                    const applyTemplateFromSourceMetaData = JSON.parse(applyTemplateFromSourceMeta.data);
-                    expect(applyTemplateFromSourceMetaData.name).toBe("Bob's templated social-context")
-                    expect(applyTemplateFromSourceMetaData.description).toBe("..here for you template")
-                    expect(applyTemplateFromSourceMetaData.description).toBe("..here for you template")
-                    expect(applyTemplateFromSourceMetaData.templateAppliedParams).toBe(JSON.stringify({
+                    const langExpr = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
+                    expect(langExpr.proof.valid).toBe(true);
+                    const meta = await bobAd4mClient.languages.meta(applyTemplateFromSource.address);
+                    expect(meta.name).toBe("Bob's templated social-context")
+                    expect(meta.description).toBe("..here for you template")
+                    expect(meta.author).toBe((await bobAd4mClient.agent.status()).did)
+                    expect(meta.templateAppliedParams).toBe(JSON.stringify({
                         "name": "Bob's templated social-context",
                         "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
                     }))
-                    expect(applyTemplateFromSourceMetaData.address).toBe("QmTT1eLg8kHN8AHVXdfKcy7k2cbT7gM9gt8YsF1ExH4VK4")
-                    expect(applyTemplateFromSourceMetaData.templateSourceLanguageAddress).toBe(sourceLanguage.address)
+                    expect(meta.address).toBe("QmTT1eLg8kHN8AHVXdfKcy7k2cbT7gM9gt8YsF1ExH4VK4")
+                    expect(meta.templateSourceLanguageAddress).toBe(sourceLanguage.address)
                 })
 
                 it("Bob can install Alice's social-context", async () => {
