@@ -124,8 +124,13 @@ function createResolvers(core: PerspectivismCore) {
             },
 
             //@ts-ignore
-            getTrustedAgents: (parent, args, context, info) => {
-                return core.runtimeService.getTrustedAgents();
+            runtimeKnownLinkLanguageTemplates: () => {
+                return core.runtimeService.knowLinkLanguageTemplates();
+            },
+
+            //@ts-ignore
+            runtimeFriends: () => {
+                return core.runtimeService.friends();
             },
         },
         Mutation: {
@@ -140,6 +145,30 @@ function createResolvers(core: PerspectivismCore) {
                 const { agents } = args;
                 core.runtimeService.deleteTrustedAgents(agents);
                 return core.runtimeService.getTrustedAgents();
+            },
+            //@ts-ignore
+            runtimeAddKnownLinkLanguageTemplates: (parent, args, context, info) => {
+                const { addresses } = args;
+                core.runtimeService.addKnowLinkLanguageTemplates(addresses);
+                return core.runtimeService.knowLinkLanguageTemplates();
+            },
+            //@ts-ignore
+            runtimeRemoveKnownLinkLanguageTemplates: (parent, args, context, info) => {
+                const { addresses } = args;
+                core.runtimeService.removeKnownLinkLanguageTemplates(addresses);
+                return core.runtimeService.knowLinkLanguageTemplates();
+            },
+                                    //@ts-ignore
+            runtimeAddFriends: (parent, args, context, info) => {
+                const { dids } = args;
+                core.runtimeService.addFriends(dids);
+                return core.runtimeService.friends();
+            },
+            //@ts-ignore
+            runtimeRemoveFriends: (parent, args, context, info) => {
+                const { dids } = args;
+                core.runtimeService.removeFriends(dids);
+                return core.runtimeService.friends();
             },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {

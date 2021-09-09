@@ -5,6 +5,37 @@ const TRUSTED_AGENTS_FILE = "trustedAgents.json"
 const KNOW_LINK_LANGUAGES_FILE = "knownLinkLanguages.json"
 const FRIENDS_FILE = "friends.json"
 
+function _add(items: string[], file: string): void {
+    let all: string[];
+    if (fs.existsSync(file)) {
+        all = Array.from(JSON.parse(fs.readFileSync(file).toString()));
+        all = all.concat(items);
+        all = Array.from(new Set(all));
+    } else {
+        all = items 
+    }
+
+    fs.writeFileSync(file, JSON.stringify(all))
+}
+
+function _delete(items: string[], file: string): void {
+    if (fs.existsSync(file)) {
+        let all= Array.from(JSON.parse(fs.readFileSync(file).toString()));
+        for (const item of items) {
+            all.splice(all.findIndex((value) => value == item), 1);
+        }
+        fs.writeFileSync(file, JSON.stringify(all))
+    }
+}
+
+function _get(file: string): string[] {
+    let all: string[] = []
+    if (fs.existsSync(file)) {
+        all.push(...Array.from<string>(JSON.parse(fs.readFileSync(file).toString())));   
+    }
+    return all
+}
+
 export default class RuntimeService {
     #rootConfigPath: string
     #did: string
@@ -31,45 +62,40 @@ export default class RuntimeService {
     }
 
     addTrustedAgents(agents: string[]): void {
-        this.add(agents, this.trustedAgentsPath())
+        _add(agents, this.trustedAgentsPath())
     }
 
     deleteTrustedAgents(agents: string[]): void {
-        this.delete(agents, this.trustedAgentsPath())
+        _delete(agents, this.trustedAgentsPath())
     }
     
     getTrustedAgents(): string[] {
-        return [this.#did!, ...this.get(this.trustedAgentsPath())]
+        return [this.#did!, ..._get(this.trustedAgentsPath())]
     }
 
-    add(items: string[], file: string): void {
-        let all: string[];
-        if (fs.existsSync(file)) {
-            all = Array.from(JSON.parse(fs.readFileSync(file).toString()));
-            all = all.concat(items);
-            all = Array.from(new Set(all));
-        } else {
-            all = items 
-        }
-
-        fs.writeFileSync(this.trustedAgentsPath(), JSON.stringify(all))
+    addKnowLinkLanguageTemplates(addresses: string[]): void {
+        _add(addresses, this.knowLinkLanguagesPath())
     }
 
-    delete(items: string[], file: string): void {
-        if (fs.existsSync(file)) {
-            let all= Array.from(JSON.parse(fs.readFileSync(file).toString()));
-            for (const item of items) {
-                all.splice(all.findIndex((value) => value == item), 1);
-            }
-            fs.writeFileSync(file, JSON.stringify(all))
-        }
+    removeKnownLinkLanguageTemplates(addresses: string[]): void {
+        _delete(addresses, this.knowLinkLanguagesPath())
+    }
+    
+    knowLinkLanguageTemplates(): string[] {
+        return _get(this.knowLinkLanguagesPath())
     }
 
-    get(file: string): string[] {
-        let all: string[] = []
-        if (fs.existsSync(file)) {
-            all.push(...Array.from<string>(JSON.parse(fs.readFileSync(file).toString())));   
-        }
-        return all
+    addFriends(addresses: string[]): void {
+        _add(addresses, this.friendsPath())
     }
+
+    removeFriends(addresses: string[]): void {
+        _delete(addresses, this.friendsPath())
+    }
+    
+    friends(): string[] {
+        return _get(this.friendsPath())
+    }
+
+
 }
