@@ -7,7 +7,8 @@
     "lib",
     "src",
     "types.d.ts",
-    "default.nix"
+    "default.nix",
+    "scripts"
   ],
   "types": "src/types.d.ts",
   "scripts": {
