@@ -18,6 +18,7 @@ import { IPFS as IPFSType } from 'ipfs'
 import path from 'path'
 import fs from 'fs'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
+import RuntimeService from './RuntimeService'
 
 export interface InitServicesParams {
     hcPortAdmin?: number, 
@@ -34,6 +35,8 @@ export default class PerspectivismCore {
     #IPFS?: IPFSType
 
     #agentService: AgentService
+    #runtimeService: RuntimeService
+
     #db: PerspectivismDb
     #didResolver: DIDResolver
     #signatures: Signatures
@@ -45,6 +48,10 @@ export default class PerspectivismCore {
         Config.init(config)
 
         this.#agentService = new AgentService(Config.rootConfigPath)
+        this.#runtimeService = new RuntimeService(Config.rootConfigPath)
+        this.#agentService.ready.then(() => {
+            this.#runtimeService.did = this.#agentService!.did!
+        })
         this.#agentService.load()
         this.#db = Db.init(Config.dataPath)
         this.#didResolver = DIDs.init(Config.dataPath)
@@ -53,6 +60,10 @@ export default class PerspectivismCore {
 
     get agentService(): AgentService {
         return this.#agentService
+    }
+
+    get runtimeService(): RuntimeService {
+        return this.#runtimeService
     }
 
     get perspectivesController(): PerspectivesController {
@@ -120,6 +131,7 @@ export default class PerspectivismCore {
     initControllers() {
         this.#languageController = new LanguageController({
             agent: this.#agentService,
+            runtime: this.#runtimeService,
             IPFS: this.#IPFS,
             signatures: this.#signatures,
             ad4mSignal: this.languageSignal
@@ -198,7 +210,7 @@ export default class PerspectivismCore {
 
         const languageLanguageInput = await this.#languageController.constructLanguageLanguageInput(sourceLanguageLines, languageMeta)
         const languageRef = await this.publish(languageLanguageInput)
-        return await this.#languageController.getLanguageExpression(languageRef.address)
+        return (await this.#languageController.getLanguageExpression(languageRef.address))!
     }
 
     async publish(languageLanguageInput: LanguageLanguageInput): Promise<LanguageRef> {

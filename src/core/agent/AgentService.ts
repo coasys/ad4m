@@ -21,7 +21,7 @@ export default class AgentService {
     #agent?: Agent
     #agentLanguage?: Language
     #pubsub: PubSub
-    #trustedAgents: string
+    
 
     #readyPromise: Promise<void>
     #readyPromiseResolve?: ((value: void | PromiseLike<void>) => void)
@@ -33,7 +33,6 @@ export default class AgentService {
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
         })
-        this.#trustedAgents = path.join(rootConfigPath, "trustedAgents.json")
     }
 
     get did() {
@@ -272,37 +271,6 @@ export default class AgentService {
             didDocument: this.#didDocument
         }
         return dump
-    }
-
-    addTrustedAgents(agents: string[]): void {
-        let trustedAgents: string[];
-        if (fs.existsSync(this.#trustedAgents)) {
-            trustedAgents = Array.from(JSON.parse(fs.readFileSync(this.#trustedAgents).toString()));
-            trustedAgents = trustedAgents.concat(agents);
-            trustedAgents = Array.from(new Set(trustedAgents));
-        } else {
-            trustedAgents = agents 
-        }
-
-        fs.writeFileSync(this.#trustedAgents, JSON.stringify(trustedAgents))
-    }
-
-    deleteTrustedAgents(agents: string[]): void {
-        if (fs.existsSync(this.#trustedAgents)) {
-            let trustedAgents = Array.from(JSON.parse(fs.readFileSync(this.#trustedAgents).toString()));
-            for (const agent of agents) {
-                trustedAgents.splice(trustedAgents.findIndex((value) => value == agent), 1);
-            }
-            fs.writeFileSync(this.#trustedAgents, JSON.stringify(trustedAgents))
-        }
-    }
-
-    getTrustedAgents(): string[] {
-        let trustedAgents: string[] = [this.#did!]
-        if (fs.existsSync(this.#trustedAgents)) {
-            trustedAgents.push(...Array.from<string>(JSON.parse(fs.readFileSync(this.#trustedAgents).toString())));   
-        }
-        return trustedAgents
     }
 }
 

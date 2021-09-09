@@ -237,7 +237,7 @@ export default class LanguageController {
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
             //@ts-ignore
-            const trustedAgents: string[] = this.#context.agent.getTrustedAgents();
+            const trustedAgents: string[] = this.#context.runtime.getTrustedAgents();
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
             if (trustedAgents.find((agent) => agent === languageAuthor)) {
                 //Get the language source so we can generate a hash and check against the hash given in the language meta information
@@ -277,7 +277,7 @@ export default class LanguageController {
                     throw new Error("Could not get the meta for the source language");
                 }
                 //@ts-ignore
-                const trustedAgents: string[] = this.#context.agent.getTrustedAgents();
+                const trustedAgents: string[] = this.#context.runtime.getTrustedAgents();
                 //Check that the agent who authored the original template language is in the current agents trust list
                 if (trustedAgents.find((agent) => agent === sourceLanguageMeta.author)) {
                     //Apply the template information supplied in the language to be installed to the source language and make sure that the resulting
