@@ -5,6 +5,9 @@ const TRUSTED_AGENTS_FILE = "trustedAgents.json"
 const KNOW_LINK_LANGUAGES_FILE = "knownLinkLanguages.json"
 const FRIENDS_FILE = "friends.json"
 
+const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
+const SOCIAL_CONTEXT_OFFICIAL = "QmZ1mkoY8nLvpxY3Mizx8UkUiwUzjxJxsqSTPPdH8sHxCQ"
+
 function _add(items: string[], file: string): void {
     let all: string[];
     if (fs.existsSync(file)) {
@@ -70,7 +73,7 @@ export default class RuntimeService {
     }
     
     getTrustedAgents(): string[] {
-        return [this.#did!, ..._get(this.trustedAgentsPath())]
+        return [this.#did!, PERSPECT3VISM_AGENT, ..._get(this.trustedAgentsPath())]
     }
 
     addKnowLinkLanguageTemplates(addresses: string[]): void {
@@ -82,7 +85,7 @@ export default class RuntimeService {
     }
     
     knowLinkLanguageTemplates(): string[] {
-        return _get(this.knowLinkLanguagesPath())
+        return [SOCIAL_CONTEXT_OFFICIAL, ..._get(this.knowLinkLanguagesPath())]
     }
 
     addFriends(addresses: string[]): void {
