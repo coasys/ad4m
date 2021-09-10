@@ -43,7 +43,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     if(!gqlPort) gqlPort = 4000
     if(!hcPortAdmin) hcPortAdmin = 2000
     if(!hcPortApp) hcPortApp = 1337
-    if(hcUseMdns === undefined) hcUseMdns = true
+    if(hcUseMdns === undefined) hcUseMdns = false
     if(hcUseProxy === undefined) hcUseProxy = true
     if(hcUseBootstrap === undefined) hcUseBootstrap = true
     let builtInLangPath = appDefaultLangPath;
