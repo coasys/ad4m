@@ -21,7 +21,7 @@ export default function languageTests(testContext: TestContext) {
                 )
                 expect(sourceLanguage.name).toBe("Newly published social-context");
                 //TODO/NOTE: this will break if the social-context language version is changed
-                expect(sourceLanguage.address).toBe("QmZ1mkoY8nLvpxY3Mizx8UkUiwUzjxJxsqSTPPdH8sHxCQ");
+                expect(sourceLanguage.address).toBe("QmNnuZ5CgemAY2sskTqBbbHLvGJTqWByv4XaGLF2nrshzk");
             })
 
             it('Alice can install her own templated language', async () => {
@@ -44,7 +44,7 @@ export default function languageTests(testContext: TestContext) {
                 const sourceLanguageMetaData = JSON.parse(sourceLanguageMeta.data);
                 expect(sourceLanguageMetaData.name).toBe("Newly published social-context")
                 expect(sourceLanguageMetaData.description).toBe("..here for you template")
-                expect(sourceLanguageMetaData.address).toBe("QmZ1mkoY8nLvpxY3Mizx8UkUiwUzjxJxsqSTPPdH8sHxCQ")
+                expect(sourceLanguageMetaData.address).toBe("QmNnuZ5CgemAY2sskTqBbbHLvGJTqWByv4XaGLF2nrshzk")
             })
 
             it('can publish and template a non-Holochain language and provide correct meta data', async() => {
@@ -101,7 +101,7 @@ export default function languageTests(testContext: TestContext) {
                     //Apply template on above holochain language
                     applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "Bob's templated social-context"}))
                     expect(applyTemplateFromSource.name).toBe("Bob's templated social-context");
-                    expect(applyTemplateFromSource.address).toBe("QmTT1eLg8kHN8AHVXdfKcy7k2cbT7gM9gt8YsF1ExH4VK4");
+                    expect(applyTemplateFromSource.address).toBe("QmXRWAJCNCP2es1vvZmH4gLnnEwdeZKCDgVFKQXh8xYyZy");
                     
                     //Get language meta for above language and make sure it is correct
                     const langExpr = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
@@ -114,7 +114,7 @@ export default function languageTests(testContext: TestContext) {
                         "name": "Bob's templated social-context",
                         "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
                     }))
-                    expect(meta.address).toBe("QmTT1eLg8kHN8AHVXdfKcy7k2cbT7gM9gt8YsF1ExH4VK4")
+                    expect(meta.address).toBe("QmXRWAJCNCP2es1vvZmH4gLnnEwdeZKCDgVFKQXh8xYyZy")
                     expect(meta.templateSourceLanguageAddress).toBe(sourceLanguage.address)
                 })
 
