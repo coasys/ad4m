@@ -6,7 +6,7 @@ const KNOW_LINK_LANGUAGES_FILE = "knownLinkLanguages.json"
 const FRIENDS_FILE = "friends.json"
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
-const SOCIAL_CONTEXT_OFFICIAL = "QmZ1mkoY8nLvpxY3Mizx8UkUiwUzjxJxsqSTPPdH8sHxCQ"
+const SOCIAL_CONTEXT_OFFICIAL = "QmTK51rVNtKvp9vxDNczmiX3MuW1o3wprxg7w9McTLoMAk"
 
 function _add(items: string[], file: string): void {
     let all: string[];
