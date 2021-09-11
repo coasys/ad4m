@@ -1,4 +1,4 @@
-import { Ad4mClient, Link, LinkQuery, Perspective, LinkExpression, ExpressionProof } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, LinkExpression, ExpressionProof } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
 
@@ -129,11 +129,15 @@ export default function perspectiveTests(testContext: TestContext) {
                 const name = "Subscription Test Perspective"
                 const p = await ad4mClient.perspective.add(name)
                 expect(perspectiveAdded.mock.calls.length).toBe(1)
-                expect(perspectiveAdded.mock.calls[0][0]).toEqual(p)
+                const pSeenInAddCB = perspectiveAdded.mock.calls[0][0]
+                expect(pSeenInAddCB.uuid).toStrictEqual(p.uuid)
+                expect(pSeenInAddCB.name).toStrictEqual(p.name)
 
                 const p1 = await ad4mClient.perspective.update(p.uuid , "New Name")
                 expect(perspectiveUpdated.mock.calls.length).toBe(1)
-                expect(perspectiveUpdated.mock.calls[0][0]).toEqual(p1)
+                const pSeenInUpdateCB = perspectiveUpdated.mock.calls[0][0]
+                expect(pSeenInUpdateCB.uuid).toStrictEqual(p1.uuid)
+                expect(pSeenInUpdateCB.name).toStrictEqual(p1.name)
 
                 const linkAdded = jest.fn()
                 await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, linkAdded)
@@ -154,6 +158,81 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(linkRemoved.mock.calls.length).toBe(2)
                 expect(linkRemoved.mock.calls[1][0]).toEqual(updatedLinkExpression)
             })
+        })
+
+        describe('PerspectiveProxy', () => {
+            let proxy: PerspectiveProxy
+            let ad4mClient: Ad4mClient
+            beforeAll(async () => {
+                ad4mClient = testContext.ad4mClient!
+                proxy = await ad4mClient.perspective.add("proxy test");
+            })
+
+            it('can do link CRUD', async () => {
+                const all = new LinkQuery({})
+                const testLink = new Link({
+                    source: 'test://source', 
+                    predicate: 'test://predicate', 
+                    target: 'test://target'
+                }) 
+
+                expect(await proxy.get(all)).toStrictEqual([])
+
+                await proxy.add(testLink)
+                let links = await proxy.get(all)
+                expect(links.length).toBe(1)
+
+                let link = new Link(links[0].data)
+                expect(link).toStrictEqual(testLink)
+
+                const updatedLink = new Link({
+                    source: link.source,
+                    predicate: link.predicate,
+                    target: 'test://new_target'
+                })
+                await proxy.update(links[0], updatedLink)
+
+                links = await proxy.get(all)
+                expect(links.length).toBe(1)
+                link = new Link(links[0].data)
+                expect(link).toStrictEqual(updatedLink)
+
+                await proxy.remove(links[0])
+                expect(await proxy.get(all)).toStrictEqual([])
+            })
+
+            it('can do singleTarget operations', async () => {
+                const all = new LinkQuery({})
+
+                expect(await proxy.get(all)).toStrictEqual([])
+                const link1 = new Link({
+                    source: 'test://source',
+                    predicate: 'test://predicate',
+                    target: 'target1'
+                })
+
+                await proxy.setSingleTarget(link1)
+                const result1 = (await proxy.get(all))[0].data
+                expect(result1.source).toStrictEqual(link1.source)
+                expect(result1.predicate).toStrictEqual(link1.predicate)
+                expect(result1.target).toStrictEqual(link1.target)
+                expect(await proxy.getSingleTarget(new LinkQuery(link1))).toBe('target1')
+
+                const link2 = new Link({
+                    source: 'test://source',
+                    predicate: 'test://predicate',
+                    target: 'target2'
+                })
+
+                await proxy.setSingleTarget(link2)
+
+                const result2 = (await proxy.get(all))[0].data
+                expect(result2.source).toStrictEqual(link2.source)
+                expect(result2.predicate).toStrictEqual(link2.predicate)
+                expect(result2.target).toStrictEqual(link2.target)
+                expect(await proxy.getSingleTarget(new LinkQuery(link1))).toBe('target2')
+            })
+            
         })
     }
 }
