@@ -181,6 +181,7 @@ export default class Perspective {
 
         this.#db.removeSource(this.uuid, link.source, addr)
         this.#db.removeTarget(this.uuid, link.target, addr)
+        this.#db.remove(this.#db.allLinksKey(this.uuid), addr)
 
         this.callLinksAdapter('removeLink', linkExpression)
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
