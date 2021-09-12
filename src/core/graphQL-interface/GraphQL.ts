@@ -93,6 +93,17 @@ function createResolvers(core: PerspectivismCore) {
                 
                 return meta
             },
+
+            //@ts-ignore
+            languageSource: async (parent, args) => {
+                const { address } = args
+                const languageSource = await core.languageController.getLanguageSource(address)
+                if(!languageSource)
+                    throw new Error(`Language not found: ${address}`)
+
+                return languageSource
+            },
+            
             //@ts-ignore
             languages: (parent, args, context, info) => {
                 let filter

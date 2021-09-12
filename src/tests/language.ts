@@ -1,5 +1,6 @@
 import { TestContext } from './integration.test'
 import path from "path";
+import fs from "fs";
 import sleep from './sleep';
 import { Ad4mClient, LanguageMetaInput, LanguageRef } from '@perspect3vism/ad4m';
 
@@ -22,6 +23,12 @@ export default function languageTests(testContext: TestContext) {
                 expect(sourceLanguage.name).toBe("Newly published social-context");
                 //TODO/NOTE: this will break if the social-context language version is changed
                 expect(sourceLanguage.address).toBe("QmNnuZ5CgemAY2sskTqBbbHLvGJTqWByv4XaGLF2nrshzk");
+            })
+
+            it('Alice can get the source of her own templated language', async () => {
+                const sourceFromAd4m = await ad4mClient.languages.source(sourceLanguage.address)
+                const sourceFromFile = fs.readFileSync(path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js")).toString()
+                expect(sourceFromAd4m).toBe(sourceFromFile)
             })
 
             it('Alice can install her own templated language', async () => {
