@@ -19,6 +19,7 @@ import path from 'path'
 import fs from 'fs'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import RuntimeService from './RuntimeService'
+import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
 export interface InitServicesParams {
     hcPortAdmin?: number, 
@@ -114,6 +115,7 @@ export default class PerspectivismCore {
             params.ipfsRepoPath
         ), this.#holochain.run()]);
         this.#IPFS = ipfs;
+        this.connectToHardwiredPerspect3vismAgent()
     }
 
     async waitForAgent(): Promise<void> {
@@ -237,6 +239,12 @@ export default class PerspectivismCore {
 
     async holochainAddAgentInfos(agent_infos: RequestAgentInfoResponse) {
         await this.#holochain!.addAgentInfos(agent_infos)
+    }
+
+    async connectToHardwiredPerspect3vismAgent() {
+        //@ts-ignore
+        await this.holochainAddAgentInfos(PERSPECT3VIMS_AGENT_INFO())
+        console.debug("Added Perspect3vism Holochain agent infos.")
     }
 }
 
