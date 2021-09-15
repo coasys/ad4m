@@ -119,5 +119,11 @@ export default function runtimeTests(testContext: TestContext) {
             const postDeleteAgents = await ad4mClient.runtime.getTrustedAgents()
             expect(postDeleteAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, 'agentPubKey', 'agentPubKey2' ])
         })
+
+        it("can deal with Holochain's agent_infos", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            const agentInfos = await ad4mClient.runtime.hcAgentInfos()
+            expect(await ad4mClient.runtime.hcAddAgentInfos(agentInfos)).toBeTruthy()
+        })
     }
 }

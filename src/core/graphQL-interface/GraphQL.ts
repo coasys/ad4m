@@ -143,6 +143,10 @@ function createResolvers(core: PerspectivismCore) {
             runtimeFriends: () => {
                 return core.runtimeService.friends();
             },
+
+            runtimeHcAgentInfos: async () => {
+                return JSON.stringify(await core.holochainRequestAgentInfos())
+            }
         },
         Mutation: {
             //@ts-ignore
@@ -348,6 +352,24 @@ function createResolvers(core: PerspectivismCore) {
             },
             runtimeQuit: () => {
                 process.exit(0)
+                return true
+            },
+            //@ts-ignore
+            runtimeHcAddAgentInfos: async (parent, args) => {
+                const { agentInfos } = args
+                //@ts-ignore
+                const parsed = JSON.parse(agentInfos).map(info => {
+                    return {
+                        //@ts-ignore
+                        agent: Buffer.from(info.agent.data),
+                        //@ts-ignore
+                        signature: Buffer.from(info.signature.data),
+                        //@ts-ignore
+                        agent_info: Buffer.from(info.agent_info.data)
+                    }
+                })
+
+                await core.holochainAddAgentInfos(parsed)
                 return true
             }
         },
