@@ -152,64 +152,64 @@ describe("Integration tests", () => {
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
-    // describe('Runtime', runtimeTests(testContext))
-    // describe('Expression', expressionTests(testContext))
-    // describe('Perspective', perspectiveTests(testContext))
+    describe('Runtime', runtimeTests(testContext))
+    describe('Expression', expressionTests(testContext))
+    describe('Perspective', perspectiveTests(testContext))
 
-    // describe('with Alice and Bob', () => {
-    //     let bob: PerspectivismCore | null = null
-    //     beforeAll(async () => {
-    //         const appDataPath = path.join(TEST_DIR, 'agents', 'bob')
-    //         const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
-    //         if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
-    //           fs.mkdirSync(path.join(TEST_DIR, 'agents'))
-    //         if(!fs.existsSync(appDataPath))
-    //           fs.mkdirSync(appDataPath)
+    describe('with Alice and Bob', () => {
+        let bob: PerspectivismCore | null = null
+        beforeAll(async () => {
+            const appDataPath = path.join(TEST_DIR, 'agents', 'bob')
+            const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
+            if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
+              fs.mkdirSync(path.join(TEST_DIR, 'agents'))
+            if(!fs.existsSync(appDataPath))
+              fs.mkdirSync(appDataPath)
 
-    //         bob = await main.init({
-    //             appDataPath,
-    //             resourcePath: TEST_DIR,
-    //             appDefaultLangPath: path.join(TEST_DIR, 'languages'),
-    //             ad4mBootstrapLanguages: {
-    //               agents: "agent-expression-store",
-    //               languages: "languages",
-    //               neighbourhoods: "neighbourhood-store",
-    //             },
-    //             ad4mBootstrapFixtures: {
-    //               languages: [],
-    //               perspectives: [],
-    //             },
-    //             appBuiltInLangs: ['note-ipfs'],
-    //             appLangAliases: null,
-    //             mocks: false,
-    //             gqlPort: 14000,
-    //             hcPortAdmin: 12000,
-    //             hcPortApp: 11337,
-    //             ipfsSwarmPort: 14002,
-    //             ipfsRepoPath,
-    //             hcUseBootstrap: false,
-    //             hcUseProxy: false,
-    //             hcUseLocalProxy: false,
-    //             hcUseMdns: true
-    //       })
+            bob = await main.init({
+                appDataPath,
+                resourcePath: TEST_DIR,
+                appDefaultLangPath: path.join(TEST_DIR, 'languages'),
+                ad4mBootstrapLanguages: {
+                  agents: "agent-expression-store",
+                  languages: "languages",
+                  neighbourhoods: "neighbourhood-store",
+                },
+                ad4mBootstrapFixtures: {
+                  languages: [],
+                  perspectives: [],
+                },
+                appBuiltInLangs: ['note-ipfs'],
+                appLangAliases: null,
+                mocks: false,
+                gqlPort: 14000,
+                hcPortAdmin: 12000,
+                hcPortApp: 11337,
+                ipfsSwarmPort: 14002,
+                ipfsRepoPath,
+                hcUseBootstrap: false,
+                hcUseProxy: false,
+                hcUseLocalProxy: false,
+                hcUseMdns: true
+          })
 
-    //       bob.initControllers()
-    //       await bob.initLanguages()
+          bob.initControllers()
+          await bob.initLanguages()
 
-    //       testContext.bob = new Ad4mClient(apolloClient(14000))
-    //       testContext.bobCore = bob
-    //       const generate = await testContext.bob.agent.generate("passphrase")
-    //       expect(generate.isInitialized).toBe(true);
-    //       expect(generate.isUnlocked).toBe(true);
-    //       await testContext.makeAllNodesKnown()
-    //     })
+          testContext.bob = new Ad4mClient(apolloClient(14000))
+          testContext.bobCore = bob
+          const generate = await testContext.bob.agent.generate("passphrase")
+          expect(generate.isInitialized).toBe(true);
+          expect(generate.isUnlocked).toBe(true);
+          await testContext.makeAllNodesKnown()
+        })
 
-    //     afterAll(async () => {
-    //       await bob!.exit();
-    //       await new Promise((resolve)=>setTimeout(resolve, 1000))
-    //     })
+        afterAll(async () => {
+          await bob!.exit();
+          await new Promise((resolve)=>setTimeout(resolve, 1000))
+        })
 
-    //     describe('Language', languageTests(testContext))
-    //     describe('Neighbourhood', neighbourhoodTests(testContext))
-    // })
+        describe('Language', languageTests(testContext))
+        describe('Neighbourhood', neighbourhoodTests(testContext))
+    })
 })
