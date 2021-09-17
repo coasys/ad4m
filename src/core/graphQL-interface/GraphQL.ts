@@ -133,21 +133,18 @@ function createResolvers(core: PerspectivismCore) {
             getEntanglementProofs: (parent, args, context, info) => {
                 return core.entanglementProofController.getEntanglementProofs();
             },
-            
+            //@ts-ignore
             getTrustedAgents: (parent, args, context, info) => {
                 return core.runtimeService.getTrustedAgents();
             },
-
             //@ts-ignore
             runtimeKnownLinkLanguageTemplates: () => {
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
-
             //@ts-ignore
             runtimeFriends: () => {
                 return core.runtimeService.friends();
             },
-
             runtimeHcAgentInfos: async () => {
                 return JSON.stringify(await core.holochainRequestAgentInfos())
             }
@@ -170,6 +167,7 @@ function createResolvers(core: PerspectivismCore) {
                 const { deviceKey } = args;
                 return core.entanglementProofController.signDeviceKey(deviceKey);
             },
+            //@ts-ignore
             addTrustedAgents: (parent, args, context, info) => {
                 const { agents } = args;
                 core.runtimeService.addTrustedAgents(agents);
@@ -193,7 +191,7 @@ function createResolvers(core: PerspectivismCore) {
                 core.runtimeService.removeKnownLinkLanguageTemplates(addresses);
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
-                                    //@ts-ignore
+            //@ts-ignore
             runtimeAddFriends: (parent, args, context, info) => {
                 const { dids } = args;
                 core.runtimeService.addFriends(dids);

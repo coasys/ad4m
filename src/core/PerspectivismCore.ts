@@ -46,8 +46,6 @@ export default class PerspectivismCore {
     #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
 
-    #languageFactory?: LanguageFactory
-
     #entanglementProofController?: EntanglementProofController
 
     constructor(config: Config.CoreConfig) {
