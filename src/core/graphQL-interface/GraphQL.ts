@@ -130,7 +130,7 @@ function createResolvers(core: PerspectivismCore) {
                 return core.perspectivesController.allPerspectiveHandles()
             },
             //@ts-ignore
-            getEntanglementProofs: (parent, args, context, info) => {
+            agentGetEntanglementProofs: (parent, args, context, info) => {
                 return core.entanglementProofController.getEntanglementProofs();
             },
             //@ts-ignore
@@ -151,19 +151,19 @@ function createResolvers(core: PerspectivismCore) {
         },
         Mutation: {
             //@ts-ignore
-            addEntanglementProofs: (parent, args, context, info) => {
+            agentAddEntanglementProofs: (parent, args, context, info) => {
                 const { proofs } = args;
                 core.entanglementProofController.addEntanglementProofs(proofs);
                 return core.entanglementProofController.getEntanglementProofs();
             },
             //@ts-ignore
-            deleteEntanglementProofs: (parent, args, context, info) => {
+            agentDeleteEntanglementProofs: (parent, args, context, info) => {
                 const { proofs } = args;
                 core.entanglementProofController.deleteEntanglementProofs(proofs);
                 return core.entanglementProofController.getEntanglementProofs();  
             },
             //@ts-ignore
-            entanglementProofPreFlight: (parent, args, context, info) => {
+            agentEntanglementProofPreFlight: (parent, args, context, info) => {
                 const { deviceKey } = args;
                 return core.entanglementProofController.signDeviceKey(deviceKey);
             },
