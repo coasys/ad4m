@@ -39,7 +39,7 @@ const domain = [
 ];
 
 const didEntangle = [
-    { name: "did", type: "string" },
+    { name: "did", type: "string" }
 ];
 
 export async function sign(signer, did) {

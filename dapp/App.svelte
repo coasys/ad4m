@@ -11,27 +11,12 @@
     } from "@apollo/client/core";
     import { gql } from "@apollo/client";
     import { WebSocketLink } from '@apollo/client/link/ws';
-
-    const AGENT_SUBITEMS = `
-        did
-        directMessageLanguage
-        perspective { 
-            links {
-                author, timestamp, 
-                proof {
-                    signature, key, valid, invalid
-                }
-                data {
-                    source, predicate, target
-                }
-            }
-        }
-    `;
-    const gqlMe = gql`query agent { agent { ${AGENT_SUBITEMS} } }`;
+    import { Ad4mClient } from "@perspect3vism/ad4m";
 
 	let currentAccount = undefined;
 	let spinner = false;
     let showSigning = false;
+    let password = undefined;
 
     function constructApolloClient(port) {
         return new ApolloClient({
@@ -42,8 +27,16 @@
             cache: new InMemoryCache(),
         });
     }
-    //TODO: we should use ad4m client here but I get compilation errors so for now I use standard apollo client
     const apolloClient = constructApolloClient(4000)
+    const ad4mClient = new Ad4mClient(apolloClient)
+
+    let signedIn = false;
+    let did = null;
+
+    ad4mClient.agent.status().then(result => {
+        signedIn = result.isUnlocked;
+        did = result.did;
+    })
 
     function handleAccountsChanged(accounts) {
 		console.log('Accounts changed: ' + accounts)
@@ -64,37 +57,55 @@
     }
 
     function signDid() {
-        apolloClient.query({query: gqlMe}).then(result => {
-            const { agent } = result.data;
-            const did = agent.did;
-            sign(currentAccount, did).then(result => {
-                const { data, signature, r, s, v } = result;
-                console.log("got signature back", signature);
-            });
+        sign(currentAccount, did).then(result => {
+            const { data, signature, r, s, v } = result;
+            console.log("got signature back", signature);
         });
+    }
+
+    function unlock() {
+        ad4mClient.agent.unlock(password).then(result => {
+            console.log("Got unlock result", result);
+            if (result.isUnlocked == true) {
+                signedIn = true;
+            } else {
+                signedIn = false;
+                console.error("Incorrect password!");
+            }
+        })
     }
 
 	startEthereum(handleAccountsChanged)
 </script>
 
 <main>
-    {#if currentAccount==undefined}
-        <h2>Get Started</h2>
-        <p>
-            Welcome to AD4M, thanks for being here. Lets connect all the dapps :)
-        <h3> Sign into MetaMask  </h3>
-        <Button on:click={connect} variant="raised" color="primary">
-            <Label>Connect MetaMask</Label>
-        </Button>	
-        <br>
-        <h3> Sign into WalletConnect </h3>
-        <Button on:click={walletConnectConnect} variant="raised" color="primary">
-            <Label>Connect WalletConnect</Label>
-        </Button>
+    {#if signedIn==true}
+        {#if currentAccount==undefined}
+            <h2>Get Started</h2>
+            <p>
+                Welcome to AD4M, thanks for being here. Lets connect all the dapps :)
+            <h3> Sign into MetaMask  </h3>
+            <Button on:click={connect} variant="raised" color="primary">
+                <Label>Connect MetaMask</Label>
+            </Button>	
+            <br>
+            <h3> Sign into WalletConnect </h3>
+            <Button on:click={walletConnectConnect} variant="raised" color="primary">
+                <Label>Connect WalletConnect</Label>
+            </Button>
+        {:else}
+            <h2>Sign Some Shit</h2>
+            <Button on:click={signDid} variant="raised" color="primary">
+                <Label>Sign</Label>
+            </Button>
+        {/if}
     {:else}
-        <h2>Sign Some Shit</h2>
-        <Button on:click={signDid} variant="raised" color="primary">
-            <Label>Sign</Label>
+        <h2>Please unlock your ad4m agent...</h2>
+        <br>
+        <Label>Password:</Label>
+        <input bind:value={password} variant="raised" color="primary" type="password">
+        <Button on:click={unlock} variant="raised" color="primary">
+            <Label>Unlock</Label>
         </Button>
     {/if}
 </main>
