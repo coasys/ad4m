@@ -4,10 +4,10 @@ mkdir src/test-temp
 cd src/test-temp
 mkdir agents
 mkdir languages
-rm hc
-ln -s `which hc` hc
-rm holochain 
-ln -s `which holochain` holochain
-rm lair-keystore
-ln -s `which lair-keystore` lair-keystore
+rm -f hc
+ln -sf `which hc` hc
+rm -f holochain 
+ln -sf `which holochain` holochain
+rm -f lair-keystore
+ln -sf `which lair-keystore` lair-keystore
 

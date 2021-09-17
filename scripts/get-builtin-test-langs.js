@@ -6,14 +6,14 @@ const path = require("path");
 const languages = {
   "agent-expression-store": {
     targetDnaName: "agent-store",
-    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.4/agent-store.dna",
+    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.5/agent-store.dna",
     bundle:
-      "https://github.com/perspect3vism/agent-language/releases/download/0.0.4/bundle.js",
+      "https://github.com/perspect3vism/agent-language/releases/download/0.0.5/bundle.js",
   },
   languages: {
       targetDnaName: "languages",
-      dna: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.3/languages.dna",
-      bundle: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.3/bundle.js",
+      dna: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.6/languages.dna",
+      bundle: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.6/bundle.js",
   },
   "neighbourhood-store": {
     targetDnaName: "neighbourhood-store",
@@ -24,7 +24,7 @@ const languages = {
     zipped: true,
     targetDnaName: "social-context",
     resource:
-      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.12/full_index.zip",
+      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.13/full_index.zip",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.1/bundle.js",
@@ -33,7 +33,8 @@ const languages = {
 
 async function main() {
   for (const lang in languages) {
-    const dir = `./src/test-temp/languages/${lang}`;
+    const targetDir = fs.readFileSync('./scripts/download-languages-path').toString()
+    const dir = path.join(targetDir, lang)
     await fs.ensureDir(dir + "/build");
 
     // bundle
@@ -68,8 +69,8 @@ async function main() {
           // }
 
           fs.copyFileSync(
-            path.join(__dirname, `../${dir}/bundle.js`),
-            path.join(__dirname, `../${dir}/build/bundle.js`)
+            path.join(`${dir}/bundle.js`),
+            path.join(`${dir}/build/bundle.js`)
           );
           fs.rmSync(`${dir}/lang.zip`);
           fs.rmSync(`${dir}/bundle.js`);

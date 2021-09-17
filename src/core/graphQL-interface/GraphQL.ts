@@ -1,6 +1,7 @@
 import { ApolloServer, withFilter, gql } from 'apollo-server'
 import { Agent, LanguageRef } from '@perspect3vism/ad4m'
-import { exprRef2String, parseExprUrl, typeDefsString } from '@perspect3vism/ad4m'
+import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
+import { typeDefsString } from '@perspect3vism/ad4m/lib/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
@@ -42,6 +43,24 @@ function createResolvers(core: PerspectivismCore) {
                 return expression
             },
             //@ts-ignore
+            expressionMany: async (parent, args, context, info) => {
+                const { urls } = args;
+                const expressionPromises = [];
+                for (const url of urls) {
+                    expressionPromises.push(core.languageController.getExpression(parseExprUrl(url)));
+                };
+                const results = await Promise.all(expressionPromises);
+
+                return results.map((expression, index) => {
+                    if(expression) {
+                        expression.ref = parseExprUrl(urls[index]);
+                        expression.url = urls[index];
+                        expression.data = JSON.stringify(expression.data);
+                    }
+                    return expression
+                })
+            },
+            //@ts-ignore
             expressionRaw: async (parent, args, context, info) => {
                 const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
@@ -54,6 +73,37 @@ function createResolvers(core: PerspectivismCore) {
                 lang.address = address
                 return lang
             },
+            //@ts-ignore
+            languageMeta: async (parent, args, context, info) => {
+                const { address } = args
+                const languageExpression = await core.languageController.getLanguageExpression(address)
+                if(!languageExpression)
+                    throw new Error(`Language not found: ${address}`)
+                const internal = languageExpression.data
+                let meta = new LanguageMeta()
+                meta.name = internal.name
+                meta.address = address
+                meta.description = internal.description
+                meta.author = languageExpression.author
+                meta.templated = internal.templateSourceLanguageAddress != undefined
+                meta.templateSourceLanguageAddress = internal.templateSourceLanguageAddress
+                meta.templateAppliedParams = internal.templateAppliedParams
+                meta.possibleTemplateParams = internal.possibleTemplateParams
+                meta.sourceCodeLink = internal.sourceCodeLink
+                
+                return meta
+            },
+
+            //@ts-ignore
+            languageSource: async (parent, args) => {
+                const { address } = args
+                const languageSource = await core.languageController.getLanguageSource(address)
+                if(!languageSource)
+                    throw new Error(`Language not found: ${address}`)
+
+                return languageSource
+            },
+            
             //@ts-ignore
             languages: (parent, args, context, info) => {
                 let filter
@@ -82,6 +132,24 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             getEntanglementProofs: (parent, args, context, info) => {
                 return core.entanglementProofController.getEntanglementProofs();
+            },
+            
+            getTrustedAgents: (parent, args, context, info) => {
+                return core.runtimeService.getTrustedAgents();
+            },
+
+            //@ts-ignore
+            runtimeKnownLinkLanguageTemplates: () => {
+                return core.runtimeService.knowLinkLanguageTemplates();
+            },
+
+            //@ts-ignore
+            runtimeFriends: () => {
+                return core.runtimeService.friends();
+            },
+
+            runtimeHcAgentInfos: async () => {
+                return JSON.stringify(await core.holochainRequestAgentInfos())
             }
         },
         Mutation: {
@@ -101,6 +169,41 @@ function createResolvers(core: PerspectivismCore) {
             entanglementProofPreFlight: (parent, args, context, info) => {
                 const { deviceKey } = args;
                 return core.entanglementProofController.signDeviceKey(deviceKey);
+            },
+            addTrustedAgents: (parent, args, context, info) => {
+                const { agents } = args;
+                core.runtimeService.addTrustedAgents(agents);
+                return core.runtimeService.getTrustedAgents();
+            },
+            //@ts-ignore
+            deleteTrustedAgents: (parent, args, context, info) => {
+                const { agents } = args;
+                core.runtimeService.deleteTrustedAgents(agents);
+                return core.runtimeService.getTrustedAgents();
+            },
+            //@ts-ignore
+            runtimeAddKnownLinkLanguageTemplates: (parent, args, context, info) => {
+                const { addresses } = args;
+                core.runtimeService.addKnowLinkLanguageTemplates(addresses);
+                return core.runtimeService.knowLinkLanguageTemplates();
+            },
+            //@ts-ignore
+            runtimeRemoveKnownLinkLanguageTemplates: (parent, args, context, info) => {
+                const { addresses } = args;
+                core.runtimeService.removeKnownLinkLanguageTemplates(addresses);
+                return core.runtimeService.knowLinkLanguageTemplates();
+            },
+                                    //@ts-ignore
+            runtimeAddFriends: (parent, args, context, info) => {
+                const { dids } = args;
+                core.runtimeService.addFriends(dids);
+                return core.runtimeService.friends();
+            },
+            //@ts-ignore
+            runtimeRemoveFriends: (parent, args, context, info) => {
+                const { dids } = args;
+                core.runtimeService.removeFriends(dids);
+                return core.runtimeService.friends();
             },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {
@@ -166,9 +269,27 @@ function createResolvers(core: PerspectivismCore) {
                 return exprRef2String(expref)
             },
             //@ts-ignore
-            languageCloneHolochainTemplate: async (parent, args, context, info) => {
-                const { languagePath, dnaNick, uid } = args;
-                return await core.languageCloneHolochainTemplate(languagePath, dnaNick, uid);
+            languageApplyTemplateAndPublish: async (parent, args, context, info) => {
+                const { sourceLanguageHash, templateData } = args;
+                return await core.languageApplyTemplateAndPublish(sourceLanguageHash, JSON.parse(templateData));
+            },
+            //@ts-ignore
+            languagePublish: async (parent, args, context, info) => {
+                const { languagePath, languageMeta } = args;
+                const expression = await core.languagePublish(languagePath, languageMeta);
+                const internal = expression.data
+                let meta = new LanguageMeta()
+                meta.name = internal.name
+                meta.address = internal.address
+                meta.description = internal.description
+                meta.author = expression.author
+                meta.templated = internal.templateSourceLanguageAddress != undefined
+                meta.templateSourceLanguageAddress = internal.templateSourceLanguageAddress
+                meta.templateAppliedParams = internal.templateAppliedParams
+                meta.possibleTemplateParams = internal.possibleTemplateParams
+                meta.sourceCodeLink = internal.sourceCodeLink
+                console.debug("GQL publish:", meta, expression)
+                return meta
             },
             //@ts-ignore
             languageWriteSettings: async (parent, args, context, info) => {
@@ -183,7 +304,13 @@ function createResolvers(core: PerspectivismCore) {
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
                 // console.log(new Date(), "GQL install shared perspective", args);
                 const { url } = args;
-                return await core.installNeighbourhood(url);
+                try{
+                    return await core.installNeighbourhood(url);
+                } catch(e) {
+                    console.error(`Error while trying to join neighbourhood '${url}':`, e)
+                    throw e
+                }
+                
             },
             //@ts-ignore
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
@@ -191,7 +318,14 @@ function createResolvers(core: PerspectivismCore) {
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(perspective.neighbourhood && perspective.sharedUrl)
                     throw new Error(`Perspective ${perspective.name} (${perspective.uuid}) is already shared`);
-                return await core.neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)
+
+                try{
+                    return await core.neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)
+                } catch(e) {
+                    console.error(`Error while trying to publish:`, e)
+                    throw e
+                }
+                
             },
             //@ts-ignore
             perspectiveAdd: (parent, args, context, info) => {
@@ -238,6 +372,24 @@ function createResolvers(core: PerspectivismCore) {
             },
             runtimeQuit: () => {
                 process.exit(0)
+                return true
+            },
+            //@ts-ignore
+            runtimeHcAddAgentInfos: async (parent, args) => {
+                const { agentInfos } = args
+                //@ts-ignore
+                const parsed = JSON.parse(agentInfos).map(info => {
+                    return {
+                        //@ts-ignore
+                        agent: Buffer.from(info.agent.data),
+                        //@ts-ignore
+                        signature: Buffer.from(info.signature.data),
+                        //@ts-ignore
+                        agent_info: Buffer.from(info.agent_info.data)
+                    }
+                })
+
+                await core.holochainAddAgentInfos(parsed)
                 return true
             }
         },

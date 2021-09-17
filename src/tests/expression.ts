@@ -13,6 +13,19 @@ export default function expressionTests(testContext: TestContext) {
                 expect(agent.proof.invalid).toBeFalsy()
             })
 
+            it('can getManyExpressions()', async () => {
+                console.warn("get many expressions");
+                const ad4mClient = testContext.ad4mClient!;
+                const me = await ad4mClient.agent.me();
+
+                console.warn("making request");
+                const agentAndNull = await ad4mClient.expression.getMany([me.did, "lang://getNull", me.did]);
+                expect(agentAndNull.length).toBe(3);
+                expect(JSON.parse(agentAndNull[0].data).did).toEqual(me.did);
+                expect(agentAndNull[1]).toBeNull();
+                expect(JSON.parse(agentAndNull[2].data).did).toEqual(me.did);
+            })
+
             it('can getRaw() my agent expression', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 const me = await ad4mClient.agent.me()
