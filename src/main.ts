@@ -15,6 +15,7 @@ interface OuterConfig {
   appBuiltInLangs: string[] | null,
   appLangAliases: object | null,
   mocks: boolean,
+  dAppPort?: number,
   gqlPort?: number,
   hcPortAdmin?: number,
   hcPortApp?: number,
@@ -32,7 +33,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       resourcePath, appDataPath, appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, 
       appBuiltInLangs, appLangAliases, 
       mocks, 
-      gqlPort, hcPortAdmin, hcPortApp,
+      dAppPort, gqlPort, hcPortAdmin, hcPortApp,
       ipfsSwarmPort,
       ipfsRepoPath,
       hcUseLocalProxy,
@@ -43,6 +44,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     if(!gqlPort) gqlPort = 4000
     if(!hcPortAdmin) hcPortAdmin = 2000
     if(!hcPortApp) hcPortApp = 1337
+    if(!dAppPort) dAppPort = 3333
     if(hcUseMdns === undefined) hcUseMdns = false
     if(hcUseProxy === undefined) hcUseProxy = true
     if(hcUseBootstrap === undefined) hcUseBootstrap = true
@@ -97,6 +99,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     await core.initServices({ hcPortAdmin, hcPortApp, ipfsSwarmPort, ipfsRepoPath, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap });
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
     await core.startGraphQLServer(gqlPort, mocks)
+    core.startDAppServer(dAppPort);
 
     console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
     return core

@@ -4,7 +4,7 @@ import fs from "fs";
 
 export default function runDAppServer(port: number) {
     http.createServer(function (request, response) {
-    
+        console.log("DAppServer request: ", request.url);
         let filePath = request.url;
         if (filePath == '/') {
             filePath = path.join(__dirname, "../../public", "index.html");
