@@ -94,8 +94,7 @@ export default class AgentService {
             throw new Error("Can't sign without signingKeyId")
         }
 
-        const timestamp = new Date().toISOString()
-        const payloadBytes = Signatures.buildMessage(data, timestamp)
+        const payloadBytes = Signatures.buildMessageRaw(data)
 
         const key = this.getSigningKey()
         const privKey = Uint8Array.from(Buffer.from(key.privateKey, key.encoding))

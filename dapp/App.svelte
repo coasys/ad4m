@@ -2,7 +2,8 @@
 	import Paper, {Title, Subtitle, Content} from '@smui/paper';
 	import Button, {Label} from '@smui/button';
 	import Textfield from '@smui/textfield'
-	import Icon from '@smui/textfield/icon/index';
+    import Icon from '@smui/textfield/icon/index';
+    import { NotificationDisplay, notifier } from '@beyonk/svelte-notifications'
 	import { startEthereum, connectWallet, sign } from './ethereum'
     import Web3 from 'web3'
     import {
@@ -57,9 +58,21 @@
     }
 
     function signDid() {
+        //TODO: check that EP has not already been created with current eth address
         sign(currentAccount, did).then(result => {
             const { data, signature, r, s, v } = result;
-            console.log("got signature back", signature);
+            //Then sign eth address with did
+            ad4mClient.agent.entanglementProofPreFlight(ethereum.selectedAddress).then(result => {
+                //Add the signed did to the proof
+                result.didSignedByDeviceKey = signature;
+                delete result["__typename"];
+                console.log("Sending", result);
+                //Save proof into ad4m
+                ad4mClient.agent.addEntanglementProofs([result]).then(result => {
+                    console.log("Added EP with result", result);
+                    notifier.success('Ethereum Proof Generated!');
+                })
+            })
         });
     }
 
@@ -70,7 +83,7 @@
                 signedIn = true;
             } else {
                 signedIn = false;
-                console.error("Incorrect password!");
+                notifier.error('Incorrect Password!')
             }
         })
     }
@@ -79,6 +92,7 @@
 </script>
 
 <main>
+    <NotificationDisplay></NotificationDisplay>
     {#if signedIn==true}
         {#if currentAccount==undefined}
             <h2>Get Started</h2>

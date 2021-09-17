@@ -51,4 +51,12 @@ export default class Signatures {
         const payloadBytes = Uint8Array.from(sha256(Buffer.from(payloadBuffer), { asBytes: true }))
         return payloadBytes
     }
+    
+    static buildMessageRaw(data: any): Uint8Array {
+        const payload = { data }
+        const payloadString = stringify(payload)
+        const payloadBuffer = Buffer.from(payloadString)
+        const payloadBytes = Uint8Array.from(sha256(Buffer.from(payloadBuffer), { asBytes: true }))
+        return payloadBytes
+    }
 }
