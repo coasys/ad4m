@@ -7,6 +7,32 @@ import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
 import { LinkExpression } from "@perspect3vism/ad4m";
 
+function filterLocalLinks(result: any[], query: LinkQuery) {
+    const newResult = [];
+
+    for (const res of result) {
+        if (query.target) {
+            if (res.data.target !== query.target) break;
+        }
+
+        if (query.predicate) {
+            if (res.data.predicate !== query.predicate) break;
+        }
+
+        if (query.fromDate) {
+            if (new Date(res.timestamp) < query.fromDate!) break;
+        }
+
+        if (query.untilDate) {
+            if (new Date(res.timestamp) > query.untilDate!) break;
+        }
+
+        newResult.push(res);
+    }
+
+    return newResult;
+}
+
 export default class Perspective {
     name?: string;
     uuid?: string;
@@ -194,7 +220,7 @@ export default class Perspective {
         // console.debug("getLinks 1")
         if(!query || !query.source && !query.predicate && !query.target) {
             //@ts-ignore
-            return this.#db.getAllLinks(this.uuid).map(e => e.link)
+            return this.#db.getAllLinks(this.uuid).map(e => e.link).slice(-Math.abs(query.limit ?? 50));
         }
 
         // console.debug("getLinks 2")
@@ -203,18 +229,8 @@ export default class Perspective {
             // console.debug("query.source", query.source)
             //@ts-ignore
             let result = this.#db.getLinksBySource(this.uuid, query.source).map(e => e.link)
-            // @ts-ignore
-            if(query.target) result = result.filter(l => l.data.target === query.target)
-            // @ts-ignore
 
-
-            if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
-            //@ts-ignore
-            if (query.fromDate) result = result.filter(l => new Date(l.timestamp) >= query.fromDate!)
-            //@ts-ignore
-            if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
-            // console.debug("result", result)
-            return result
+            return filterLocalLinks(result, query).slice(-Math.abs(query.limit ?? 50));
         }
 
         // console.debug("getLinks 3")
@@ -222,19 +238,18 @@ export default class Perspective {
         if(query.target) {
             //@ts-ignore
             let result = this.#db.getLinksByTarget(this.uuid, query.target).map(e => e.link)
-            // @ts-ignore
-            if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
-            //@ts-ignore
-            if (query.fromDate) result = result.filter(l => new Date(l.timestamp) >= query.fromDate!)
-            //@ts-ignore
-            if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
-            return result
+
+            return filterLocalLinks(result, query).slice(-Math.abs(query.limit ?? 50));
         }
 
         // console.debug("getLinks 4")
 
         //@ts-ignore
-        return this.#db.getAllLinks(this.uuid).map(e => e.link).filter(link => link.data.predicate === query.predicate)
+        return this.#db
+                .getAllLinks(this.uuid)
+                .map((e: any) => e.link)
+                .filter((link: any) => link.data.predicate === query.predicate)
+                .slice(-Math.abs(query.limit ?? 50));
     }
 
     async getLinks(query: LinkQuery): Promise<Expression[]> {
