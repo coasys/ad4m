@@ -8,6 +8,7 @@ import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, 
 import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
+import EntanglementProofController from '../../EntanglementProof'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
@@ -41,8 +42,10 @@ export default class HolochainService {
     #didResolveError: boolean
     #conductorConfigPath: string
     signalCallbacks: Map<string, [AppSignalCb, string]>;
+    #agentDid: string
+    #entanglementProofController?: EntanglementProofController
 
-    constructor(config: HolochainConfiguration) {
+    constructor(config: HolochainConfiguration, agentDid: string, entanglementProofController?: EntanglementProofController) {
         let {
             conductorPath, 
             dataPath, 
@@ -56,6 +59,8 @@ export default class HolochainService {
         } = config;
 
         this.#didResolveError = false;
+        this.#agentDid = agentDid;
+        this.#entanglementProofController = entanglementProofController;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
         this.#dataPath = dataPath
@@ -207,13 +212,13 @@ export default class HolochainService {
                     const hash = await this.#adminWebsocket!.registerDna({
                         path: p
                     })
-                    //const didHolochainEntanglement = await this.#entanglementProofController.generateHolochainProof(pubKey.toString());
+                    //TODO: call below is broken since its not implemented on the conductor yet
+                    const signedDid = await this.#appWebsocket!.client.request({type: "crypto", data: {type: "sign", data: this.#agentDid}});
+                    //@ts-ignore
+                    const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(pubKey.toString(), signedDid);
                     //The membrane proof passing here is untested and thus most likely broken
-                    // await this.#adminWebsocket!.installApp({
-                    //     installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick, membrane_proof: Buffer.from(JSON.stringify(didHolochainEntanglement))}]
-                    // })
                     await this.#adminWebsocket!.installApp({
-                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick}]
+                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick, membrane_proof: Buffer.from(JSON.stringify({"ad4mDidEntanglement": didHolochainEntanglement}))}]
                     })
                 }
                 installed = true

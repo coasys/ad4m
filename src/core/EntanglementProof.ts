@@ -17,9 +17,8 @@ export default class EntanglementProofController {
         return new EntanglementProof(this.#agentService.did!, deviceKey, this.#agentService.signString(deviceKey))
     }
 
-    generateHolochainProof(holochainPubKey: string): EntanglementProof {
-        const holochainDidSignature = "TODO - CALL LAIR?";
-        return new EntanglementProof(this.#agentService.did!, holochainPubKey, this.#agentService.signString(holochainPubKey), holochainDidSignature)
+    generateHolochainProof(holochainPubKey: string, signedDid: string): EntanglementProof {
+        return new EntanglementProof(this.#agentService.did!, holochainPubKey, this.#agentService.signString(holochainPubKey), signedDid)
     }
 
     addEntanglementProofs(proofs: EntanglementProof[]): void {

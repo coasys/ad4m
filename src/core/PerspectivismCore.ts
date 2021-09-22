@@ -23,6 +23,7 @@ import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
 export interface InitServicesParams {
+    agentDid: string,
     hcPortAdmin?: number, 
     hcPortApp?: number,
     ipfsSwarmPort?: number,
@@ -86,7 +87,7 @@ export default class PerspectivismCore {
 
     get entanglementProofController(): EntanglementProofController {
         if (!this.#entanglementProofController) {
-            throw Error("No entanglementProofController")
+            this.#entanglementProofController = new EntanglementProofController(Config.rootConfigPath, this.#agentService);
         }
         return this.#entanglementProofController
     }
@@ -123,7 +124,7 @@ export default class PerspectivismCore {
             useProxy: params.hcUseProxy,
             useLocalProxy: params.hcUseLocalProxy,
             useMdns: params.hcUseMdns,
-        })
+        }, params.agentDid, this.entanglementProofController)
         let [ipfs, _] = await Promise.all([IPFS.init(
             params.ipfsSwarmPort, 
             params.ipfsRepoPath
@@ -159,7 +160,7 @@ export default class PerspectivismCore {
             languageController: this.#languageController
         })
 
-        this.#entanglementProofController = new EntanglementProofController(Config.rootConfigPath, this.#agentService);
+        this.entanglementProofController
     }
 
     async initLanguages() {
