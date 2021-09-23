@@ -21,7 +21,6 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const socialContext = await ad4mClient.languages.publish(
                     path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), 
                     new LanguageMetaInput("Alice's social-context")
-
                 )
                 expect(socialContext.name).toBe("Alice's social-context");
 
