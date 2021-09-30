@@ -104,7 +104,7 @@ export default function languageTests(testContext: TestContext) {
                     console.warn("Got result when adding trusted agent", aliceTrusted);
                 })
 
-                it("Bob can template Alice's social-context", async () => {
+                it("Bob can template Alice's social-context, and alice can install", async () => {
                     //Apply template on above holochain language
                     applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "Bob's templated social-context"}))
                     expect(applyTemplateFromSource.name).toBe("Bob's templated social-context");
@@ -123,6 +123,12 @@ export default function languageTests(testContext: TestContext) {
                     }))
                     expect(meta.address).toBe("QmXRWAJCNCP2es1vvZmH4gLnnEwdeZKCDgVFKQXh8xYyZy")
                     expect(meta.templateSourceLanguageAddress).toBe(sourceLanguage.address)
+
+                    await ad4mClient.runtime.addTrustedAgents([(await ad4mClient.agent.me()).did]);
+                    await sleep(500)
+
+                    const installGetLanguage = await ad4mClient.languages.byAddress(applyTemplateFromSource.address);
+                    expect(installGetLanguage.address).toBe(applyTemplateFromSource.address);
                 })
 
                 it("Bob can install Alice's social-context", async () => {
@@ -135,39 +141,8 @@ export default function languageTests(testContext: TestContext) {
                     //Test that bob can install language which is templated from source since source language was created by alice who is now a trusted agent
                     const installTemplated = await bobAd4mClient.languages.byAddress(applyTemplateFromSource.address);
                     //console.warn("Got result when trying to install language which was templated from source", installTemplated);
-
                 })
             })
-
-            // it('can get and create unique language', async () => {
-            //     const ad4mClient = testContext.ad4mClient!
-                
-            //     const languages = await ad4mClient.languages.byFilter("");
-            //     expect(languages.length).toBe(4);
-
-            //     const createUniqueLang = await ad4mClient.languages.cloneHolochainTemplate(path.join(__dirname, "../test-temp/languages/agent-expression-store"), "agent-store", "b98e53a8-5800-47b6-adb9-86d55a74871e");
-            //     expect(createUniqueLang.name).toBe("agent-expression-store");
-
-            //     const installLanguage = await ad4mClient.languages.byAddress(createUniqueLang.address);
-            //     expect(installLanguage.name).toBe("agent-expression-store");
-
-            //     expect(await async function() {
-            //         let me = await ad4mClient.agent.me()
-            //         me.directMessageLanguage = "test"
-            //         //Test that we can use the language after creating the unique version
-            //         await ad4mClient.expression.create(me, installLanguage.address!)
-            //     }).not.toThrow()
-
-            //     const languagesPostInstall = await ad4mClient.languages.byFilter("");
-            //     expect(languagesPostInstall.length).toBe(5);
-
-            //     const writeSettings = await ad4mClient.languages.writeSettings(createUniqueLang.address, JSON.stringify({"setting": "test"}));
-            //     expect(writeSettings).toBe(true);
-
-            //     const language = await ad4mClient.languages.byAddress(createUniqueLang.address);
-            //     expect(language.settings).toBeDefined()
-            //     expect(JSON.parse(language.settings!).setting).toBe("test");
-            // })
         })
     }
 }
