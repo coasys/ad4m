@@ -115,7 +115,7 @@ export default class PerspectivismCore {
             params.ipfsRepoPath
         ), this.#holochain.run()]);
         this.#IPFS = ipfs;
-        this.connectToHardwiredPerspect3vismAgent()
+        //this.connectToHardwiredPerspect3vismAgent()
     }
 
     async waitForAgent(): Promise<void> {

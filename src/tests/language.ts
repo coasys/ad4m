@@ -125,6 +125,7 @@ export default function languageTests(testContext: TestContext) {
                     expect(meta.templateSourceLanguageAddress).toBe(sourceLanguage.address)
 
                     await ad4mClient.runtime.addTrustedAgents([(await ad4mClient.agent.me()).did]);
+                    await sleep(500)
 
                     const installGetLanguage = await ad4mClient.languages.byAddress(applyTemplateFromSource.address);
                     expect(installGetLanguage.address).toBe(applyTemplateFromSource.address);
