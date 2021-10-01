@@ -96,7 +96,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       bootstrapFixtures,
     });
     console.log("\x1b[34m", "Init services...", "\x1b[0m");
-    await core.initServices({ hcPortAdmin, hcPortApp, ipfsSwarmPort, ipfsRepoPath, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, agentDid: core.agentService.did! });
+    await core.initServices({ hcPortAdmin, hcPortApp, ipfsSwarmPort, ipfsRepoPath, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, agentService: core.agentService });
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
     await core.startGraphQLServer(gqlPort, mocks)
     core.startDAppServer(dAppPort);

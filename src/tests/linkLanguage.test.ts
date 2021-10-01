@@ -42,7 +42,7 @@ describe(LANG_TO_TEST, () => {
         })
 
         await core.initServices({
-            agentDid: core.agentService.did!,
+            agentService: core.agentService,
             hcPortAdmin: 22000,
             hcPortApp: 21337,
             ipfsSwarmPort: 24002,

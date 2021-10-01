@@ -23,7 +23,7 @@ import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
 export interface InitServicesParams {
-    agentDid: string,
+    agentService: AgentService,
     hcPortAdmin?: number, 
     hcPortApp?: number,
     ipfsSwarmPort?: number,
@@ -124,7 +124,7 @@ export default class PerspectivismCore {
             useProxy: params.hcUseProxy,
             useLocalProxy: params.hcUseLocalProxy,
             useMdns: params.hcUseMdns,
-        }, params.agentDid, this.entanglementProofController)
+        }, params.agentService, this.entanglementProofController)
         let [ipfs, _] = await Promise.all([IPFS.init(
             params.ipfsSwarmPort, 
             params.ipfsRepoPath

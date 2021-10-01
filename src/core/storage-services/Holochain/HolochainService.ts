@@ -9,6 +9,8 @@ import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import EntanglementProofController from '../../EntanglementProof'
+import AgentService from '../../agent/AgentService'
+import { CellId } from '@holochain/conductor-api'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
@@ -41,11 +43,12 @@ export default class HolochainService {
     #conductorPath: string
     #didResolveError: boolean
     #conductorConfigPath: string
-    signalCallbacks: Map<string, [AppSignalCb, string]>;
-    #agentDid: string
+    signalCallbacks: Map<string, [AppSignalCb, string][]>;
+    #agentService: AgentService
     #entanglementProofController?: EntanglementProofController
+    #signingService?: CellId
 
-    constructor(config: HolochainConfiguration, agentDid: string, entanglementProofController?: EntanglementProofController) {
+    constructor(config: HolochainConfiguration, agentService: AgentService, entanglementProofController?: EntanglementProofController) {
         let {
             conductorPath, 
             dataPath, 
@@ -59,7 +62,7 @@ export default class HolochainService {
         } = config;
 
         this.#didResolveError = false;
-        this.#agentDid = agentDid;
+        this.#agentService = agentService;
         this.#entanglementProofController = entanglementProofController;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
@@ -101,8 +104,11 @@ export default class HolochainService {
         // console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
         if (this.signalCallbacks.size != 0) {
             let callbacks = this.signalCallbacks.get(signal.data.cellId[1].toString("base64"))
-            if (callbacks && callbacks![0] != undefined) {
-                callbacks![0](signal);
+            if (callbacks && callbacks! != undefined) {
+                //TODO: test that these multiple callbacks work correctly
+                for (const callback of callbacks) {
+                    callback[0](signal)
+                }
             };
         };
     }
@@ -128,6 +134,30 @@ export default class HolochainService {
                 this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
                 console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
             };
+
+            //Install signing service DNA
+            const activeApps = await this.#adminWebsocket!.listActiveApps();
+            if (!activeApps.includes("signing_service")) {
+                const pubKey = await this.pubKeyForLanguage("main");
+
+                const hash = await this.#adminWebsocket!.registerDna({
+                    //Pretty sure this is not gonna work in production
+                    path: path.join(__dirname, "../../../../public/signing.dna")
+                })
+
+                const installedApp = await this.#adminWebsocket!.installApp({
+                    installed_app_id: "signing_service", agent_key: pubKey, dnas: [{hash: hash, nick: "crypto"}]
+                })
+                this.#signingService = installedApp.cell_data[0].cell_id;
+
+                try {
+                    await this.#adminWebsocket!.activateApp({installed_app_id: "signing_service"})
+                } catch(e) {
+                    console.error("HolochainService: ERROR activating app signing_service", " - ", e)
+                }
+
+            }
+
             resolveReady!()
             this.#didResolveError = false;
         } catch(e) {
@@ -135,6 +165,22 @@ export default class HolochainService {
             this.#didResolveError = true;
             resolveReady!()
         }
+    }
+
+    async callSigningService(data: string): Promise<string> {
+        if (!this.#signingService) {
+            throw new Error("Signing service DNA is not init'd yet!")
+        }
+        const pubKey = await this.pubKeyForLanguage("main");
+        const result = await this.#appWebsocket!.callZome({
+            cap: null,
+            cell_id: this.#signingService!,
+            zome_name: "crypto",
+            fn_name: "sign",
+            payload: data,
+            provenance: pubKey
+        })
+        return result
     }
 
     async stop() {
@@ -187,11 +233,7 @@ export default class HolochainService {
         if (this.#didResolveError) {
             console.error("HolochainService.ensureInstallDNAforLanguage: Warning attempting to install holochain DNA when conductor did not start error free...")
         }
-        const pubKey = await this.pubKeyForLanguage(lang);
-        if (callback != undefined) {
-            console.log("HolochainService: setting holochains signal callback for language", lang);
-            this.signalCallbacks.set(pubKey.toString("base64"), [callback, lang]);
-        };
+        const pubKey = await this.pubKeyForLanguage("main");
         const activeApps = await this.#adminWebsocket!.listActiveApps();
         //console.log("HolochainService: Found running apps:", activeApps);
         if(!activeApps.includes(lang)) {
@@ -212,10 +254,28 @@ export default class HolochainService {
                     const hash = await this.#adminWebsocket!.registerDna({
                         path: p
                     })
-                    //TODO: call below is broken since its not implemented on the conductor yet
-                    const signedDid = await this.#appWebsocket!.client.request({type: "crypto", data: {type: "sign", data: this.#agentDid}});
-                    //@ts-ignore
+                    if (callback != undefined) {
+                        console.log("HolochainService: setting holochains signal callback for language", lang);
+                        const hashHex = hash.toString("hex");
+                        let callbacks = this.signalCallbacks.get(hashHex);
+                        let newCallbacks = [];
+                        if (callbacks) {
+                            callbacks.push([callback, lang]);
+                            newCallbacks = callbacks;
+                        } else {
+                            newCallbacks = [[callback, lang]] as [AppSignalCb, string][]
+                        }
+                        this.signalCallbacks.set(hashHex, newCallbacks);
+                    };
+                    const did = this.#agentService.did;
+                    if(!did) {
+                        throw new Error("Agent has not been created yet and thus cannot sign a did for holochain")
+                    }
+                    console.log("using signed did", did);
+                    const signedDid = await this.callSigningService(did);
+                    console.log("passing signed did", signedDid);
                     const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(pubKey.toString(), signedDid);
+                    console.warn("got did entanglement", didHolochainEntanglement);
                     //The membrane proof passing here is untested and thus most likely broken
                     await this.#adminWebsocket!.installApp({
                         installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick, membrane_proof: Buffer.from(JSON.stringify({"ad4mDidEntanglement": didHolochainEntanglement}))}]
@@ -293,7 +353,7 @@ export default class HolochainService {
         try {
             console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m")
             const result = await this.#appWebsocket!.callZome({
-                cap: fakeCapSecret(),
+                cap: null,
                 cell_id,
                 zome_name: zomeName,
                 fn_name: fnName,
