@@ -146,6 +146,24 @@ function createResolvers(core: PerspectivismCore) {
 
             runtimeHcAgentInfos: async () => {
                 return JSON.stringify(await core.holochainRequestAgentInfos())
+            },
+
+            //@ts-ignore
+            runtimeFriendStatus: async (parent, args) => {
+                const { did } = args
+                const dmLang = await core.friendsDirectMessageLanguage(did)
+                return await dmLang.directMessageAdapter!.status()
+            },
+
+            //@ts-ignore
+            runtimeMessageInbox: async (parent, args) => {
+                const { filter } = args
+                const dmLang = await core.myDirectMessageLanguage()
+                return await dmLang.directMessageAdapter!.inbox()
+            },
+            //@ts-ignore
+            runtimeMessageOutbox: async (parent, args) => {
+
             }
         },
         Mutation: {
@@ -174,9 +192,11 @@ function createResolvers(core: PerspectivismCore) {
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
                                     //@ts-ignore
-            runtimeAddFriends: (parent, args, context, info) => {
+            runtimeAddFriends: async (parent, args, context, info) => {
                 const { dids } = args;
                 core.runtimeService.addFriends(dids);
+                //@ts-ignore
+                await Promise.all(dids.map(did => core.friendsDirectMessageLanguage(did)))
                 return core.runtimeService.friends();
             },
             //@ts-ignore
@@ -372,12 +392,43 @@ function createResolvers(core: PerspectivismCore) {
 
                 await core.holochainAddAgentInfos(parsed)
                 return true
+            },
+
+            //@ts-ignore
+            runtimeSetStatus: async (parent, args) => {
+                const { status } = args
+                const dmLang = await core.myDirectMessageLanguage()
+                await dmLang.directMessageAdapter!.setStatus(status)
+                return true
+            },
+
+            //@ts-ignore
+            runtimeFriendSendMessage: async (parent, args) => {
+                const { did, message } = args
+                const dmLang = await core.friendsDirectMessageLanguage(did)
+                try {
+                    const status = await dmLang.directMessageAdapter!.status()
+                    if(status) {
+                        await dmLang.directMessageAdapter!.sendP2P(message)
+                    } else {
+                        throw "Friends seems offline"
+                    }
+                } catch(e) {
+                    await dmLang.directMessageAdapter!.sendInbox(message)
+                }
+                return true
             }
+
         },
 
         Subscription: {
             agentUpdated: {
                 subscribe: () => pubsub.asyncIterator(PubSub.AGENT_UPDATED),
+                //@ts-ignore
+                resolve: payload => payload
+            },
+            runtimeMessageReceived: {
+                subscribe: () => pubsub.asyncIterator(PubSub.DIRECT_MESSAGE_RECEIVED),
                 //@ts-ignore
                 resolve: payload => payload
             },

@@ -1,5 +1,5 @@
-import type { Address, LanguageRef, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageMetaInternal, LanguageLanguageInput, LanguageExpression, LanguageMetaInput  } from '@perspect3vism/ad4m'
-import { parseExprUrl, Neighbourhood } from '@perspect3vism/ad4m'
+import type { Address, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression  } from '@perspect3vism/ad4m'
+import { parseExprUrl, LanguageRef, Neighbourhood } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
 import * as Db from './db'
@@ -285,6 +285,19 @@ export default class PerspectivismCore {
         await this.#agentService.updateAgent(agent)
         console.debug("DM Language published...")
         console.log("Agent's direct message language successfully cloned, installed and published!")
+    }
+
+    async friendsDirectMessageLanguage(did: string): Promise<Language> {
+        const expression = await this.#languageController!.getExpression(parseExprUrl(did))! as AgentExpression
+        const dmLang = expression.data.directMessageLanguage
+        //const installed = this.#languageController!.getInstalledLanguages().find(l => l.address === dmLang)
+        //if(!installed)
+        return await this.#languageController!.languageByRef(dmLang)
+    }
+
+    async myDirectMessageLanguage(): Promise<Language> {
+        const dmLang = this.#agentService.agent!.directMessageLanguage!
+        return await this.#languageController!.languageByRef(new LanguageRef(dmLang))
     }
 }
 

@@ -1,6 +1,6 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput 
+    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput } from '@perspect3vism/ad4m';
 import fs from 'fs'
@@ -117,6 +117,12 @@ export default class LanguageController {
                 this.#linkObservers.forEach(o => {
                     o(added, removed, {name, address: hash} as LanguageRef)
                 })
+            })
+        }
+
+        if(language.directMessageAdapter) {
+            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
+                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
             })
         }
 
