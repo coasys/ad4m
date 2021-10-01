@@ -163,7 +163,23 @@ export default class HolochainService {
         }
     }
 
+    async pubKeyForAllLanguages(): Promise<AgentPubKey> {
+        const alreadyExisting = this.#db.get('pubKeys').find({lang: "global"}).value()
+        if(alreadyExisting) {
+            const pubKey = Buffer.from(alreadyExisting.pubKey)
+            console.debug("Found existing pubKey", pubKey.toString("base64"), "for all languages")
+            return pubKey
+        } else {
+            const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
+            this.#db.get('pubKeys').push({lang: "global", pubKey}).write()
+            console.debug("Created new pubKey", pubKey.toString("base64"), "for all languages")
+            return pubKey
+        }
+    }
+
     async pubKeyForLanguage(lang: string): Promise<AgentPubKey> {
+        return this.pubKeyForAllLanguages()
+        
         const alreadyExisting = this.#db.get('pubKeys').find({lang}).value()
         if(alreadyExisting) {
             const pubKey = Buffer.from(alreadyExisting.pubKey)
