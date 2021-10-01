@@ -287,8 +287,9 @@ export default class PerspectivismCore {
         console.log("Agent's direct message language successfully cloned, installed and published!")
     }
 
-    async friendsDirectMessageLanguage(did: string): Promise<Language> {
+    async friendsDirectMessageLanguage(did: string): Promise<Language|null> {
         const expression = await this.#languageController!.getExpression(parseExprUrl(did))! as AgentExpression
+        if(!expression) return null
         const dmLang = expression.data.directMessageLanguage
         //const installed = this.#languageController!.getInstalledLanguages().find(l => l.address === dmLang)
         //if(!installed)

@@ -152,7 +152,10 @@ function createResolvers(core: PerspectivismCore) {
             runtimeFriendStatus: async (parent, args) => {
                 const { did } = args
                 const dmLang = await core.friendsDirectMessageLanguage(did)
-                return await dmLang.directMessageAdapter!.status()
+                if(dmLang)
+                    return await dmLang.directMessageAdapter!.status()
+                else
+                    return undefined
             },
 
             //@ts-ignore
@@ -406,6 +409,8 @@ function createResolvers(core: PerspectivismCore) {
             runtimeFriendSendMessage: async (parent, args) => {
                 const { did, message } = args
                 const dmLang = await core.friendsDirectMessageLanguage(did)
+                if(!dmLang) return false
+
                 try {
                     const status = await dmLang.directMessageAdapter!.status()
                     if(status) {

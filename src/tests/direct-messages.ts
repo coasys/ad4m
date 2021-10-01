@@ -1,5 +1,6 @@
 import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@perspect3vism/ad4m'
 import { TestContext } from './integration.test'
+import sleep from './sleep'
 
 export default function directMessageTests(testContext: TestContext) {
     return () => {
@@ -11,7 +12,7 @@ export default function directMessageTests(testContext: TestContext) {
             const { did } = await bob.agent.status()
 
             const status = await alice.runtime.friendStatus(did!)
-            expect(status).toBeUndefined()
+            expect(status).toBe(null)
         })    
 
         describe("with Alice and Bob being friends", () => {
@@ -41,14 +42,15 @@ export default function directMessageTests(testContext: TestContext) {
                 link.author = "did:test";
                 link.timestamp = new Date().toISOString();
                 link.data = new Link({
-                    source: Literal.from("me"),  
-                    predicate: Literal.from("thinks"),
-                    target: Literal.from("nothing")
+                    source: Literal.from("me").toUrl(),  
+                    predicate: Literal.from("thinks").toUrl(),
+                    target: Literal.from("nothing").toUrl()
                 });
                 link.proof = new ExpressionProof("sig", "key");
                 const message = new Perspective([link])
                 //@ts-ignore
                 await alice.runtime.friendSendMessage(didBob, message)
+                await sleep(1000)
                 //@ts-ignore
                 const bobsInbox = await bob.runtime.messageInbox()
                 expect(bobsInbox.length).toBe(1)

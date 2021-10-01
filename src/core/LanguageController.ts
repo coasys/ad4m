@@ -120,7 +120,8 @@ export default class LanguageController {
             })
         }
 
-        if(language.directMessageAdapter) {
+        //@ts-ignore
+        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
                 this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
             })
