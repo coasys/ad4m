@@ -189,6 +189,7 @@ function createResolvers(core: PerspectivismCore) {
             agentGenerate: async (parent, args, context, info) => {
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
+                await core.initializeAgentsDirectMessageLanguage()
                 return core.agentService.dump()
             },
             //@ts-ignore

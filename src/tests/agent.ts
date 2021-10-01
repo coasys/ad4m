@@ -45,7 +45,7 @@ export default function agentTests(testContext: TestContext) {
                 const currentAgent = await ad4mClient.agent.me();
                 expect(currentAgent.perspective).toBeDefined()
                 expect(currentAgent.perspective!.links.length).toBe(0);
-                expect(currentAgent.directMessageLanguage).toBe(null);
+                expect(currentAgent.directMessageLanguage).toBeDefined();
 
                 let link = new LinkExpression();
                 link.author = "did:test";

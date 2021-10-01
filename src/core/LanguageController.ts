@@ -206,7 +206,7 @@ export default class LanguageController {
             console.error(e)
             fs.rmdirSync(languagePath, {recursive: true})
             //@ts-ignore
-            throw Error(e.toString())
+            throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
         }
     }
 
@@ -413,10 +413,12 @@ export default class LanguageController {
 
     async constructLanguageLanguageInput(
         sourceLanguageLines: string[], 
-        internal: LanguageMetaInternal
+        metaInput: LanguageMetaInput
     ): Promise<LanguageLanguageInput> {
         const languageData = sourceLanguageLines.join('\n');
         const languageHash = await this.ipfsHash(languageData);
+
+        const internal: LanguageMetaInternal = metaInput as LanguageMetaInternal
 
         internal.address = languageHash
 

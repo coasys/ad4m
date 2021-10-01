@@ -1,4 +1,4 @@
-import type { Address, LanguageRef, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageMetaInternal, LanguageLanguageInput, LanguageExpression  } from '@perspect3vism/ad4m'
+import type { Address, LanguageRef, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageMetaInternal, LanguageLanguageInput, LanguageExpression, LanguageMetaInput  } from '@perspect3vism/ad4m'
 import { parseExprUrl, Neighbourhood } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
@@ -199,7 +199,7 @@ export default class PerspectivismCore {
         return this.publish(languageLanguageInput)
     }
 
-    async languagePublish(languagePath: string, languageMeta: LanguageMetaInternal): Promise<LanguageExpression> {
+    async languagePublish(languagePath: string, languageMeta: LanguageMetaInput): Promise<LanguageExpression> {
         if (!fs.existsSync(languagePath)) {
             throw new Error("Language at path: " + languagePath + " does not exist");
         };
@@ -245,6 +245,46 @@ export default class PerspectivismCore {
         //@ts-ignore
         await this.holochainAddAgentInfos(PERSPECT3VIMS_AGENT_INFO())
         console.debug("Added Perspect3vism Holochain agent infos.")
+    }
+
+    async initializeAgentsDirectMessageLanguage() {
+        await this.waitForAgent()
+        const agent = this.#agentService.agent!
+        if(agent.directMessageLanguage) return
+        console.log("Agent doesn't have direct message language set yet. Looking for Languages to clone...")
+        const dmLangs = this.#languageController?.filteredLanguageRefs("directMessageAdapter")
+        if(!dmLangs || dmLangs.length < 1) {
+            console.error("No direct message language found! Can't create DM language for agent!")
+            return
+        }
+        const builtinLang = dmLangs[0]
+        console.debug("Publishing built-in DM Language so we can clone it later...")
+        const publishedLang = await this.languagePublish(
+            path.join(Config.builtInLangPath, builtinLang.name, "build", "bundle.js"),
+            {
+                name: "direct-message-language",
+                description: "Built-in Direct Message Language used to contact Agents directly p2p",
+                possibleTemplateParams: ['recipient_did', 'recipient_hc_agent_pubkey'],
+                sourceCodeLink: "https://github.com/perspect3vism/direct-message-language",
+            }     
+        )
+        console.debug("Successfully published template:", publishedLang)
+
+        const templateParams = {
+            recipient_did: this.#agentService.agent?.did,
+            recipient_hc_agent_pubkey: (await this.#holochain?.pubKeyForAllLanguages())!.toString('hex')
+        }
+        console.debug("Now creating clone with parameters:", templateParams)
+        const createdDmLang = await this.languageApplyTemplateAndPublish(publishedLang.data.address, templateParams)
+        console.debug("DM Language cloned...")
+        // Install language by calling languageByRef
+        // TODO: extract language installing code into its own function
+        await this.#languageController?.languageByRef(createdDmLang)
+        console.debug("DM Language installed...")
+        agent.directMessageLanguage = createdDmLang.address
+        await this.#agentService.updateAgent(agent)
+        console.debug("DM Language published...")
+        console.log("Agent's direct message language successfully cloned, installed and published!")
     }
 }
 
