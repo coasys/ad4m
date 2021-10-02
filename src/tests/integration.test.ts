@@ -23,6 +23,7 @@ import neighbourhoodTests from "./neighbourhood";
 import runtimeTests from "./runtime";
 import { Crypto } from "@peculiar/webcrypto"
 import directMessageTests from "./direct-messages";
+import agentLanguageTests from "./agent-language";
 //@ts-ignore
 global.crypto = new Crypto();
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
@@ -210,6 +211,7 @@ describe("Integration tests", () => {
           await new Promise((resolve)=>setTimeout(resolve, 1000))
         })
 
+        describe('Agent Language', agentLanguageTests(testContext))
         describe('Direct Messages', directMessageTests(testContext))
         describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
