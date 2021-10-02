@@ -155,7 +155,15 @@ export default class HolochainService {
                 } catch(e) {
                     console.error("HolochainService: ERROR activating app signing_service", " - ", e)
                 }
-
+            } else {
+                const { cell_data } = await this.#appWebsocket!.appInfo({installed_app_id: "signing_service"})
+                console.warn(cell_data);
+                const cell = cell_data.find(c => c.cell_nick === "crypto")
+                if(!cell) {
+                    const e = new Error(`No DNA with nick signing_service found for language signing service DNA`)
+                    throw e
+                }
+                this.#signingService = cell.cell_id;
             }
 
             resolveReady!()
@@ -180,7 +188,7 @@ export default class HolochainService {
             payload: data,
             provenance: pubKey
         })
-        return result
+        return result.toString("hex")
     }
 
     async stop() {
@@ -271,11 +279,8 @@ export default class HolochainService {
                     if(!did) {
                         throw new Error("Agent has not been created yet and thus cannot sign a did for holochain")
                     }
-                    console.log("using signed did", did);
                     const signedDid = await this.callSigningService(did);
-                    console.log("passing signed did", signedDid);
-                    const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(pubKey.toString(), signedDid);
-                    console.warn("got did entanglement", didHolochainEntanglement);
+                    const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(pubKey.toString("hex"), signedDid);
                     //The membrane proof passing here is untested and thus most likely broken
                     await this.#adminWebsocket!.installApp({
                         installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick, membrane_proof: Buffer.from(JSON.stringify({"ad4mDidEntanglement": didHolochainEntanglement}))}]
