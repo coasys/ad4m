@@ -288,12 +288,15 @@ export default class PerspectivismCore {
     }
 
     async friendsDirectMessageLanguage(did: string): Promise<Language|null> {
-        const expression = await this.#languageController!.getExpression(parseExprUrl(did))! as AgentExpression
+        const expression = await this.#languageController!.getAgentLanguage().expressionAdapter?.get(did)! as AgentExpression
+        //console.log("AGENT EXPRESSION:", expression)
         if(!expression) return null
         const dmLang = expression.data.directMessageLanguage
-        //const installed = this.#languageController!.getInstalledLanguages().find(l => l.address === dmLang)
-        //if(!installed)
-        return await this.#languageController!.languageByRef(dmLang)
+        //console.log("DM LANG", dmLang)
+        if(dmLang)
+            return await this.#languageController!.languageByRef(new LanguageRef(dmLang))
+        else
+            return null
     }
 
     async myDirectMessageLanguage(): Promise<Language> {
