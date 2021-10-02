@@ -14,11 +14,11 @@ export default function agentLanguageTests(testContext: TestContext) {
 
             const bobSeenFromAlice = await alice.agent.byDID(didBob)
             expect(bobSeenFromAlice).toBeDefined()
-            expect(bobSeenFromAlice).toStrictEqual(bobHimself)
+            expect(bobSeenFromAlice).toEqual(bobHimself)
 
             const aliceSeenFromBob = await bob.agent.byDID(didAlice)
             expect(aliceSeenFromBob).toBeDefined()
-            expect(aliceSeenFromBob).toStrictEqual(aliceHerself)
+            expect(aliceSeenFromBob).toEqual(aliceHerself)
         })    
     }
 }
