@@ -108,7 +108,7 @@
                 <Label>Connect WalletConnect</Label>
             </Button>
         {:else}
-            <h2>Sign Some Shit</h2>
+            <h2>Create link</h2>
             <Button on:click={signDid} variant="raised" color="primary">
                 <Label>Sign</Label>
             </Button>
