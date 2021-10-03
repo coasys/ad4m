@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal } from '@holochain/conductor-api'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, CellId } from '@holochain/conductor-api'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -40,7 +40,7 @@ export default class HolochainService {
     #conductorPath: string
     #didResolveError: boolean
     #conductorConfigPath: string
-    signalCallbacks: Map<string, [AppSignalCb, string]>;
+    #signalCallbacks: [CellId, AppSignalCb, string][];
 
     constructor(config: HolochainConfiguration) {
         let {
@@ -61,7 +61,7 @@ export default class HolochainService {
         this.#dataPath = dataPath
         this.#db = low(new FileSync(path.join(dataPath, 'holochain-service.json')))
         this.#db.defaults({pubKeys: []}).write()
-        this.signalCallbacks = new Map();
+        this.#signalCallbacks = [];
 
         const holochainAppPort = appPort ? appPort : 1337;
         const holochainAdminPort = adminPort ? adminPort : 2000;
@@ -93,12 +93,24 @@ export default class HolochainService {
     }
 
     handleCallback(signal: AppSignal) {
-        // console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
-        if (this.signalCallbacks.size != 0) {
-            let callbacks = this.signalCallbacks.get(signal.data.cellId[1].toString("base64"))
-            if (callbacks && callbacks![0] != undefined) {
-                callbacks![0](signal);
-            };
+        console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks", signal);
+        //console.debug("registered callbacks:", this.#signalCallbacks)
+        if (this.#signalCallbacks.length != 0) {
+            const signalDna = signal.data.cellId[0].toString('hex')
+            const signalPubkey = signal.data.cellId[1].toString('hex')
+            //console.debug("Looking for:", signalDna, signalPubkey)
+            let callbacks = this.#signalCallbacks.filter(e => {
+                const dna = e[0][0].toString('hex')
+                const pubkey = e[0][1].toString('hex')
+                //console.debug("Checking:", dna, pubkey)
+                return ( dna === signalDna ) && (pubkey === signalPubkey)
+            })
+            console.debug("found callbacks:", callbacks)
+            callbacks.forEach(cb => {
+                if (cb && cb![1] != undefined) {
+                    cb![1](signal);
+                };
+            })
         };
     }
 
@@ -199,10 +211,7 @@ export default class HolochainService {
             console.error("HolochainService.ensureInstallDNAforLanguage: Warning attempting to install holochain DNA when conductor did not start error free...")
         }
         const pubKey = await this.pubKeyForLanguage(lang);
-        if (callback != undefined) {
-            console.log("HolochainService: setting holochains signal callback for language", lang);
-            this.signalCallbacks.set(pubKey.toString("base64"), [callback, lang]);
-        };
+        
         const activeApps = await this.#adminWebsocket!.listActiveApps();
         //console.log("HolochainService: Found running apps:", activeApps);
         if(!activeApps.includes(lang)) {
@@ -247,6 +256,12 @@ export default class HolochainService {
                 console.error("HolochainService: ERROR activating app", lang, " - ", e)
             }
         }
+
+        if (callback != undefined) {
+            console.log("HolochainService: setting holochains signal callback for language", lang);
+            const { cell_data } = await this.#appWebsocket!.appInfo({installed_app_id: lang})
+            this.#signalCallbacks.push([cell_data[0].cell_id, callback, lang]);
+        };
     }
 
     getDelegateForLanguage(languageHash: string) {
