@@ -71,6 +71,10 @@ export default function directMessageTests(testContext: TestContext) {
             })
 
             it("Alice can send a message to Bob", async () => {
+                const bobMessageCallback = jest.fn()
+                //@ts-ignore
+                await bob.runtime.addMessageCallback(bobMessageCallback)
+
                 let link = new LinkExpressionInput()
                 link.author = "did:test";
                 link.timestamp = new Date().toISOString();
@@ -81,15 +85,21 @@ export default function directMessageTests(testContext: TestContext) {
                 });
                 link.proof = new ExpressionProof("sig", "key");
                 const message = new Perspective([link])
+
                 //@ts-ignore
                 await alice.runtime.friendSendMessage(didBob, message)
                 await sleep(100)
                 //@ts-ignore
                 const bobsInbox = await bob.runtime.messageInbox()
                 expect(bobsInbox.length).toBe(1)
+
+                expect(bobMessageCallback.mock.calls.length).toBe(1)
+                expect(bobMessageCallback.mock.calls[0][0]).toEqual(bobsInbox[0])
+
                 delete bobsInbox[0].data.links[0].proof.invalid
                 delete bobsInbox[0].data.links[0].proof.valid
                 expect(bobsInbox[0].data).toEqual(message)
+                
             })
         })
     }
