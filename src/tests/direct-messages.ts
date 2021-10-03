@@ -47,10 +47,27 @@ export default function directMessageTests(testContext: TestContext) {
                 await bob.runtime.deleteTrustedAgents([didAlice!])
             })
 
-            it("Alice can get Bob's status", async () => {    
+            it("Alice can get Bob's status", async () => {
+                let link = new LinkExpressionInput()
+                link.author = "did:test";
+                link.timestamp = new Date().toISOString();
+                link.data = new Link({
+                    //@ts-ignore
+                    source: didBob,  
+                    predicate: Literal.from("is").toUrl(),
+                    target: Literal.from("online").toUrl()
+                });
+                link.proof = new ExpressionProof("sig", "key");
+                const statusBob = new Perspective([link])
                 //@ts-ignore
-                const status = await alice.runtime.friendStatus(didBob)
-                expect(status).toBeDefined()
+                await bob.runtime.setStatus(statusBob)
+                await sleep(100)    
+                //@ts-ignore
+                const statusAlice = await alice.runtime.friendStatus(didBob)
+                expect(statusAlice).toBeDefined()
+                delete statusAlice.data.links[0].proof.invalid
+                delete statusAlice.data.links[0].proof.valid
+                expect(statusAlice.data).toEqual(statusBob)
             })
 
             it("Alice can send a message to Bob", async () => {
@@ -66,7 +83,7 @@ export default function directMessageTests(testContext: TestContext) {
                 const message = new Perspective([link])
                 //@ts-ignore
                 await alice.runtime.friendSendMessage(didBob, message)
-                await sleep(1000)
+                await sleep(100)
                 //@ts-ignore
                 const bobsInbox = await bob.runtime.messageInbox()
                 expect(bobsInbox.length).toBe(1)
