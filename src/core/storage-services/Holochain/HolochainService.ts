@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal } from '@holochain/conductor-api'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, AppStatusFilter } from '@holochain/conductor-api'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -43,7 +43,7 @@ export default class HolochainService {
     #conductorPath: string
     #didResolveError: boolean
     #conductorConfigPath: string
-    signalCallbacks: Map<string, [AppSignalCb, string][]>;
+    signalCallbacks: Map<string, AppSignalCb[]>;
     #agentService: AgentService
     #entanglementProofController?: EntanglementProofController
     #signingService?: CellId
@@ -103,11 +103,11 @@ export default class HolochainService {
     handleCallback(signal: AppSignal) {
         // console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
         if (this.signalCallbacks.size != 0) {
-            let callbacks = this.signalCallbacks.get(signal.data.cellId[1].toString("base64"))
+            let callbacks = this.signalCallbacks.get(signal.data.cellId[0].toString("hex"))
             if (callbacks && callbacks! != undefined) {
                 //TODO: test that these multiple callbacks work correctly
                 for (const callback of callbacks) {
-                    callback[0](signal)
+                    callback(signal)
                 }
             };
         };
@@ -157,7 +157,6 @@ export default class HolochainService {
                 }
             } else {
                 const { cell_data } = await this.#appWebsocket!.appInfo({installed_app_id: "signing_service"})
-                console.warn(cell_data);
                 const cell = cell_data.find(c => c.cell_nick === "crypto")
                 if(!cell) {
                     const e = new Error(`No DNA with nick signing_service found for language signing service DNA`)
@@ -242,9 +241,9 @@ export default class HolochainService {
             console.error("HolochainService.ensureInstallDNAforLanguage: Warning attempting to install holochain DNA when conductor did not start error free...")
         }
         const pubKey = await this.pubKeyForLanguage("main");
-        const activeApps = await this.#adminWebsocket!.listActiveApps();
-        //console.log("HolochainService: Found running apps:", activeApps);
-        if(!activeApps.includes(lang)) {
+        const activeApps = await this.#adminWebsocket!.listApps({status_filter: AppStatusFilter.Enabled});
+        // console.log("HolochainService: Found running apps:", activeApps);
+        if(!activeApps.map(value => value.installed_app_id).includes(lang)) {
 
             let installed
             // 1. install app
@@ -268,22 +267,25 @@ export default class HolochainService {
                         let callbacks = this.signalCallbacks.get(hashHex);
                         let newCallbacks = [];
                         if (callbacks) {
-                            callbacks.push([callback, lang]);
+                            callbacks.push(callback);
                             newCallbacks = callbacks;
                         } else {
-                            newCallbacks = [[callback, lang]] as [AppSignalCb, string][]
+                            newCallbacks = [callback] as AppSignalCb[]
                         }
                         this.signalCallbacks.set(hashHex, newCallbacks);
                     };
                     const did = this.#agentService.did;
-                    if(!did) {
-                        throw new Error("Agent has not been created yet and thus cannot sign a did for holochain")
+                    //Did should only ever be undefined when the system DNA's get init'd before agent create occurs
+                    //These system DNA's do not currently need EP proof's
+                    let membraneProof;
+                    if(did) {
+                        const signedDid = await this.callSigningService(did);
+                        const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(pubKey.toString("hex"), signedDid);
+                        membraneProof = Buffer.from(JSON.stringify({"ad4mDidEntanglement": didHolochainEntanglement}));
                     }
-                    const signedDid = await this.callSigningService(did);
-                    const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(pubKey.toString("hex"), signedDid);
                     //The membrane proof passing here is untested and thus most likely broken
                     await this.#adminWebsocket!.installApp({
-                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick, membrane_proof: Buffer.from(JSON.stringify({"ad4mDidEntanglement": didHolochainEntanglement}))}]
+                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick, membrane_proof: membraneProof}]
                     })
                 }
                 installed = true
@@ -304,6 +306,32 @@ export default class HolochainService {
                 await this.#adminWebsocket!.activateApp({installed_app_id: lang})
             } catch(e) {
                 console.error("HolochainService: ERROR activating app", lang, " - ", e)
+            }
+        } else {
+            for (let dna of dnas) {
+                if (callback != undefined) {
+                    console.log("HolochainService: setting holochains signal callback for language", lang);
+                    let infoResult = await this.#appWebsocket!.appInfo({installed_app_id: lang})
+                    const { cell_data } = infoResult
+                    const cell = cell_data.find(c => c.cell_nick === dna.nick)
+                    if(!cell) {
+                        const e = new Error(`No DNA with nick '${dna.nick}' found for language ${lang}`)
+                        console.error(e)
+                        return e
+                    }
+                    const hash = cell.cell_id[0];
+                    
+                    const hashHex = hash.toString("hex");
+                    let callbacks = this.signalCallbacks.get(hashHex);
+                    let newCallbacks = [];
+                    if (callbacks) {
+                        callbacks.push(callback);
+                        newCallbacks = callbacks;
+                    } else {
+                        newCallbacks = [callback] as AppSignalCb[]
+                    }
+                    this.signalCallbacks.set(hashHex, newCallbacks);
+                };
             }
         }
     }
