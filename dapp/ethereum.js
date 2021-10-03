@@ -47,7 +47,7 @@ export async function sign(signer, did) {
         name: "Ad4m DID Authentification",
         version: "2",
         //TODO: infer env from process.env and then use correct chainId; ropstein or eth
-        chainId: 3,
+        chainId: 1,
     };
 
     var message = {
