@@ -128,7 +128,8 @@ describe("Integration tests", () => {
             hcUseBootstrap: false,
             hcUseProxy: false,
             hcUseLocalProxy: false,
-            hcUseMdns: true
+            hcUseMdns: true,
+            runDappServer: false
         })
 
         core.initControllers()
@@ -190,7 +191,8 @@ describe("Integration tests", () => {
                 hcUseBootstrap: false,
                 hcUseProxy: false,
                 hcUseLocalProxy: false,
-                hcUseMdns: true
+                hcUseMdns: true,
+                runDappServer: false
           })
 
           bob.initControllers()
