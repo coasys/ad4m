@@ -136,8 +136,8 @@ export default class HolochainService {
             };
 
             //Install signing service DNA
-            const activeApps = await this.#adminWebsocket!.listActiveApps();
-            if (!activeApps.includes("signing_service")) {
+            const activeApps = await this.#adminWebsocket!.listApps({status_filter: AppStatusFilter.Enabled});
+            if (!activeApps.map(value => value.installed_app_id).includes("signing_service")) {
                 const pubKey = await this.pubKeyForLanguage("main");
 
                 const hash = await this.#adminWebsocket!.registerDna({
