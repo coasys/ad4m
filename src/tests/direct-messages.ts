@@ -11,8 +11,14 @@ export default function directMessageTests(testContext: TestContext) {
             const bob = testContext.bob!
             const { did } = await bob.agent.status()
 
-            const status = await alice.runtime.friendStatus(did!)
-            expect(status).toBe(null)
+            let hasThrown = false
+            try{
+                await alice.runtime.friendStatus(did!)
+            }catch(e) {
+                hasThrown = true
+            }
+            
+            expect(hasThrown).toBe(true)
         })    
 
         describe("with Alice and Bob being friends", () => {
@@ -29,6 +35,16 @@ export default function directMessageTests(testContext: TestContext) {
                 await alice.runtime.addFriends([didBob!])
                 await bob.runtime.addTrustedAgents([didAlice!])
                 await bob.runtime.addFriends([didAlice!])
+            })
+
+            afterAll(async () => {
+                alice = testContext.alice!
+                didAlice = (await alice.agent.status()).did
+                bob = testContext.bob!
+                didBob = (await bob.agent.status()).did
+
+                await alice.runtime.deleteTrustedAgents([didBob!])
+                await bob.runtime.deleteTrustedAgents([didAlice!])
             })
 
             it("Alice can get Bob's status", async () => {    
@@ -54,7 +70,9 @@ export default function directMessageTests(testContext: TestContext) {
                 //@ts-ignore
                 const bobsInbox = await bob.runtime.messageInbox()
                 expect(bobsInbox.length).toBe(1)
-                expect(bobsInbox[0].data).toStrictEqual(message)
+                delete bobsInbox[0].data.links[0].proof.invalid
+                delete bobsInbox[0].data.links[0].proof.valid
+                expect(bobsInbox[0].data).toEqual(message)
             })
         })
     }
