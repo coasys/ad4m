@@ -18,7 +18,6 @@ export default class AgentService {
     #wallet?: object
     #file: string
     #fileProfile: string
-    #entanglementProofs: string
     #agent?: Agent
     #agentLanguage?: Language
     #pubsub: PubSub
@@ -30,7 +29,6 @@ export default class AgentService {
     constructor(rootConfigPath: string) {
         this.#file = path.join(rootConfigPath, "agent.json")
         this.#fileProfile = path.join(rootConfigPath, "agentProfile.json")
-        this.#entanglementProofs = path.join(rootConfigPath, "entanglementProofs.json")
         this.#pubsub = PubSubInstance.get()
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
