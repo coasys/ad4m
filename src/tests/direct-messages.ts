@@ -99,6 +99,11 @@ export default function directMessageTests(testContext: TestContext) {
                 delete bobsInbox[0].data.links[0].proof.invalid
                 delete bobsInbox[0].data.links[0].proof.valid
                 expect(bobsInbox[0].data).toEqual(message)
+
+                //@ts-ignore
+                expect((await bob.runtime.messageInbox(didAlice)).length).toBe(1)
+                //@ts-ignore
+                expect((await bob.runtime.messageInbox("did:test:other")).length).toBe(0)
                 
             })
         })

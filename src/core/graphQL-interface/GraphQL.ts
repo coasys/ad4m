@@ -162,7 +162,7 @@ function createResolvers(core: PerspectivismCore) {
             runtimeMessageInbox: async (parent, args) => {
                 const { filter } = args
                 const dmLang = await core.myDirectMessageLanguage()
-                return await dmLang.directMessageAdapter!.inbox()
+                return await dmLang.directMessageAdapter!.inbox(filter)
             },
             //@ts-ignore
             runtimeMessageOutbox: async (parent, args) => {
