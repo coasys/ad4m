@@ -1,4 +1,5 @@
 import { TestContext } from './integration.test'
+import sleep from './sleep'
 
 export default function agentLanguageTests(testContext: TestContext) {
     return () => {
@@ -11,6 +12,8 @@ export default function agentLanguageTests(testContext: TestContext) {
 
             const aliceHerself = await alice.agent.me()
             const bobHimself = await bob.agent.me()
+
+            await sleep(1000)
 
             const bobSeenFromAlice = await alice.agent.byDID(didBob)
             expect(bobSeenFromAlice).toBeDefined()
