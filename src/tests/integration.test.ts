@@ -120,7 +120,11 @@ describe("Integration tests", () => {
               neighbourhoods: "neighbourhood-store",
             },
             ad4mBootstrapFixtures: {
-              languages: [],
+              languages: [{
+                address: 'QmPWD1nkf83RDdr3gGSdCfstvfFD22XPGWTtM3ZzTMtPRP',
+                meta: {"author":"did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","timestamp":"2021-10-05T14:57:27.228Z","data":{"name":"Direct Message language","address":"QmPWD1nkf83RDdr3gGSdCfstvfFD22XPGWTtM3ZzTMtPRP","description":"Template source for personal, per-agent DM languages. Holochain based.","possibleTemplateParams":["recipient_did","recipient_hc_agent_pubkey"],"sourceCodeLink":"https://github.com/perspect3vism/direct-message-language"},"proof":{"signature":"57411794c219c81917ebdbed16ecbac41b1ea777e0f39e9487326c3a4dbca65f110a05ce691b81c9545400fefe825ee900a89468e10cf338a1276f2cf88d498a","key":"#zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","valid":true}},
+                bundle: fs.readFileSync(path.join(TEST_DIR, 'languages', 'direct-message-language', 'build', 'bundle.js')).toString()
+              }],
               perspectives: [],
             },
             appBuiltInLangs: ['note-ipfs', 'direct-message-language'],
@@ -178,7 +182,11 @@ describe("Integration tests", () => {
                   neighbourhoods: "neighbourhood-store",
                 },
                 ad4mBootstrapFixtures: {
-                  languages: [],
+                  languages: [{
+                    address: 'QmPWD1nkf83RDdr3gGSdCfstvfFD22XPGWTtM3ZzTMtPRP',
+                    meta: {"author":"did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","timestamp":"2021-10-05T14:57:27.228Z","data":{"name":"Direct Message language","address":"QmPWD1nkf83RDdr3gGSdCfstvfFD22XPGWTtM3ZzTMtPRP","description":"Template source for personal, per-agent DM languages. Holochain based.","possibleTemplateParams":["recipient_did","recipient_hc_agent_pubkey"],"sourceCodeLink":"https://github.com/perspect3vism/direct-message-language"},"proof":{"signature":"57411794c219c81917ebdbed16ecbac41b1ea777e0f39e9487326c3a4dbca65f110a05ce691b81c9545400fefe825ee900a89468e10cf338a1276f2cf88d498a","key":"#zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","valid":true}},
+                    bundle: fs.readFileSync(path.join(TEST_DIR, 'languages', 'direct-message-language', 'build', 'bundle.js')).toString()
+                  }],
                   perspectives: [],
                 },
                 appBuiltInLangs: ['note-ipfs', 'direct-message-language'],
