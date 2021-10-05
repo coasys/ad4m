@@ -132,13 +132,11 @@ export async function runHolochain(resourcePath: string, conductorConfigPath: st
 
     //Log holochain process stdout to out
     hcProcess.stdout.on('data', (data) => {
-        //console.log(`${data}`);
+        console.log(`${data}`);
     });
     //Log holochain process stderr to out
     hcProcess.stderr.on('data', (data) => {
-        //const filteredLog = data.toString().split('\n').filter((l:string)=>!l.startsWith("[crates/holochain_sqlite")).join('\n').trim()
-        //if(filteredLog.length)
-        //    console.log(filteredLog);
+        console.log(`${data}`);
     });
 
     let isReady = new Promise((resolve, reject) => {
