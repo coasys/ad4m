@@ -31,20 +31,8 @@ export default function directMessageTests(testContext: TestContext) {
                 bob = testContext.bob!
                 didBob = (await bob.agent.status()).did
 
-                await alice.runtime.addTrustedAgents([didBob!])
                 await alice.runtime.addFriends([didBob!])
-                await bob.runtime.addTrustedAgents([didAlice!])
                 await bob.runtime.addFriends([didAlice!])
-            })
-
-            afterAll(async () => {
-                alice = testContext.alice!
-                didAlice = (await alice.agent.status()).did
-                bob = testContext.bob!
-                didBob = (await bob.agent.status()).did
-
-                await alice.runtime.deleteTrustedAgents([didBob!])
-                await bob.runtime.deleteTrustedAgents([didAlice!])
             })
 
             it("Alice can get Bob's status", async () => {
