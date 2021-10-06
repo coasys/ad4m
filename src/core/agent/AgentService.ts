@@ -47,6 +47,13 @@ export default class AgentService {
         return this.#readyPromise
     }
 
+    get signingKeyId(): string {
+        if (!this.#signingKeyId) {
+            throw new Error("No signing key id on AgentService")
+        }
+        return this.#signingKeyId!
+    }
+
     createSignedExpression(data: any): Expression {
         if(!this.isInitialized){
             throw new Error("Can't sign without keystore")
