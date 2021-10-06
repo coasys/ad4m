@@ -5,6 +5,16 @@ import sleep from './sleep'
 export default function directMessageTests(testContext: TestContext) {
     return () => {
 
+        let link = new LinkExpressionInput()
+        link.author = "did:test";
+        link.timestamp = new Date().toISOString();
+        link.data = new Link({
+            source: Literal.from("me").toUrl(),  
+            predicate: Literal.from("thinks").toUrl(),
+            target: Literal.from("nothing").toUrl()
+        });
+        link.proof = new ExpressionProof("sig", "key");
+        const message = new Perspective([link])
 
         it("don't work when we're not friends", async () => {
             const alice = testContext.alice!
@@ -62,18 +72,6 @@ export default function directMessageTests(testContext: TestContext) {
                 const bobMessageCallback = jest.fn()
                 //@ts-ignore
                 await bob.runtime.addMessageCallback(bobMessageCallback)
-
-                let link = new LinkExpressionInput()
-                link.author = "did:test";
-                link.timestamp = new Date().toISOString();
-                link.data = new Link({
-                    source: Literal.from("me").toUrl(),  
-                    predicate: Literal.from("thinks").toUrl(),
-                    target: Literal.from("nothing").toUrl()
-                });
-                link.proof = new ExpressionProof("sig", "key");
-                const message = new Perspective([link])
-
                 //@ts-ignore
                 await alice.runtime.friendSendMessage(didBob, message)
                 await sleep(100)
@@ -93,6 +91,21 @@ export default function directMessageTests(testContext: TestContext) {
                 //@ts-ignore
                 expect((await bob.runtime.messageInbox("did:test:other")).length).toBe(0)
                 
+            })
+
+            it("Alice finds her sent message in the outbox", async () => {
+                //@ts-ignore
+                const outbox = await alice.runtime.messageOutbox()
+                expect(outbox.length).toBe(1)
+                //@ts-ignore
+                expect(outbox[0].recipient).toBe(didBob)
+                delete outbox[0].message.data.links[0].proof.invalid
+                delete outbox[0].message.data.links[0].proof.valid
+                expect(outbox[0].message.data).toEqual(message)
+
+                //@ts-ignore
+                const filteredOutbox = await alice.runtime.messageOutbox("did:test:other")
+                expect(filteredOutbox.length).toBe(0)
             })
         })
     }
