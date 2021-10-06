@@ -1,9 +1,11 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import { PerspectiveExpression } from '@perspect3vism/ad4m';
 
 const TRUSTED_AGENTS_FILE = "trustedAgents.json"
 const KNOW_LINK_LANGUAGES_FILE = "knownLinkLanguages.json"
 const FRIENDS_FILE = "friends.json"
+const OUTBOX_FILE = "outbox.json"
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const SOCIAL_CONTEXT_OFFICIAL = "QmNnuZ5CgemAY2sskTqBbbHLvGJTqWByv4XaGLF2nrshzk"
@@ -16,6 +18,18 @@ function _add(items: string[], file: string): void {
         all = Array.from(new Set(all));
     } else {
         all = items 
+    }
+
+    fs.writeFileSync(file, JSON.stringify(all))
+}
+
+function _addObject(item: object, file: string): void {
+    let all: object[];
+    if (fs.existsSync(file)) {
+        all = Array.from(JSON.parse(fs.readFileSync(file).toString()));
+        all.push(item)
+    } else {
+        all = [item] 
     }
 
     fs.writeFileSync(file, JSON.stringify(all))
@@ -37,6 +51,19 @@ function _get(file: string): string[] {
         all.push(...Array.from<string>(JSON.parse(fs.readFileSync(file).toString())));   
     }
     return all
+}
+
+function _getObjects(file: string): object[] {
+    if (fs.existsSync(file)) {
+        return JSON.parse(fs.readFileSync(file).toString())
+    } else {
+        return []
+    }
+}
+
+export interface Message {
+    recipient: string;
+    message: PerspectiveExpression;
 }
 
 export default class RuntimeService {
@@ -62,6 +89,10 @@ export default class RuntimeService {
 
     friendsPath(): string {
         return path.join(this.#rootConfigPath, FRIENDS_FILE)
+    }
+
+    outboxPath(): string {
+        return path.join(this.#rootConfigPath, OUTBOX_FILE)
     }
 
     addTrustedAgents(agents: string[]): void {
@@ -100,5 +131,17 @@ export default class RuntimeService {
         return _get(this.friendsPath())
     }
 
+    addMessageOutbox(recipient: string, message: PerspectiveExpression) {
+        _addObject({recipient, message}, this.outboxPath())
+    }
+
+    getMessagesOutbox(filter?: string): Message[] {
+        let messages = _getObjects(this.outboxPath()) as Message[]
+        console.log("OUTBOX:", messages)
+        if(filter) {
+            messages = messages.filter(m => m.recipient === filter)
+        }
+        return messages
+    }
 
 }
