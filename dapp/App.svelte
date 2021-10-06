@@ -62,7 +62,7 @@
         sign(currentAccount, did).then(result => {
             const { data, signature, r, s, v } = result;
             //Then sign eth address with did
-            ad4mClient.agent.entanglementProofPreFlight(ethereum.selectedAddress).then(result => {
+            ad4mClient.agent.entanglementProofPreFlight(ethereum.selectedAddress, "ethereum").then(result => {
                 //Add the signed did to the proof
                 result.didSignedByDeviceKey = signature;
                 delete result["__typename"];

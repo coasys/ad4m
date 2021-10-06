@@ -13,12 +13,12 @@ export default class EntanglementProofController {
         this.#agentService = agentService
     }
 
-    signDeviceKey(deviceKey: string): EntanglementProof {
-        return new EntanglementProof(this.#agentService.did!, deviceKey, this.#agentService.signString(deviceKey))
+    signDeviceKey(deviceKey: string, deviceKeyType: string): EntanglementProof {
+        return new EntanglementProof(this.#agentService.did!, this.#agentService.signingKeyId!, deviceKeyType, deviceKey, this.#agentService.signString(deviceKey))
     }
 
     generateHolochainProof(holochainPubKey: string, signedDid: string): EntanglementProof {
-        return new EntanglementProof(this.#agentService.did!, holochainPubKey, this.#agentService.signString(holochainPubKey), signedDid)
+        return new EntanglementProof(this.#agentService.did!, this.#agentService.signingKeyId!, "holochain", holochainPubKey, this.#agentService.signString(holochainPubKey), signedDid)
     }
 
     addEntanglementProofs(proofs: EntanglementProof[]): void {
