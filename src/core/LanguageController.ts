@@ -1,6 +1,6 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput 
+    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput } from '@perspect3vism/ad4m';
 import fs from 'fs'
@@ -120,6 +120,13 @@ export default class LanguageController {
             })
         }
 
+        //@ts-ignore
+        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
+            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
+                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+            })
+        }
+
         this.#languages.set(hash, language)
         this.#languageConstructors.set(hash, create)
 
@@ -206,7 +213,7 @@ export default class LanguageController {
             console.error(e)
             fs.rmdirSync(languagePath, {recursive: true})
             //@ts-ignore
-            throw Error(e.toString())
+            throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
         }
     }
 
@@ -282,20 +289,19 @@ export default class LanguageController {
                 if (trustedAgents.find((agent) => agent === sourceLanguageMeta.author)) {
                     //Apply the template information supplied in the language to be installed to the source language and make sure that the resulting
                     //language hash is equal to the one trying to be installed. This ensures that the only thing changed between language versions is the template data
-                    const sourceLanguageTemplated = await this.languageApplyTemplateOnSource(sourceLanguageHash, languageMetaData.templateAppliedParams);
+                    const sourceLanguageTemplated = await this.languageApplyTemplateOnSource(sourceLanguageHash, JSON.parse(languageMetaData.templateAppliedParams));
                     const languageSource = await this.getLanguageSource(address);
                     if (!languageSource) {
                         throw new Error("Could not get languageSource for language")
                     }
                     //Hash the language source and ensure its the same as the templated language 
                     const languageHash = await this.ipfsHash(languageSource);
-                    //@ts-ignore
-                    if (sourceLanguageTemplated.address === languageHash) {
+                    if (sourceLanguageTemplated.meta.address === languageHash) {
                         //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                         const lang = await this.installLanguage(address, languageMeta)
                         return lang!
                     } else {
-                        throw new Error("Templating of original source language did not result in the same language hash of un-trusted language trying to be installed... aborting language install")
+                        throw new Error(`Templating of original source language did not result in the same language hash of un-trusted language trying to be installed... aborting language install. Expected hash: ${languageHash}. But got: ${sourceLanguageTemplated.meta.address}`)
                     }
                 } else {
                     throw new Error("Agent which created source language for language trying to be installed is not a trustedAgent... aborting language install")
@@ -339,8 +345,6 @@ export default class LanguageController {
             if (wasmName.length == 0 || wasmName.length > 1) {
                 throw new Error("Got incorrect number of files inside wasm path when unpacking DNA");
             }
-            const completeWasmPath = path.join(wasmPath, wasmName[0]);
-            const wasmData = fs.readFileSync(completeWasmPath);
 
             //Read the yaml file
             let dnaYaml = yaml.load(fs.readFileSync(dnaYamlPath, 'utf8'));
@@ -355,8 +359,11 @@ export default class LanguageController {
                 dnaYaml.properties[templateKey] = templateValue;
             }
 
-            let dnaYamlDump = yaml.dump(dnaYaml);
-            console.log("LanguageController.languageApplyTemplate: writing new yaml file for dna", dnaYamlDump);
+            let dnaYamlDump = yaml.dump(dnaYaml, {
+                'styles': {
+                  '!!null': 'canonical' // dump null as ~
+                }
+            });
             fs.writeFileSync(dnaYamlPath, dnaYamlDump);
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result 
@@ -413,10 +420,12 @@ export default class LanguageController {
 
     async constructLanguageLanguageInput(
         sourceLanguageLines: string[], 
-        internal: LanguageMetaInternal
+        metaInput: LanguageMetaInput
     ): Promise<LanguageLanguageInput> {
         const languageData = sourceLanguageLines.join('\n');
         const languageHash = await this.ipfsHash(languageData);
+
+        const internal: LanguageMetaInternal = metaInput as LanguageMetaInternal
 
         internal.address = languageHash
 
@@ -426,36 +435,6 @@ export default class LanguageController {
 
         return input
     }
-
-    /*
-    async languageApplyTemplate(languagePath: string, templateData: object): Promise<object> {
-        if (!fs.existsSync(languagePath)) {
-            throw new Error("Language at path: " + languagePath + " does not exist");
-        };
-        const sourceLanguage = fs.readFileSync(languagePath).toString();
-        const sourceLanguageLines = sourceLanguage!.split("\n");
-        templateData = this.orderObject(templateData);
-        const { dnaCode } = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData);
-        //Add the template data to the language data
-        if (dnaCode) {
-            //@ts-ignore
-            templateData["dna"] = dnaCode;
-        };
-        templateData = this.orderObject(templateData);
-        //console.debug("LangugeFactory.languageApplyTemplate: Templating language with template data", templateData);
-        this.applyTemplateData(sourceLanguageLines, templateData);
-
-        //@ts-ignore
-        delete templateData["dna"];
-
-        //Create the language object
-        //@ts-ignore
-        const name = templateData["name"] || null;
-        //@ts-ignore
-        const description = templateData["description"] || null;
-        return await this.constructLanguageObject(sourceLanguageLines, templateData, {name, description, sourceLanguageHash: null})
-    }
-    */
 
     async languageApplyTemplateOnSource(sourceLanguageHash: string, templateData: object): Promise<LanguageLanguageInput> {
         const sourceLanguageExpr = await this.getLanguageExpression(sourceLanguageHash);

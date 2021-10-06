@@ -45,7 +45,8 @@ export default function agentTests(testContext: TestContext) {
                 const currentAgent = await ad4mClient.agent.me();
                 expect(currentAgent.perspective).toBeDefined()
                 expect(currentAgent.perspective!.links.length).toBe(0);
-                expect(currentAgent.directMessageLanguage).toBe(null);
+                expect(currentAgent.directMessageLanguage).toBeDefined();
+                const oldDmLang = currentAgent.directMessageLanguage!
 
                 let link = new LinkExpression();
                 link.author = "did:test";
@@ -77,6 +78,8 @@ export default function agentTests(testContext: TestContext) {
                 expect(currentAgent.perspective).toBeDefined()
                 expect(getByDid.perspective!.links.length).toBe(1);
                 expect(getByDid.directMessageLanguage).toBe("newlang");
+
+                await ad4mClient.agent.updateDirectMessageLanguage(oldDmLang);
 
                 const getInvalidDid = await ad4mClient.agent.byDID("na");
                 expect(getInvalidDid).toBe(null);
