@@ -416,27 +416,22 @@ function createResolvers(core: PerspectivismCore) {
                 if(!dmLang) return false
 
                 let wasSent = false
+                let messageExpression
                 try {
                     const status = await dmLang.directMessageAdapter!.status()
                     if(status) {
-                        await dmLang.directMessageAdapter!.sendP2P(message)
+                        messageExpression = await dmLang.directMessageAdapter!.sendP2P(message)
                         wasSent = true
                     } else {
                         throw "Friends seems offline"
                     }
                 } catch(e) {
-                    await dmLang.directMessageAdapter!.sendInbox(message)
+                    messageExpression = await dmLang.directMessageAdapter!.sendInbox(message)
                     wasSent = true
                 }
 
-                if(wasSent) {
-                    // TODO: change DirectMessageAdapter in Ad4m so that 
-                    // sendP2p and sendInbox return the created expression
-                    // so that we can save exactly what was sent.
-                    // This is just a temporary fix to make the inbox work at all
-                    // without having to release a new ad4m again.
-                    const expr = core.agentService.createSignedExpression(message)
-                    core.runtimeService.addMessageOutbox(did, expr)
+                if(wasSent && messageExpression) {
+                    core.runtimeService.addMessageOutbox(did, messageExpression)
                 }
                 return wasSent
             }
