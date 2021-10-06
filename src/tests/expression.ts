@@ -39,7 +39,6 @@ export default function expressionTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!
                 let me = await ad4mClient.agent.me()
 
-                me.directMessageLanguage = "test 2"
                 const result = await ad4mClient.expression.create(me, "did")
                 expect(result).toBe(me.did)
             })

@@ -146,6 +146,30 @@ function createResolvers(core: PerspectivismCore) {
 
             runtimeHcAgentInfos: async () => {
                 return JSON.stringify(await core.holochainRequestAgentInfos())
+            },
+
+            //@ts-ignore
+            runtimeFriendStatus: async (parent, args) => {
+                const { did } = args
+                if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
+                const dmLang = await core.friendsDirectMessageLanguage(did)
+                if(dmLang)
+                    return await dmLang.directMessageAdapter!.status()
+                else
+                    return undefined
+            },
+
+            //@ts-ignore
+            runtimeMessageInbox: async (parent, args) => {
+                const { filter } = args
+                const dmLang = await core.myDirectMessageLanguage()
+                return await dmLang.directMessageAdapter!.inbox(filter)
+            },
+            //@ts-ignore
+            runtimeMessageOutbox: (parent, args) => {
+                console.log("runtimeMessageOutbox")
+                const { filter } = args
+                return core.runtimeService.getMessagesOutbox(filter)
             }
         },
         Mutation: {
@@ -174,9 +198,11 @@ function createResolvers(core: PerspectivismCore) {
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
                                     //@ts-ignore
-            runtimeAddFriends: (parent, args, context, info) => {
+            runtimeAddFriends: async (parent, args, context, info) => {
                 const { dids } = args;
                 core.runtimeService.addFriends(dids);
+                //@ts-ignore
+                await Promise.all(dids.map(did => core.friendsDirectMessageLanguage(did)))
                 return core.runtimeService.friends();
             },
             //@ts-ignore
@@ -189,6 +215,7 @@ function createResolvers(core: PerspectivismCore) {
             agentGenerate: async (parent, args, context, info) => {
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
+                await core.initializeAgentsDirectMessageLanguage()
                 return core.agentService.dump()
             },
             //@ts-ignore
@@ -371,12 +398,54 @@ function createResolvers(core: PerspectivismCore) {
 
                 await core.holochainAddAgentInfos(parsed)
                 return true
+            },
+
+            //@ts-ignore
+            runtimeSetStatus: async (parent, args) => {
+                const { status } = args
+                const dmLang = await core.myDirectMessageLanguage()
+                await dmLang.directMessageAdapter!.setStatus(status)
+                return true
+            },
+
+            //@ts-ignore
+            runtimeFriendSendMessage: async (parent, args) => {
+                const { did, message } = args
+                if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
+                const dmLang = await core.friendsDirectMessageLanguage(did)
+                if(!dmLang) return false
+
+                let wasSent = false
+                let messageExpression
+                try {
+                    const status = await dmLang.directMessageAdapter!.status()
+                    if(status) {
+                        messageExpression = await dmLang.directMessageAdapter!.sendP2P(message)
+                        wasSent = true
+                    } else {
+                        throw "Friends seems offline"
+                    }
+                } catch(e) {
+                    messageExpression = await dmLang.directMessageAdapter!.sendInbox(message)
+                    wasSent = true
+                }
+
+                if(wasSent && messageExpression) {
+                    core.runtimeService.addMessageOutbox(did, messageExpression)
+                }
+                return wasSent
             }
+
         },
 
         Subscription: {
             agentUpdated: {
                 subscribe: () => pubsub.asyncIterator(PubSub.AGENT_UPDATED),
+                //@ts-ignore
+                resolve: payload => payload
+            },
+            runtimeMessageReceived: {
+                subscribe: () => pubsub.asyncIterator(PubSub.DIRECT_MESSAGE_RECEIVED),
                 //@ts-ignore
                 resolve: payload => payload
             },

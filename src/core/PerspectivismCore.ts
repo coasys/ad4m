@@ -1,5 +1,5 @@
-import type { Address, LanguageRef, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageMetaInternal, LanguageLanguageInput, LanguageExpression  } from '@perspect3vism/ad4m'
-import { parseExprUrl, Neighbourhood } from '@perspect3vism/ad4m'
+import type { Address, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression  } from '@perspect3vism/ad4m'
+import { parseExprUrl, LanguageRef, Neighbourhood } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
 import * as Db from './db'
@@ -20,6 +20,8 @@ import fs from 'fs'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
+
+const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmYGSJUQib1H6rHumdRVDhoHgkHm3U8KzSEQFfTPgziAYe"
 
 export interface InitServicesParams {
     hcPortAdmin?: number, 
@@ -199,7 +201,7 @@ export default class PerspectivismCore {
         return this.publish(languageLanguageInput)
     }
 
-    async languagePublish(languagePath: string, languageMeta: LanguageMetaInternal): Promise<LanguageExpression> {
+    async languagePublish(languagePath: string, languageMeta: LanguageMetaInput): Promise<LanguageExpression> {
         if (!fs.existsSync(languagePath)) {
             throw new Error("Language at path: " + languagePath + " does not exist");
         };
@@ -245,6 +247,46 @@ export default class PerspectivismCore {
         //@ts-ignore
         await this.holochainAddAgentInfos(PERSPECT3VIMS_AGENT_INFO())
         console.debug("Added Perspect3vism Holochain agent infos.")
+    }
+
+    async initializeAgentsDirectMessageLanguage() {
+        await this.waitForAgent()
+        const agent = this.#agentService.agent!
+        if(agent.directMessageLanguage) return
+        console.log("Agent doesn't have direct message language set yet. Creating from template...")
+
+        const templateParams = {
+            recipient_did: this.#agentService.agent?.did,
+            recipient_hc_agent_pubkey: (await this.#holochain?.pubKeyForAllLanguages())!.toString('hex')
+        }
+        console.debug("Now creating clone with parameters:", templateParams)
+        const createdDmLang = await this.languageApplyTemplateAndPublish(DM_LANGUAGE_TEMPLATE_ADDRESS, templateParams)
+        console.debug("DM Language cloned...")
+        // Install language by calling languageByRef
+        // TODO: extract language installing code into its own function
+        await this.#languageController?.languageByRef(createdDmLang)
+        console.debug("DM Language installed...")
+        agent.directMessageLanguage = createdDmLang.address
+        await this.#agentService.updateAgent(agent)
+        console.debug("DM Language published...")
+        console.log("Agent's direct message language successfully cloned, installed and published!")
+    }
+
+    async friendsDirectMessageLanguage(did: string): Promise<Language|null> {
+        const expression = await this.#languageController!.getAgentLanguage().expressionAdapter?.get(did)! as AgentExpression
+        //console.log("AGENT EXPRESSION:", expression)
+        if(!expression) return null
+        const dmLang = expression.data.directMessageLanguage
+        //console.log("DM LANG", dmLang)
+        if(dmLang)
+            return await this.#languageController!.languageByRef(new LanguageRef(dmLang))
+        else
+            return null
+    }
+
+    async myDirectMessageLanguage(): Promise<Language> {
+        const dmLang = this.#agentService.agent!.directMessageLanguage!
+        return await this.#languageController!.languageByRef(new LanguageRef(dmLang))
     }
 }
 
