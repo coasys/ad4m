@@ -71,6 +71,13 @@ export default class PerspectivismCore {
         return this.#runtimeService
     }
 
+    get signatureService(): Signatures {
+        if (!this.#signatures) {
+            throw Error("No signature service")
+        }
+        return this.#signatures
+    }
+
     get perspectivesController(): PerspectivesController {
         if (!this.#perspectivesController) {
             throw Error("No perspectiveController")

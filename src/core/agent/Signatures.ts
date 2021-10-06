@@ -13,6 +13,36 @@ export default class Signatures {
         this.#didResolver = didResolver
     }
 
+    async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
+        // @ts-ignore
+        const { didDocument } = await this.#didResolver.resolve(did)
+        if(!didDocument) {
+            console.debug("DID document not found for", did)
+            return false
+        }
+
+        const availableKeys = didDocument.publicKey ? didDocument.publicKey : didDocument.verificationMethod
+        //@ts-ignore
+        const key = availableKeys.find(k => k.id === didSigningKeyId)
+        if(!key) {
+            console.debug("Key not found in DID document", didSigningKeyId, didDocument)
+            return false
+        }
+
+        let pubKey: Uint8Array | undefined
+        if(key.publicKeyHex)
+            pubKey = Uint8Array.from(Buffer.from(key.publicKeyHex, "hex"))
+        if(key.publicKeyBase58)
+            pubKey = Uint8Array.from(bs58.decode(key.publicKeyBase58))
+        const sigBytes = Uint8Array.from(Buffer.from(signedData, "hex"))
+        const message = Signatures.buildMessageRaw(data)
+
+        if (!pubKey) {
+            throw Error("Could not find publicKeyHex or publicKeyBase58 in did document")
+        }
+        return secp256k1.ecdsaVerify(sigBytes, message, pubKey)
+    }
+
     async verify(expr: Expression): Promise<boolean> {
         // @ts-ignore
         const { didDocument } = await this.#didResolver.resolve(expr.author)
@@ -20,7 +50,6 @@ export default class Signatures {
             console.debug("DID document not found for", expr.author)
             return false
         }
-
 
         const availableKeys = didDocument.publicKey ? didDocument.publicKey : didDocument.verificationMethod
         //@ts-ignore

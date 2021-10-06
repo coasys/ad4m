@@ -147,6 +147,11 @@ function createResolvers(core: PerspectivismCore) {
             },
             runtimeHcAgentInfos: async () => {
                 return JSON.stringify(await core.holochainRequestAgentInfos())
+            },
+            //@ts-ignore
+            runtimeVerifyStringSignedByDid: async (parent, args, context, info) => {
+                const { did, didSigningKeyId, data, signedData } = args;
+                return await core.signatureService.verifyStringSignedByDid(did, didSigningKeyId, data, signedData)
             }
         },
         Mutation: {
@@ -164,8 +169,8 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentEntanglementProofPreFlight: (parent, args, context, info) => {
-                const { deviceKey } = args;
-                return core.entanglementProofController.signDeviceKey(deviceKey);
+                const { deviceKey, deviceKeyType } = args;
+                return core.entanglementProofController.signDeviceKey(deviceKey, deviceKeyType);
             },
             //@ts-ignore
             addTrustedAgents: (parent, args, context, info) => {
