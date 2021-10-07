@@ -83,7 +83,7 @@
   },
   "dependencies": {
     "@holochain/conductor-api": "0.2.0",
-    "@perspect3vism/ad4m": "file:../ad4m",
+    "@perspect3vism/ad4m": "0.1.20",
     "@peculiar/webcrypto": "^1.1.7",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
