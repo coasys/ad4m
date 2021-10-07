@@ -21,7 +21,7 @@ import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
-const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmYGSJUQib1H6rHumdRVDhoHgkHm3U8KzSEQFfTPgziAYe"
+const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmR1dV5KuAQtYG98qqmYEvHXfxJZ3jKyjf7SFMriCMfHVQ"
 
 export interface InitServicesParams {
     hcPortAdmin?: number, 
