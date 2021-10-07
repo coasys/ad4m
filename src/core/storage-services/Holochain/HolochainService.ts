@@ -10,11 +10,13 @@ import type { ChildProcess } from 'child_process'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
+import fetch from "node-fetch";
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
 const bootstrapUrl = "https://bootstrap-staging.holo.host"
 const kitsuneProxy = "kitsune-proxy://SYVd4CF3BdJ4DS7KwLLgeU3_DbHoZ34Y-qroZ79DOs8/kitsune-quic/h/165.22.32.11/p/5779/--"
+const signingServiceVersion = "0.0.1";
 
 export interface HolochainConfiguration {
     conductorPath: string, 
@@ -148,9 +150,17 @@ export default class HolochainService {
             if (!activeApps.map(value => value.installed_app_id).includes("signing_service")) {
                 const pubKey = await this.pubKeyForLanguage("main");
 
+                const dest = path.join(this.#dataPath, "signing.dna");
+                const res = await fetch(`https://github.com/perspect3vism/signing-service/releases/download/${signingServiceVersion}/signing.dna`);
+                const fileStream = fs.createWriteStream(dest);
+                await new Promise((resolve, reject) => {
+                    res.body.pipe(fileStream);
+                    res.body.on("error", reject);
+                    fileStream.on("finish", resolve);
+                });
+
                 const hash = await this.#adminWebsocket!.registerDna({
-                    //Pretty sure this is not gonna work in production
-                    path: path.join(__dirname, "../../../../public/signing.dna")
+                    path: dest
                 })
 
                 const installedApp = await this.#adminWebsocket!.installApp({
