@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, AppStatusFilter } from '@holochain/conductor-api'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, AppStatusFilter, CellId } from '@holochain/conductor-api'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -10,7 +10,6 @@ import type { ChildProcess } from 'child_process'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
-import { CellId } from '@holochain/conductor-api'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
@@ -43,7 +42,7 @@ export default class HolochainService {
     #conductorPath: string
     #didResolveError: boolean
     #conductorConfigPath: string
-    signalCallbacks: Map<string, AppSignalCb[]>;
+    #signalCallbacks: [CellId, AppSignalCb, string][]
     #agentService: AgentService
     #entanglementProofController?: EntanglementProofController
     #signingService?: CellId
@@ -69,7 +68,7 @@ export default class HolochainService {
         this.#dataPath = dataPath
         this.#db = low(new FileSync(path.join(dataPath, 'holochain-service.json')))
         this.#db.defaults({pubKeys: []}).write()
-        this.signalCallbacks = new Map();
+        this.#signalCallbacks = [];
 
         const holochainAppPort = appPort ? appPort : 1337;
         const holochainAdminPort = adminPort ? adminPort : 2000;
@@ -101,15 +100,24 @@ export default class HolochainService {
     }
 
     handleCallback(signal: AppSignal) {
-        // console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
-        if (this.signalCallbacks.size != 0) {
-            let callbacks = this.signalCallbacks.get(signal.data.cellId[0].toString("hex"))
-            if (callbacks && callbacks! != undefined) {
-                //TODO: test that these multiple callbacks work correctly
-                for (const callback of callbacks) {
-                    callback(signal)
-                }
-            };
+        console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks", signal);
+        //console.debug("registered callbacks:", this.#signalCallbacks)
+        if (this.#signalCallbacks.length != 0) {
+            const signalDna = signal.data.cellId[0].toString('hex')
+            const signalPubkey = signal.data.cellId[1].toString('hex')
+            //console.debug("Looking for:", signalDna, signalPubkey)
+            let callbacks = this.#signalCallbacks.filter(e => {
+                const dna = e[0][0].toString('hex')
+                const pubkey = e[0][1].toString('hex')
+                //console.debug("Checking:", dna, pubkey)
+                return ( dna === signalDna ) && (pubkey === signalPubkey)
+            })
+            console.debug("found callbacks:", callbacks)
+            callbacks.forEach(cb => {
+                if (cb && cb![1] != undefined) {
+                    cb![1](signal);
+                };
+            })
         };
     }
 
@@ -221,7 +229,23 @@ export default class HolochainService {
         }
     }
 
+    async pubKeyForAllLanguages(): Promise<AgentPubKey> {
+        const alreadyExisting = this.#db.get('pubKeys').find({lang: "global"}).value()
+        if(alreadyExisting) {
+            const pubKey = Buffer.from(alreadyExisting.pubKey)
+            console.debug("Found existing pubKey", pubKey.toString("base64"), "for all languages")
+            return pubKey
+        } else {
+            const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
+            this.#db.get('pubKeys').push({lang: "global", pubKey}).write()
+            console.debug("Created new pubKey", pubKey.toString("base64"), "for all languages")
+            return pubKey
+        }
+    }
+
     async pubKeyForLanguage(lang: string): Promise<AgentPubKey> {
+        return this.pubKeyForAllLanguages()
+        
         const alreadyExisting = this.#db.get('pubKeys').find({lang}).value()
         if(alreadyExisting) {
             const pubKey = Buffer.from(alreadyExisting.pubKey)
@@ -261,19 +285,6 @@ export default class HolochainService {
                     const hash = await this.#adminWebsocket!.registerDna({
                         path: p
                     })
-                    if (callback != undefined) {
-                        console.log("HolochainService: setting holochains signal callback for language", lang);
-                        const hashHex = hash.toString("hex");
-                        let callbacks = this.signalCallbacks.get(hashHex);
-                        let newCallbacks = [];
-                        if (callbacks) {
-                            callbacks.push(callback);
-                            newCallbacks = callbacks;
-                        } else {
-                            newCallbacks = [callback] as AppSignalCb[]
-                        }
-                        this.signalCallbacks.set(hashHex, newCallbacks);
-                    };
                     const did = this.#agentService.did;
                     //Did should only ever be undefined when the system DNA's get init'd before agent create occurs
                     //These system DNA's do not currently need EP proof's
@@ -307,33 +318,13 @@ export default class HolochainService {
             } catch(e) {
                 console.error("HolochainService: ERROR activating app", lang, " - ", e)
             }
-        } else {
-            for (let dna of dnas) {
-                if (callback != undefined) {
-                    console.log("HolochainService: setting holochains signal callback for language", lang);
-                    let infoResult = await this.#appWebsocket!.appInfo({installed_app_id: lang})
-                    const { cell_data } = infoResult
-                    const cell = cell_data.find(c => c.cell_nick === dna.nick)
-                    if(!cell) {
-                        const e = new Error(`No DNA with nick '${dna.nick}' found for language ${lang}`)
-                        console.error(e)
-                        return e
-                    }
-                    const hash = cell.cell_id[0];
-                    
-                    const hashHex = hash.toString("hex");
-                    let callbacks = this.signalCallbacks.get(hashHex);
-                    let newCallbacks = [];
-                    if (callbacks) {
-                        callbacks.push(callback);
-                        newCallbacks = callbacks;
-                    } else {
-                        newCallbacks = [callback] as AppSignalCb[]
-                    }
-                    this.signalCallbacks.set(hashHex, newCallbacks);
-                };
-            }
         }
+
+        if (callback != undefined) {
+            console.log("HolochainService: setting holochains signal callback for language", lang);
+            const { cell_data } = await this.#appWebsocket!.appInfo({installed_app_id: lang})
+            this.#signalCallbacks.push([cell_data[0].cell_id, callback, lang]);
+        };
     }
 
     getDelegateForLanguage(languageHash: string) {

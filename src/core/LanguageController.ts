@@ -1,6 +1,6 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput 
+    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput } from '@perspect3vism/ad4m';
 import fs from 'fs'
@@ -120,6 +120,13 @@ export default class LanguageController {
             })
         }
 
+        //@ts-ignore
+        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
+            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
+                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+            })
+        }
+
         this.#languages.set(hash, language)
         this.#languageConstructors.set(hash, create)
 
@@ -206,7 +213,7 @@ export default class LanguageController {
             console.error(e)
             fs.rmdirSync(languagePath, {recursive: true})
             //@ts-ignore
-            throw Error(e.toString())
+            throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
         }
     }
 
@@ -413,10 +420,12 @@ export default class LanguageController {
 
     async constructLanguageLanguageInput(
         sourceLanguageLines: string[], 
-        internal: LanguageMetaInternal
+        metaInput: LanguageMetaInput
     ): Promise<LanguageLanguageInput> {
         const languageData = sourceLanguageLines.join('\n');
         const languageHash = await this.ipfsHash(languageData);
+
+        const internal: LanguageMetaInternal = metaInput as LanguageMetaInternal
 
         internal.address = languageHash
 
