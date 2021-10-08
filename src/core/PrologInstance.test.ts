@@ -18,12 +18,11 @@ describe('PrologInstance', () => {
     it('runs Prolog', async () => {
         const instance = new PrologInstance()
         await instance.initialized()
-        const program = `
-link(1,2).
-link(2,3).
-link(A,B):-link(A,X),link(X,B).
-`
-        instance.setProgram(program)
+        instance.consult(`
+        link(1,2).
+        link(2,3).
+        link(A,B):-link(A,X),link(X,B).
+        `)
         expect(instance.getStdout()).toEqual('true.')
     })
 

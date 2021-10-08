@@ -135,7 +135,7 @@ export default class PrologInstance {
         return result
     };
 
-    setProgram(program: string) {
+    consult(program: string) {
         //@ts-ignore
         this.#FS.writeFile('/file.pl', program);
         this.query("consult('/file.pl').");
