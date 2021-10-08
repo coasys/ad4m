@@ -73,6 +73,7 @@
     "@transmute/did-wallet": "lucksus/did-wallet",
     "@types/json-stable-stringify": "^1.0.33",
     "apollo-server": "^2.18.2",
+    "eval": "^0.1.6",
     "graphql": "^15.3.0",
     "ipfs": "^0.54.4",
     "js-yaml": "^4.0.0",
