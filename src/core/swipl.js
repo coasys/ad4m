@@ -1,8 +1,3 @@
-if(typeof Module !== "undefined") {
-    console.log("Found Module:", Module)
-} else {
-    console.log("No Module found!")
-}
 var Module = typeof Module !== "undefined" ? Module : {};
 if (!Module.expectedDataFileDownloads) {
     Module.expectedDataFileDownloads = 0;
@@ -6873,7 +6868,6 @@ dependenciesFulfilled = function runCaller() {
     if (!Module["calledRun"]) dependenciesFulfilled = runCaller;
 };
 function run(args) {
-    console.log("RUN!")
     args = args || Module["arguments"];
     if (runDependencies > 0) {
         return;
