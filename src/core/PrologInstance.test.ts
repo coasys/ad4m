@@ -24,6 +24,7 @@ link(2,3).
 link(A,B):-link(A,X),link(X,B).
 `
         instance.setProgram(program)
+        expect(instance.getStdout()).toEqual('true.')
     })
 
 })

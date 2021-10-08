@@ -1,6 +1,8 @@
 import fs from "fs-extra";
 //@ts-ignore
 import _eval from 'eval'
+//@ts-ignore
+import { UTF8ArrayToString } from './utf8ArrayToString'
 interface EmscriptenModule {
     cwrap(fn_name: string, param: string, params: string[]): void;
     allocate(a: number[], b: string, c: string): void;
@@ -24,6 +26,7 @@ export default class PrologInstance {
     #bindings: any
     #stdin = ''
     #stdinPosition = 0
+    #stdout: number[] = []
     #FS: any
     #initialzed: Promise<void>
 
@@ -35,9 +38,9 @@ export default class PrologInstance {
             resolveInitialized = resolve
         })
         let that = this
-        const readStdin = () => {
-            return that.readStdin()
-        }
+        const readStdin = () => that.readStdin()
+        //@ts-ignore
+        const writeStdout = (char) => that.writeStdout(char)
         var Module = {
             ENVIRONMENT: "NODE",
             noInitialRun: true,
@@ -51,19 +54,16 @@ export default class PrologInstance {
             print: (x:any) => console.log("print:", x),
             printErr: (x:any) => console.log("printErr:", x),
             //@ts-ignore
-            preRun: [() => Module.FS.init(readStdin, console.log)], // sets up stdin
+            preRun: [() => Module.FS.init(readStdin, writeStdout)], // sets up stdin
             onRuntimeInitialized: () => {
-                console.log("onRuntimeInitialized 1")
                 // Bind foreign functions to JavaScript.
                 //@ts-ignore
                 this.#bindings = createBindings(Module);
                 // Initialise SWI-Prolog.
                 //@ts-ignore
                 this.initialise(Module);
-                console.log("onRuntimeInitialized 2")
                 //@ts-ignore
                 resolveInitialized()
-                console.log("onRuntimeInitialized 3")
             }
         }
         const swiplInitCode = fs.readFileSync('./swipl.js').toString()
@@ -110,6 +110,16 @@ export default class PrologInstance {
         }
     };
 
+    writeStdout(char: number) {
+        this.#stdout.push(char)
+    }
+
+    getStdout(): string {
+        const s = UTF8ArrayToString(this.#stdout, 0).trim()
+        this.#stdout = []
+        return s
+    }
+
     query(input: string) {
         this.setStdin(input);
         // This will execute one iteration of toplevel.
@@ -117,25 +127,18 @@ export default class PrologInstance {
     }
 
     call(query: string) {
-        console.log("call 1")
         const ref = this.#bindings.PL_new_term_ref();
         if (!this.#bindings.PL_chars_to_term(query, ref)) {
             throw new Error('Query has a syntax error: ' + query);
         }
-        console.log("call 2")
         const result = !!this.#bindings.PL_call(ref, 0);
-        console.log("result", result)
-        console.log("call 3")
         return result
     };
 
     setProgram(program: string) {
-        console.log("setProgram 1")
         //@ts-ignore
         this.#FS.writeFile('/file.pl', program);
-        console.log("setProgram 2")
         this.query("consult('/file.pl').");
-        console.log("setProgram 3")
     }
 
     writeFile(file: string, content: string) {
