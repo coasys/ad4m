@@ -124,6 +124,7 @@ export default class PrologInstance {
         this.setStdin(input);
         // This will execute one iteration of toplevel.
         this.call('break'); // see call.js
+        return this.getStdout()
     }
 
     call(query: string) {
@@ -138,7 +139,7 @@ export default class PrologInstance {
     consult(program: string) {
         //@ts-ignore
         this.#FS.writeFile('/file.pl', program);
-        this.query("consult('/file.pl').");
+        return this.query("consult('/file.pl').");
     }
 
     writeFile(file: string, content: string) {

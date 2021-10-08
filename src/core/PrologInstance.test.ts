@@ -18,12 +18,16 @@ describe('PrologInstance', () => {
     it('runs Prolog', async () => {
         const instance = new PrologInstance()
         await instance.initialized()
-        instance.consult(`
+        const consultResult = instance.consult(`
         link(1,2).
         link(2,3).
         link(A,B):-link(A,X),link(X,B).
         `)
-        expect(instance.getStdout()).toEqual('true.')
+        expect(consultResult).toEqual('true.')
+
+        expect(instance.query('link(1,2).')).toEqual('true')
+        expect(instance.query('link(1,3).')).toEqual('true')
+        //expect(instance.query('link(1,4).')).toEqual('false')
     })
 
 })
