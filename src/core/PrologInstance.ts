@@ -34,21 +34,24 @@ export default class PrologInstance {
         this.#initialzed = new Promise(resolve=>{
             resolveInitialized = resolve
         })
-        const readStdin = this.readStdin
+        let that = this
+        const readStdin = () => {
+            return that.readStdin()
+        }
         var Module = {
             ENVIRONMENT: "NODE",
             noInitialRun: true,
             locateFile: (url:string) => `./swipl-wasm/dist/${url}`,
             getPreloadedPackage: (file: string, size: number) => {
-                console.debug("getPreloadedPackage", file)
+                //console.debug("getPreloadedPackage", file)
                 const read = fs.readFileSync(file)
-                console.debug(read)
+                //console.debug(read)
                 return read
             },
             print: (x:any) => console.log("print:", x),
             printErr: (x:any) => console.log("printErr:", x),
             //@ts-ignore
-            preRun: [() => Module.FS.init(readStdin)], // sets up stdin
+            preRun: [() => Module.FS.init(readStdin, console.log)], // sets up stdin
             onRuntimeInitialized: () => {
                 console.log("onRuntimeInitialized 1")
                 // Bind foreign functions to JavaScript.
@@ -97,7 +100,7 @@ export default class PrologInstance {
         this.#stdinPosition = 0;
     }
 
-    readStdin() {
+    readStdin(): number|null {
         if (this.#stdinPosition >= this.#stdin.length) {
             return null;
         } else {
@@ -133,5 +136,13 @@ export default class PrologInstance {
         console.log("setProgram 2")
         this.query("consult('/file.pl').");
         console.log("setProgram 3")
+    }
+
+    writeFile(file: string, content: string) {
+        this.#FS.writeFile(`/${file}`, content);
+    }
+
+    readFile(file: string): string {
+        return this.#FS.readFile(file, {encoding: 'utf8'})
     }
 }
