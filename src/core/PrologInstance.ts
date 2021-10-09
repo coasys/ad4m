@@ -18,7 +18,8 @@ const createBindings = (module: EmscriptenModule) => {
         PL_initialise: module.cwrap('PL_initialise', 'number', ['number', 'number']),
         PL_new_term_ref: module.cwrap('PL_new_term_ref', 'number', []),
         PL_chars_to_term: module.cwrap('PL_chars_to_term', 'number', ['string', 'number']),
-        PL_call: module.cwrap('PL_call', 'number', ['number', 'number'])
+        PL_call: module.cwrap('PL_call', 'number', ['number', 'number']),
+        PL_next_solution: module.cwrap('PL_next_solution', 'number', [])
     };
 };
 
@@ -123,8 +124,18 @@ export default class PrologInstance {
     query(input: string) {
         this.setStdin(input);
         // This will execute one iteration of toplevel.
-        this.call('break'); // see call.js
-        return this.getStdout()
+        const callResult = this.call('break'); // see call.js
+        console.log(callResult)
+        let lines = [this.getStdout()]
+        while(!lines[lines.length-1].endsWith(".")) {
+            console.log(lines[lines.length-1])
+            this.#bindings.PL_next_solution()
+            this.setStdin(" ");
+            this.call('break');
+        }
+
+        console.log(input, "=>", lines)
+        return lines.join('\n')
     }
 
     call(query: string) {

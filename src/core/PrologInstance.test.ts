@@ -34,4 +34,12 @@ describe('PrologInstance', () => {
         expect(instance.query('link(1,4).')).toEqual('false.')
     })
 
+    it('can destructure query results', async () => {
+        const instance = new PrologInstance()
+        await instance.initialized()
+        expect(instance.consult(linksProgram)).toEqual('true.')
+
+        
+    })
+
 })
