@@ -69,7 +69,7 @@ export default class Perspective {
         }
 
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => resolve([]), 100000)
+            setTimeout(() => resolve([]), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);

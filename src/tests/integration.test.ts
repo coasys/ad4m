@@ -100,7 +100,7 @@ let testContext: TestContext = new TestContext()
 
 describe("Integration tests", () => {
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
-    const ipfsRepoPath = path.join(appDataPath, 'agents', 'alice', '.jsipfs')
+    const ipfsRepoPath = path.join(appDataPath)
 
     beforeAll(async () => {    
         if(!fs.existsSync(TEST_DIR)) {
@@ -166,7 +166,7 @@ describe("Integration tests", () => {
         let bob: PerspectivismCore | null = null
         beforeAll(async () => {
             const appDataPath = path.join(TEST_DIR, 'agents', 'bob')
-            const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
+            const ipfsRepoPath = path.join(appDataPath)
             if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
               fs.mkdirSync(path.join(TEST_DIR, 'agents'))
             if(!fs.existsSync(appDataPath))
