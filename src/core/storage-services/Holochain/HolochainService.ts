@@ -94,7 +94,7 @@ export default class HolochainService {
             const config = yaml.load(fs.readFileSync(conductorConfigPath, 'utf-8')) as any;
             const adminPort = config.admin_interfaces[0].driver.port as number;
 
-            if (adminPort !== this.#appPort) {
+            if (adminPort !== this.#adminPort) {
                 console.debug(`HC PORT: ${this.#adminPort} supplied is different than the PORT: ${adminPort} set in config, using the config port`);
                 this.#adminPort = adminPort;
             }
