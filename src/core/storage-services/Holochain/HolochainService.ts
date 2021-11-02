@@ -95,7 +95,7 @@ export default class HolochainService {
             const adminPort = config.admin_interfaces[0].driver.port as number;
 
             if (adminPort !== this.#appPort) {
-                console.debug('HC port supplied is different than the port set in config using the config port');
+                console.debug(`HC PORT: ${this.#adminPort} supplied is different than the PORT: ${adminPort} set in config, using the config port`);
                 this.#adminPort = adminPort;
             }
         }
