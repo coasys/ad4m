@@ -122,6 +122,12 @@ function createResolvers(core: PerspectivismCore) {
                 return await perspective.getLinks(query)
             },
             //@ts-ignore
+            perspectiveQueryProlog: async (parent, args, context, info) => {
+                const { uuid, query } = args
+                const perspective = core.perspectivesController.perspective(uuid)
+                return JSON.stringify(await perspective.prologQuery(query))
+            },
+            //@ts-ignore
             perspectiveSnapshot: async (parent, args, context, info) => {
                 return await core.perspectivesController.perspectiveSnapshot(args.uuid)
             },
