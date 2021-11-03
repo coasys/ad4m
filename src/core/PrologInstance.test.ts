@@ -11,35 +11,32 @@ link(A,B):-
 describe('PrologInstance', () => {
     it('smoke test', async () => {
         const instance = new PrologInstance()
-        await instance.initialized()
-    })
-
-    it('has working virtual filesystem', async () => {
-        const instance = new PrologInstance()
-        await instance.initialized()
-        const content = "some test string"
-        instance.writeFile('wurst', content)
-        const read = instance.readFile('wurst')
-        expect(read).toEqual(content)
     })
 
     it('runs Prolog', async () => {
         const instance = new PrologInstance()
-        await instance.initialized()
 
-        expect(instance.consult(linksProgram)).toEqual('true.')
+        await instance.consult(linksProgram)
 
-        expect(instance.query('link(1,2).')).toEqual('true')
-        expect(instance.query('link(1,3).')).toEqual('true')
-        expect(instance.query('link(1,4).')).toEqual('false.')
+        expect(await instance.query('link(1,2).')).toEqual(true)
+        expect(await instance.query('link(1,3).')).toEqual(true)
+        expect(await instance.query('link(1,4).')).toEqual(false)
     })
 
     it('can destructure query results', async () => {
         const instance = new PrologInstance()
-        await instance.initialized()
-        expect(instance.consult(linksProgram)).toEqual('true.')
-
+        await instance.consult(linksProgram)
         
+        expect(await instance.query('link(1,X).')).toEqual([
+            {'X': 2}, 
+            {'X': 3}
+        ])
+
+        expect(await instance.query('link(Y,3).')).toEqual([
+            {'Y': 2}, 
+            {'Y': 1}
+        ])
+        expect(await instance.query('link(Y,4).')).toEqual(false)
     })
 
 })
