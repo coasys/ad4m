@@ -21,7 +21,7 @@ import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
-const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmYGSJUQib1H6rHumdRVDhoHgkHm3U8KzSEQFfTPgziAYe"
+const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmR1dV5KuAQtYG98qqmYEvHXfxJZ3jKyjf7SFMriCMfHVQ"
 
 export interface InitServicesParams {
     hcPortAdmin?: number, 
@@ -47,6 +47,9 @@ export default class PerspectivismCore {
     #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
 
+    #languagesReady: Promise<void>
+    #resolveLanguagesReady: (value: void) => void
+
     constructor(config: Config.CoreConfig) {
         Config.init(config)
 
@@ -59,6 +62,11 @@ export default class PerspectivismCore {
         this.#db = Db.init(Config.dataPath)
         this.#didResolver = DIDs.init(Config.dataPath)
         this.#signatures = new Signatures(this.#didResolver)
+        const that = this
+        this.#resolveLanguagesReady = () => {}
+        this.#languagesReady = new Promise(resolve => {
+            that.#resolveLanguagesReady = resolve
+        })
     }
 
     get agentService(): AgentService {
@@ -123,6 +131,10 @@ export default class PerspectivismCore {
     async waitForAgent(): Promise<void> {
         return this.#agentService.ready
     }
+
+    async waitForLanguages(): Promise<void> {
+        return this.#languagesReady
+    }
     
     languageSignal(signal: any) {
         //@ts-ignore
@@ -150,6 +162,7 @@ export default class PerspectivismCore {
 
     async initLanguages() {
         await this.#languageController!.loadLanguages()
+        this.#resolveLanguagesReady()
     }
 
     initMockLanguages(hashes: string[], languages: Language[]) {
@@ -250,7 +263,7 @@ export default class PerspectivismCore {
     }
 
     async initializeAgentsDirectMessageLanguage() {
-        await this.waitForAgent()
+        await this.waitForLanguages()
         const agent = this.#agentService.agent!
         if(agent.directMessageLanguage) return
         console.log("Agent doesn't have direct message language set yet. Creating from template...")

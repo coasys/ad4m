@@ -1,4 +1,4 @@
-import IPFS from "ipfs";
+import * as IPFS from 'ipfs-core'
 
 const _appendBuffer = (buffer1: Uint8Array, buffer2: Uint8Array) => {
     const tmp = new Uint8Array(buffer1.byteLength + buffer2.byteLength);
