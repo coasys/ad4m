@@ -54,7 +54,14 @@ export default function perspectiveTests(testContext: TestContext) {
                 let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date()}));
                 expect(queryLinks.length).toEqual(4);
 
-                //Test can get all links but first by querying from second timestamp
+                //Test can get links limited
+                let queryLinksLimited =await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date(), limit: 3}));
+                expect(queryLinksLimited.length).toEqual(3);
+                expect(queryLinksLimited[0].data.target).toEqual("lang://test-target2")
+                expect(queryLinksLimited[1].data.target).toEqual("lang://test-target3")
+                expect(queryLinksLimited[2].data.target).toEqual("lang://test-target4")
+
+                //Test can get only the first link
                 let queryLinksFirst = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({
                     source: "lang://test", fromDate: new Date(addLink.timestamp), 
                     untilDate: new Date(new Date(addLink2.timestamp).getTime() - 1)
