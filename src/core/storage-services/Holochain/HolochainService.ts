@@ -8,6 +8,7 @@ import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, 
 import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
 import { RequestAgentInfoResponse } from '@holochain/conductor-api'
+import yaml from 'js-yaml';
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
@@ -89,7 +90,15 @@ export default class HolochainService {
                 useLocalProxy,
                 useMdns
             } as ConductorConfiguration);
-        };
+        } else {
+            const config = yaml.load(fs.readFileSync(conductorConfigPath, 'utf-8')) as any;
+            const adminPort = config.admin_interfaces[0].driver.port as number;
+
+            if (adminPort !== this.#adminPort) {
+                console.debug(`HC PORT: ${this.#adminPort} supplied is different than the PORT: ${adminPort} set in config, using the config port`);
+                this.#adminPort = adminPort;
+            }
+        }
     }
 
     handleCallback(signal: AppSignal) {
