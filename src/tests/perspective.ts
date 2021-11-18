@@ -55,7 +55,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(queryLinks.length).toEqual(4);
 
                 //Test can get links limited
-                let queryLinksLimited =await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date(), limit: 3}));
+                let queryLinksLimited =await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date(), limit: 3}));
                 expect(queryLinksLimited.length).toEqual(3);
                 expect(queryLinksLimited[0].data.target).toEqual("lang://test-target2")
                 expect(queryLinksLimited[1].data.target).toEqual("lang://test-target3")
