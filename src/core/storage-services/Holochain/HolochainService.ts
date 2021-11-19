@@ -242,7 +242,7 @@ export default class HolochainService {
                         path: p
                     })
                     await this.#adminWebsocket!.installApp({
-                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick}]
+                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, role_id: dna.nick}]
                     })
                 }
                 installed = true
@@ -309,7 +309,7 @@ export default class HolochainService {
             return null
         }
 
-        const cell = cell_data.find(c => c.cell_nick === dnaNick)
+        const cell = cell_data.find(c => c.role_id === dnaNick)
         if(!cell) {
             const e = new Error(`No DNA with nick '${dnaNick}' found for language ${installed_app_id}`)
             console.error(e)

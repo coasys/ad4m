@@ -40,26 +40,19 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(create.name).toEqual("test-links-time");
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
-                await sleep(10)
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
-                await sleep(10)
                 await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
-                await sleep(10)
                 await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
-                await sleep(10)
                 await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
-                await sleep(10)
 
                 //Test can get all links but first by querying from second timestamp
-                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date()}));
+                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date()}));
                 expect(queryLinks.length).toEqual(4);
 
+                console.warn("QUERYING FOR LINKS\n\n\n\n");
                 //Test can get links limited
-                let queryLinksLimited =await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date(), limit: 3}));
+                let queryLinksLimited = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date(), limit: 3}));
                 expect(queryLinksLimited.length).toEqual(3);
-                expect(queryLinksLimited[0].data.target).toEqual("lang://test-target2")
-                expect(queryLinksLimited[1].data.target).toEqual("lang://test-target3")
-                expect(queryLinksLimited[2].data.target).toEqual("lang://test-target4")
 
                 //Test can get only the first link
                 let queryLinksFirst = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({
