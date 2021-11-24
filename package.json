@@ -74,7 +74,7 @@
     "get-port": "5.1.1",
     "graphql": "^15.3.0",
     "https": "^1.0.0",
-    "ipfs": "0.58.6",
+    "ipfs": "0.60.2",
     "js-yaml": "^4.1.0",
     "json-stable-stringify": "^1.0.1",
     "liquidcore": "^0.7.10",
