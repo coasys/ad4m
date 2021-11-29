@@ -72,7 +72,6 @@
     "@types/json-stable-stringify": "^1.0.33",
     "apollo-server": "^2.18.2",
     "get-port": "5.1.1",
-    "eval": "^0.1.6",
     "graphql": "^15.3.0",
     "https": "^1.0.0",
     "ipfs": "0.60.2",
