@@ -206,14 +206,13 @@ export default class Perspective {
             // @ts-ignore
             if(query.target) result = result.filter(l => l.data.target === query.target)
             // @ts-ignore
-
-
             if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
             //@ts-ignore
             if (query.fromDate) result = result.filter(l => new Date(l.timestamp) >= query.fromDate!)
             //@ts-ignore
             if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
             // console.debug("result", result)
+            if (query.limit) result = result.slice(0, query.limit);
             return result
         }
 
@@ -228,13 +227,16 @@ export default class Perspective {
             if (query.fromDate) result = result.filter(l => new Date(l.timestamp) >= query.fromDate!)
             //@ts-ignore
             if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
+            if (query.limit) result = result.slice(0, query.limit);
             return result
         }
 
         // console.debug("getLinks 4")
 
         //@ts-ignore
-        return this.#db.getAllLinks(this.uuid).map(e => e.link).filter(link => link.data.predicate === query.predicate)
+        let result = this.#db.getAllLinks(this.uuid).map(e => e.link).filter(link => link.data.predicate === query.predicate)
+        if (query.limit) result = result.slice(0, query.limit)
+        return result
     }
 
     async getLinks(query: LinkQuery): Promise<LinkExpression[]> {
