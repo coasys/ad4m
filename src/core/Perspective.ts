@@ -1,11 +1,11 @@
-import type { Agent, Expression, Neighbourhood, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle } from "@perspect3vism/ad4m"
+import type { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle } from "@perspect3vism/ad4m"
 import { Link, hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
-import { LinkExpression } from "@perspect3vism/ad4m";
+import PrologInstance from "./PrologInstance";
 
 export default class Perspective {
     name?: string;
@@ -62,7 +62,7 @@ export default class Perspective {
     }
 
     //@ts-ignore
-    private callLinksAdapter(functionName: string, ...args): Promise<Expression[]> {
+    private callLinksAdapter(functionName: string, ...args): Promise<LinkExpression[]> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve([])
@@ -95,7 +95,7 @@ export default class Perspective {
         //@ts-ignore
         const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link)
         const remoteLinks = await this.callLinksAdapter('getLinks')
-        const includes = (link: Expression, list: Expression[]) => {
+        const includes = (link: LinkExpression, list: LinkExpression[]) => {
             return undefined !== list.find(e =>
                 JSON.stringify(e.author) === JSON.stringify(link.author) &&
                 e.timestamp === link.timestamp &&
@@ -190,7 +190,7 @@ export default class Perspective {
         })
     }
 
-    private getLinksLocal(query: LinkQuery): Expression[] {
+    private getLinksLocal(query: LinkQuery): LinkExpression[] {
         // console.debug("getLinks 1")
         if(!query || !query.source && !query.predicate && !query.target) {
             //@ts-ignore
@@ -239,17 +239,34 @@ export default class Perspective {
         return result
     }
 
-    async getLinks(query: LinkQuery): Promise<Expression[]> {
+    async getLinks(query: LinkQuery): Promise<LinkExpression[]> {
         // console.debug("getLinks local...")
         const localLinks = await this.getLinksLocal(query)
         // console.debug("getLinks local", localLinks)
         // console.debug("getLinks remote...")
         const remoteLinks = await this.callLinksAdapter('getLinks', query)
         // console.debug("getLinks remote", remoteLinks)
-        const mergedLinks: {[key: number]: Expression} = {};
+        const mergedLinks: {[key: number]: LinkExpression} = {};
         localLinks.forEach(l => mergedLinks[hashLinkExpression(l)] = l)
         remoteLinks.forEach(l => mergedLinks[hashLinkExpression(l)] = l)
 
         return Object.values(mergedLinks)
+    }
+
+    async prologQuery(query: string): Promise<any> {
+        const allLinks = await this.getLinks(new LinkQuery({}))
+        const prolog = new PrologInstance()
+        await prolog.query("dynamic(triple/3).")
+        const triples = allLinks.map(l => `triple('${l.data.source}', '${l.data.predicate}', '${l.data.target}').`).join('\n')
+        await prolog.consult(triples)
+
+        const reachable = `
+        reachable(A,B):-triple(A,_,B).
+        reachable(A,B):-
+            triple(A,_,X),
+            reachable(X,B).`
+        await prolog.consult(reachable)
+
+        return await prolog.query(query)
     }
 }

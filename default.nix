@@ -11,5 +11,6 @@ in nixpkgs.mkShell {
   buildInputs = with nixpkgs; [
     binaryen
     nodejs-16_x
+    swiProlog
   ];
 }

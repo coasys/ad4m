@@ -1,3 +1,4 @@
+import { isReference } from "@apollo/client";
 import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, LinkExpression, ExpressionProof } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
@@ -157,6 +158,27 @@ export default function perspectiveTests(testContext: TestContext) {
                 await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
                 expect(linkRemoved.mock.calls.length).toBe(2)
                 expect(linkRemoved.mock.calls[1][0]).toEqual(updatedLinkExpression)
+            })
+
+            it('can run Prolog queries', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("Prolog test")
+                await p.add(new Link({
+                    source: "ad4m://root",
+                    target: "note-ipfs://Qm123"
+                }))
+                await p.add(new Link({
+                    source: "note-ipfs://Qm123",
+                    target: "todo-ontology://is-todo"
+                }))
+
+                const result = await p.infer("triple(X, _, 'todo-ontology://is-todo').")
+                console.log("PROLOG result:", result)
+                expect(result).toBeTruthy()
+                expect(result.length).toBe(1)
+                expect(result[0].X).toBe('note-ipfs://Qm123')
+
+                expect(await p.infer("reachable('ad4m://root', 'todo-ontology://is-todo')")).toBeTruthy()
             })
         })
 
