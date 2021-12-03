@@ -61,7 +61,7 @@
   },
   "dependencies": {
     "@holochain/conductor-api": "0.2.4",
-    "@perspect3vism/ad4m": "0.1.21",
+    "@perspect3vism/ad4m": "0.1.22",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^11.2.0",
