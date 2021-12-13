@@ -49,6 +49,7 @@ signing_service_uri: ~
 encryption_service_uri: ~
 decryption_service_uri: ~
 dpki: ~
+db_sync_strategy: Fast
 keystore:
   type: lair_server_legacy_deprecated
   keystore_path: ${escapeShellArg(conductorConfig.environmentPath)}/keystore
@@ -77,6 +78,8 @@ network:
     gossip_peer_on_success_next_gossip_delay_ms: "60000"
     gossip_peer_on_error_next_gossip_delay_ms: "300000"
     gossip_local_sync_delay_ms: "60000"
+    gossip_dynamic_arcs: "true"
+    gossip_single_storage_arc_per_space: "false"
     default_rpc_single_timeout_ms: "30000"
     default_rpc_multi_remote_agent_count: "3"
     default_rpc_multi_remote_request_grace_ms: "3000"
@@ -84,6 +87,12 @@ network:
     tls_in_mem_session_storage: "512"
     proxy_keepalive_ms: "120000"
     proxy_to_expire_ms: "300000"
+    concurrent_limit_per_thread: "4096"
+    tx2_quic_max_idle_timeout_ms: "30000"
+    tx2_pool_max_connection_count: "4096"
+    tx2_channel_count_per_connection: "2"
+    tx2_implicit_timeout_ms: "30000"
+    tx2_initial_connect_retry_delay_ms: "200"
 `
     fs.writeFileSync(conductorConfig.conductorConfigPath, conductorStringConfig);
 }
