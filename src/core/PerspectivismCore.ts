@@ -201,7 +201,7 @@ export default class PerspectivismCore {
         };
         console.log("Core.installNeighbourhood(): Got neighbourhood", neighbourHoodExp);
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
-        this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
+        await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
 
         return this.#perspectivesController!.add("", url, neighbourhood);        
     }
