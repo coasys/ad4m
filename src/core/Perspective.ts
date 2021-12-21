@@ -1,4 +1,4 @@
-import type { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal } from "@perspect3vism/ad4m"
 import { Link, hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -259,6 +259,14 @@ export default class Perspective {
         await prolog.query("dynamic(triple/3).")
         const triples = allLinks.map(l => `triple('${l.data.source}', '${l.data.predicate}', '${l.data.target}').`).join('\n')
         await prolog.consult(triples)
+
+        for(let linkExpression of allLinks) {
+            let link = linkExpression.data
+            if(link.source == 'self' && link.predicate == 'ad4m://has_zome') {
+                let code = Literal.fromUrl(link.target).get()
+                await prolog.consult(code)
+            }
+        }
 
         const reachable = `
         reachable(A,B):-triple(A,_,B).
