@@ -295,7 +295,7 @@ export default class Perspective {
             }
 
             for(let node of nodes) {
-                if(node.startsWith('literal://')) continue
+                node.replace('\n', '\n\c')
                 try {
                     let ref = parseExprUrl(node)
                     let lang
@@ -312,7 +312,7 @@ export default class Perspective {
                     console.debug("While creating expressionLanguageFacts:", e)
                 }
             }
-            
+
             await prolog.consult(expressionLanguageFacts)
 
             //-------------------
