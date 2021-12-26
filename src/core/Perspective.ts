@@ -275,6 +275,11 @@ export default class Perspective {
                 triple(A,_,X),
                 reachable(X,B).`
             await prolog.consult(reachable)
+
+            //-------------------
+            // hiddenExpression/1
+            //-------------------
+            await prolog.query("dynamic(hiddenExpression/1).")
             
 
             //-------------------
