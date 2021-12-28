@@ -263,7 +263,7 @@ export default class Perspective {
             // triple/3
             //-------------------
             await prolog.query("dynamic(triple/3).")
-            const triples = allLinks.map(l => `triple('${l.data.source}', '${l.data.predicate}', '${l.data.target}').`).join('\n')
+            const triples = allLinks.map(l => `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`).join('\n')
             await prolog.consult(triples)
 
             //-------------------
@@ -309,14 +309,16 @@ export default class Perspective {
                     else 
                         lang = ref.language
                     expressionLanguageFacts += `
-                        languageAddress('${node}', '${ref.language.address}').
-                        languageName('${node}', '${lang!.name}').
-                        expressionAddress('${node}', '${ref.expression}').
+                        languageAddress("${node}", "${ref.language.address}").
+                        languageName("${node}", "${lang!.name}").
+                        expressionAddress("${node}", "${ref.expression}").
                     `
                 } catch(e) {
                     console.debug("While creating expressionLanguageFacts:", e)
                 }
             }
+
+            console.log(expressionLanguageFacts)
 
             await prolog.consult(expressionLanguageFacts)
 
