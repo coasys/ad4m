@@ -20,6 +20,9 @@ export default class Perspective {
     #languageController?: LanguageController
     #pubsub: any
 
+    #prologEngine: PrologInstance|null
+    #prologNeedsRebuild: boolean
+
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
         this.updateFromId(id)
         if (neighbourhood) this.neighbourhood = neighbourhood;
@@ -29,6 +32,16 @@ export default class Perspective {
         this.#languageController = context.languageController!
 
         this.#pubsub = PubSub.get()
+        this.#prologEngine = null
+        this.#prologNeedsRebuild = true
+
+        this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, () => {
+            this.#prologNeedsRebuild = true
+        })
+
+        this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, () => {
+            this.#prologNeedsRebuild = true
+        })
     }
 
     plain(): PerspectiveHandle {
@@ -253,8 +266,12 @@ export default class Perspective {
         return Object.values(mergedLinks)
     }
 
-    async prologQuery(query: string): Promise<any> {
-        let result
+    async spawnPrologEngine(): Promise<any> {
+        if(this.#prologEngine) {
+            await this.#prologEngine.close()
+            this.#prologEngine = null
+        }
+
         let error
         const prolog = new PrologInstance()
         try {
@@ -333,15 +350,22 @@ export default class Perspective {
                     await prolog.consult(code)
                 }
             }
-
-            result = await prolog.query(query)            
+       
         } catch(e) {
             error = e
-        } finally {
             prolog.close()
-        }
-        
+        } 
+
         if(error) throw error
-        return result
+        
+        this.#prologNeedsRebuild = false
+        this.#prologEngine = prolog
+    }
+
+    async prologQuery(query: string): Promise<any> {
+        if(!this.#prologEngine || this.#prologNeedsRebuild)
+            await this.spawnPrologEngine()
+        
+        return await this.#prologEngine!.query(query)
     }
 }
