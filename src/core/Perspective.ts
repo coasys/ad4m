@@ -6,6 +6,7 @@ import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
+import { link } from "fs";
 
 export default class Perspective {
     name?: string;
@@ -42,6 +43,12 @@ export default class Perspective {
         this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, () => {
             this.#prologNeedsRebuild = true
         })
+
+        const that = this
+
+        process.on("SIGINT", function () {
+            that.#prologEngine?.close()
+        });
     }
 
     plain(): PerspectiveHandle {
@@ -269,6 +276,79 @@ export default class Perspective {
         return Object.values(mergedLinks)
     }
 
+    async createPrologFacts(): Promise<string> {
+        let lines = []
+
+        const allLinks = await this.getLinks(new LinkQuery({}))
+        //-------------------
+        // triple/3
+        //-------------------
+        lines = allLinks.map(l => `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`)
+
+        //-------------------
+        // reachable/2
+        //-------------------
+        lines.push("reachable(A,B) :- triple(A,_,B).")
+        lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
+
+        //-------------------
+        // hiddenExpression/1
+        //-------------------
+        lines.push(":- discontiguous hiddenExpression/1.")            
+
+        //-------------------
+        // languageAddress/2
+        // languageName/2
+        // expressionAddress/2
+        //-------------------
+        let langAddrs = []
+        let langNames = []
+        let exprAddrs = []
+
+        let nodes = new Set<string>()
+        for(let link of allLinks) {
+            nodes.add(link.data.source)
+            nodes.add(link.data.predicate)
+            nodes.add(link.data.target)
+        }
+
+        for(let node of nodes) {
+            //node.replace('\n', '\n\c')
+            try {
+                let ref = parseExprUrl(node)
+                let lang
+                if(!ref.language.name)
+                    lang = await this.#languageController?.languageByRef(ref.language)
+                else 
+                    lang = ref.language
+
+                langAddrs.push(`languageAddress("${node}", "${ref.language.address}").`)
+                langNames.push(`languageName("${node}", "${lang!.name}").`)
+                exprAddrs.push(`expressionAddress("${node}", "${ref.expression}").`)
+            } catch(e) {
+                console.debug("While creating expressionLanguageFacts:", e)
+            }
+        }
+
+        lines = [...lines, ...langAddrs, ...langNames, ...exprAddrs]
+
+        //-------------------
+        // Social DNA zomes
+        //-------------------
+
+        for(let linkExpression of allLinks) {
+            let link = linkExpression.data
+            if(link.source == 'self' && link.predicate == 'ad4m://has_zome') {
+                let code = Literal.fromUrl(link.target).get()
+                lines.push(code)
+            }
+        }
+
+        const factsCode = lines.join('\n')
+        console.debug(factsCode)
+        return factsCode
+    }
+
     async spawnPrologEngine(): Promise<any> {
         if(this.#prologEngine) {
             await this.#prologEngine.close()
@@ -277,83 +357,10 @@ export default class Perspective {
 
         let error
         const prolog = new PrologInstance()
+
         try {
-            const allLinks = await this.getLinks(new LinkQuery({}))
-            //-------------------
-            // triple/3
-            //-------------------
-            await prolog.query("dynamic(triple/3).")
-            const triples = allLinks.map(l => `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`).join('\n')
-            await prolog.consult(triples)
-
-            //-------------------
-            // reachable/2
-            //-------------------
-            const reachable = `
-            reachable(A,B):-triple(A,_,B).
-            reachable(A,B):-
-                triple(A,_,X),
-                reachable(X,B).`
-            await prolog.consult(reachable)
-
-            //-------------------
-            // hiddenExpression/1
-            //-------------------
-            await prolog.query("dynamic(hiddenExpression/1).")
-            
-
-            //-------------------
-            // languageAddress/2
-            // languageName/2
-            // expressionAddress/2
-            //-------------------
-            let expressionLanguageFacts = `
-                :- discontiguous languageAddress/2.
-                :- discontiguous languageName/2.
-                :- discontiguous expressionAddress/2.
-            `
-            let nodes = new Set<string>()
-            for(let link of allLinks) {
-                nodes.add(link.data.source)
-                nodes.add(link.data.predicate)
-                nodes.add(link.data.target)
-            }
-
-            for(let node of nodes) {
-                node.replace('\n', '\n\c')
-                try {
-                    let ref = parseExprUrl(node)
-                    let lang
-                    if(!ref.language.name)
-                        lang = await this.#languageController?.languageByRef(ref.language)
-                    else 
-                        lang = ref.language
-                    expressionLanguageFacts += `
-                        languageAddress("${node}", "${ref.language.address}").
-                        languageName("${node}", "${lang!.name}").
-                        expressionAddress("${node}", "${ref.expression}").
-                    `
-                } catch(e) {
-                    console.debug("While creating expressionLanguageFacts:", e)
-                }
-            }
-
-            console.log(expressionLanguageFacts)
-
-            await prolog.consult(expressionLanguageFacts)
-
-            //-------------------
-            // Social DNA zomes
-            //-------------------
-
-            for(let linkExpression of allLinks) {
-                let link = linkExpression.data
-                if(link.source == 'self' && link.predicate == 'ad4m://has_zome') {
-                    let code = Literal.fromUrl(link.target).get()
-                    await prolog.consult(code)
-                }
-            }
-       
+            const facts = await this.createPrologFacts()
+            await prolog.consult(facts)
         } catch(e) {
             error = e
             prolog.close()
