@@ -138,6 +138,7 @@ export default class Perspective {
         this.#db.attachSource(this.uuid, link.source, addr)
         this.#db.attachTarget(this.uuid, link.target, addr)
 
+        this.#prologNeedsRebuild = true
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
@@ -175,6 +176,7 @@ export default class Perspective {
             this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
+        this.#prologNeedsRebuild = true
         this.callLinksAdapter('updateLink', oldLink, newLinkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
@@ -196,6 +198,7 @@ export default class Perspective {
         this.#db.removeTarget(this.uuid, link.target, addr)
         this.#db.remove(this.#db.allLinksKey(this.uuid), addr)
 
+        this.#prologNeedsRebuild = true
         this.callLinksAdapter('removeLink', linkExpression)
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
