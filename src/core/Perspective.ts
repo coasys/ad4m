@@ -378,4 +378,9 @@ export default class Perspective {
         
         return await this.#prologEngine!.query(query)
     }
+
+    closePrologEngine() {
+        if(this.#prologEngine)
+            this.#prologEngine.close()
+    }
 }
