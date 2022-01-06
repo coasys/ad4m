@@ -104,7 +104,92 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     return core
 }
 
+interface OuterConfigForLauncher {
+  resourcePath: string
+  appDataPath: string
+  appDefaultLangPath: string
+  ad4mBootstrapLanguages: BootstrapLanguages,
+  ad4mBootstrapFixtures: BootstrapFixtures,
+  appBuiltInLangs: string[] | null,
+  appLangAliases: object | null,
+  mocks: boolean,
+  gqlPort?: number,
+  hcPortAdmin: number,
+  hcPortApp: number,
+  ipfsSwarmPort?: number,
+  ipfsRepoPath?: string
+}
+
+
+export async function init_for_launcher(config: OuterConfigForLauncher): Promise<PerspectivismCore> {
+    let { 
+      resourcePath, appDataPath, 
+      appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, 
+      appBuiltInLangs, appLangAliases, 
+      mocks, 
+      gqlPort, hcPortAdmin, hcPortApp,
+      ipfsSwarmPort,
+      ipfsRepoPath,
+    } = config
+    if(!gqlPort) gqlPort = 4000 // TODO check if available
+    let builtInLangPath = appDefaultLangPath;
+    let builtInLangs = [
+      ad4mBootstrapLanguages.agents, 
+      ad4mBootstrapLanguages.languages, 
+      ad4mBootstrapLanguages.neighbourhoods
+    ]
+
+    let languageAliases = {
+      'did': ad4mBootstrapLanguages.agents,
+      'lang': ad4mBootstrapLanguages.languages,
+      'neighbourhood': ad4mBootstrapLanguages.neighbourhoods
+    }
+
+    if(appBuiltInLangs) {
+      builtInLangs = Array.from(new Set(builtInLangs.concat(appBuiltInLangs)))
+    }
+
+    if(appLangAliases) {
+      languageAliases = {
+        ...languageAliases,
+        ...appLangAliases,
+      }
+    }
+    
+
+    console.log("\x1b[2m", 
+      "Starting ad4m core with path:", appDataPath, "\n", 
+      "AD4M Bootstrap Languages:", ad4mBootstrapLanguages, "\n", 
+      //"AD4M Bootstrap Fixtures:", ad4mBootstrapFixtures, "\n", 
+      "Built-in languages path:", builtInLangPath, "\n",
+      "Built-In languages:", appBuiltInLangs, "\n", 
+      "=> All auto-loaded languages:", builtInLangs, "\n",
+      "Language aliases:", languageAliases, "\n", 
+      "Resource path:", resourcePath, "\n", 
+      "\x1b[0m"
+    );
+
+    let bootstrapFixtures = ad4mBootstrapFixtures
+
+    const core = new create({
+      appDataPath,
+      appResourcePath: resourcePath,
+      builtInLangPath,
+      builtInLangs,
+      languageAliases,
+      bootstrapFixtures,
+    });
+    console.log("\x1b[34m", "Init services...", "\x1b[0m");
+    await core.initServicesForLauncher({ hcPortAdmin, hcPortApp, ipfsSwarmPort, ipfsRepoPath });
+    console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
+    await core.startGraphQLServer(gqlPort, mocks)
+
+    console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
+    return core
+}
+
 export default {
   init,
+  init_for_launcher,
   PerspectivismCore
 }

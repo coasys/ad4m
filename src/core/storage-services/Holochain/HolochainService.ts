@@ -123,6 +123,34 @@ export default class HolochainService {
         };
     }
 
+    async connect() {
+        let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
+        this.#ready = new Promise(resolve => resolveReady = resolve)
+        
+        console.log("========== try to connect existing holochain process.");
+
+        // TODO connect to admin port
+        try {
+            if (this.#adminWebsocket == undefined) {
+                this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
+                console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
+            };
+            if (this.#appWebsocket == undefined) {
+                this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
+                console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
+            };
+            resolveReady!()
+            this.#didResolveError = false;
+        } catch(e) {
+            console.error("HolochainService: Error intializing Holochain conductor:", e)
+            this.#didResolveError = true;
+            resolveReady!()
+        }
+
+        resolveReady!()
+        this.#didResolveError = false;
+    }
+
     async run() {
         let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)

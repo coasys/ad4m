@@ -128,6 +128,24 @@ export default class PerspectivismCore {
         //this.connectToHardwiredPerspect3vismAgent()
     }
 
+    async initServicesForLauncher(params: InitServicesParams) {
+        console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
+        console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
+        this.#holochain = new HolochainService({
+            conductorPath: Config.holochainConductorPath, 
+            dataPath: Config.holochainDataPath, 
+            resourcePath: Config.resourcePath, 
+            adminPort: params.hcPortAdmin, 
+            appPort: params.hcPortApp,
+        })
+        let [ipfs, _] = await Promise.all([IPFS.init(
+            params.ipfsSwarmPort, 
+            params.ipfsRepoPath
+        ), this.#holochain.connect()]);
+        this.#IPFS = ipfs;
+        //this.connectToHardwiredPerspect3vismAgent()
+    }
+
     async waitForAgent(): Promise<void> {
         return this.#agentService.ready
     }
