@@ -177,7 +177,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(result.length).toBe(1)
                 expect(result[0].X).toBe('note-ipfs://Qm123')
 
-                expect(await p.infer("reachable('ad4m://root', 'todo-ontology://is-todo')")).toBeTruthy()
+                expect(await p.infer('reachable("ad4m://root", "todo-ontology://is-todo")')).toBeTruthy()
             })
         })
 
