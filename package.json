@@ -8,7 +8,8 @@
     "src",
     "types.d.ts",
     "default.nix",
-    "scripts"
+    "scripts",
+    "CHANGELOG.md"
   ],
   "types": "src/types.d.ts",
   "scripts": {
