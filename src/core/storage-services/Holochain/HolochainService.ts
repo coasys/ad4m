@@ -77,26 +77,28 @@ export default class HolochainService {
     
         let conductorConfigPath = path.join(conductorPath, "conductor-config.yaml");
         this.#conductorConfigPath = conductorConfigPath;
-        if (!fs.existsSync(conductorConfigPath)) {
-            writeDefaultConductor({
-                proxyUrl: kitsuneProxy,
-                environmentPath: conductorPath,
-                adminPort: holochainAdminPort,
-                appPort: holochainAppPort,
-                useBootstrap,
-                bootstrapService: bootstrapUrl,
-                conductorConfigPath: conductorConfigPath,
-                useProxy,
-                useLocalProxy,
-                useMdns
-            } as ConductorConfiguration);
-        } else {
-            const config = yaml.load(fs.readFileSync(conductorConfigPath, 'utf-8')) as any;
-            const adminPort = config.admin_interfaces[0].driver.port as number;
-
-            if (adminPort !== this.#adminPort) {
-                console.debug(`HC PORT: ${this.#adminPort} supplied is different than the PORT: ${adminPort} set in config, using the config port`);
-                this.#adminPort = adminPort;
+        if (!appPort) {
+            if (!fs.existsSync(conductorConfigPath)) {
+                writeDefaultConductor({
+                    proxyUrl: kitsuneProxy,
+                    environmentPath: conductorPath,
+                    adminPort: holochainAdminPort,
+                    appPort: holochainAppPort,
+                    useBootstrap,
+                    bootstrapService: bootstrapUrl,
+                    conductorConfigPath: conductorConfigPath,
+                    useProxy,
+                    useLocalProxy,
+                    useMdns
+                } as ConductorConfiguration);
+            } else {
+                const config = yaml.load(fs.readFileSync(conductorConfigPath, 'utf-8')) as any;
+                const adminPort = config.admin_interfaces[0].driver.port as number;
+    
+                if (adminPort !== this.#adminPort) {
+                    console.debug(`HC PORT: ${this.#adminPort} supplied is different than the PORT: ${adminPort} set in config, using the config port`);
+                    this.#adminPort = adminPort;
+                }
             }
         }
     }

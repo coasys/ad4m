@@ -121,7 +121,7 @@ interface OuterConfigForLauncher {
 }
 
 
-export async function init_for_launcher(config: OuterConfigForLauncher): Promise<PerspectivismCore> {
+export async function initForLauncher(config: OuterConfigForLauncher): Promise<PerspectivismCore> {
     let { 
       resourcePath, appDataPath, 
       appDefaultLangPath, ad4mBootstrapLanguages, ad4mBootstrapFixtures, 
@@ -190,6 +190,6 @@ export async function init_for_launcher(config: OuterConfigForLauncher): Promise
 
 export default {
   init,
-  init_for_launcher,
+  initForLauncher,
   PerspectivismCore
 }

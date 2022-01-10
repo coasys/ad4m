@@ -30,4 +30,20 @@ export interface Config {
 
 export function init(config: OuterConfig): Promise<PerspectivismCore>;
 
+export interface OuterConfigForLauncher {
+  resourcePath: string
+  appDataPath: string
+  appDefaultLangPath: string
+  ad4mBootstrapLanguages: BootstrapLanguages,
+  ad4mBootstrapFixtures: BootstrapFixtures | null,
+  appBuiltInLangs: string[] | null,
+  appLangAliases: object | null,
+  mocks: boolean,
+  gqlPort: number,
+  hcPortAdmin: number,
+  hcPortApp: number
+}
+
+export function initForLauncher(config: OuterConfig): Promise<PerspectivismCore>;
+
 export {PerspectivismCore};
