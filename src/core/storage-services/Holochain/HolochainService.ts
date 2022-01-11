@@ -230,18 +230,6 @@ export default class HolochainService {
 
     async pubKeyForLanguage(lang: string): Promise<AgentPubKey> {
         return this.pubKeyForAllLanguages()
-        
-        const alreadyExisting = this.#db.get('pubKeys').find({lang}).value()
-        if(alreadyExisting) {
-            const pubKey = Buffer.from(alreadyExisting.pubKey)
-            console.debug("Found existing pubKey", pubKey.toString("base64"), "for language:", lang)
-            return pubKey
-        } else {
-            const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
-            this.#db.get('pubKeys').push({lang, pubKey}).write()
-            console.debug("Created new pubKey", pubKey.toString("base64"), "for language", lang)
-            return pubKey
-        }
     }
 
     async ensureInstallDNAforLanguage(lang: string, dnas: Dna[], callback: AppSignalCb | undefined) {
