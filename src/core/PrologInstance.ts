@@ -43,4 +43,8 @@ export default class PrologInstance {
         tmpobj.removeCallback()
         return result
     }
+
+    close() {
+        this.#engine.close()
+    }
 }

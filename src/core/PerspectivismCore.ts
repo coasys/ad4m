@@ -100,8 +100,17 @@ export default class PerspectivismCore {
     }
 
     async exit() {
+        console.log("Exiting gracefully...")
+        console.log("Stopping Prolog engines")
+        for(let ph of this.perspectivesController.allPerspectiveHandles()) {
+            const perspective = this.perspectivesController.perspective(ph.uuid)
+            perspective.closePrologEngine()
+        }
+        console.log("Stopping IPFS")
         await this.#IPFS?.stop();
+        console.log("Stopping Holochain conductor")
         await this.#holochain?.stop();
+        console.log("Done.")
     }
 
     async startGraphQLServer(port: number, mocks: boolean) {

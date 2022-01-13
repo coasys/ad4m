@@ -1,4 +1,4 @@
-import type { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, ExpressionRef, parseExprUrl } from "@perspect3vism/ad4m"
 import { Link, hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -6,6 +6,7 @@ import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
+import { link } from "fs";
 
 export default class Perspective {
     name?: string;
@@ -20,6 +21,9 @@ export default class Perspective {
     #languageController?: LanguageController
     #pubsub: any
 
+    #prologEngine: PrologInstance|null
+    #prologNeedsRebuild: boolean
+
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
         this.updateFromId(id)
         if (neighbourhood) this.neighbourhood = neighbourhood;
@@ -29,6 +33,22 @@ export default class Perspective {
         this.#languageController = context.languageController!
 
         this.#pubsub = PubSub.get()
+        this.#prologEngine = null
+        this.#prologNeedsRebuild = true
+
+        this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, () => {
+            this.#prologNeedsRebuild = true
+        })
+
+        this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, () => {
+            this.#prologNeedsRebuild = true
+        })
+
+        const that = this
+
+        process.on("SIGINT", function () {
+            that.#prologEngine?.close()
+        });
     }
 
     plain(): PerspectiveHandle {
@@ -125,6 +145,7 @@ export default class Perspective {
         this.#db.attachSource(this.uuid, link.source, addr)
         this.#db.attachTarget(this.uuid, link.target, addr)
 
+        this.#prologNeedsRebuild = true
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
@@ -162,6 +183,7 @@ export default class Perspective {
             this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
+        this.#prologNeedsRebuild = true
         this.callLinksAdapter('updateLink', oldLink, newLinkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
@@ -183,6 +205,7 @@ export default class Perspective {
         this.#db.removeTarget(this.uuid, link.target, addr)
         this.#db.remove(this.#db.allLinksKey(this.uuid), addr)
 
+        this.#prologNeedsRebuild = true
         this.callLinksAdapter('removeLink', linkExpression)
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
@@ -253,20 +276,111 @@ export default class Perspective {
         return Object.values(mergedLinks)
     }
 
-    async prologQuery(query: string): Promise<any> {
+    async createPrologFacts(): Promise<string> {
+        let lines = []
+
         const allLinks = await this.getLinks(new LinkQuery({}))
+        //-------------------
+        // triple/3
+        //-------------------
+        lines = allLinks.map(l => `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`)
+
+        //-------------------
+        // reachable/2
+        //-------------------
+        lines.push("reachable(A,B) :- triple(A,_,B).")
+        lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
+
+        //-------------------
+        // hiddenExpression/1
+        //-------------------
+        lines.push(":- discontiguous hiddenExpression/1.")            
+
+        //-------------------
+        // languageAddress/2
+        // languageName/2
+        // expressionAddress/2
+        //-------------------
+        let langAddrs = []
+        let langNames = []
+        let exprAddrs = []
+
+        let nodes = new Set<string>()
+        for(let link of allLinks) {
+            nodes.add(link.data.source)
+            nodes.add(link.data.predicate)
+            nodes.add(link.data.target)
+        }
+
+        for(let node of nodes) {
+            //node.replace('\n', '\n\c')
+            try {
+                let ref = parseExprUrl(node)
+                let lang
+                if(!ref.language.name)
+                    lang = await this.#languageController?.languageByRef(ref.language)
+                else 
+                    lang = ref.language
+
+                langAddrs.push(`languageAddress("${node}", "${ref.language.address}").`)
+                langNames.push(`languageName("${node}", "${lang!.name}").`)
+                exprAddrs.push(`expressionAddress("${node}", "${ref.expression}").`)
+            } catch(e) {
+                console.debug("While creating expressionLanguageFacts:", e)
+            }
+        }
+
+        lines = [...lines, ...langAddrs, ...langNames, ...exprAddrs]
+
+        //-------------------
+        // Social DNA zomes
+        //-------------------
+
+        for(let linkExpression of allLinks) {
+            let link = linkExpression.data
+            if(link.source == 'self' && link.predicate == 'ad4m://has_zome') {
+                let code = Literal.fromUrl(link.target).get()
+                lines.push(code)
+            }
+        }
+
+        const factsCode = lines.join('\n')
+        console.debug(factsCode)
+        return factsCode
+    }
+
+    async spawnPrologEngine(): Promise<any> {
+        if(this.#prologEngine) {
+            await this.#prologEngine.close()
+            this.#prologEngine = null
+        }
+
+        let error
         const prolog = new PrologInstance()
-        await prolog.query("dynamic(triple/3).")
-        const triples = allLinks.map(l => `triple('${l.data.source}', '${l.data.predicate}', '${l.data.target}').`).join('\n')
-        await prolog.consult(triples)
 
-        const reachable = `
-        reachable(A,B):-triple(A,_,B).
-        reachable(A,B):-
-            triple(A,_,X),
-            reachable(X,B).`
-        await prolog.consult(reachable)
+        try {
+            const facts = await this.createPrologFacts()
+            await prolog.consult(facts)
+        } catch(e) {
+            error = e
+            prolog.close()
+        } 
 
-        return await prolog.query(query)
+        if(error) throw error
+        
+        this.#prologNeedsRebuild = false
+        this.#prologEngine = prolog
+    }
+
+    async prologQuery(query: string): Promise<any> {
+        if(!this.#prologEngine || this.#prologNeedsRebuild)
+            await this.spawnPrologEngine()
+        
+        return await this.#prologEngine!.query(query)
+    }
+
+    closePrologEngine() {
+        if(this.#prologEngine)
+            this.#prologEngine.close()
     }
 }

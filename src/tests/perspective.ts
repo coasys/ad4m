@@ -172,13 +172,12 @@ export default function perspectiveTests(testContext: TestContext) {
                     target: "todo-ontology://is-todo"
                 }))
 
-                const result = await p.infer("triple(X, _, 'todo-ontology://is-todo').")
-                console.log("PROLOG result:", result)
+                const result = await p.infer('triple(X, _, "todo-ontology://is-todo").')
                 expect(result).toBeTruthy()
                 expect(result.length).toBe(1)
                 expect(result[0].X).toBe('note-ipfs://Qm123')
 
-                expect(await p.infer("reachable('ad4m://root', 'todo-ontology://is-todo')")).toBeTruthy()
+                expect(await p.infer('reachable("ad4m://root", "todo-ontology://is-todo")')).toBeTruthy()
             })
         })
 

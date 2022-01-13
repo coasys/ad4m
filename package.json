@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -8,7 +8,8 @@
     "src",
     "types.d.ts",
     "default.nix",
-    "scripts"
+    "scripts",
+    "CHANGELOG.md"
   ],
   "types": "src/types.d.ts",
   "scripts": {
@@ -61,7 +62,7 @@
   },
   "dependencies": {
     "@holochain/conductor-api": "0.2.4",
-    "@perspect3vism/ad4m": "0.1.22",
+    "@perspect3vism/ad4m": "0.1.23",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^11.2.0",
@@ -71,6 +72,7 @@
     "@transmute/did-wallet": "lucksus/did-wallet",
     "@types/json-stable-stringify": "^1.0.33",
     "apollo-server": "^2.18.2",
+    "blockstore-core": "=1.0.2",
     "get-port": "5.1.1",
     "graphql": "^15.3.0",
     "https": "^1.0.0",
