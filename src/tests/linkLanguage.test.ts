@@ -41,11 +41,13 @@ describe(LANG_TO_TEST, () => {
             builtInLangs: [LANG_TO_TEST],
         })
 
-        await core.initServices({
-            hcPortAdmin: 22000,
-            hcPortApp: 21337,
+        await core.initIPFS({
             ipfsSwarmPort: 24002,
             ipfsRepoPath
+        })
+        await core.initHolochain({
+            hcPortAdmin: 22000,
+            hcPortApp: 21337,
         })
         await core.agentService.createNewKeys()
         await core.agentService.save('')

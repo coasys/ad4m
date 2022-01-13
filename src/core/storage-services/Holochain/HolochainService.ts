@@ -16,7 +16,7 @@ const bootstrapUrl = "https://bootstrap-staging.holo.host"
 const kitsuneProxy = "kitsune-proxy://SYVd4CF3BdJ4DS7KwLLgeU3_DbHoZ34Y-qroZ79DOs8/kitsune-quic/h/165.22.32.11/p/5779/--"
 
 export interface HolochainConfiguration {
-    conductorPath: string, 
+    conductorPath?: string, 
     dataPath: string, 
     resourcePath: string
     adminPort?: number;
@@ -38,9 +38,9 @@ export default class HolochainService {
     #hcProcess?: ChildProcess
     #lairProcess?: ChildProcess
     #resourcePath: string
-    #conductorPath: string
+    #conductorPath?: string
     #didResolveError: boolean
-    #conductorConfigPath: string
+    #conductorConfigPath?: string
     #signalCallbacks: [CellId, AppSignalCb, string][];
 
     constructor(config: HolochainConfiguration) {
@@ -73,11 +73,11 @@ export default class HolochainService {
         this.#adminPort = holochainAdminPort;
         this.#appPort = holochainAppPort;
         this.#resourcePath = resourcePath;
-        this.#conductorPath = conductorPath;
-    
-        let conductorConfigPath = path.join(conductorPath, "conductor-config.yaml");
-        this.#conductorConfigPath = conductorConfigPath;
-        if (!appPort) {
+
+        if (conductorPath) {
+            this.#conductorPath = conductorPath;
+            let conductorConfigPath = path.join(conductorPath, "conductor-config.yaml");
+            this.#conductorConfigPath = conductorConfigPath;
             if (!fs.existsSync(conductorConfigPath)) {
                 writeDefaultConductor({
                     proxyUrl: kitsuneProxy,
@@ -129,9 +129,8 @@ export default class HolochainService {
         let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)
         
-        console.log("========== try to connect existing holochain process.");
+        console.log("Connecting to holochain process.");
 
-        // TODO connect to admin port
         try {
             if (this.#adminWebsocket == undefined) {
                 this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
@@ -144,43 +143,33 @@ export default class HolochainService {
             resolveReady!()
             this.#didResolveError = false;
         } catch(e) {
-            console.error("HolochainService: Error intializing Holochain conductor:", e)
+            console.error("HolochainService: connect Holochain process with error:", e)
             this.#didResolveError = true;
             resolveReady!()
         }
-
-        resolveReady!()
-        this.#didResolveError = false;
     }
 
     async run() {
         let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)
-        let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath);
-        console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
-        [this.#hcProcess, this.#lairProcess] = hcProcesses;
-        try {
-            if (this.#adminWebsocket == undefined) {
-                this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
-
-                try {
-                    await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
-                } catch {
-                    console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...")
-                }
-                console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
-            };
-            if (this.#appWebsocket == undefined) {
-                this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
-                console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
-            };
-            resolveReady!()
-            this.#didResolveError = false;
-        } catch(e) {
-            console.error("HolochainService: Error intializing Holochain conductor:", e)
+        if (this.#conductorPath == undefined || this.#conductorConfigPath == undefined) {
+            console.error("HolochainService: Error intializing Holochain conductor, conductor path is invalid")
             this.#didResolveError = true;
             resolveReady!()
+            return
         }
+        let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath);
+        [this.#hcProcess, this.#lairProcess] = hcProcesses;
+        console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
+
+        await this.connect();
+        try {
+            await this.#adminWebsocket!.attachAppInterface({ port: this.#appPort })
+        } catch {
+            console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...")
+        }
+        resolveReady!()
+        this.#didResolveError = false;
     }
 
     async stop() {

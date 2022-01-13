@@ -23,16 +23,24 @@ import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
 const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmR1dV5KuAQtYG98qqmYEvHXfxJZ3jKyjf7SFMriCMfHVQ"
 
-export interface InitServicesParams {
+export interface InitIPFSServiceParams {
+    ipfsSwarmPort?: number,
+    ipfsRepoPath?: string,
+}
+export interface InitHolochainParams {
     hcPortAdmin?: number, 
     hcPortApp?: number,
-    ipfsSwarmPort?: number,
-    ipfsRepoPath?: string
     hcUseBootstrap?: boolean,
     hcUseProxy?: boolean,
     hcUseLocalProxy?: boolean,
     hcUseMdns?: boolean
 }
+
+export interface ConnectHolochainParams {
+    hcPortAdmin: number, 
+    hcPortApp: number,
+}
+
 export default class PerspectivismCore {
     #holochain?: HolochainService
     #IPFS?: IPFSType
@@ -106,7 +114,14 @@ export default class PerspectivismCore {
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
 
-    async initServices(params: InitServicesParams) {
+    async initIPFS(params: InitIPFSServiceParams) {
+        console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
+        
+        let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
+        this.#IPFS = ipfs;
+    }
+
+    async initHolochain(params: InitHolochainParams) {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
         console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
         this.#holochain = new HolochainService({
@@ -120,30 +135,19 @@ export default class PerspectivismCore {
             useLocalProxy: params.hcUseLocalProxy,
             useMdns: params.hcUseMdns,
         })
-        let [ipfs, _] = await Promise.all([IPFS.init(
-            params.ipfsSwarmPort, 
-            params.ipfsRepoPath
-        ), this.#holochain.run()]);
-        this.#IPFS = ipfs;
-        //this.connectToHardwiredPerspect3vismAgent()
+        await this.#holochain.run();
     }
 
-    async initServicesForLauncher(params: InitServicesParams) {
-        console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
+    async connectHolochain(params: ConnectHolochainParams) {
+        console.log("Init ad4m service with resource path ", Config.resourcePath)
         console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
         this.#holochain = new HolochainService({
-            conductorPath: Config.holochainConductorPath, 
             dataPath: Config.holochainDataPath, 
             resourcePath: Config.resourcePath, 
             adminPort: params.hcPortAdmin, 
             appPort: params.hcPortApp,
         })
-        let [ipfs, _] = await Promise.all([IPFS.init(
-            params.ipfsSwarmPort, 
-            params.ipfsRepoPath
-        ), this.#holochain.connect()]);
-        this.#IPFS = ipfs;
-        //this.connectToHardwiredPerspect3vismAgent()
+        await this.#holochain.connect();
     }
 
     async waitForAgent(): Promise<void> {
