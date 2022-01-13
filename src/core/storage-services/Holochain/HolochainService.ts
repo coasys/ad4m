@@ -135,6 +135,11 @@ export default class HolochainService {
             if (this.#adminWebsocket == undefined) {
                 this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
+                try {
+                    await this.#adminWebsocket!.attachAppInterface({ port: this.#appPort });
+                } catch {
+                    console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...");
+                }
             };
             if (this.#appWebsocket == undefined) {
                 this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
@@ -163,11 +168,7 @@ export default class HolochainService {
         console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
 
         await this.connect();
-        try {
-            await this.#adminWebsocket!.attachAppInterface({ port: this.#appPort })
-        } catch {
-            console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...")
-        }
+        
         resolveReady!()
         this.#didResolveError = false;
     }
