@@ -23,7 +23,7 @@ import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
 const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmR1dV5KuAQtYG98qqmYEvHXfxJZ3jKyjf7SFMriCMfHVQ"
 
-export interface InitIPFSServiceParams {
+export interface InitIPFSParams {
     ipfsSwarmPort?: number,
     ipfsRepoPath?: string,
 }
@@ -114,7 +114,7 @@ export default class PerspectivismCore {
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
 
-    async initIPFS(params: InitIPFSServiceParams) {
+    async initIPFS(params: InitIPFSParams) {
         console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
         
         let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
