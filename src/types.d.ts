@@ -7,9 +7,9 @@ export interface OuterConfig {
   appDataPath: string
   appDefaultLangPath: string
   ad4mBootstrapLanguages: BootstrapLanguages,
-  ad4mBootstrapFixtures: BootstrapFixtures | null,
-  appBuiltInLangs: string[] | null,
-  appLangAliases: object | null,
+  ad4mBootstrapFixtures?: BootstrapFixtures,
+  appBuiltInLangs?: string[],
+  appLangAliases?: object,
   mocks: boolean,
   gqlPort?: number,
   hcPortAdmin?: number,

@@ -13,8 +13,8 @@ interface OuterConfig {
   appDefaultLangPath: string
   ad4mBootstrapLanguages: BootstrapLanguages,
   ad4mBootstrapFixtures?: BootstrapFixtures,
-  appBuiltInLangs: string[] | null,
-  appLangAliases: object | null,
+  appBuiltInLangs?: string[],
+  appLangAliases?: object,
   mocks: boolean,
   gqlPort?: number,
   hcPortAdmin?: number,
