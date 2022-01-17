@@ -133,6 +133,9 @@ export default class PerspectivesController {
     replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood) {
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
         this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood));
+        if (perspectiveHandle.sharedUrl) {
+            this.#urlPerspectiveMap.set(perspectiveHandle.sharedUrl, perspectiveHandle.uuid)
+        }
         this.save()
     }
 
