@@ -31,6 +31,7 @@ export default class LanguageController {
     #agentLanguage?: Language
     #languageLanguage?: Language
     #perspectiveLanguage?: Language
+    #perspectiveSnapshotLanguage?: Language
     pubSub
 
 
@@ -69,6 +70,9 @@ export default class LanguageController {
                     }
                     if(alias === 'lang') {
                         this.#languageLanguage = language
+                    }
+                    if(alias === 'perspective') {
+                        this.#perspectiveSnapshotLanguage = language
                     }
                     if(alias === 'neighbourhood') {
                         this.#perspectiveLanguage = language
@@ -577,6 +581,13 @@ export default class LanguageController {
             throw new Error("No Perspective Language installed!")
         }
         return this.#perspectiveLanguage
+    }
+
+    getPerspectiveSnapshotLanguage(): Language {
+        if(!this.#perspectiveSnapshotLanguage) {
+            throw new Error("No Perspective Snapshot Language installed!")
+        }
+        return this.#perspectiveSnapshotLanguage
     }
 
     async getConstructorIcon(lang: LanguageRef): Promise<string | undefined> {
