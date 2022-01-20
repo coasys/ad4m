@@ -20,7 +20,10 @@ const languages = {
     bundle: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.3/bundle.js",
   },
   "social-context": {
-    bundle: "https://github.com/juntofoundation/Social-Context/releases/download/0.0.18/bundle.js",
+    zipped: true,
+    targetDnaName: "social-context",
+    resource:
+      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.20/full_features.zip",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.1/bundle.js",
