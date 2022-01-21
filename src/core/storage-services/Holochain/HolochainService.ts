@@ -114,7 +114,6 @@ export default class HolochainService {
                 //console.debug("Checking:", dna, pubkey)
                 return ( dna === signalDna ) && (pubkey === signalPubkey)
             })
-            console.debug("found callbacks:", callbacks)
             callbacks.forEach(cb => {
                 if (cb && cb![1] != undefined) {
                     cb![1](signal);
