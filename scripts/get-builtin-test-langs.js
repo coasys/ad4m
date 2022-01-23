@@ -6,13 +6,13 @@ const path = require("path");
 const languages = {
   "agent-expression-store": {
     targetDnaName: "agent-store",
-    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.7/agent-store.dna",
+    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.8/agent-store.dna",
     bundle:
-      "https://github.com/perspect3vism/agent-language/releases/download/0.0.7/bundle.js",
+      "https://github.com/perspect3vism/agent-language/releases/download/0.0.8/bundle.js",
   },
   languages: {
       targetDnaName: "languages",
-      bundle: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.14/bundle.js",
+      bundle: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.15/bundle.js",
   },
   "neighbourhood-store": {
     targetDnaName: "neighbourhood-store",
@@ -23,13 +23,13 @@ const languages = {
     zipped: true,
     targetDnaName: "social-context",
     resource:
-      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.20/full_features.zip",
+      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.21/full_features.zip",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.1/bundle.js",
   },
   "direct-message-language": {
-    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.2/bundle.js"
+    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.3/bundle.js"
   }
 };
 
