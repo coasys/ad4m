@@ -17,7 +17,7 @@ import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
 import path from 'path'
 import fs from 'fs'
-import { RequestAgentInfoResponse } from '@holochain/conductor-api'
+import { RequestAgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
@@ -254,7 +254,7 @@ export default class PerspectivismCore {
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
-        return await this.#holochain!.pubKeyForLanguage(lang)
+        return Buffer.from(await this.#holochain!.pubKeyForLanguage(lang))
     }
 
     async holochainRequestAgentInfos(): Promise<RequestAgentInfoResponse> {
@@ -279,7 +279,7 @@ export default class PerspectivismCore {
 
         const templateParams = {
             recipient_did: this.#agentService.agent?.did,
-            recipient_hc_agent_pubkey: (await this.#holochain?.pubKeyForAllLanguages())!.toString('hex')
+            recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
         const createdDmLang = await this.languageApplyTemplateAndPublish(DM_LANGUAGE_TEMPLATE_ADDRESS, templateParams)
