@@ -21,7 +21,7 @@ import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
-const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmR1dV5KuAQtYG98qqmYEvHXfxJZ3jKyjf7SFMriCMfHVQ"
+const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb"
 
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
