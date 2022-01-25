@@ -681,11 +681,11 @@ export default class LanguageController {
     }
 
     async getExpression(ref: ExpressionRef): Promise<Expression | null> {
-        if(bootstrapFixtures && ref.language.address === "neighbourhood") {
+        if(bootstrapFixtures?.perspectives && ref.language.address === "neighbourhood") {
             const fixturePerspective = bootstrapFixtures.perspectives!.find(f=>f.address===ref.expression)
             if(fixturePerspective && fixturePerspective.expression) return fixturePerspective.expression
         }
-        if(bootstrapFixtures && ref.language.address === "lang") {
+        if(bootstrapFixtures?.languages && ref.language.address === "lang") {
             const fixtureLang = bootstrapFixtures.languages!.find(f=>f.address===ref.expression)
             if(fixtureLang && fixtureLang.meta) return fixtureLang.meta
         }

@@ -5,6 +5,7 @@ import { BootstrapFixtures, BootstrapLanguages, LanguageAlias } from "./core/Con
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
 import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
+import getPort from 'get-port';
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 interface OuterConfig {
   resourcePath: string
@@ -41,8 +42,9 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       hcUseBootstrap
     } = config
     if(!gqlPort) gqlPort = 4000
-    if(!hcPortAdmin) hcPortAdmin = 2000
-    if(!hcPortApp) hcPortApp = 1337
+    // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
+    if(!hcPortAdmin) hcPortAdmin = await getPort({ port: 2000 });
+    if(!hcPortApp) hcPortApp = await getPort({ port: 1337 });
     if(hcUseMdns === undefined) hcUseMdns = false
     if(hcUseProxy === undefined) hcUseProxy = true
     if(hcUseBootstrap === undefined) hcUseBootstrap = true

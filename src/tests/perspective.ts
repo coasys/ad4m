@@ -1,3 +1,4 @@
+import { isReference } from "@apollo/client";
 import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, LinkExpression, ExpressionProof } from "@perspect3vism/ad4m";
 import ExpressionClient from "@perspect3vism/ad4m/lib/src/expression/ExpressionClient";
 import { TestContext } from './integration.test'
@@ -41,21 +42,21 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(create.name).toEqual("test-links-time");
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
-                await sleep(10)
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
-                await sleep(10)
                 await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
-                await sleep(10)
                 await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
-                await sleep(10)
                 await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
-                await sleep(10)
 
                 //Test can get all links but first by querying from second timestamp
-                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date()}));
+                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date()}));
                 expect(queryLinks.length).toEqual(4);
 
-                //Test can get all links but first by querying from second timestamp
+                console.warn("QUERYING FOR LINKS\n\n\n\n");
+                //Test can get links limited
+                let queryLinksLimited = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date(), limit: 3}));
+                expect(queryLinksLimited.length).toEqual(3);
+
+                //Test can get only the first link
                 let queryLinksFirst = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({
                     source: "lang://test", fromDate: new Date(addLink.timestamp), 
                     untilDate: new Date(new Date(addLink2.timestamp).getTime() - 1)
@@ -141,9 +142,9 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(pSeenInUpdateCB.name).toStrictEqual(p1.name)
 
                 const linkAdded = jest.fn()
-                await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, linkAdded)
+                await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
                 const linkRemoved = jest.fn()
-                await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, linkRemoved)
+                await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
 
                 const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'root', target: 'lang://123'})
                 expect(linkAdded.mock.calls.length).toBe(1)
@@ -186,6 +187,26 @@ export default function perspectiveTests(testContext: TestContext) {
                     expression = null
                     expect(1).toEqual(2)
                 }
+            })
+            
+            it('can run Prolog queries', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("Prolog test")
+                await p.add(new Link({
+                    source: "ad4m://root",
+                    target: "note-ipfs://Qm123"
+                }))
+                await p.add(new Link({
+                    source: "note-ipfs://Qm123",
+                    target: "todo-ontology://is-todo"
+                }))
+
+                const result = await p.infer('triple(X, _, "todo-ontology://is-todo").')
+                expect(result).toBeTruthy()
+                expect(result.length).toBe(1)
+                expect(result[0].X).toBe('note-ipfs://Qm123')
+
+                expect(await p.infer('reachable("ad4m://root", "todo-ontology://is-todo")')).toBeTruthy()
             })
         })
 

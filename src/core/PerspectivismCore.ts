@@ -21,7 +21,7 @@ import { RequestAgentInfoResponse } from '@holochain/conductor-api'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
-const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmR1dV5KuAQtYG98qqmYEvHXfxJZ3jKyjf7SFMriCMfHVQ"
+const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb"
 
 export interface InitServicesParams {
     hcPortAdmin?: number, 
@@ -92,8 +92,17 @@ export default class PerspectivismCore {
     }
 
     async exit() {
+        console.log("Exiting gracefully...")
+        console.log("Stopping Prolog engines")
+        for(let ph of this.perspectivesController.allPerspectiveHandles()) {
+            const perspective = this.perspectivesController.perspective(ph.uuid)
+            perspective.closePrologEngine()
+        }
+        console.log("Stopping IPFS")
         await this.#IPFS?.stop();
+        console.log("Stopping Holochain conductor")
         await this.#holochain?.stop();
+        console.log("Done.")
     }
 
     async startGraphQLServer(port: number, mocks: boolean) {

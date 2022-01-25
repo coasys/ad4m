@@ -49,10 +49,10 @@ signing_service_uri: ~
 encryption_service_uri: ~
 decryption_service_uri: ~
 dpki: ~
-keystore_path: ${escapeShellArg(conductorConfig.environmentPath)}/keystore
-passphrase_service: 
-    type: danger_insecure_from_config
-    passphrase: "foobar"
+keystore:
+  type: lair_server_legacy_deprecated
+  keystore_path: ${escapeShellArg(conductorConfig.environmentPath)}/keystore
+  danger_passphrase_insecure_from_config: "foobar"
 admin_interfaces:
   - driver:
       type: websocket

@@ -1,7 +1,7 @@
 import { ApolloServer, withFilter, gql } from 'apollo-server'
-import { Agent, LanguageRef } from '@perspect3vism/ad4m'
+import { Agent, Expression, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
-import { typeDefsString } from '@perspect3vism/ad4m/lib/typeDefs'
+import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
@@ -51,7 +51,7 @@ function createResolvers(core: PerspectivismCore) {
                 };
                 const results = await Promise.all(expressionPromises);
 
-                return results.map((expression, index) => {
+                return results.map((expression: Expression|null, index) => {
                     if(expression) {
                         expression.ref = parseExprUrl(urls[index]);
                         expression.url = urls[index];
@@ -120,6 +120,12 @@ function createResolvers(core: PerspectivismCore) {
                 const perspective = core.perspectivesController.perspective(uuid)
                 //console.log("querying on", perspective, query, uuid);
                 return await perspective.getLinks(query)
+            },
+            //@ts-ignore
+            perspectiveQueryProlog: async (parent, args, context, info) => {
+                const { uuid, query } = args
+                const perspective = core.perspectivesController.perspective(uuid)
+                return JSON.stringify(await perspective.prologQuery(query))
             },
             //@ts-ignore
             perspectiveSnapshot: async (parent, args, context, info) => {
