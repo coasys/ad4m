@@ -220,6 +220,7 @@ export default class HolochainService {
     async pubKeyForLanguage(lang: string): Promise<AgentPubKey> {
         return this.pubKeyForAllLanguages()
 
+        // TODO using the same key for all DNAs should only be a temporary thing.
         const alreadyExisting = this.#db.get('pubKeys').find({lang}).value()
         if(alreadyExisting) {
             const pubKey = Buffer.from(alreadyExisting.pubKey)
