@@ -729,7 +729,7 @@ export default class LanguageController {
     async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {
         const language = await this.languageByRef(ref.language);
         if (!language.isImmutableExpression) {
-            return true
+            return false
         } else {
             return language.isImmutableExpression(ref.expression);
         }
