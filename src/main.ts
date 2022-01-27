@@ -12,9 +12,9 @@ interface OuterConfig {
   appDataPath: string
   appDefaultLangPath: string
   ad4mBootstrapLanguages: BootstrapLanguages,
-  ad4mBootstrapFixtures: BootstrapFixtures,
-  appBuiltInLangs: string[] | null,
-  appLangAliases: object | null,
+  ad4mBootstrapFixtures?: BootstrapFixtures,
+  appBuiltInLangs?: string[],
+  appLangAliases?: object,
   mocks: boolean,
   gqlPort?: number,
   hcPortAdmin?: number,
@@ -24,7 +24,8 @@ interface OuterConfig {
   hcUseLocalProxy?: boolean,
   hcUseMdns?: boolean,
   hcUseProxy?: boolean,
-  hcUseBootstrap?: boolean
+  hcUseBootstrap?: boolean,
+  connectHolochain?: boolean,
 }
 
 
@@ -39,7 +40,8 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       hcUseLocalProxy,
       hcUseMdns,
       hcUseProxy,
-      hcUseBootstrap
+      hcUseBootstrap,
+      connectHolochain
     } = config
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
@@ -86,7 +88,6 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     );
 
     let bootstrapFixtures = ad4mBootstrapFixtures
-
     const core = new create({
       appDataPath,
       appResourcePath: resourcePath,
@@ -95,8 +96,15 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       languageAliases,
       bootstrapFixtures,
     });
+
     console.log("\x1b[34m", "Init services...", "\x1b[0m");
-    await core.initServices({ hcPortAdmin, hcPortApp, ipfsSwarmPort, ipfsRepoPath, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap });
+    await core.initIPFS({ ipfsSwarmPort, ipfsRepoPath });
+    if (connectHolochain) {
+      await core.connectHolochain( {hcPortAdmin, hcPortApp} );
+    } else {
+      await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap });
+    }
+    
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
     await core.startGraphQLServer(gqlPort, mocks)
 
