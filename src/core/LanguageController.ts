@@ -725,6 +725,15 @@ export default class LanguageController {
     addLinkObserver(observer: LinkObservers) {
         this.#linkObservers.push(observer)
     }
+
+    async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {
+        const language = await this.languageByRef(ref.language);
+        if (!language.isImmutableExpression) {
+            return true
+        } else {
+            return language.isImmutableExpression(ref.expression);
+        }
+    }
 }
 
 export function init(context: object, holochainService: HolochainService): LanguageController {

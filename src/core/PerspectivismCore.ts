@@ -99,6 +99,10 @@ export default class PerspectivismCore {
         return this.#languageController!
     }
 
+    get database(): PerspectivismDb {
+        return this.#db
+    }
+
     async exit() {
         console.log("Exiting gracefully...")
         console.log("Stopping Prolog engines")
