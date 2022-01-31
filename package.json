@@ -18,7 +18,8 @@
     "prepare-test": "rm -rf src/test-temp && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
-    "test": "npm run prepare-test && PATH=$PATH:./src/test-temp jest --forceExit"
+    "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
+    "test": "npm run prepare-test && nix-shell --run \"npm run test-all\""
   },
   "repository": {
     "type": "git",
@@ -62,7 +63,7 @@
   "dependencies": {
     "fs-extra": "^10.0.0",
     "@holochain/client": "0.3.2",
-    "@perspect3vism/ad4m": "0.1.24",
+    "@perspect3vism/ad4m": "0.1.25",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",

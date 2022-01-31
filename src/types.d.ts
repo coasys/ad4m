@@ -7,10 +7,20 @@ export interface OuterConfig {
   appDataPath: string
   appDefaultLangPath: string
   ad4mBootstrapLanguages: BootstrapLanguages,
-  ad4mBootstrapFixtures: BootstrapFixtures | null,
-  appBuiltInLangs: string[] | null,
-  appLangAliases: object | null,
-  mocks: boolean
+  ad4mBootstrapFixtures?: BootstrapFixtures,
+  appBuiltInLangs?: string[],
+  appLangAliases?: object,
+  mocks: boolean,
+  gqlPort?: number,
+  hcPortAdmin?: number,
+  hcPortApp?: number,
+  ipfsSwarmPort?: number,
+  ipfsRepoPath?: string
+  hcUseLocalProxy?: boolean,
+  hcUseMdns?: boolean,
+  hcUseProxy?: boolean,
+  hcUseBootstrap?: boolean,
+  connectHolochain?: boolean,
 }
 
 export interface Config {
