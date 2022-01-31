@@ -35,19 +35,12 @@ function createResolvers(core: PerspectivismCore) {
             expression: async (parent, args, context, info) => {
                 const url = args.url.toString();
                 const ref = parseExprUrl(url)
-                if (await core.languageController.isImmutableExpression(ref)) {
-                    const cachedExpression = core.database.getExpression(url);
-                    if (cachedExpression) {
-                        return cachedExpression
-                    }
-                }
                 const expression = await core.languageController.getExpression(ref);
                 if(expression) {
                     expression.ref = ref
                     expression.url = url
                     expression.data = JSON.stringify(expression.data)
                 }
-                core.database.addExpression(url, expression);
                 return expression
             },
             //@ts-ignore
