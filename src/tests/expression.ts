@@ -14,11 +14,9 @@ export default function expressionTests(testContext: TestContext) {
             })
 
             it('can getManyExpressions()', async () => {
-                console.warn("get many expressions");
                 const ad4mClient = testContext.ad4mClient!;
                 const me = await ad4mClient.agent.me();
 
-                console.warn("making request");
                 const agentAndNull = await ad4mClient.expression.getMany([me.did, "lang://getNull", me.did]);
                 expect(agentAndNull.length).toBe(3);
                 expect(JSON.parse(agentAndNull[0].data).did).toEqual(me.did);
@@ -55,6 +53,39 @@ export default function expressionTests(testContext: TestContext) {
                 const expr = await ad4mClient.expression.get(exprAddr)
                 expect(expr).toBeDefined()
                 expect(expr.proof.valid).toBeTruthy()
+            })
+
+            it('can get expression from cache', async () => {
+                const ad4mClient = testContext.ad4mClient!
+                //@ts-ignore
+                const noteIpfs = (await ad4mClient.languages.byFilter('')).find(l=>l.name ==='note-ipfs')
+                expect(noteIpfs).toBeDefined()
+
+                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs!.address)
+                expect(exprAddr).toBeDefined()
+
+                const expr = await ad4mClient.expression.get(exprAddr)
+                expect(expr).toBeDefined()
+                expect(expr.proof.valid).toBeTruthy()
+                expect(expr.data).toBe("\"test note\"");
+
+                const exprCacheHit = await ad4mClient.expression.get(exprAddr)
+                expect(exprCacheHit).toBeDefined()
+                expect(exprCacheHit.proof.valid).toBeTruthy()
+                expect(exprCacheHit.data).toBe("\"test note\"");
+
+                const objExpr = await ad4mClient.expression.create(JSON.stringify({"key": "value"}), noteIpfs!.address)
+                expect(objExpr).toBeDefined()
+
+                const exprObj = await ad4mClient.expression.get(objExpr)
+                expect(exprObj).toBeDefined()
+                expect(exprObj.proof.valid).toBeTruthy()
+                expect(exprObj.data).toBe(JSON.stringify({"key": "value"}));
+
+                const exprObjCacheHit = await ad4mClient.expression.get(objExpr)
+                expect(exprObjCacheHit).toBeDefined()
+                expect(exprObjCacheHit.proof.valid).toBeTruthy()
+                expect(exprObjCacheHit.data).toBe(JSON.stringify({"key": "value"}));
             })
         })
     }

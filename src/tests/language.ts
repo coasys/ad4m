@@ -62,7 +62,7 @@ export default function languageTests(testContext: TestContext) {
                 );
                 expect(canPublishNonHolochainLang.name).toBe("Newly published note language");
                 //TODO/NOTE: this will break if the note-ipfs language version is changed
-                expect(canPublishNonHolochainLang.address).toBe("Qmd6AZzLjfGWNAqWLGTGy354JC1bK26XNf7rTEEsJfv7Fe");
+                expect(canPublishNonHolochainLang.address).toBe("QmbWg5VBFB1Zzce8X33GiGpMDXFPQjFQKS2T2rJtSYt7TJ");
             
                 //Get meta for source language above and make sure it is correct
                 const sourceLanguageMetaNonHC = await ad4mClient.expression.get(`lang://${canPublishNonHolochainLang.address}`);
