@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, CellId } from '@holochain/conductor-api'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, CellId } from '@holochain/client'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -7,7 +7,7 @@ import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, ConductorConfiguration} from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
-import { RequestAgentInfoResponse } from '@holochain/conductor-api'
+import { RequestAgentInfoResponse } from '@holochain/client'
 import yaml from 'js-yaml';
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
@@ -107,12 +107,12 @@ export default class HolochainService {
         console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks", signal);
         //console.debug("registered callbacks:", this.#signalCallbacks)
         if (this.#signalCallbacks.length != 0) {
-            const signalDna = signal.data.cellId[0].toString('hex')
-            const signalPubkey = signal.data.cellId[1].toString('hex')
+            const signalDna = Buffer.from(signal.data.cellId[0]).toString('hex')
+            const signalPubkey = Buffer.from(signal.data.cellId[1]).toString('hex')
             //console.debug("Looking for:", signalDna, signalPubkey)
             let callbacks = this.#signalCallbacks.filter(e => {
-                const dna = e[0][0].toString('hex')
-                const pubkey = e[0][1].toString('hex')
+                const dna = Buffer.from(e[0][0]).toString('hex')
+                const pubkey = Buffer.from(e[0][1]).toString('hex')
                 //console.debug("Checking:", dna, pubkey)
                 return ( dna === signalDna ) && (pubkey === signalPubkey)
             })
@@ -212,7 +212,7 @@ export default class HolochainService {
         } else {
             const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
             this.#db.get('pubKeys').push({lang: "global", pubKey}).write()
-            console.debug("Created new pubKey", pubKey.toString("base64"), "for all languages")
+            console.debug("Created new pubKey", Buffer.from(pubKey).toString("base64"), "for all languages")
             return pubKey
         }
     }
@@ -229,7 +229,7 @@ export default class HolochainService {
         } else {
             const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
             this.#db.get('pubKeys').push({lang, pubKey}).write()
-            console.debug("Created new pubKey", pubKey.toString("base64"), "for language", lang)
+            console.debug("Created new pubKey", Buffer.from(pubKey).toString("base64"), "for language", lang)
             return pubKey
         }
     }
@@ -343,7 +343,7 @@ export default class HolochainService {
         try {
             console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m")
             const result = await this.#appWebsocket!.callZome({
-                cap: fakeCapSecret(),
+                cap_secret: fakeCapSecret(),
                 cell_id,
                 zome_name: zomeName,
                 fn_name: fnName,
