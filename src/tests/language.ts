@@ -70,7 +70,7 @@ export default function languageTests(testContext: TestContext) {
                 const sourceLanguageMetaNonHCData = JSON.parse(sourceLanguageMetaNonHC.data);
                 expect(sourceLanguageMetaNonHCData.name).toBe("Newly published note language")
                 expect(sourceLanguageMetaNonHCData.description).toBe("Just to test non-HC language work as well")
-                expect(sourceLanguageMetaNonHCData.address).toBe("Qmd6AZzLjfGWNAqWLGTGy354JC1bK26XNf7rTEEsJfv7Fe")
+                expect(sourceLanguageMetaNonHCData.address).toBe("QmbWg5VBFB1Zzce8X33GiGpMDXFPQjFQKS2T2rJtSYt7TJ")
             })
 
 
