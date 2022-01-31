@@ -1,6 +1,6 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl 
+    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput } from '@perspect3vism/ad4m';
 import fs from 'fs'
