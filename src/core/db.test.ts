@@ -1,6 +1,7 @@
 import { PerspectivismDb } from './db'
 import Memory from 'lowdb/adapters/Memory'
 import { v4 as uuidv4 } from 'uuid'
+import { Expression } from '@perspect3vism/ad4m'
 
 describe('PerspectivismDb', () => {
     let db: PerspectivismDb | undefined
@@ -161,5 +162,12 @@ describe('PerspectivismDb', () => {
         const result2 = db!.getLinksByTarget(pUUID!, '1')
 
         expect(result2).toEqual([])
+    })
+
+    it('can add expression object', () => {
+        const expression = new Expression();
+        db!.addExpression("address", expression);
+        const getExpression = db!.getExpression("address");
+        expect(getExpression).toBe(expression);
     })
 })

@@ -99,6 +99,10 @@ export default class PerspectivismCore {
         return this.#languageController!
     }
 
+    get database(): PerspectivismDb {
+        return this.#db
+    }
+
     async exit() {
         console.log("Exiting gracefully...")
         console.log("Stopping Prolog engines")
@@ -181,8 +185,8 @@ export default class PerspectivismCore {
             runtime: this.#runtimeService,
             IPFS: this.#IPFS,
             signatures: this.#signatures,
-            ad4mSignal: this.languageSignal
-        }, this.#holochain!)
+            ad4mSignal: this.languageSignal,
+        }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, signatures: this.#signatures, db: this.#db } )
 
         this.#perspectivesController = new PerspectivesController(Config.rootConfigPath, {
             db: this.#db,

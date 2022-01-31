@@ -63,7 +63,7 @@
   "dependencies": {
     "fs-extra": "^10.0.0",
     "@holochain/conductor-api": "0.2.4",
-    "@perspect3vism/ad4m": "0.1.24",
+    "@perspect3vism/ad4m": "0.1.25",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^11.2.0",
