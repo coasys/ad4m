@@ -707,7 +707,7 @@ export default class LanguageController {
             } else {
                 console.log("Cache miss...");
                 expr = await lang.expressionAdapter.get(ref.expression);
-                this.#db.addExpression(ref.expression, expr);
+                if (expr) { this.#db.addExpression(ref.expression, expr) };
             };
         } else {
             expr = await lang.expressionAdapter.get(ref.expression);
