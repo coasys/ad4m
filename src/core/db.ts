@@ -127,11 +127,11 @@ export class PerspectivismDb {
         this.#db.get(key).remove(l => l===linkName).write()
     }
 
-    addExpression(key: string, expression: Expression): void {
+    addExpression(key: string, expression: string): void {
         this.#db.set(key, expression).write()
     }
 
-    getExpression(key: string): Expression | undefined {
+    getExpression(key: string): string | undefined {
         return this.#db.get(key).value()
     }
 }

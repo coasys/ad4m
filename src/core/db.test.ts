@@ -163,11 +163,4 @@ describe('PerspectivismDb', () => {
 
         expect(result2).toEqual([])
     })
-
-    it('can add expression object', () => {
-        const expression = new Expression();
-        db!.addExpression("address", expression);
-        const getExpression = db!.getExpression("address");
-        expect(getExpression).toBe(expression);
-    })
 })

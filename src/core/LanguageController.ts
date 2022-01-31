@@ -703,11 +703,11 @@ export default class LanguageController {
             const cachedExpression = this.#db.getExpression(ref.expression);
             if (cachedExpression) {
                 console.log("Cache hit...");
-                expr = cachedExpression
+                expr = JSON.parse(cachedExpression) as Expression
             } else {
                 console.log("Cache miss...");
                 expr = await lang.expressionAdapter.get(ref.expression);
-                if (expr) { this.#db.addExpression(ref.expression, expr) };
+                if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
             };
         } else {
             expr = await lang.expressionAdapter.get(ref.expression);
