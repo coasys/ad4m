@@ -12,12 +12,12 @@ const languages = {
   },
   languages: {
       targetDnaName: "languages",
-      bundle: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.15/bundle.js",
+      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.1/bundle.js",
   },
   "neighbourhood-store": {
     targetDnaName: "neighbourhood-store",
     //dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.2/neighbourhood-store.dna",
-    bundle: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.3/bundle.js",
+    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.1/bundle.js",
   },
   "social-context": {
     zipped: true,
@@ -43,7 +43,11 @@ async function main() {
     if (languages[lang].bundle) {
       let url = languages[lang].bundle;
       let dest = dir + "/build/bundle.js";
-      wget({ url, dest });
+      if (url.slice(0, 8) != "https://" && url.slice(0, 7) != "http://") {
+        fs.copyFileSync(url, dest);
+      } else {
+        wget({ url, dest });
+      }
     }
 
     // dna
