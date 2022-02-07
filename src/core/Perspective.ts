@@ -224,6 +224,32 @@ export default class Perspective {
 
         const reverse = query.fromDate! >= query.untilDate!;
 
+        function fromDateFilter(link: LinkExpression) {
+            if (reverse) {
+                return new Date(link.timestamp) <= query.fromDate!
+            } else {
+                return new Date(link.timestamp) >= query.fromDate!
+            }
+        }
+
+        function untilDateFilter(link: LinkExpression) {
+            if (reverse) {
+                return new Date(link.timestamp) >= query.untilDate!
+            } else {
+                return new Date(link.timestamp) <= query.untilDate!
+            }
+        }
+
+        function limitFilter(results: LinkExpression[]) {
+            if (query.limit) {
+                const startLimit = reverse ? results.length - query.limit : 0;
+                const endLimit = reverse ? (results.length - query.limit) + query.limit : query.limit;
+                return results.slice(startLimit, endLimit)
+            }
+
+            return results;
+        }
+
         if(query.source) {
             // console.debug("query.source", query.source)
             //@ts-ignore
@@ -233,27 +259,11 @@ export default class Perspective {
             // @ts-ignore
             if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
             //@ts-ignore
-            if (query.fromDate) result = result.filter(l => {
-                if (reverse) {
-                    return new Date(l.timestamp) <= query.fromDate!
-                } else {
-                    return new Date(l.timestamp) >= query.fromDate!
-                }
-            })
-            //@ts-ignore
-            if (query.untilDate) result = result.filter(l => {
-                if (reverse) {
-                    return new Date(l.timestamp) >= query.untilDate!
-                } else {
-                    return new Date(l.timestamp) <= query.untilDate!
-                }
-            })
+            if (query.fromDate) result = result.filter(fromDateFilter)
+            // @ts-ignore
+            if (query.untilDate) result = result.filter(untilDateFilter)
             // console.debug("result", result)
-            if (query.limit) {
-                const startLimit = reverse ? result.length - query.limit : 0;
-                const endLimit = reverse ? (result.length - query.limit) + query.limit : query.limit;
-                result = result.slice(startLimit, endLimit)
-            };
+            result = limitFilter(result);
             return result
         }
 
@@ -265,26 +275,10 @@ export default class Perspective {
             // @ts-ignore
             if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
             //@ts-ignore
-            if (query.fromDate) result = result.filter(l => {
-                if (reverse) {
-                    return new Date(l.timestamp) <= query.fromDate!
-                } else {
-                    return new Date(l.timestamp) >= query.fromDate!
-                }
-            })
+            if (query.fromDate) result = result.filter(fromDateFilter)
             //@ts-ignore
-            if (query.untilDate) result = result.filter(l => {
-                if (reverse) {
-                    return new Date(l.timestamp) >= query.untilDate!
-                } else {
-                    return new Date(l.timestamp) <= query.untilDate!
-                }
-            })
-            if (query.limit) {
-                const startLimit = reverse ? result.length - query.limit : 0;
-                const endLimit = reverse ? (result.length - query.limit) + query.limit : query.limit;
-                result = result.slice(startLimit, endLimit)
-            };
+            if (query.untilDate) result = result.filter(untilDateFilter)
+            result = limitFilter(result);
             return result
         }
 
