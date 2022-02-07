@@ -160,25 +160,25 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(pSeenInUpdateCB.uuid).toStrictEqual(p1.uuid)
                 expect(pSeenInUpdateCB.name).toStrictEqual(p1.name)
 
-                // const linkAdded = jest.fn()
-                // // TODO: @fayeed update this
-                // await ad4mClient.perspective.addPerspectiveLinkListener(p1.uuid, 'link-added', linkAdded)
-                // const linkRemoved = jest.fn()
-                // await ad4mClient.perspective.addPerspectiveLinkListener(p1.uuid, 'link-removed', linkRemoved)
+                const linkAdded = jest.fn()
+                // TODO: @fayeed update this
+                await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
+                const linkRemoved = jest.fn()
+                await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
 
-                // const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'root', target: 'lang://123'})
-                // expect(linkAdded.mock.calls.length).toBe(1)
-                // expect(linkAdded.mock.calls[0][0]).toEqual(linkExpression)
+                const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'root', target: 'lang://123'})
+                expect(linkAdded.mock.calls.length).toBe(1)
+                expect(linkAdded.mock.calls[0][0]).toEqual(linkExpression)
 
-                // const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'root', target: 'lang://456'})
-                // expect(linkAdded.mock.calls.length).toBe(2)
-                // expect(linkAdded.mock.calls[1][0]).toEqual(updatedLinkExpression)
-                // expect(linkRemoved.mock.calls.length).toBe(1)
-                // expect(linkRemoved.mock.calls[0][0]).toEqual(linkExpression)
+                const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'root', target: 'lang://456'})
+                expect(linkAdded.mock.calls.length).toBe(2)
+                expect(linkAdded.mock.calls[1][0]).toEqual(updatedLinkExpression)
+                expect(linkRemoved.mock.calls.length).toBe(1)
+                expect(linkRemoved.mock.calls[0][0]).toEqual(linkExpression)
 
-                // await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
-                // expect(linkRemoved.mock.calls.length).toBe(2)
-                // expect(linkRemoved.mock.calls[1][0]).toEqual(updatedLinkExpression)
+                await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
+                expect(linkRemoved.mock.calls.length).toBe(2)
+                expect(linkRemoved.mock.calls[1][0]).toEqual(updatedLinkExpression)
             })
 
             it('can run Prolog queries', async () => {
