@@ -63,7 +63,7 @@
   "dependencies": {
     "fs-extra": "^10.0.0",
     "@holochain/client": "0.3.2",
-    "@perspect3vism/ad4m": "0.1.25",
+    "@perspect3vism/ad4m": "0.1.26",
     "@peculiar/webcrypto": "^1.1.7",
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-json": "^4.1.0",
