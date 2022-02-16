@@ -381,7 +381,7 @@ function createResolvers(core: PerspectivismCore) {
             perspectivePublishSnapshot: async (parent, args, context, info) => {
                 const { uuid } = args
                 const snapshot = await core.perspectivesController.perspectiveSnapshot(uuid)
-                const language = core.languageController.getPerspectiveSnapshotLanguage()
+                const language = core.languageController.getPerspectiveLanguage()
                 const langref = { address: 'perspective' } as LanguageRef
                 const expref = await core.languageController.expressionCreate(langref, snapshot)
                 return exprRef2String(expref)
