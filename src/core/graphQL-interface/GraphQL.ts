@@ -33,11 +33,12 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             expression: async (parent, args, context, info) => {
-                const ref = parseExprUrl(args.url.toString())
-                const expression = await core.languageController.getExpression(ref) as any
+                const url = args.url.toString();
+                const ref = parseExprUrl(url)
+                const expression = await core.languageController.getExpression(ref);
                 if(expression) {
                     expression.ref = ref
-                    expression.url = args.url.toString()
+                    expression.url = url
                     expression.data = JSON.stringify(expression.data)
                 }
                 return expression

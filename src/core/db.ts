@@ -1,7 +1,7 @@
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
-import type { LinkExpression } from "@perspect3vism/ad4m";  
+import type { Expression, LinkExpression } from "@perspect3vism/ad4m";  
 
 export class PerspectivismDb {
     #db: any
@@ -127,6 +127,13 @@ export class PerspectivismDb {
         this.#db.get(key).remove(l => l===linkName).write()
     }
 
+    addExpression(key: string, expression: string): void {
+        this.#db.set(key, expression).write()
+    }
+
+    getExpression(key: string): string | undefined {
+        return this.#db.get(key).value()
+    }
 }
 
 export function init(dbFilePath: string): PerspectivismDb {

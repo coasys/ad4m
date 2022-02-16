@@ -1,6 +1,6 @@
 import type { Dna } from '@perspect3vism/ad4m'
 import type HolochainService from './HolochainService'
-import type { AppSignalCb } from '@holochain/conductor-api'
+import type { AppSignalCb } from '@holochain/client'
 import { AsyncQueue } from './Queue'
 
 export default class HolochainLanguageDelegate {
