@@ -12,12 +12,22 @@ import { builtInLangs, builtInLangPath, languageAliases, bootstrapFixtures } fro
 import * as PubSub from './graphQL-interface/PubSub'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid'
+import RuntimeService from './RuntimeService';
+import Signatures from './agent/Signatures';
+import { PerspectivismDb } from './db';
 
 type LinkObservers = (added: Expression[], removed: Expression[], lang: LanguageRef)=>void;
 
 interface LoadedLanguage {
     language: Language,
     hash: string,
+}
+
+interface Services {
+    holochainService: HolochainService, 
+    runtimeService: RuntimeService, 
+    signatures: Signatures, 
+    db: PerspectivismDb
 }
 
 export default class LanguageController {
@@ -27,6 +37,9 @@ export default class LanguageController {
     #linkObservers: LinkObservers[];
     #holochainService: HolochainService
     #builtInLanguages: string[];
+    #runtimeService: RuntimeService;
+    #signatures: Signatures;
+    #db: PerspectivismDb;
 
     #agentLanguage?: Language
     #languageLanguage?: Language
@@ -34,11 +47,14 @@ export default class LanguageController {
     pubSub
 
 
-    constructor(context: object, holochainService: HolochainService) {
+    constructor(context: object, services: Services) {
         this.#builtInLanguages = builtInLangs.map(l => `${builtInLangPath}/${l}/build/bundle.js`)
 
         this.#context = context
-        this.#holochainService = holochainService
+        this.#holochainService = services.holochainService
+        this.#runtimeService = services.runtimeService
+        this.#signatures = services.signatures
+        this.#db = services.db
         this.#languages = new Map()
         this.#languageConstructors = new Map()
         this.#linkObservers = []   
@@ -243,8 +259,7 @@ export default class LanguageController {
             }
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
-            //@ts-ignore
-            const trustedAgents: string[] = this.#context.runtime.getTrustedAgents();
+            const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
             if (trustedAgents.find((agent) => agent === languageAuthor)) {
                 //Get the language source so we can generate a hash and check against the hash given in the language meta information
@@ -283,8 +298,7 @@ export default class LanguageController {
                 if (!sourceLanguageMeta) {
                     throw new Error("Could not get the meta for the source language");
                 }
-                //@ts-ignore
-                const trustedAgents: string[] = this.#context.runtime.getTrustedAgents();
+                const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
                 //Check that the agent who authored the original template language is in the current agents trust list
                 if (trustedAgents.find((agent) => agent === sourceLanguageMeta.author)) {
                     //Apply the template information supplied in the language to be installed to the source language and make sure that the resulting
@@ -682,11 +696,25 @@ export default class LanguageController {
         if (!lang.expressionAdapter) {
             throw Error("Language does not have an expresionAdapter!")
         };
-        const expr = await lang.expressionAdapter.get(ref.expression);
+        const langIsImmutable = await this.isImmutableExpression(ref);
+        let expr;
+        if (langIsImmutable) {
+            console.log("Calling cache for expression...");
+            const cachedExpression = this.#db.getExpression(ref.expression);
+            if (cachedExpression) {
+                console.log("Cache hit...");
+                expr = JSON.parse(cachedExpression) as Expression
+            } else {
+                console.log("Cache miss...");
+                expr = await lang.expressionAdapter.get(ref.expression);
+                if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
+            };
+        } else {
+            expr = await lang.expressionAdapter.get(ref.expression);
+        }
         if(expr) {
             try{
-                // @ts-ignore
-                if(! await this.#context.signatures.verify(expr)) {
+                if(! await this.#signatures.verify(expr)) {
                     console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
                     expr.proof.invalid = true
                     delete expr.proof.valid
@@ -725,9 +753,18 @@ export default class LanguageController {
     addLinkObserver(observer: LinkObservers) {
         this.#linkObservers.push(observer)
     }
+
+    async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {
+        const language = await this.languageByRef(ref.language);
+        if (!language.isImmutableExpression) {
+            return false
+        } else {
+            return language.isImmutableExpression(ref.expression);
+        }
+    }
 }
 
-export function init(context: object, holochainService: HolochainService): LanguageController {
-    const languageController = new LanguageController(context, holochainService)
+export function init(context: object, services: Services): LanguageController {
+    const languageController = new LanguageController(context, services)
     return languageController
 }

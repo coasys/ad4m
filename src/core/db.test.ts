@@ -1,6 +1,7 @@
 import { PerspectivismDb } from './db'
 import Memory from 'lowdb/adapters/Memory'
 import { v4 as uuidv4 } from 'uuid'
+import { Expression } from '@perspect3vism/ad4m'
 
 describe('PerspectivismDb', () => {
     let db: PerspectivismDb | undefined
