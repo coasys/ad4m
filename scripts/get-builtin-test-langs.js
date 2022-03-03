@@ -29,7 +29,7 @@ const languages = {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
   },
   "direct-message-language": {
-    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.3/bundle.js"
+    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.4/bundle.js"
   }
 };
 
