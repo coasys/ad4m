@@ -6,9 +6,9 @@ const path = require("path");
 const languages = {
   "agent-expression-store": {
     targetDnaName: "agent-store",
-    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.9/agent-store.dna",
+    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.10/agent-store.dna",
     bundle:
-      "https://github.com/perspect3vism/agent-language/releases/download/0.0.9/bundle.js",
+      "https://github.com/perspect3vism/agent-language/releases/download/0.0.10/bundle.js",
   },
   languages: {
       targetDnaName: "languages",
@@ -23,7 +23,7 @@ const languages = {
     zipped: true,
     targetDnaName: "social-context",
     resource:
-      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.21/full_features.zip",
+      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.22/full_features.zip",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
