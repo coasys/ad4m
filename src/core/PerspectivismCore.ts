@@ -18,23 +18,33 @@ import { IPFS as IPFSType } from 'ipfs'
 import EntanglementProofController from './EntanglementProof'
 import runDAppServer from "./DAppServer"
 import fs from 'fs'
-import { RequestAgentInfoResponse } from '@holochain/conductor-api'
+import { RequestAgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
-const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmYGSJUQib1H6rHumdRVDhoHgkHm3U8KzSEQFfTPgziAYe"
+const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb"
 
 export interface InitServicesParams {
     agentService: AgentService,
+}
+export interface InitIPFSParams {
+    ipfsSwarmPort?: number,
+    ipfsRepoPath?: string,
+}
+export interface InitHolochainParams {
     hcPortAdmin?: number, 
     hcPortApp?: number,
-    ipfsSwarmPort?: number,
-    ipfsRepoPath?: string
     hcUseBootstrap?: boolean,
     hcUseProxy?: boolean,
     hcUseLocalProxy?: boolean,
     hcUseMdns?: boolean
 }
+
+export interface ConnectHolochainParams {
+    hcPortAdmin: number, 
+    hcPortApp: number,
+}
+
 export default class PerspectivismCore {
     #holochain?: HolochainService
     #IPFS?: IPFSType
@@ -107,10 +117,23 @@ export default class PerspectivismCore {
         }
         return this.#entanglementProofController
     }
+    
+    get database(): PerspectivismDb {
+        return this.#db
+    }
 
     async exit() {
+        console.log("Exiting gracefully...")
+        console.log("Stopping Prolog engines")
+        for(let ph of this.perspectivesController.allPerspectiveHandles()) {
+            const perspective = this.perspectivesController.perspective(ph.uuid)
+            perspective.closePrologEngine()
+        }
+        console.log("Stopping IPFS")
         await this.#IPFS?.stop();
+        console.log("Stopping Holochain conductor")
         await this.#holochain?.stop();
+        console.log("Done.")
     }
 
     async startGraphQLServer(port: number, mocks: boolean) {
@@ -127,7 +150,14 @@ export default class PerspectivismCore {
         runDAppServer(port)
     }
 
-    async initServices(params: InitServicesParams) {
+    async initIPFS(params: InitIPFSParams) {
+        console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
+        
+        let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
+        this.#IPFS = ipfs;
+    }
+
+    async initHolochain(params: InitHolochainParams) {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
         console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
         this.#holochain = new HolochainService({
@@ -140,13 +170,20 @@ export default class PerspectivismCore {
             useProxy: params.hcUseProxy,
             useLocalProxy: params.hcUseLocalProxy,
             useMdns: params.hcUseMdns,
-        }, params.agentService, this.entanglementProofController)
-        let [ipfs, _] = await Promise.all([IPFS.init(
-            params.ipfsSwarmPort, 
-            params.ipfsRepoPath
-        ), this.#holochain.run()]);
-        this.#IPFS = ipfs;
-        //this.connectToHardwiredPerspect3vismAgent()
+        }, this.#agentService, this.entanglementProofController)
+        await this.#holochain.run();
+    }
+
+    async connectHolochain(params: ConnectHolochainParams) {
+        console.log("Init ad4m service with resource path ", Config.resourcePath)
+        console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
+        this.#holochain = new HolochainService({
+            dataPath: Config.holochainDataPath, 
+            resourcePath: Config.resourcePath, 
+            adminPort: params.hcPortAdmin, 
+            appPort: params.hcPortApp,
+        }, this.#agentService, this.entanglementProofController)
+        await this.#holochain.connect();
     }
 
     async waitForAgent(): Promise<void> {
@@ -171,8 +208,8 @@ export default class PerspectivismCore {
             runtime: this.#runtimeService,
             IPFS: this.#IPFS,
             signatures: this.#signatures,
-            ad4mSignal: this.languageSignal
-        }, this.#holochain!)
+            ad4mSignal: this.languageSignal,
+        }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, signatures: this.#signatures, db: this.#db } )
 
         this.#perspectivesController = new PerspectivesController(Config.rootConfigPath, {
             db: this.#db,
@@ -268,7 +305,7 @@ export default class PerspectivismCore {
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
-        return await this.#holochain!.pubKeyForLanguage(lang)
+        return Buffer.from(await this.#holochain!.pubKeyForLanguage(lang))
     }
 
     async holochainRequestAgentInfos(): Promise<RequestAgentInfoResponse> {
@@ -293,7 +330,7 @@ export default class PerspectivismCore {
 
         const templateParams = {
             recipient_did: this.#agentService.agent?.did,
-            recipient_hc_agent_pubkey: (await this.#holochain?.pubKeyForAllLanguages())!.toString('hex')
+            recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
         const createdDmLang = await this.languageApplyTemplateAndPublish(DM_LANGUAGE_TEMPLATE_ADDRESS, templateParams)

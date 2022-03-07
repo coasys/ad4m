@@ -8,7 +8,7 @@ const FRIENDS_FILE = "friends.json"
 const OUTBOX_FILE = "outbox.json"
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
-const SOCIAL_CONTEXT_OFFICIAL = "QmNnuZ5CgemAY2sskTqBbbHLvGJTqWByv4XaGLF2nrshzk"
+const SOCIAL_CONTEXT_OFFICIAL = "QmUvSpKxCnychotba2pVCufCNFSmr5Tj8e9qqdZkpuuxWt"
 
 function _add(items: string[], file: string): void {
     let all: string[];

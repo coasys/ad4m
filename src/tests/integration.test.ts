@@ -100,7 +100,7 @@ let testContext: TestContext = new TestContext()
 
 describe("Integration tests", () => {
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
-    const ipfsRepoPath = path.join(appDataPath, 'agents', 'alice', '.jsipfs')
+    const ipfsRepoPath = path.join(appDataPath)
 
     beforeAll(async () => {    
         if(!fs.existsSync(TEST_DIR)) {
@@ -121,14 +121,14 @@ describe("Integration tests", () => {
             },
             ad4mBootstrapFixtures: {
               languages: [{
-                address: 'QmYGSJUQib1H6rHumdRVDhoHgkHm3U8KzSEQFfTPgziAYe',
-                meta:  {"author":"did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","timestamp":"2021-10-06T17:58:05.141Z","data":{"name":"Direct Message Language","address":"QmYGSJUQib1H6rHumdRVDhoHgkHm3U8KzSEQFfTPgziAYe","description":"Template source for personal, per-agent DM languages. Holochain based.","possibleTemplateParams":["recipient_did","recipient_hc_agent_pubkey"],"sourceCodeLink":"https://github.com/perspect3vism/direct-message-language"},"proof":{"signature":"8a495d3a1f59479109d78800362870158fdc4d8833299bd46d5c4aca3616754d3b3e8dbe74a7b2601b8b81862ffbcbeb6f73f31be255e57e3054026318ac9e38","key":"#zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","valid":true}},
+                address: 'QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb',
+                meta:  {"author":"did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","timestamp":"2022-01-24T17:47:46.855Z","data":{"name":"Direct Message Language","address":"QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb","description":"Template source for personal, per-agent DM languages. Holochain based.","possibleTemplateParams":["recipient_did","recipient_hc_agent_pubkey"],"sourceCodeLink":"https://github.com/perspect3vism/direct-message-language"},"proof":{"signature":"d5f120f0cd225386499c54addd0bd9e5b0706c448d6211c2cf94333f8c78734612f8a3606e8e188ffb370fca6bd6ae301337384b24809febb1d12c38c6cdebcf","key":"#zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","valid":true}},
                 bundle: fs.readFileSync(path.join(TEST_DIR, 'languages', 'direct-message-language', 'build', 'bundle.js')).toString()
               }],
               perspectives: [],
             },
             appBuiltInLangs: ['note-ipfs', 'direct-message-language'],
-            appLangAliases: null,
+            appLangAliases: undefined,
             mocks: false,
             ipfsRepoPath,
             hcUseBootstrap: false,
@@ -167,7 +167,7 @@ describe("Integration tests", () => {
         let bob: PerspectivismCore | null = null
         beforeAll(async () => {
             const appDataPath = path.join(TEST_DIR, 'agents', 'bob')
-            const ipfsRepoPath = path.join(appDataPath, '.jsipfs')
+            const ipfsRepoPath = path.join(appDataPath)
             if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
               fs.mkdirSync(path.join(TEST_DIR, 'agents'))
             if(!fs.existsSync(appDataPath))
@@ -184,14 +184,14 @@ describe("Integration tests", () => {
                 },
                 ad4mBootstrapFixtures: {
                   languages: [{
-                    address: 'QmYGSJUQib1H6rHumdRVDhoHgkHm3U8KzSEQFfTPgziAYe',
-                meta:  {"author":"did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","timestamp":"2021-10-06T17:58:05.141Z","data":{"name":"Direct Message Language","address":"QmYGSJUQib1H6rHumdRVDhoHgkHm3U8KzSEQFfTPgziAYe","description":"Template source for personal, per-agent DM languages. Holochain based.","possibleTemplateParams":["recipient_did","recipient_hc_agent_pubkey"],"sourceCodeLink":"https://github.com/perspect3vism/direct-message-language"},"proof":{"signature":"8a495d3a1f59479109d78800362870158fdc4d8833299bd46d5c4aca3616754d3b3e8dbe74a7b2601b8b81862ffbcbeb6f73f31be255e57e3054026318ac9e38","key":"#zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","valid":true}},
+                    address: 'QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb',
+                    meta:  {"author":"did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","timestamp":"2022-01-24T17:47:46.855Z","data":{"name":"Direct Message Language","address":"QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb","description":"Template source for personal, per-agent DM languages. Holochain based.","possibleTemplateParams":["recipient_did","recipient_hc_agent_pubkey"],"sourceCodeLink":"https://github.com/perspect3vism/direct-message-language"},"proof":{"signature":"d5f120f0cd225386499c54addd0bd9e5b0706c448d6211c2cf94333f8c78734612f8a3606e8e188ffb370fca6bd6ae301337384b24809febb1d12c38c6cdebcf","key":"#zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","valid":true}},
                     bundle: fs.readFileSync(path.join(TEST_DIR, 'languages', 'direct-message-language', 'build', 'bundle.js')).toString()
                   }],
                   perspectives: [],
                 },
                 appBuiltInLangs: ['note-ipfs', 'direct-message-language'],
-                appLangAliases: null,
+                appLangAliases: undefined,
                 mocks: false,
                 gqlPort: 14000,
                 hcPortAdmin: 12000,

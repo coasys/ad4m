@@ -1,7 +1,7 @@
 import { TestContext } from './integration.test'
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
-const SOCIAL_CONTEXT_OFFICIAL = "QmNnuZ5CgemAY2sskTqBbbHLvGJTqWByv4XaGLF2nrshzk"
+const SOCIAL_CONTEXT_OFFICIAL = "QmUvSpKxCnychotba2pVCufCNFSmr5Tj8e9qqdZkpuuxWt"
 
 export default function runtimeTests(testContext: TestContext) {
     return () => {
@@ -122,7 +122,9 @@ export default function runtimeTests(testContext: TestContext) {
 
         it("can deal with Holochain's agent_infos", async () => {
             const ad4mClient = testContext.ad4mClient!
+            // @ts-ignore
             const agentInfos = await ad4mClient.runtime.hcAgentInfos()
+            // @ts-ignore
             expect(await ad4mClient.runtime.hcAddAgentInfos(agentInfos)).toBeTruthy()
         })
     }

@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, AppStatusFilter, CellId } from '@holochain/conductor-api'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, CellId, RequestAgentInfoResponse, AppStatusFilter } from '@holochain/client'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -7,10 +7,12 @@ import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, ConductorConfiguration} from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
-import { RequestAgentInfoResponse } from '@holochain/conductor-api'
+
 import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
 import fetch from "node-fetch";
+import yaml from 'js-yaml';
+
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
@@ -19,7 +21,7 @@ const kitsuneProxy = "kitsune-proxy://SYVd4CF3BdJ4DS7KwLLgeU3_DbHoZ34Y-qroZ79DOs
 const signingServiceVersion = "0.0.1";
 
 export interface HolochainConfiguration {
-    conductorPath: string, 
+    conductorPath?: string, 
     dataPath: string, 
     resourcePath: string
     adminPort?: number;
@@ -41,9 +43,9 @@ export default class HolochainService {
     #hcProcess?: ChildProcess
     #lairProcess?: ChildProcess
     #resourcePath: string
-    #conductorPath: string
+    #conductorPath?: string
     #didResolveError: boolean
-    #conductorConfigPath: string
+    #conductorConfigPath?: string
     #signalCallbacks: [CellId, AppSignalCb, string][]
     #agentService: AgentService
     #entanglementProofController?: EntanglementProofController
@@ -81,40 +83,49 @@ export default class HolochainService {
         this.#adminPort = holochainAdminPort;
         this.#appPort = holochainAppPort;
         this.#resourcePath = resourcePath;
-        this.#conductorPath = conductorPath;
+
+        if (conductorPath) {
+            this.#conductorPath = conductorPath;
+            let conductorConfigPath = path.join(conductorPath, "conductor-config.yaml");
+            this.#conductorConfigPath = conductorConfigPath;
+            if (!fs.existsSync(conductorConfigPath)) {
+                writeDefaultConductor({
+                    proxyUrl: kitsuneProxy,
+                    environmentPath: conductorPath,
+                    adminPort: holochainAdminPort,
+                    appPort: holochainAppPort,
+                    useBootstrap,
+                    bootstrapService: bootstrapUrl,
+                    conductorConfigPath: conductorConfigPath,
+                    useProxy,
+                    useLocalProxy,
+                    useMdns
+                } as ConductorConfiguration);
+            } else {
+                const config = yaml.load(fs.readFileSync(conductorConfigPath, 'utf-8')) as any;
+                const adminPort = config.admin_interfaces[0].driver.port as number;
     
-        let conductorConfigPath = path.join(conductorPath, "conductor-config.yaml");
-        this.#conductorConfigPath = conductorConfigPath;
-        if (!fs.existsSync(conductorConfigPath)) {
-            writeDefaultConductor({
-                proxyUrl: kitsuneProxy,
-                environmentPath: conductorPath,
-                adminPort: holochainAdminPort,
-                appPort: holochainAppPort,
-                useBootstrap,
-                bootstrapService: bootstrapUrl,
-                conductorConfigPath: conductorConfigPath,
-                useProxy,
-                useLocalProxy,
-                useMdns
-            } as ConductorConfiguration);
-        };
+                if (adminPort !== this.#adminPort) {
+                    console.debug(`HC PORT: ${this.#adminPort} supplied is different than the PORT: ${adminPort} set in config, using the config port`);
+                    this.#adminPort = adminPort;
+                }
+            }
+        }
     }
 
     handleCallback(signal: AppSignal) {
         console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks", signal);
         //console.debug("registered callbacks:", this.#signalCallbacks)
         if (this.#signalCallbacks.length != 0) {
-            const signalDna = signal.data.cellId[0].toString('hex')
-            const signalPubkey = signal.data.cellId[1].toString('hex')
+            const signalDna = Buffer.from(signal.data.cellId[0]).toString('hex')
+            const signalPubkey = Buffer.from(signal.data.cellId[1]).toString('hex')
             //console.debug("Looking for:", signalDna, signalPubkey)
             let callbacks = this.#signalCallbacks.filter(e => {
-                const dna = e[0][0].toString('hex')
-                const pubkey = e[0][1].toString('hex')
+                const dna = Buffer.from(e[0][0]).toString('hex')
+                const pubkey = Buffer.from(e[0][1]).toString('hex')
                 //console.debug("Checking:", dna, pubkey)
                 return ( dna === signalDna ) && (pubkey === signalPubkey)
             })
-            console.debug("found callbacks:", callbacks)
             callbacks.forEach(cb => {
                 if (cb && cb![1] != undefined) {
                     cb![1](signal);
@@ -123,22 +134,21 @@ export default class HolochainService {
         };
     }
 
-    async run() {
+    async connect() {
         let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)
-        let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath);
-        console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
-        [this.#hcProcess, this.#lairProcess] = hcProcesses;
+        
+        console.log("Connecting to holochain process.");
+
         try {
             if (this.#adminWebsocket == undefined) {
                 this.#adminWebsocket = await AdminWebsocket.connect(`ws://localhost:${this.#adminPort}`)
-
-                try {
-                    await this.#adminWebsocket.attachAppInterface({ port: this.#appPort })
-                } catch {
-                    console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...")
-                }
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
+                try {
+                    await this.#adminWebsocket!.attachAppInterface({ port: this.#appPort });
+                } catch {
+                    console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...");
+                }
             };
             if (this.#appWebsocket == undefined) {
                 this.#appWebsocket = await AppWebsocket.connect(`ws://localhost:${this.#appPort}`, 100000, this.handleCallback.bind(this))
@@ -164,7 +174,7 @@ export default class HolochainService {
                 })
 
                 const installedApp = await this.#adminWebsocket!.installApp({
-                    installed_app_id: "signing_service", agent_key: pubKey, dnas: [{hash: hash, nick: "crypto"}]
+                    installed_app_id: "signing_service", agent_key: pubKey, dnas: [{hash: hash, role_id: "crypto"}]
                 })
                 this.#signingService = installedApp.cell_data[0].cell_id;
 
@@ -175,7 +185,7 @@ export default class HolochainService {
                 }
             } else {
                 const { cell_data } = await this.#appWebsocket!.appInfo({installed_app_id: "signing_service"})
-                const cell = cell_data.find(c => c.cell_nick === "crypto")
+                const cell = cell_data.find(c => c.role_id === "crypto")
                 if(!cell) {
                     const e = new Error(`No DNA with nick signing_service found for language signing service DNA`)
                     throw e
@@ -186,10 +196,29 @@ export default class HolochainService {
             resolveReady!()
             this.#didResolveError = false;
         } catch(e) {
-            console.error("HolochainService: Error intializing Holochain conductor:", e)
+            console.error("HolochainService: connect Holochain process with error:", e)
             this.#didResolveError = true;
             resolveReady!()
         }
+    }
+
+    async run() {
+        let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
+        this.#ready = new Promise(resolve => resolveReady = resolve)
+        if (this.#conductorPath == undefined || this.#conductorConfigPath == undefined) {
+            console.error("HolochainService: Error intializing Holochain conductor, conductor path is invalid")
+            this.#didResolveError = true;
+            resolveReady!()
+            return
+        }
+        let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath);
+        [this.#hcProcess, this.#lairProcess] = hcProcesses;
+        console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
+
+        await this.connect();
+        
+        resolveReady!()
+        this.#didResolveError = false;
     }
 
     async callSigningService(data: string): Promise<string> {
@@ -198,7 +227,7 @@ export default class HolochainService {
         }
         const pubKey = await this.pubKeyForLanguage("main");
         const result = await this.#appWebsocket!.callZome({
-            cap: null,
+            cap_secret: null,
             cell_id: this.#signingService!,
             zome_name: "crypto",
             fn_name: "sign",
@@ -248,14 +277,15 @@ export default class HolochainService {
         } else {
             const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
             this.#db.get('pubKeys').push({lang: "global", pubKey}).write()
-            console.debug("Created new pubKey", pubKey.toString("base64"), "for all languages")
+            console.debug("Created new pubKey", Buffer.from(pubKey).toString("base64"), "for all languages")
             return pubKey
         }
     }
 
     async pubKeyForLanguage(lang: string): Promise<AgentPubKey> {
         return this.pubKeyForAllLanguages()
-        
+
+        // TODO using the same key for all DNAs should only be a temporary thing.
         const alreadyExisting = this.#db.get('pubKeys').find({lang}).value()
         if(alreadyExisting) {
             const pubKey = Buffer.from(alreadyExisting.pubKey)
@@ -264,7 +294,7 @@ export default class HolochainService {
         } else {
             const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
             this.#db.get('pubKeys').push({lang, pubKey}).write()
-            console.debug("Created new pubKey", pubKey.toString("base64"), "for language", lang)
+            console.debug("Created new pubKey", Buffer.from(pubKey).toString("base64"), "for language", lang)
             return pubKey
         }
     }
@@ -301,12 +331,12 @@ export default class HolochainService {
                     let membraneProof;
                     if(did) {
                         const signedDid = await this.callSigningService(did);
-                        const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(pubKey.toString("hex"), signedDid);
+                        const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(Buffer.from(pubKey).toString("base64"), signedDid);
                         membraneProof = Buffer.from(JSON.stringify({"ad4mDidEntanglement": didHolochainEntanglement}));
                     }
                     //The membrane proof passing here is untested and thus most likely broken
                     await this.#adminWebsocket!.installApp({
-                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, nick: dna.nick, membrane_proof: membraneProof}]
+                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, role_id: dna.nick, membrane_proof: membraneProof}]
                     })
                 }
                 installed = true
@@ -373,7 +403,7 @@ export default class HolochainService {
             return null
         }
 
-        const cell = cell_data.find(c => c.cell_nick === dnaNick)
+        const cell = cell_data.find(c => c.role_id === dnaNick)
         if(!cell) {
             const e = new Error(`No DNA with nick '${dnaNick}' found for language ${installed_app_id}`)
             console.error(e)
@@ -387,7 +417,7 @@ export default class HolochainService {
         try {
             console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m")
             const result = await this.#appWebsocket!.callZome({
-                cap: null,
+                cap_secret: fakeCapSecret(),
                 cell_id,
                 zome_name: zomeName,
                 fn_name: fnName,

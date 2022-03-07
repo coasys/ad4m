@@ -6,27 +6,30 @@ const path = require("path");
 const languages = {
   "agent-expression-store": {
     targetDnaName: "agent-store",
-    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.6/agent-store.dna",
+    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.10/agent-store.dna",
     bundle:
-      "https://github.com/perspect3vism/agent-language/releases/download/0.0.6/bundle.js",
+      "https://github.com/perspect3vism/agent-language/releases/download/0.0.10/bundle.js",
   },
   languages: {
       targetDnaName: "languages",
-      bundle: "https://github.com/perspect3vism/language-persistence/releases/download/0.0.11/bundle.js",
+      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.1/bundle.js",
   },
   "neighbourhood-store": {
     targetDnaName: "neighbourhood-store",
     //dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.2/neighbourhood-store.dna",
-    bundle: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.3/bundle.js",
+    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.1/bundle.js",
   },
   "social-context": {
-    bundle: "https://github.com/juntofoundation/Social-Context/releases/download/0.0.15/bundle.js",
+    zipped: true,
+    targetDnaName: "social-context",
+    resource:
+      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.22/full_features.zip",
   },
   "note-ipfs": {
-    bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.1/bundle.js",
+    bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
   },
   "direct-message-language": {
-    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.1/bundle.js"
+    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.4/bundle.js"
   }
 };
 
@@ -40,7 +43,11 @@ async function main() {
     if (languages[lang].bundle) {
       let url = languages[lang].bundle;
       let dest = dir + "/build/bundle.js";
-      wget({ url, dest });
+      if (url.slice(0, 8) != "https://" && url.slice(0, 7) != "http://") {
+        fs.copyFileSync(url, dest);
+      } else {
+        wget({ url, dest });
+      }
     }
 
     // dna

@@ -5,15 +5,16 @@ import { BootstrapFixtures, BootstrapLanguages, LanguageAlias } from "./core/Con
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
 import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
+import getPort from 'get-port';
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 interface OuterConfig {
   resourcePath: string
   appDataPath: string
   appDefaultLangPath: string
   ad4mBootstrapLanguages: BootstrapLanguages,
-  ad4mBootstrapFixtures: BootstrapFixtures,
-  appBuiltInLangs: string[] | null,
-  appLangAliases: object | null,
+  ad4mBootstrapFixtures?: BootstrapFixtures,
+  appBuiltInLangs?: string[],
+  appLangAliases?: object,
   mocks: boolean,
   runDappServer: boolean,
   dAppPort?: number,
@@ -25,7 +26,8 @@ interface OuterConfig {
   hcUseLocalProxy?: boolean,
   hcUseMdns?: boolean,
   hcUseProxy?: boolean,
-  hcUseBootstrap?: boolean
+  hcUseBootstrap?: boolean,
+  connectHolochain?: boolean,
 }
 
 
@@ -41,12 +43,14 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       hcUseLocalProxy,
       hcUseMdns,
       hcUseProxy,
-      hcUseBootstrap
+      hcUseBootstrap,
+      connectHolochain
     } = config
     if(!gqlPort) gqlPort = 4000
-    if(!hcPortAdmin) hcPortAdmin = 2000
-    if(!hcPortApp) hcPortApp = 1337
-    if(!dAppPort) dAppPort = 3333
+    // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
+    if(!hcPortAdmin) hcPortAdmin = await getPort({ port: 2000 });
+    if(!hcPortApp) hcPortApp = await getPort({ port: 1337 });
+    if(!dAppPort) dAppPort = await getPort({port: 4200})
     if(hcUseMdns === undefined) hcUseMdns = false
     if(hcUseProxy === undefined) hcUseProxy = true
     if(hcUseBootstrap === undefined) hcUseBootstrap = true
@@ -88,7 +92,6 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     );
 
     let bootstrapFixtures = ad4mBootstrapFixtures
-
     const core = new create({
       appDataPath,
       appResourcePath: resourcePath,
@@ -97,8 +100,15 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       languageAliases,
       bootstrapFixtures,
     });
+
     console.log("\x1b[34m", "Init services...", "\x1b[0m");
-    await core.initServices({ hcPortAdmin, hcPortApp, ipfsSwarmPort, ipfsRepoPath, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, agentService: core.agentService });
+    await core.initIPFS({ ipfsSwarmPort, ipfsRepoPath });
+    if (connectHolochain) {
+      await core.connectHolochain( {hcPortAdmin, hcPortApp} );
+    } else {
+      await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap });
+    }
+    
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
     await core.startGraphQLServer(gqlPort, mocks)
     if (runDappServer) { core.startDAppServer(dAppPort) };
