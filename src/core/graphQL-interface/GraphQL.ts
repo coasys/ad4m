@@ -68,6 +68,12 @@ function createResolvers(core: PerspectivismCore) {
                 return JSON.stringify(expression)
             },
             //@ts-ignore
+            expressionInteractions: async (parent, args, context, info) => {
+                const { url } = args
+                const result = await core.languageController.expressionInteractions(url)
+                return result
+            },
+            //@ts-ignore
             language: async (parent, args, context, info) => {
                 const { address } = args
                 const lang = await core.languageController.languageByRef({address} as LanguageRef) as any
