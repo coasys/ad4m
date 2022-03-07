@@ -283,6 +283,12 @@ function createResolvers(core: PerspectivismCore) {
                 return exprRef2String(expref)
             },
             //@ts-ignore
+            expressionInteract: async (parent, args, context, info) => {
+                const { url, interactionCall } = args
+                const result = await core.languageController.expressionInteract(url, interactionCall)
+                return result
+            },
+            //@ts-ignore
             languageApplyTemplateAndPublish: async (parent, args, context, info) => {
                 const { sourceLanguageHash, templateData } = args;
                 return await core.languageApplyTemplateAndPublish(sourceLanguageHash, JSON.parse(templateData));

@@ -1,6 +1,6 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression 
+    LinksAdapter, InteractionCall, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput } from '@perspect3vism/ad4m';
 import fs from 'fs'
@@ -683,6 +683,14 @@ export default class LanguageController {
         return new ExpressionRef(lang, address!)
     }
 
+    async expressionInteract(url: string, interactionCall: InteractionCall): Promise<string|null> {
+        const ref = parseExprUrl(url)
+        const lang = await this.languageByRef(ref.language)
+        const interaction = lang.interactions(ref.expression).find(i => i.name === interactionCall.name)
+        if(!interaction) throw `No interaction named "${interactionCall.name}" found for ${url}`
+        return await interaction.execute(interactionCall.parameters)
+    }
+
     async getExpression(ref: ExpressionRef): Promise<Expression | null> {
         if(bootstrapFixtures?.perspectives && ref.language.address === "neighbourhood") {
             const fixturePerspective = bootstrapFixtures.perspectives!.find(f=>f.address===ref.expression)
@@ -730,10 +738,6 @@ export default class LanguageController {
         }
 
         return expr
-    }
-
-    interact(expression: ExpressionRef, interaction: InteractionCall) {
-        console.log("TODO")
     }
 
     async getLinksAdapter(lang: LanguageRef): Promise<LinksAdapter | null> {
