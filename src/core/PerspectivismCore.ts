@@ -151,7 +151,7 @@ export default class PerspectivismCore {
     }
 
     async initIPFS(params: InitIPFSParams) {
-        console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
+        console.log("Init IPFS service with optional swarm port ", params.ipfsSwarmPort, " at optional repo path: ", params.ipfsRepoPath);
         
         let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
         this.#IPFS = ipfs;

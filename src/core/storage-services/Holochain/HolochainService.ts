@@ -304,7 +304,7 @@ export default class HolochainService {
         if (this.#didResolveError) {
             console.error("HolochainService.ensureInstallDNAforLanguage: Warning attempting to install holochain DNA when conductor did not start error free...")
         }
-        const pubKey = await this.pubKeyForLanguage("main");
+        const pubKey = await this.pubKeyForLanguage(lang);
         const activeApps = await this.#adminWebsocket!.listApps({status_filter: AppStatusFilter.Enabled});
         // console.log("HolochainService: Found running apps:", activeApps);
         if(!activeApps.map(value => value.installed_app_id).includes(lang)) {
