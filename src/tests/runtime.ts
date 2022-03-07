@@ -1,7 +1,7 @@
 import { TestContext } from './integration.test'
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
-const SOCIAL_CONTEXT_OFFICIAL = "QmfDoeJgiG5Hs4DJcwPqDWbwU2Ks8zLSJjv7bR8is84Qt5"
+const SOCIAL_CONTEXT_OFFICIAL = "QmUvSpKxCnychotba2pVCufCNFSmr5Tj8e9qqdZkpuuxWt"
 
 export default function runtimeTests(testContext: TestContext) {
     return () => {
