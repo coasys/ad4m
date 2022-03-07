@@ -18,7 +18,7 @@ export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').j
 
 const bootstrapUrl = "https://bootstrap-staging.holo.host"
 const kitsuneProxy = "kitsune-proxy://SYVd4CF3BdJ4DS7KwLLgeU3_DbHoZ34Y-qroZ79DOs8/kitsune-quic/h/165.22.32.11/p/5779/--"
-const signingServiceVersion = "0.0.1";
+const signingServiceVersion = "0.0.2";
 
 export interface HolochainConfiguration {
     conductorPath?: string, 
