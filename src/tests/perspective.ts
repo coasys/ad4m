@@ -42,29 +42,9 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
-                let addLink3 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
-                let addLink4 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
-                let addLink5 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
-
-                // Get all the links
-                let queryLinksAll = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink.timestamp).getTime()), untilDate: new Date()}));
-                expect(queryLinksAll.length).toEqual(5);
-
-
-                // Get all the links in ascending order
-                let queryLinksAsc = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(), untilDate: new Date("August 19, 1975 23:15:30"), limit: 3}));
-                expect(queryLinksAsc.length).toEqual(3);
-                expect(queryLinksAsc[0].data.target).toBe(addLink3.data.target)
-                expect(queryLinksAsc[1].data.target).toBe(addLink4.data.target)
-                expect(queryLinksAsc[2].data.target).toBe(addLink5.data.target)
-
-                // Get all the links in ascending order
-                let queryLinksDesc = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date("August 19, 1975 23:15:30"), untilDate: new Date(), limit: 3}));
-                expect(queryLinksDesc.length).toEqual(3);
-                expect(queryLinksDesc[0].data.target).toBe(addLink.data.target)
-                expect(queryLinksDesc[1].data.target).toBe(addLink2.data.target)
-                expect(queryLinksDesc[2].data.target).toBe(addLink3.data.target)
-
+                await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
+                await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
+                await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
 
                 //Test can get all links but first by querying from second timestamp
                 let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date()}));
@@ -161,7 +141,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(pSeenInUpdateCB.name).toStrictEqual(p1.name)
 
                 const linkAdded = jest.fn()
-                // TODO: @fayeed update this
                 await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
                 const linkRemoved = jest.fn()
                 await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
