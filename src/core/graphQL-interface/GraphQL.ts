@@ -378,6 +378,15 @@ function createResolvers(core: PerspectivismCore) {
                 return perspective.updateLink(oldLink, newLink)
             },
             //@ts-ignore
+            perspectivePublishSnapshot: async (parent, args, context, info) => {
+                const { uuid } = args
+                const snapshot = await core.perspectivesController.perspectiveSnapshot(uuid)
+                const language = core.languageController.getPerspectiveLanguage()
+                const langref = { address: 'perspective' } as LanguageRef
+                const expref = await core.languageController.expressionCreate(langref, snapshot)
+                return exprRef2String(expref)
+            },
+            //@ts-ignore
             runtimeOpenLink: (parent, args) => {
                 const { url } = args
                 console.log("openLinkExtern:", url)

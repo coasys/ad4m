@@ -219,7 +219,7 @@ export default class PerspectivismCore {
         }
 
         // Create neighbourhood
-        const neighbourhoodAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
+        const neighbourhoodAddress = await (this.languageController.getNeighbourhoodLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
         const neighbourhoodUrl = `neighbourhood://${neighbourhoodAddress}`
 
         //Add shared perspective to original perpspective and then update controller

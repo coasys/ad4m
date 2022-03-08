@@ -54,12 +54,14 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let builtInLangs = [
       ad4mBootstrapLanguages.agents, 
       ad4mBootstrapLanguages.languages, 
+      ad4mBootstrapLanguages.perspectives,
       ad4mBootstrapLanguages.neighbourhoods
     ]
 
     let languageAliases = {
       'did': ad4mBootstrapLanguages.agents,
       'lang': ad4mBootstrapLanguages.languages,
+      'perspective': ad4mBootstrapLanguages.perspectives,
       'neighbourhood': ad4mBootstrapLanguages.neighbourhoods
     }
 

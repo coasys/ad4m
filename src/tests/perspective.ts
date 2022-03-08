@@ -1,5 +1,6 @@
 import { isReference } from "@apollo/client";
 import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, LinkExpression, ExpressionProof } from "@perspect3vism/ad4m";
+import ExpressionClient from "@perspect3vism/ad4m/lib/src/expression/ExpressionClient";
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
 
@@ -181,6 +182,34 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(linkRemoved.mock.calls[1][0]).toEqual(updatedLinkExpression)
             })
 
+            it('publish snapshots', async () => {
+                //create new perspective, add links, create snapshot, get snapshot and check link length
+                const ad4mClient = testContext.ad4mClient!
+
+                const create = await ad4mClient!.perspective.add("test-snapshot");
+                expect(create.name).toEqual("test-snapshot");
+
+                // add a link to the perspective
+                let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
+                expect(addLink.data.target).toEqual("lang://test-target");
+                expect(addLink.data.source).toEqual("lang://test");
+
+                //turn perspective into snapshot
+                let snapshotUrl = await ad4mClient!.perspective.publishSnapshotByUUID(create.uuid)
+
+                let expression
+                // get the expression from the perspective language
+                if (typeof snapshotUrl === 'string') {
+                    expression = await ad4mClient!.expression.get(snapshotUrl)
+                    const perspectiveObject = JSON.parse(expression.data)
+                    expect(perspectiveObject.links.length).toEqual(1)
+                }
+                else {
+                    expression = null
+                    expect(1).toEqual(2)
+                }
+            })
+            
             it('can run Prolog queries', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
                 const p = await ad4mClient.perspective.add("Prolog test")

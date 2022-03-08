@@ -74,6 +74,7 @@ export function getLanguageStoragePath(name: string) {
 export interface BootstrapLanguages {
     agents: string,
     languages: string,
+    perspectives: string,
     neighbourhoods: string,
 }
 
