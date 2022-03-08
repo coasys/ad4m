@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { Expression } from '@perspect3vism/ad4m';
+import { Address, Expression } from '@perspect3vism/ad4m';
 
 export let rootConfigPath = path.join('', 'ad4m')
 export let dataPath = path.join(rootConfigPath, 'data')
@@ -11,21 +11,22 @@ export let holochainDataPath = path.join(holochainPath, 'd')
 export let holochainConductorPath = path.join(holochainPath, 'c')
 export let resourcePath = ''
 
-export let builtInLangPath = "";
-export let builtInLangs: string[] = [];
+export let systemLanguages: string[] = [];
+export let langugeLanguageBundle: string = '';
+export let directMessageLanguageAddress: string = '';
 export let languageAliases: LanguageAlias = {};
 export let bootstrapFixtures: BootstrapFixtures|null = null;
 
-
 export type LanguageAlias = {
-    [key: string]: string;
+    [key: string]: Address;
 }
 
 export interface CoreConfig {
     appDataPath: string
     appResourcePath: string
-    builtInLangPath: string
-    builtInLangs: string[]
+    languageLanguageBundle: string
+    systemLanguages: string[]
+    directMessageLanguageAddress: string
     languageAliases?: LanguageAlias
     bootstrapFixtures?: BootstrapFixtures
 }
@@ -49,8 +50,7 @@ export function init(c: CoreConfig) {
         fs.mkdirSync(d)
     }
 
-    builtInLangPath = c.builtInLangPath
-    builtInLangs = c.builtInLangs
+    systemLanguages = c.systemLanguages
     if(c.languageAliases)
         languageAliases = c.languageAliases
 
@@ -59,6 +59,7 @@ export function init(c: CoreConfig) {
     } else {
         bootstrapFixtures = null
     }
+    directMessageLanguageAddress = c.directMessageLanguageAddress
 }
 
 export function getLanguageStoragePath(name: string) {
@@ -69,12 +70,6 @@ export function getLanguageStoragePath(name: string) {
     if(!fs.existsSync(storageDirectory))
         fs.mkdirSync(storageDirectory)
     return storageDirectory
-}
-
-export interface BootstrapLanguages {
-    agents: string,
-    languages: string,
-    neighbourhoods: string,
 }
 
 export class BootstrapFixtures {

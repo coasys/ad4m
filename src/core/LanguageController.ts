@@ -8,7 +8,7 @@ import path from 'path'
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
-import { builtInLangs, builtInLangPath, languageAliases, bootstrapFixtures } from "./Config";
+import { systemLanguages, languageAliases, langugeLanguageBundle, bootstrapFixtures } from "./Config";
 import * as PubSub from './graphQL-interface/PubSub'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid'
@@ -36,7 +36,7 @@ export default class LanguageController {
     #context: object;
     #linkObservers: LinkObservers[];
     #holochainService: HolochainService
-    #builtInLanguages: string[];
+    #systemLanguages: string[];
     #runtimeService: RuntimeService;
     #signatures: Signatures;
     #db: PerspectivismDb;
@@ -48,7 +48,7 @@ export default class LanguageController {
 
 
     constructor(context: object, services: Services) {
-        this.#builtInLanguages = builtInLangs.map(l => `${builtInLangPath}/${l}/build/bundle.js`)
+        this.#systemLanguages = systemLanguages
 
         this.#context = context
         this.#holochainService = services.holochainService
@@ -63,25 +63,28 @@ export default class LanguageController {
 
     async loadLanguages() {
         try {
-            await this.loadBuiltInLanguages()
+            await this.loadSystemLanguages()
             await this.loadInstalledLanguages()
         } catch (e) {
             throw new Error(`Error loading languages ${e}`);
         }
     }
 
-    loadBuiltInLanguages() {
-        console.log("loadBuiltInLanguages: Built in languages:", this.#builtInLanguages);
-        return Promise.all(this.#builtInLanguages.map( async bundle => {
-            const { hash, language } = await this.loadLanguage(bundle)
+    loadSystemLanguages() {
+        console.log("loadBuiltInLanguages: Built in languages:", this.#systemLanguages);
+        //Install language language from the bundle file
+
+
+        
+        return Promise.all(this.#systemLanguages.map( async address => {
+            const language = await this.installLanguage(address, null);
             
             // Do special stuff for AD4M languages:
             Object.keys(languageAliases).forEach(alias => {
-                if(language.name === languageAliases[alias]) {
-                    languageAliases[alias] = hash
+                if(language!.name === languageAliases[alias]) {
                     if(alias === 'did') {
                         this.#agentLanguage = language;
-                        ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(language)
+                        ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(language!)
                     }
                     if(alias === 'lang') {
                         this.#languageLanguage = language
@@ -149,6 +152,41 @@ export default class LanguageController {
         return { hash, language }
     }
 
+    async loadLanguageFromBundle(bundle: string): Promise<LoadedLanguage> {
+        const bundleBytes = Buffer.from(bundle);
+        // @ts-ignore
+        const hash = await this.ipfsHash(bundleBytes)
+        
+        const { default: create, name } = require(sourceFilePath)
+
+        const customSettings = this.getSettings({name, address: hash} as LanguageRef)
+        const storageDirectory = Config.getLanguageStoragePath(name)
+        const Holochain = this.#holochainService.getDelegateForLanguage(hash)
+        //@ts-ignore
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.pubSub});
+        const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
+
+        if(language.linksAdapter) {
+            language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
+                this.#linkObservers.forEach(o => {
+                    o(added, removed, {name, address: hash} as LanguageRef)
+                })
+            })
+        }
+
+        //@ts-ignore
+        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
+            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
+                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+            })
+        }
+
+        this.#languages.set(hash, language)
+        this.#languageConstructors.set(hash, create)
+
+        return { hash, language }
+    }
+
     async loadMockLanguage(hash: string, language: Language) {
         this.#languages.set(hash, language)
     }
@@ -159,6 +197,7 @@ export default class LanguageController {
         return ipfsAddress.cid.toString()
     }
 
+    //Split this up into multiple functions so parts can be used for loading languages from a bundle file
     async installLanguage(address: Address, languageMeta: null|Expression): Promise<Language | undefined> {
         const language = this.#languages.get(address)
         if (language) return language
