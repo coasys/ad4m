@@ -1,5 +1,5 @@
 import { ApolloServer, withFilter, gql } from 'apollo-server'
-import { Agent, Expression, LanguageRef } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -290,7 +290,8 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             expressionInteract: async (parent, args, context, info) => {
-                const { url, interactionCall } = args
+                let { url, interactionCall } = args
+                interactionCall = new InteractionCall(interactionCall.name, JSON.parse(interactionCall.parametersStringified))
                 const result = await core.languageController.expressionInteract(url, interactionCall)
                 return result
             },
