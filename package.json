@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
-    "prepare-test": "rm -rf src/test-temp && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
+    "prepare-test": "rm -rf src/test-temp && ./scripts/build-test-language.sh && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
