@@ -300,7 +300,7 @@ export default class PerspectivismCore {
             recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
-        const createdDmLang = await this.languageApplyTemplateAndPublish(Config.directMessageLanguageAddress, templateParams)
+        const createdDmLang = await this.languageApplyTemplateAndPublish(Config.directMessageLanguage, templateParams)
         console.debug("DM Language cloned...")
         // Install language by calling languageByRef
         // TODO: extract language installing code into its own function

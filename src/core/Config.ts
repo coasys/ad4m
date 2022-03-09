@@ -14,7 +14,7 @@ export let resourcePath = ''
 export let systemLanguages: string[] = [];
 export let preloadLanguages: string[] = [];
 export let langugeLanguageBundle: string = '';
-export let directMessageLanguageAddress: string = '';
+export let directMessageLanguage: string = '';
 export let languageAliases: LanguageAlias = {};
 export let bootstrapFixtures: BootstrapFixtures|null = null;
 
@@ -33,7 +33,7 @@ export interface CoreConfig {
     languageLanguageBundle: string
     systemLanguages: string[]
     preloadLanguages: string[]
-    directMessageLanguageAddress: string
+    directMessageLanguage: string
     languageAliases?: LanguageAlias
     bootstrapFixtures?: BootstrapFixtures
 }
@@ -67,7 +67,7 @@ export function init(c: CoreConfig) {
     } else {
         bootstrapFixtures = null
     }
-    directMessageLanguageAddress = c.directMessageLanguageAddress
+    directMessageLanguage = c.directMessageLanguage
 }
 
 export function getLanguageStoragePath(name: string) {

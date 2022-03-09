@@ -50,7 +50,7 @@ interface SeedFileSchema {
   //Link language templates that are known
   knownLinkLanguageTemplates: string[],
   //Address of language to be used when creating a direct message interface on behalf of agent
-  directMessageLanguageTemplate: string,
+  directMessageLanguage: string,
   //Address of language to be used for saving AgentExpression
   agentLanguage: string,
   //Address of language to be used for saving perspectives
@@ -129,8 +129,9 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       appResourcePath: resourcePath,
       systemLanguages,
       preloadLanguages,
+      directMessageLanguage: networkBootstrapSeedData.directMessageLanguage,
       languageAliases,
-      bootstrapFixtures
+      bootstrapFixtures,
     } as CoreConfig);
 
     console.log("\x1b[34m", "Init services...", "\x1b[0m");

@@ -43,7 +43,7 @@ export interface Config {
   languageLanguageBundle: string
   systemLanguages: string[]
   preloadLanguages: string[]
-  directMessageLanguageAddress: string
+  directMessageLanguage: string
   languageAliases?: LanguageAlias
   bootstrapFixtures?: BootstrapFixtures
 }
