@@ -12,6 +12,7 @@ export let holochainConductorPath = path.join(holochainPath, 'c')
 export let resourcePath = ''
 
 export let systemLanguages: string[] = [];
+export let preloadLanguages: string[] = [];
 export let langugeLanguageBundle: string = '';
 export let directMessageLanguageAddress: string = '';
 export let languageAliases: LanguageAlias = {};
@@ -31,6 +32,7 @@ export interface CoreConfig {
     appResourcePath: string
     languageLanguageBundle: string
     systemLanguages: string[]
+    preloadLanguages: string[]
     directMessageLanguageAddress: string
     languageAliases?: LanguageAlias
     bootstrapFixtures?: BootstrapFixtures
@@ -56,6 +58,7 @@ export function init(c: CoreConfig) {
     }
 
     systemLanguages = c.systemLanguages
+    preloadLanguages = c.preloadLanguages
     if(c.languageAliases)
         languageAliases = c.languageAliases
 

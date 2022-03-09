@@ -86,13 +86,28 @@ export default class LanguageController {
         //Install the perspective language and set
         const perspectiveLanguage = await this.installLanguage(languageAliases[Config.perspectiveLanguageAlias], null);
         this.#perspectiveLanguage = perspectiveLanguage!;
+
+        //Install preload languages
+        await Promise.all(Config.preloadLanguages.map(async hash => {
+            await this.installLanguage(hash, null);
+        }))
+
+        //Load bootstrap languages
+        if (Config.bootstrapFixtures) {
+            if (Config.bootstrapFixtures!.languages) {
+                await Promise.all(Config.bootstrapFixtures!.languages!.map(async file => {
+                    const { sourcePath } = await this.saveLanguageBundle(langugeLanguageBundle);
+                    await this.loadLanguage(sourcePath);
+                }))
+            }
+        }
     }
 
     async loadInstalledLanguages() {
         const files = fs.readdirSync(Config.languagesPath)
         return Promise.all(files.map(async file => {
             //Ensure we do not loaded previously loaded system languages again
-            if (!systemLanguages.find((lang) => lang === file)) {
+            if (!systemLanguages.find((lang) => lang === file) && !Config.preloadLanguages.find((lang) => lang === file)) {
                 const bundlePath = path.join(Config.languagesPath, file, 'bundle.js')
                 if(fs.existsSync(bundlePath)) {
                     try {

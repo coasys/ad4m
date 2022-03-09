@@ -84,15 +84,19 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
 
     let networkBootstrapSeedData = JSON.parse(fs.readFileSync(networkBootstrapSeed).toString()) as SeedFileSchema;
 
+    //Core adm4-executor System languages
     let systemLanguages = [
       networkBootstrapSeedData.languageLanguageBundle,
       networkBootstrapSeedData.agentLanguage,  
       networkBootstrapSeedData.neighbourhoodLanguage,
       networkBootstrapSeedData.perspectiveLanguage
     ]
+    //Languages to be pre-loaded as supplied in the appLanguageAliases 
+    let preloadLanguages: string[] = [];
 
     let coreLanguageAliases = {} as LanguageAlias;
-    coreLanguageAliases[languageLanguageAlias] = networkBootstrapSeedData.languageLanguageBundle;
+    //Set this to empty string, since we do not know the address yet and it will be loaded/updated on LanguageController.loadSystemLanguages()
+    coreLanguageAliases[languageLanguageAlias] = "";
     coreLanguageAliases[agentLanguageAlias] = networkBootstrapSeedData.agentLanguage;
     coreLanguageAliases[neighbourhoodLanguageAlias] = networkBootstrapSeedData.neighbourhoodLanguage;
     coreLanguageAliases[perspectiveLanguageAlias] = networkBootstrapSeedData.perspectiveLanguage;
@@ -103,13 +107,19 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
         ...coreLanguageAliases,
         ...appLangAliases,
       }
+
+      Object.keys(appLangAliases).forEach(address => {
+        preloadLanguages.push(address);
+      })
     }
     
 
     console.log("\x1b[2m", 
       "Starting ad4m core with path:", appDataPath, "\n", 
       "=> AD4M core language addresses:", systemLanguages, "\n",
+      "Languages to be preloaded, as supplied by appLangAliases", preloadLanguages, "\n",
       "Language aliases:", languageAliases, "\n", 
+      "Bootstrap fixtures:", bootstrapFixtures, "\n",
       "Resource path:", resourcePath, "\n", 
       "\x1b[0m"
     );
@@ -118,6 +128,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       appDataPath,
       appResourcePath: resourcePath,
       systemLanguages,
+      preloadLanguages,
       languageAliases,
       bootstrapFixtures
     } as CoreConfig);
