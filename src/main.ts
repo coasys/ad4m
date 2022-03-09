@@ -48,7 +48,7 @@ interface SeedFileSchema {
   //DID of agents trusted by user running executor
   trustedAgents: string[],
   //Link language templates that are known
-  knownLinkLanguageTemplates: string[],
+  knownLinkLanguages: string[],
   //Address of language to be used when creating a direct message interface on behalf of agent
   directMessageLanguage: string,
   //Address of language to be used for saving AgentExpression
@@ -130,6 +130,8 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       systemLanguages,
       preloadLanguages,
       directMessageLanguage: networkBootstrapSeedData.directMessageLanguage,
+      knownLinkLanguages: networkBootstrapSeedData.knownLinkLanguages,
+      trustedAgents: networkBootstrapSeedData.trustedAgents,
       languageAliases,
       bootstrapFixtures,
     } as CoreConfig);
