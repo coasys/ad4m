@@ -17,6 +17,11 @@ export let directMessageLanguageAddress: string = '';
 export let languageAliases: LanguageAlias = {};
 export let bootstrapFixtures: BootstrapFixtures|null = null;
 
+export let agentLanguageAlias = "did";
+export let languageLanguageAlias = "lang";
+export let neighbourhoodLanguageAlias = "neighbourhood";
+export let perspectiveLanguageAlias = "perspective";
+
 export type LanguageAlias = {
     [key: string]: Address;
 }
