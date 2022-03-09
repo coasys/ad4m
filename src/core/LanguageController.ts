@@ -18,11 +18,6 @@ import { PerspectivismDb } from './db';
 
 type LinkObservers = (added: Expression[], removed: Expression[], lang: LanguageRef)=>void;
 
-interface LoadedLanguage {
-    language: Language,
-    hash: string,
-}
-
 interface Services {
     holochainService: HolochainService, 
     runtimeService: RuntimeService, 
@@ -43,6 +38,7 @@ export default class LanguageController {
 
     #agentLanguage?: Language
     #languageLanguage?: Language
+    #neighbourhoodLanguage?: Language
     #perspectiveLanguage?: Language
     pubSub
 
@@ -70,51 +66,52 @@ export default class LanguageController {
         }
     }
 
-    loadSystemLanguages() {
+    async loadSystemLanguages() {
         console.log("loadBuiltInLanguages: Built in languages:", this.#systemLanguages);
-        //Install language language from the bundle file
+        //Install language language from the bundle file and then update languageAliases to point to language hash
+        const { sourcePath } = await this.saveLanguageBundle(langugeLanguageBundle);
+        const { hash, language: languageLanguage } = await this.loadLanguage(sourcePath);
+        languageAliases[Config.languageLanguageAlias] = hash;
+        this.#languageLanguage = languageLanguage!;
 
+        //Install the agent language and set
+        const agentLanguage = await this.installLanguage(languageAliases[Config.agentLanguageAlias], null);
+        this.#agentLanguage = agentLanguage!;
+        ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
 
-        
-        return Promise.all(this.#systemLanguages.map( async address => {
-            const language = await this.installLanguage(address, null);
-            
-            // Do special stuff for AD4M languages:
-            Object.keys(languageAliases).forEach(alias => {
-                if(language!.name === languageAliases[alias]) {
-                    if(alias === 'did') {
-                        this.#agentLanguage = language;
-                        ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(language!)
-                    }
-                    if(alias === 'lang') {
-                        this.#languageLanguage = language
-                    }
-                    if(alias === 'neighbourhood') {
-                        this.#perspectiveLanguage = language
-                    }
-                }
-            })
-        }))
+        //Install the neighbourhood language and set
+        const neighbourhoodLanguage = await this.installLanguage(languageAliases[Config.neighbourhoodLanguageAlias], null);
+        this.#neighbourhoodLanguage = neighbourhoodLanguage!;
+
+        //Install the perspective language and set
+        const perspectiveLanguage = await this.installLanguage(languageAliases[Config.perspectiveLanguageAlias], null);
+        this.#perspectiveLanguage = perspectiveLanguage!;
     }
 
     async loadInstalledLanguages() {
         const files = fs.readdirSync(Config.languagesPath)
         return Promise.all(files.map(async file => {
-            const bundlePath = path.join(Config.languagesPath, file, 'bundle.js')
-            if(fs.existsSync(bundlePath)) {
-                try {
-                    await this.loadLanguage(bundlePath)
-                } catch(e) {
-                    console.error("LanguageController.loadInstalledLanguages()=========================")
-                    console.error("LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE:", bundlePath)
-                    console.error(e)
-                    console.error("LanguageController.loadInstalledLanguages()=========================")
+            //Ensure we do not loaded previously loaded system languages again
+            if (!systemLanguages.find((lang) => lang === file)) {
+                const bundlePath = path.join(Config.languagesPath, file, 'bundle.js')
+                if(fs.existsSync(bundlePath)) {
+                    try {
+                        await this.loadLanguage(bundlePath)
+                    } catch(e) {
+                        console.error("LanguageController.loadInstalledLanguages()=========================")
+                        console.error("LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE:", bundlePath)
+                        console.error(e)
+                        console.error("LanguageController.loadInstalledLanguages()=========================")
+                    }
                 }
             }
         }))
     }
 
-    async loadLanguage(sourceFilePath: string): Promise<LoadedLanguage> {
+    async loadLanguage(sourceFilePath: string): Promise<{
+        language: Language,
+        hash: string,
+    }> {
         if(!path.isAbsolute(sourceFilePath))
             sourceFilePath = path.join(process.env.PWD!, sourceFilePath)
 
@@ -152,43 +149,29 @@ export default class LanguageController {
         return { hash, language }
     }
 
-    async loadLanguageFromBundle(bundle: string): Promise<LoadedLanguage> {
-        const bundleBytes = Buffer.from(bundle);
-        // @ts-ignore
-        const hash = await this.ipfsHash(bundleBytes)
+    async saveLanguageBundle(bundle: string, languageMeta?: object, hash?: string): Promise<{
+        languagePath: string, 
+        sourcePath: string, 
+        metaPath: string, 
+        hash: string
+    }> {
+        if (!hash) {
+            const bundleBytes = Buffer.from(bundle);
+            // @ts-ignore
+            hash = await this.ipfsHash(bundleBytes);
+        }
+        const languagePath = path.join(Config.languagesPath, hash);
+        const sourcePath = path.join(languagePath, 'bundle.js')
+        const metaPath = path.join(languagePath, 'meta.json')
+
+        if (!fs.existsSync(languagePath)) {
+            fs.mkdirSync(languagePath)
+        }
         
-        const { default: create, name } = require(sourceFilePath)
+        fs.writeFileSync(sourcePath, bundle)
+        if (languageMeta) { fs.writeFileSync(metaPath, JSON.stringify(languageMeta)) }
 
-        const customSettings = this.getSettings({name, address: hash} as LanguageRef)
-        const storageDirectory = Config.getLanguageStoragePath(name)
-        const Holochain = this.#holochainService.getDelegateForLanguage(hash)
-        //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.pubSub});
-        const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
-
-        if(language.linksAdapter) {
-            language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
-                this.#linkObservers.forEach(o => {
-                    o(added, removed, {name, address: hash} as LanguageRef)
-                })
-            })
-        }
-
-        //@ts-ignore
-        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
-            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
-                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
-            })
-        }
-
-        this.#languages.set(hash, language)
-        this.#languageConstructors.set(hash, create)
-
-        return { hash, language }
-    }
-
-    async loadMockLanguage(hash: string, language: Language) {
-        this.#languages.set(hash, language)
+        return {languagePath, sourcePath, metaPath, hash}
     }
 
     async ipfsHash(data: Buffer|string): Promise<string> {
@@ -197,11 +180,11 @@ export default class LanguageController {
         return ipfsAddress.cid.toString()
     }
 
-    //Split this up into multiple functions so parts can be used for loading languages from a bundle file
     async installLanguage(address: Address, languageMeta: null|Expression): Promise<Language | undefined> {
         const language = this.#languages.get(address)
         if (language) return language
     
+        //Get language meta information
         console.log(new Date(), "installLanguage: installing language with address", address);
         if(!languageMeta) {
             try {
@@ -215,6 +198,7 @@ export default class LanguageController {
                 languageMeta = {data: {}};
             }
         }
+        //Get language bundle data
         console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
         let source;
         try {
@@ -239,27 +223,11 @@ export default class LanguageController {
             console.error("LanguageController.installLanguage:", languageMeta)
             console.error("LanguageController.installLanguage: =================================")
             console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: CONTENT:")
-            //console.error(source)
-            //console.error("LanguageController.installLanguage: =================================")
-            //console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-            //console.error("LanguageController.installLanguage: =================================")
             return
         }
 
-        const languagePath = path.join(Config.languagesPath, address);
-        const sourcePath = path.join(languagePath, 'bundle.js')
-        const metaPath = path.join(languagePath, 'meta.json')
-        try {
-            fs.mkdirSync(languagePath)
-        } catch(e) {
-            console.error("Error trying to create directory", languagePath)
-            console.error("Will proceed with installing language anyway...")
-        }
-        
-        fs.writeFileSync(sourcePath, source)
-        fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
-        // console.log(new Date(), "LanguageController: installed language");
+        const {languagePath, sourcePath} = await this.saveLanguageBundle(source, languageMeta, hash);
+        console.log(new Date(), "LanguageController.installLanguage: installed language");
         try {
             return (await this.loadLanguage(sourcePath)).language
         } catch(e) {
@@ -593,7 +561,7 @@ export default class LanguageController {
         }
 
         try {
-            return await this.#perspectiveLanguage!.expressionAdapter!.get(address)
+            return await this.#neighbourhoodLanguage!.expressionAdapter!.get(address)
         } catch (e) {
             throw Error(`Error inside perspective language expression get adapter: ${e}`)
         }
@@ -623,6 +591,13 @@ export default class LanguageController {
             throw new Error("No Language Language installed!")
         }
         return this.#languageLanguage
+    }
+
+    getNeighbourhoodLanguage(): Language {
+        if(!this.#neighbourhoodLanguage) {
+            throw new Error("No Neighbourhood Language installed!")
+        }
+        return this.#neighbourhoodLanguage
     }
 
     getPerspectiveLanguage(): Language {

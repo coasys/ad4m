@@ -1,6 +1,6 @@
 import PerspectivismCore from "./core/PerspectivismCore";
 import create from "./core/PerspectivismCore";
-import { LanguageAlias, CoreConfig, BootstrapFixtures } from "./core/Config"
+import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, agentLanguageAlias, neighbourhoodLanguageAlias, perspectiveLanguageAlias } from "./core/Config"
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
@@ -85,16 +85,17 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let networkBootstrapSeedData = JSON.parse(fs.readFileSync(networkBootstrapSeed).toString()) as SeedFileSchema;
 
     let systemLanguages = [
-      networkBootstrapSeedData.agentLanguage, 
-      networkBootstrapSeedData.languageLanguageBundle, 
-      networkBootstrapSeedData.neighbourhoodLanguage
+      networkBootstrapSeedData.languageLanguageBundle,
+      networkBootstrapSeedData.agentLanguage,  
+      networkBootstrapSeedData.neighbourhoodLanguage,
+      networkBootstrapSeedData.perspectiveLanguage
     ]
 
-    let coreLanguageAliases = {
-      'did': networkBootstrapSeedData.agentLanguage,
-      'lang': networkBootstrapSeedData.languageLanguageBundle,
-      'neighbourhood': networkBootstrapSeedData.neighbourhoodLanguage
-    } as LanguageAlias;
+    let coreLanguageAliases = {} as LanguageAlias;
+    coreLanguageAliases[languageLanguageAlias] = networkBootstrapSeedData.languageLanguageBundle;
+    coreLanguageAliases[agentLanguageAlias] = networkBootstrapSeedData.agentLanguage;
+    coreLanguageAliases[neighbourhoodLanguageAlias] = networkBootstrapSeedData.neighbourhoodLanguage;
+    coreLanguageAliases[perspectiveLanguageAlias] = networkBootstrapSeedData.perspectiveLanguage;
 
     let languageAliases: LanguageAlias = coreLanguageAliases;
     if(appLangAliases) {

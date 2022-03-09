@@ -198,12 +198,6 @@ export default class PerspectivismCore {
         this.#resolveLanguagesReady()
     }
 
-    initMockLanguages(hashes: string[], languages: Language[]) {
-        languages.forEach((lang, index) => {
-            this.#languageController!.loadMockLanguage(hashes[index], lang);
-        });
-    }
-
     async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<string> {
         // We only work on the PerspectiveID object.
         // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
@@ -217,8 +211,8 @@ export default class PerspectivismCore {
         }
 
         // Create neighbourhood
-        const neighbourhoodAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
-        const neighbourhoodUrl = `neighbourhood://${neighbourhoodAddress}`
+        const neighbourhoodAddress = await (this.languageController.getNeighbourhoodLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
+        const neighbourhoodUrl = `${Config.neighbourhoodLanguageAlias}://${neighbourhoodAddress}`
 
         //Add shared perspective to original perpspective and then update controller
         perspectiveID.sharedUrl = neighbourhoodUrl
