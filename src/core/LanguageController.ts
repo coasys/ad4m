@@ -171,9 +171,7 @@ export default class LanguageController {
         hash: string
     }> {
         if (!hash) {
-            const bundleBytes = Buffer.from(bundle);
-            // @ts-ignore
-            hash = await this.ipfsHash(bundleBytes);
+            hash = await this.ipfsHash(bundle);
         }
         const languagePath = path.join(Config.languagesPath, hash);
         const sourcePath = path.join(languagePath, 'bundle.js')
@@ -198,49 +196,63 @@ export default class LanguageController {
     async installLanguage(address: Address, languageMeta: null|Expression): Promise<Language | undefined> {
         const language = this.#languages.get(address)
         if (language) return language
-    
-        //Get language meta information
-        console.log(new Date(), "installLanguage: installing language with address", address);
-        if(!languageMeta) {
-            try {
-                languageMeta = await this.getLanguageExpression(address)
-            } catch (e) {
-                throw Error(`Error getting language meta from language language: ${e}`)
+        
+        //Check that the metafile already exists with language with this address to avoid refetch
+        const metaFile = path.join(path.join(Config.languagesPath, address), "meta.json");
+        if(!fs.existsSync(metaFile)) {
+            //Get language meta information
+            console.log(new Date(), "installLanguage: installing language with address", address);
+            if(!languageMeta) {
+                try {
+                    languageMeta = await this.getLanguageExpression(address)
+                } catch (e) {
+                    throw Error(`Error getting language meta from language language: ${e}`)
+                }
             }
-
-            if (languageMeta == null) {
-                //@ts-ignore
-                languageMeta = {data: {}};
-            }
+        } else {
+            languageMeta = JSON.parse(fs.readFileSync(metaFile).toString());
+        };
+        if (languageMeta == null) {
+            //@ts-ignore
+            languageMeta = {data: {}};
         }
-        //Get language bundle data
+        
         console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
+        let bundlePath = path.join(path.join(Config.languagesPath, address), "bundle.js");
         let source;
-        try {
-            source = await this.getLanguageSource(address);
-        } catch (e) {
-            throw Error(`Error getting language source from language language, language adapter: ${e}`)
-        }
-        if(!source){
-            console.error("LanguageController.installLanguage: COULDN'T GET SOURCE OF LANGUAGE TO INSTALL!")
-            console.error("LanguageController.installLanguage: Address:", address)
-            console.error("LanguageController.installLanguage:", languageMeta)
-            throw Error(`Could not find language source for language with address: ${address}`)
-        }
-        const hash = await this.ipfsHash(source)
-        if(hash === 'asdf') {
-            console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
-            console.error("LanguageController.installLanguage: Address:", address)
-            console.error("LanguageController.installLanguage: Computed hash:", hash)
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage:", languageMeta)
-            console.error("LanguageController.installLanguage: =================================")
-            console.error("LanguageController.installLanguage: =================================")
-            return
+        let hash;
+        //Check if the bundle file already exists to avoid refetching
+        if (!fs.existsSync(bundlePath)) {
+            try {
+                source = await this.getLanguageSource(address);
+            } catch (e) {
+                throw Error(`Error getting language source from language language, language adapter: ${e}`)
+            }
+            if(!source){
+                console.error("LanguageController.installLanguage: COULDN'T GET SOURCE OF LANGUAGE TO INSTALL!")
+                console.error("LanguageController.installLanguage: Address:", address)
+                console.error("LanguageController.installLanguage:", languageMeta)
+                throw Error(`Could not find language source for language with address: ${address}`)
+            }
+            hash = await this.ipfsHash(source)
+            if(hash === 'asdf') {
+                console.error("LanguageController.installLanguage: COULDN'T VERIFY HASH OF LANGUAGE!")
+                console.error("LanguageController.installLanguage: Address:", address)
+                console.error("LanguageController.installLanguage: Computed hash:", hash)
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage: LANGUAGE WILL BE IGNORED")
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage:", languageMeta)
+                console.error("LanguageController.installLanguage: =================================")
+                console.error("LanguageController.installLanguage: =================================")
+                return
+            }
+        } else {
+            source = fs.readFileSync(bundlePath).toString();
+            hash = await this.ipfsHash(source);
         }
 
+        //TODO: potential for unnecassary write to happen here if meta / source is already present at languages paths
         const {languagePath, sourcePath} = await this.saveLanguageBundle(source, languageMeta, hash);
         console.log(new Date(), "LanguageController.installLanguage: installed language");
         try {
