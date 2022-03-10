@@ -5,8 +5,7 @@ import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
-import { config } from 'process'
-import { ad4mExecutorVersion, ad4mVersion } from '../Config'
+import { ad4mExecutorVersion } from '../Config'
 
 function createResolvers(core: PerspectivismCore) {
     const pubsub = PubSub.get()
@@ -184,7 +183,6 @@ function createResolvers(core: PerspectivismCore) {
             runtimeInfo: (parent, args) => {
                 return {
                     ad4mExecutorVersion: ad4mExecutorVersion,
-                    ad4mVersion: ad4mVersion
                 }
             }
         },

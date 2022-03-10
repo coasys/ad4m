@@ -1,9 +1,9 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { Expression } from '@perspect3vism/ad4m';
+const pkg = require('./package.json');
 
-export let ad4mExecutorVersion = "0.1.32";
-export let ad4mVersion = "0.1.25";
+export let ad4mExecutorVersion = pkg.version;
 export let rootConfigPath = path.join('', 'ad4m')
 export let dataPath = path.join(rootConfigPath, 'data')
 export let languagesPath = path.join(rootConfigPath, 'languages')
