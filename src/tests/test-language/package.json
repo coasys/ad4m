@@ -1,7 +1,7 @@
 {
-  "name": "note-ipfs",
-  "version": "0.0.3",
-  "description": "An AD4M Language for simple text notes build on IPFS",
+  "name": "test-language",
+  "version": "0.0.1",
+  "description": "An AD4M Language for testing AD4M-executor",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -11,12 +11,12 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@perspect3vism/ad4m": "file:../../../../ad4m",
+    "@perspect3vism/ad4m": "0.1.27",
     "@rollup/plugin-commonjs": "^14.0.0",
     "@rollup/plugin-node-resolve": "^8.0.0",
     "@rollup/plugin-typescript": "^4.0.0",
     "@tsconfig/svelte": "^1.0.0",
-    "node-sass": "^4.14.1",
+    "node-sass": "^7.0.1",
     "rollup": "^2.3.4",
     "rollup-plugin-postcss": "^3.1.8",
     "rollup-plugin-string": "^3.0.0",
