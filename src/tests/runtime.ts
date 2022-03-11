@@ -127,5 +127,11 @@ export default function runtimeTests(testContext: TestContext) {
             // @ts-ignore
             expect(await ad4mClient.runtime.hcAddAgentInfos(agentInfos)).toBeTruthy()
         })
+
+        it("can get runtimeInfo", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            const runtimeInfo = await ad4mClient.runtime.info();
+            expect(runtimeInfo.ad4mExecutorVersion).toBe(process.env.npm_package_version);
+        })
     }
 }
