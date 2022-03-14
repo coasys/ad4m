@@ -10,6 +10,7 @@ export let holochainPath = path.join(rootConfigPath, 'h')
 export let holochainDataPath = path.join(holochainPath, 'd')
 export let holochainConductorPath = path.join(holochainPath, 'c')
 export let resourcePath = ''
+export let languageLanguageOnly = false;
 
 export let knownLinkLanguages: string[] = [];
 export let trustedAgents: string[] =  [];
@@ -38,6 +39,7 @@ export interface CoreConfig {
     directMessageLanguage: string
     knownLinkLanguages: string[]
     trustedAgents: string[]
+    languageLanguageOnly: boolean
     languageAliases?: LanguageAlias
     bootstrapFixtures?: BootstrapFixtures
 }
@@ -74,6 +76,7 @@ export function init(c: CoreConfig) {
     directMessageLanguage = c.directMessageLanguage
     knownLinkLanguages = c.knownLinkLanguages
     trustedAgents = c.trustedAgents
+    languageLanguageOnly = c.languageLanguageOnly;
 }
 
 export function getLanguageStoragePath(name: string) {

@@ -60,7 +60,7 @@ export default class LanguageController {
     async loadLanguages() {
         try {
             await this.loadSystemLanguages()
-            await this.loadInstalledLanguages()
+            if (!Config.languageLanguageOnly) await this.loadInstalledLanguages()
         } catch (e) {
             throw new Error(`Error loading languages ${e}`);
         }
@@ -74,31 +74,33 @@ export default class LanguageController {
         languageAliases[Config.languageLanguageAlias] = hash;
         this.#languageLanguage = languageLanguage!;
 
-        //Install the agent language and set
-        const agentLanguage = await this.installLanguage(languageAliases[Config.agentLanguageAlias], null);
-        this.#agentLanguage = agentLanguage!;
-        ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
+        if (!Config.languageLanguageOnly) {
+            //Install the agent language and set
+            const agentLanguage = await this.installLanguage(languageAliases[Config.agentLanguageAlias], null);
+            this.#agentLanguage = agentLanguage!;
+            ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
 
-        //Install the neighbourhood language and set
-        const neighbourhoodLanguage = await this.installLanguage(languageAliases[Config.neighbourhoodLanguageAlias], null);
-        this.#neighbourhoodLanguage = neighbourhoodLanguage!;
+            //Install the neighbourhood language and set
+            const neighbourhoodLanguage = await this.installLanguage(languageAliases[Config.neighbourhoodLanguageAlias], null);
+            this.#neighbourhoodLanguage = neighbourhoodLanguage!;
 
-        //Install the perspective language and set
-        const perspectiveLanguage = await this.installLanguage(languageAliases[Config.perspectiveLanguageAlias], null);
-        this.#perspectiveLanguage = perspectiveLanguage!;
+            //Install the perspective language and set
+            const perspectiveLanguage = await this.installLanguage(languageAliases[Config.perspectiveLanguageAlias], null);
+            this.#perspectiveLanguage = perspectiveLanguage!;
 
-        //Install preload languages
-        await Promise.all(Config.preloadLanguages.map(async hash => {
-            await this.installLanguage(hash, null);
-        }))
+            //Install preload languages
+            await Promise.all(Config.preloadLanguages.map(async hash => {
+                await this.installLanguage(hash, null);
+            }))
 
-        //Load bootstrap languages
-        if (Config.bootstrapFixtures) {
-            if (Config.bootstrapFixtures!.languages) {
-                await Promise.all(Config.bootstrapFixtures!.languages!.map(async file => {
-                    const { sourcePath } = await this.saveLanguageBundle(langugeLanguageBundle);
-                    await this.loadLanguage(sourcePath);
-                }))
+            //Load bootstrap languages
+            if (Config.bootstrapFixtures) {
+                if (Config.bootstrapFixtures!.languages) {
+                    await Promise.all(Config.bootstrapFixtures!.languages!.map(async file => {
+                        const { sourcePath } = await this.saveLanguageBundle(langugeLanguageBundle);
+                        await this.loadLanguage(sourcePath);
+                    }))
+                }
             }
         }
     }

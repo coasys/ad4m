@@ -16,6 +16,8 @@ interface OuterConfig {
   appDataPath: string
   //Seed file used to load initial languages & agent configuration 
   networkBootstrapSeed: string
+  //Should the ad4m-executor be started with only the languageLanguage, so it can be used for publish other system languages
+  languageLanguageOnly?: boolean,
   //Languages & perspectives to be bootstrapped into ad4m-executor without requirment for using language language
   bootstrapFixtures?: BootstrapFixtures,
   //Aliases used by application running ad4m-executor; should be in form {"alias": "language-address"}
@@ -64,7 +66,7 @@ interface SeedFileSchema {
 /// Main function which starts ad4m-executor
 export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let { 
-      resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures,
+      resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
       mocks, gqlPort, 
       hcPortAdmin, hcPortApp,
       ipfsSwarmPort, ipfsRepoPath,
@@ -77,6 +79,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     if(hcUseMdns === undefined) hcUseMdns = false
     if(hcUseProxy === undefined) hcUseProxy = true
     if(hcUseBootstrap === undefined) hcUseBootstrap = true
+    if(languageLanguageOnly === undefined) languageLanguageOnly = false;
 
     if(!fs.existsSync(networkBootstrapSeed)) {
       throw new Error(`Could not find networkBootstrapSeed at path ${networkBootstrapSeed}`)
@@ -134,6 +137,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       trustedAgents: networkBootstrapSeedData.trustedAgents,
       languageAliases,
       bootstrapFixtures,
+      languageLanguageOnly
     } as CoreConfig);
 
     console.log("\x1b[34m", "Init services...", "\x1b[0m");
