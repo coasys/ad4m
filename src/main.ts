@@ -53,14 +53,24 @@ interface SeedFileSchema {
   knownLinkLanguages: string[],
   //Address of language to be used when creating a direct message interface on behalf of agent
   directMessageLanguage: string,
+  //Settings to be injected into directMessageLanguage
+  directMessageLanguageSettings?: object,
   //Address of language to be used for saving AgentExpression
   agentLanguage: string,
+  //Settings to be injected into agentLanguage
+  agentLanguageSettings?: object,
   //Address of language to be used for saving perspectives
   perspectiveLanguage: string,
+  //Settings to be injected into perspectiveLanguage
+  perspectiveLanguageSettings?: object,
   //Address of language to be used for persisting neighbourhoods
   neighbourhoodLanguage: string,
+  //Settings to be injected into neighbourhoodLanguage
+  neighbourhoodLanguageSettings?: object,
   //Bundle file containg langauge language code 
   languageLanguageBundle: string,
+  //Settings to be injected into languageLanguage
+  languageLanguageSettings?: object,
 }
 
 /// Main function which starts ad4m-executor
@@ -133,6 +143,11 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       systemLanguages,
       preloadLanguages,
       directMessageLanguage: networkBootstrapSeedData.directMessageLanguage,
+      directMessageLanguageSettings: networkBootstrapSeedData.directMessageLanguageSettings,
+      agentLanguageSettings: networkBootstrapSeedData.agentLanguageSettings,
+      perspectiveLanguageSettings: networkBootstrapSeedData.perspectiveLanguageSettings,
+      neighbourhoodLanguageSettings: networkBootstrapSeedData.neighbourhoodLanguageSettings,
+      languageLanguageSettings: networkBootstrapSeedData.languageLanguageSettings,
       knownLinkLanguages: networkBootstrapSeedData.knownLinkLanguages,
       trustedAgents: networkBootstrapSeedData.trustedAgents,
       languageAliases,

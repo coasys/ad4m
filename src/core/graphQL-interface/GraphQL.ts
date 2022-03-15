@@ -308,10 +308,7 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             languageWriteSettings: async (parent, args, context, info) => {
                 const { languageAddress, settings } = args
-                const langref = { name: '', address: languageAddress }
-                const lang = await core.languageController.languageByRef(langref)
-                langref.name = lang.name
-                await core.languageController.putSettings(langref, JSON.parse(settings))
+                await core.languageController.putSettings(languageAddress, JSON.parse(settings))
                 return true
             },
             //@ts-ignore

@@ -19,7 +19,12 @@ export let preloadLanguages: string[] = [];
 export let langugeLanguageBundle: string = '';
 export let directMessageLanguage: string = '';
 export let languageAliases: LanguageAlias = {};
-export let bootstrapFixtures: BootstrapFixtures|null = null;
+export let bootstrapFixtures: BootstrapFixtures | null = null;
+export let directMessageLanguageSettings: object | null = null;
+export let agentLanguageSettings: object | null = null;
+export let perspectiveLanguageSettings: object | null = null;
+export let neighbourhoodLanguageSettings: object | null = null;
+export let languageLanguageSettings: object | null = null;
 
 export let agentLanguageAlias = "did";
 export let languageLanguageAlias = "lang";
@@ -42,6 +47,11 @@ export interface CoreConfig {
     languageLanguageOnly: boolean
     languageAliases?: LanguageAlias
     bootstrapFixtures?: BootstrapFixtures
+    directMessageLanguageSettings?: object
+    agentLanguageSettings?: object
+    perspectiveLanguageSettings?: object
+    neighbourhoodLanguageSettings?: object
+    languageLanguageSettings?: object
 }
 
 
@@ -77,16 +87,22 @@ export function init(c: CoreConfig) {
     knownLinkLanguages = c.knownLinkLanguages
     trustedAgents = c.trustedAgents
     languageLanguageOnly = c.languageLanguageOnly;
-}
 
-export function getLanguageStoragePath(name: string) {
-    const languageConfigPath = path.join(languagesPath, name)
-    if(!fs.existsSync(languageConfigPath))
-        fs.mkdirSync(languageConfigPath)
-    const storageDirectory = path.join(languageConfigPath, "storage")
-    if(!fs.existsSync(storageDirectory))
-        fs.mkdirSync(storageDirectory)
-    return storageDirectory
+    if (c.directMessageLanguageSettings) {
+        directMessageLanguageSettings = c.directMessageLanguageSettings
+    }
+    if (c.agentLanguageSettings) {
+        agentLanguageSettings = c.agentLanguageSettings
+    }
+    if (c.perspectiveLanguageSettings) {
+        perspectiveLanguageSettings = c.perspectiveLanguageSettings
+    }
+    if (c.neighbourhoodLanguageSettings) {
+        neighbourhoodLanguageSettings = c.neighbourhoodLanguageSettings
+    }
+    if (c.languageLanguageSettings) {
+        languageLanguageSettings = c.languageLanguageSettings
+    }
 }
 
 export class BootstrapFixtures {

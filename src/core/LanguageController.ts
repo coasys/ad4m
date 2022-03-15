@@ -69,22 +69,38 @@ export default class LanguageController {
     async loadSystemLanguages() {
         console.log("loadBuiltInLanguages: Built in languages:", this.#systemLanguages);
         //Install language language from the bundle file and then update languageAliases to point to language hash
-        const { sourcePath } = await this.saveLanguageBundle(langugeLanguageBundle);
+        const { sourcePath, hash: calculatedHash } = await this.saveLanguageBundle(langugeLanguageBundle);
+        if (Config.languageLanguageSettings) {
+            console.log("Found settings for languageLanguage, writting settings");
+            this.writeSettings(calculatedHash, Config.languageLanguageSettings);
+        }
         const { hash, language: languageLanguage } = await this.loadLanguage(sourcePath);
         languageAliases[Config.languageLanguageAlias] = hash;
         this.#languageLanguage = languageLanguage!;
 
         if (!Config.languageLanguageOnly) {
             //Install the agent language and set
+            if (Config.agentLanguageSettings) {
+                console.log("Found settings for agentLanguage, writting settings");
+                this.writeSettings(languageAliases[Config.agentLanguageAlias], Config.agentLanguageSettings);
+            }
             const agentLanguage = await this.installLanguage(languageAliases[Config.agentLanguageAlias], null);
             this.#agentLanguage = agentLanguage!;
             ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
 
             //Install the neighbourhood language and set
+            if (Config.neighbourhoodLanguageSettings) {
+                console.log("Found settings for neighbourhoodLanguage, writting settings");
+                this.writeSettings(languageAliases[Config.neighbourhoodLanguageAlias], Config.neighbourhoodLanguageSettings);
+            }
             const neighbourhoodLanguage = await this.installLanguage(languageAliases[Config.neighbourhoodLanguageAlias], null);
             this.#neighbourhoodLanguage = neighbourhoodLanguage!;
 
             //Install the perspective language and set
+            if (Config.perspectiveLanguageSettings) {
+                console.log("Found settings for a perspectiveLanguage, writting settings")
+                this.writeSettings(languageAliases[Config.perspectiveLanguageAlias], Config.perspectiveLanguageSettings);
+            }
             const perspectiveLanguage = await this.installLanguage(languageAliases[Config.perspectiveLanguageAlias], null);
             this.#perspectiveLanguage = perspectiveLanguage!;
 
@@ -138,8 +154,8 @@ export default class LanguageController {
         
         const { default: create, name } = require(sourceFilePath)
 
-        const customSettings = this.getSettings({name, address: hash} as LanguageRef)
-        const storageDirectory = Config.getLanguageStoragePath(name)
+        const customSettings = this.getSettings(hash)
+        const storageDirectory = this.getLanguageStoragePath(name)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.pubSub});
@@ -164,6 +180,42 @@ export default class LanguageController {
         this.#languageConstructors.set(hash, create)
 
         return { hash, language }
+    }
+
+    async reloadLanguage(hash: string): Promise<{
+        language: Language,
+        hash: string
+    }> {
+        this.#languages.delete(hash);
+        const create = this.#languageConstructors.get(hash)
+        if (!create) {
+            throw new Error(`Could not find create constructor when trying to reload language: ${hash}`);
+        }
+        const customSettings = this.getSettings(hash)
+        const storageDirectory = this.getLanguageStoragePath(hash)
+        const Holochain = this.#holochainService.getDelegateForLanguage(hash)
+        //@ts-ignore
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: this.pubSub});
+        //@ts-ignore
+        const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings})
+
+        if(language.linksAdapter) {
+            language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
+                this.#linkObservers.forEach(o => {
+                    o(added, removed, {name: language.name, address: hash} as LanguageRef)
+                })
+            })
+        }
+
+        //@ts-ignore
+        if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
+            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
+                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+            })
+        }
+
+        this.#languages.set(hash, language)
+        return {language: language, hash}
     }
 
     async saveLanguageBundle(bundle: string, languageMeta?: object, hash?: string): Promise<{
@@ -653,8 +705,8 @@ export default class LanguageController {
         return grabbedLang.expressionUI?.icon()
     }
 
-    getSettings(lang: LanguageRef): object {
-        const FILEPATH = path.join(Config.languagesPath, lang.name, 'settings.json')
+    getSettings(hash: string): object {
+        const FILEPATH = path.join(Config.languagesPath, hash, 'settings.json')
         if(fs.existsSync(FILEPATH)) {
             return JSON.parse(fs.readFileSync(FILEPATH).toString())
         } else {
@@ -662,31 +714,27 @@ export default class LanguageController {
         }
     }
 
-    async putSettings(lang: LanguageRef, settings: object) {
-        const directory = path.join(Config.languagesPath, lang.name)
+    writeSettings(hash: string, settings: object) {
+        const directory = path.join(Config.languagesPath, hash)
         if(!fs.existsSync(directory))
             fs.mkdirSync(directory)
         const FILEPATH = path.join(directory, 'settings.json')
         fs.writeFileSync(FILEPATH, JSON.stringify(settings))
+    }
 
-        this.#languages.delete(lang.address)
-        const create = this.#languageConstructors.get(lang.address)
-        const storageDirectory = Config.getLanguageStoragePath(lang.name)
-        const Holochain = this.#holochainService.getDelegateForLanguage(lang.address)
-        //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind({language: lang.address, pubsub: this.pubSub});
-        //@ts-ignore
-        const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings: settings})
+    async putSettings(hash: string, settings: object) {
+        this.writeSettings(hash, settings);
+        this.reloadLanguage(hash);
+    }
 
-        if(language.linksAdapter) {
-            language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
-                this.#linkObservers.forEach(o => {
-                    o(added, removed, {name: lang.name, address: lang.address} as LanguageRef)
-                })
-            })
-        }
-
-        this.#languages.set(lang.address, language)
+    getLanguageStoragePath(hash: string) {
+        const languageConfigPath = path.join(Config.languagesPath, hash)
+        if(!fs.existsSync(languageConfigPath))
+            fs.mkdirSync(languageConfigPath)
+        const storageDirectory = path.join(languageConfigPath, "storage")
+        if(!fs.existsSync(storageDirectory))
+            fs.mkdirSync(storageDirectory)
+        return storageDirectory
     }
 
     async expressionCreate(lang: LanguageRef, content: object): Promise<ExpressionRef> {
