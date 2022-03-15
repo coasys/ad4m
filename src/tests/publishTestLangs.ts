@@ -17,7 +17,7 @@ const ipfsRepoPath = path.join(appDataPath);
 const publishLanguagesPath = path.join(TEST_DIR, "languages");
 const publishingAgentPath = path.join(`${__dirname}/../../src/tests/publishing-agent`);
 const publishingBootstrapSeedPath = path.join(`${__dirname}/../../src/tests/publishBootstrapSeed.json`);
-const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/publishBootstrapSeed.json`);
+const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -25,7 +25,8 @@ const languagesToPublish = {
     "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
     "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
     "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
-    "social-context": {name: "social-context", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput
+    "social-context": {name: "social-context", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput,
+    "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput,
 }
 
 const languageHashes = {
@@ -111,6 +112,9 @@ async function publish() {
         }
         if (language === "direct-message-language") {
             languageHashes["directMessageLanguage"] = publishedLang.address;
+        }
+        if (language === "perspective-language") {
+            languageHashes["perspectiveLanguage"] = publishedLang.address;
         }
     }
     injectSystemLanguages()

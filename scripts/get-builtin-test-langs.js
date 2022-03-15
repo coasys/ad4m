@@ -30,6 +30,9 @@ const languages = {
   },
   "direct-message-language": {
     bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.4/bundle.js"
+  },
+  "perspective-language": {
+    bundle: "https://github.com/perspect3vism/perspective-language/releases/download/0.0.1/bundle.js"
   }
 };
 
