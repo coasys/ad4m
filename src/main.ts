@@ -130,7 +130,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
 
     console.log("\x1b[2m", 
       "Starting ad4m core with path:", appDataPath, "\n", 
-      "=> AD4M core language addresses:", systemLanguages, "\n",
+      "=> AD4M core language addresses: languageLanguage bundle (hidden) + ", systemLanguages.slice(1, systemLanguages.length), "\n",
       "Languages to be preloaded, as supplied by appLangAliases", preloadLanguages, "\n",
       "Language aliases:", languageAliases, "\n", 
       "Bootstrap fixtures:", bootstrapFixtures, "\n",

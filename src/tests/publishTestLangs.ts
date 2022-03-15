@@ -7,7 +7,7 @@ import ws from "ws"
 import main from "../main";
 import path from "path";
 import { OuterConfig } from "../types";
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient, LanguageMetaInput } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 
 const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
@@ -16,7 +16,15 @@ const ipfsRepoPath = path.join(appDataPath);
 const publishLanguagesPath = path.join(TEST_DIR, "languages");
 const publishingAgentPath = path.join(`${__dirname}/../../src/tests/publishing-agent`);
 const publishBootstrapSeedPath = path.join(`${__dirname}/../../src/tests/publishBootstrapSeed.json`);
-const languagesToPublish = fs.readdirSync(publishLanguagesPath);
+
+//Update this as new languages are needed within testing code
+const languagesToPublish = {
+    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
+    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
+    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
+    "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
+    "social-context": {name: "social-context", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput
+}
 
 function apolloClient(port: number): ApolloClient<any> {
     return new ApolloClient({
@@ -66,8 +74,14 @@ async function publish() {
     await core.initLanguages()
 
     const ad4mClient = new Ad4mClient(apolloClient(4000));
+    await ad4mClient.agent.unlock("passphrase");
 
-    console.log("Got me", await ad4mClient.agent.me());
+    for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
+        let bundlePath = path.join(publishLanguagesPath, language, "build", "bundle.js");
+        console.log("Attempting to publish language", bundlePath);
+        let publishedLang = await ad4mClient.languages.publish(bundlePath, languageMeta);
+        console.log("Published with result", publishedLang);
+    }
 }
 
 publish()
