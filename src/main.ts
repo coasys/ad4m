@@ -9,7 +9,8 @@ import getPort from 'get-port';
 import fs from "fs";
 
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
-interface OuterConfig {
+
+export interface OuterConfig {
   //Path to resources used by ad4m-executor such as; hc, holochain, prolog
   resourcePath: string
   //Path to be used for storing ad4m data
@@ -46,7 +47,7 @@ interface OuterConfig {
   connectHolochain?: boolean,
 }
 
-interface SeedFileSchema {
+export interface SeedFileSchema {
   //DID of agents trusted by user running executor
   trustedAgents: string[],
   //Link language templates that are known
@@ -142,12 +143,13 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       appResourcePath: resourcePath,
       systemLanguages,
       preloadLanguages,
+      languageLanguageBundle: networkBootstrapSeedData.languageLanguageBundle,
+      languageLanguageSettings: networkBootstrapSeedData.languageLanguageSettings,
       directMessageLanguage: networkBootstrapSeedData.directMessageLanguage,
       directMessageLanguageSettings: networkBootstrapSeedData.directMessageLanguageSettings,
       agentLanguageSettings: networkBootstrapSeedData.agentLanguageSettings,
       perspectiveLanguageSettings: networkBootstrapSeedData.perspectiveLanguageSettings,
       neighbourhoodLanguageSettings: networkBootstrapSeedData.neighbourhoodLanguageSettings,
-      languageLanguageSettings: networkBootstrapSeedData.languageLanguageSettings,
       knownLinkLanguages: networkBootstrapSeedData.knownLinkLanguages,
       trustedAgents: networkBootstrapSeedData.trustedAgents,
       languageAliases,

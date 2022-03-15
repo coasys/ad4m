@@ -16,7 +16,7 @@ export let knownLinkLanguages: string[] = [];
 export let trustedAgents: string[] =  [];
 export let systemLanguages: string[] = [];
 export let preloadLanguages: string[] = [];
-export let langugeLanguageBundle: string = '';
+export let languageLanguageBundle: string = '';
 export let directMessageLanguage: string = '';
 export let languageAliases: LanguageAlias = {};
 export let bootstrapFixtures: BootstrapFixtures | null = null;
@@ -87,6 +87,7 @@ export function init(c: CoreConfig) {
     knownLinkLanguages = c.knownLinkLanguages
     trustedAgents = c.trustedAgents
     languageLanguageOnly = c.languageLanguageOnly;
+    languageLanguageBundle = c.languageLanguageBundle;
 
     if (c.directMessageLanguageSettings) {
         directMessageLanguageSettings = c.directMessageLanguageSettings

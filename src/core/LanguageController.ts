@@ -8,7 +8,6 @@ import path from 'path'
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
-import { systemLanguages, languageAliases, langugeLanguageBundle, bootstrapFixtures } from "./Config";
 import * as PubSub from './graphQL-interface/PubSub'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid'
@@ -31,7 +30,6 @@ export default class LanguageController {
     #context: object;
     #linkObservers: LinkObservers[];
     #holochainService: HolochainService
-    #systemLanguages: string[];
     #runtimeService: RuntimeService;
     #signatures: Signatures;
     #db: PerspectivismDb;
@@ -42,10 +40,7 @@ export default class LanguageController {
     #perspectiveLanguage?: Language
     pubSub
 
-
     constructor(context: object, services: Services) {
-        this.#systemLanguages = systemLanguages
-
         this.#context = context
         this.#holochainService = services.holochainService
         this.#runtimeService = services.runtimeService
@@ -67,41 +62,40 @@ export default class LanguageController {
     }
 
     async loadSystemLanguages() {
-        console.log("loadBuiltInLanguages: Built in languages:", this.#systemLanguages);
         //Install language language from the bundle file and then update languageAliases to point to language hash
-        const { sourcePath, hash: calculatedHash } = await this.saveLanguageBundle(langugeLanguageBundle);
+        const { sourcePath, hash: calculatedHash } = await this.saveLanguageBundle(Config.languageLanguageBundle);
         if (Config.languageLanguageSettings) {
             console.log("Found settings for languageLanguage, writting settings");
             this.writeSettings(calculatedHash, Config.languageLanguageSettings);
         }
         const { hash, language: languageLanguage } = await this.loadLanguage(sourcePath);
-        languageAliases[Config.languageLanguageAlias] = hash;
+        Config.languageAliases[Config.languageLanguageAlias] = hash;
         this.#languageLanguage = languageLanguage!;
 
         if (!Config.languageLanguageOnly) {
             //Install the agent language and set
             if (Config.agentLanguageSettings) {
                 console.log("Found settings for agentLanguage, writting settings");
-                this.writeSettings(languageAliases[Config.agentLanguageAlias], Config.agentLanguageSettings);
+                this.writeSettings(Config.languageAliases[Config.agentLanguageAlias], Config.agentLanguageSettings);
             }
-            const agentLanguage = await this.installLanguage(languageAliases[Config.agentLanguageAlias], null);
+            const agentLanguage = await this.installLanguage(Config.languageAliases[Config.agentLanguageAlias], null);
             this.#agentLanguage = agentLanguage!;
             ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
 
             //Install the neighbourhood language and set
             if (Config.neighbourhoodLanguageSettings) {
                 console.log("Found settings for neighbourhoodLanguage, writting settings");
-                this.writeSettings(languageAliases[Config.neighbourhoodLanguageAlias], Config.neighbourhoodLanguageSettings);
+                this.writeSettings(Config.languageAliases[Config.neighbourhoodLanguageAlias], Config.neighbourhoodLanguageSettings);
             }
-            const neighbourhoodLanguage = await this.installLanguage(languageAliases[Config.neighbourhoodLanguageAlias], null);
+            const neighbourhoodLanguage = await this.installLanguage(Config.languageAliases[Config.neighbourhoodLanguageAlias], null);
             this.#neighbourhoodLanguage = neighbourhoodLanguage!;
 
             //Install the perspective language and set
             if (Config.perspectiveLanguageSettings) {
                 console.log("Found settings for a perspectiveLanguage, writting settings")
-                this.writeSettings(languageAliases[Config.perspectiveLanguageAlias], Config.perspectiveLanguageSettings);
+                this.writeSettings(Config.languageAliases[Config.perspectiveLanguageAlias], Config.perspectiveLanguageSettings);
             }
-            const perspectiveLanguage = await this.installLanguage(languageAliases[Config.perspectiveLanguageAlias], null);
+            const perspectiveLanguage = await this.installLanguage(Config.languageAliases[Config.perspectiveLanguageAlias], null);
             this.#perspectiveLanguage = perspectiveLanguage!;
 
             //Install preload languages
@@ -113,7 +107,7 @@ export default class LanguageController {
             if (Config.bootstrapFixtures) {
                 if (Config.bootstrapFixtures!.languages) {
                     await Promise.all(Config.bootstrapFixtures!.languages!.map(async file => {
-                        const { sourcePath } = await this.saveLanguageBundle(langugeLanguageBundle);
+                        const { sourcePath } = await this.saveLanguageBundle(Config.languageLanguageBundle);
                         await this.loadLanguage(sourcePath);
                     }))
                 }
@@ -125,7 +119,7 @@ export default class LanguageController {
         const files = fs.readdirSync(Config.languagesPath)
         return Promise.all(files.map(async file => {
             //Ensure we do not loaded previously loaded system languages again
-            if (!systemLanguages.find((lang) => lang === file) && !Config.preloadLanguages.find((lang) => lang === file)) {
+            if (!Config.systemLanguages.find((lang) => lang === file) && !Config.preloadLanguages.find((lang) => lang === file)) {
                 const bundlePath = path.join(Config.languagesPath, file, 'bundle.js')
                 if(fs.existsSync(bundlePath)) {
                     try {
@@ -230,6 +224,7 @@ export default class LanguageController {
         const languagePath = path.join(Config.languagesPath, hash);
         const sourcePath = path.join(languagePath, 'bundle.js')
         const metaPath = path.join(languagePath, 'meta.json')
+        console.log("Saving at path", sourcePath);
 
         if (!fs.existsSync(languagePath)) {
             fs.mkdirSync(languagePath)
@@ -322,7 +317,7 @@ export default class LanguageController {
     }
 
     languageForExpression(e: ExpressionRef): Language {
-        const address = languageAliases[e.language.address] ? languageAliases[e.language.address] : e.language.address
+        const address = Config.languageAliases[e.language.address] ? Config.languageAliases[e.language.address] : e.language.address
         const language = this.#languages.get(address)
         if(language) {
             return language
@@ -332,7 +327,7 @@ export default class LanguageController {
     }
 
     async languageByRef(ref: LanguageRef): Promise<Language> {
-        const address = languageAliases[ref.address] ? languageAliases[ref.address] : ref.address
+        const address = Config.languageAliases[ref.address] ? Config.languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
         //If the language is already installed then just return it
         if(language) {
@@ -596,8 +591,8 @@ export default class LanguageController {
     }
 
     async getLanguageExpression(address: string): Promise<LanguageExpression | null> {
-        if(bootstrapFixtures) {
-            const fixtures = bootstrapFixtures.languages;
+        if(Config.bootstrapFixtures) {
+            const fixtures = Config.bootstrapFixtures.languages;
             if (fixtures) {
                 const fixtureLanguage = fixtures.find(f=>f.address===address)
                 if(fixtureLanguage && fixtureLanguage.meta) {
@@ -614,8 +609,8 @@ export default class LanguageController {
     }
 
     async getLanguageSource(address: string): Promise<string | null> {
-        if(bootstrapFixtures) {
-            const fixtures = bootstrapFixtures.languages;
+        if(Config.bootstrapFixtures) {
+            const fixtures = Config.bootstrapFixtures.languages;
             if (fixtures) {
                 const fixtureLanguage = fixtures.find(f=>f.address===address)
                 if(fixtureLanguage && fixtureLanguage.bundle) {
@@ -631,8 +626,8 @@ export default class LanguageController {
     }
 
     async getPerspective(address: string): Promise<Expression | null> {
-        if(bootstrapFixtures) {
-            const perspectives = bootstrapFixtures.perspectives;
+        if(Config.bootstrapFixtures) {
+            const perspectives = Config.bootstrapFixtures.perspectives;
             if (perspectives) {
                 const perspective = perspectives.find(f=>f.address===address)
                 if(perspective && perspective.expression) {
@@ -764,8 +759,8 @@ export default class LanguageController {
 
         // This makes sure that Expression references used in Links (i.e. in Perspectives) use the aliased Language schemas.
         // Especially important for DIDs
-        for(const alias of Object.keys(languageAliases)) {
-            const target = languageAliases[alias]
+        for(const alias of Object.keys(Config.languageAliases)) {
+            const target = Config.languageAliases[alias]
             if(lang.address === target) {
                 lang.address = alias
             }
@@ -775,12 +770,12 @@ export default class LanguageController {
     }
 
     async getExpression(ref: ExpressionRef): Promise<Expression | null> {
-        if(bootstrapFixtures?.perspectives && ref.language.address === "neighbourhood") {
-            const fixturePerspective = bootstrapFixtures.perspectives!.find(f=>f.address===ref.expression)
+        if(Config.bootstrapFixtures?.perspectives && ref.language.address === "neighbourhood") {
+            const fixturePerspective = Config.bootstrapFixtures.perspectives!.find(f=>f.address===ref.expression)
             if(fixturePerspective && fixturePerspective.expression) return fixturePerspective.expression
         }
-        if(bootstrapFixtures?.languages && ref.language.address === "lang") {
-            const fixtureLang = bootstrapFixtures.languages!.find(f=>f.address===ref.expression)
+        if(Config.bootstrapFixtures?.languages && ref.language.address === "lang") {
+            const fixtureLang = Config.bootstrapFixtures.languages!.find(f=>f.address===ref.expression)
             if(fixtureLang && fixtureLang.meta) return fixtureLang.meta
         }
         const lang = this.languageForExpression(ref);
