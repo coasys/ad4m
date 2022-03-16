@@ -2,6 +2,7 @@ import { TestContext } from './integration.test'
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const SOCIAL_CONTEXT_OFFICIAL = "QmUvSpKxCnychotba2pVCufCNFSmr5Tj8e9qqdZkpuuxWt"
+const PUBLISHING_AGENT = "did:key:zQ3shdvPx7A5cy5ZeiXcmXRxC8DFmXDPhUY1RajFmxWPLEf2R"
 
 export default function runtimeTests(testContext: TestContext) {
     return () => {
@@ -12,26 +13,26 @@ export default function runtimeTests(testContext: TestContext) {
             const { did } = await ad4mClient.agent.status()
 
             const initalAgents = await ad4mClient.runtime.getTrustedAgents();
-            expect(initalAgents).toEqual([ did, PERSPECT3VISM_AGENT ])
+            expect(initalAgents).toEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
             
             const addAgents = await ad4mClient.runtime.addTrustedAgents(["agentPubKey", "agentPubKey2"]);
-            expect(addAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(addAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
 
             //Add the agents again to be sure we cannot get any duplicates
             const addAgentsDuplicate = await ad4mClient.runtime.addTrustedAgents(["agentPubKey", "agentPubKey2"]);
-            expect(addAgentsDuplicate).toStrictEqual([ did, PERSPECT3VISM_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(addAgentsDuplicate).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
 
             const getAgents = await ad4mClient.runtime.getTrustedAgents();
-            expect(getAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(getAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
 
             const deleteAgents1 = await ad4mClient.runtime.deleteTrustedAgents(["agentPubKey2"])
-            expect(deleteAgents1).toStrictEqual([ did, PERSPECT3VISM_AGENT, "agentPubKey" ])
+            expect(deleteAgents1).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, "agentPubKey" ])
 
             const deleteAgents2 = await ad4mClient.runtime.deleteTrustedAgents(["agentPubKey", "agentPubKey2"])
-            expect(deleteAgents2).toStrictEqual([ did, PERSPECT3VISM_AGENT ])
+            expect(deleteAgents2).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
 
             const getAgentsPostDelete = await ad4mClient.runtime.getTrustedAgents();
-            expect(getAgentsPostDelete).toStrictEqual([ did, PERSPECT3VISM_AGENT ])
+            expect(getAgentsPostDelete).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
         })    
 
 
@@ -97,14 +98,14 @@ export default function runtimeTests(testContext: TestContext) {
             expect(addresses).toEqual([ SOCIAL_CONTEXT_OFFICIAL ])
 
             const initalAgents = await ad4mClient.runtime.getTrustedAgents();
-            expect(initalAgents).toEqual([ did, PERSPECT3VISM_AGENT ])
+            expect(initalAgents).toEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
 
 
             const addAddresses = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
             expect(addAddresses).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL, 'Qm123', 'Qmabc' ])
 
             const addAgents = await ad4mClient.runtime.addTrustedAgents(["agentPubKey", "agentPubKey2"]);
-            expect(addAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(addAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
 
             const dids = await ad4mClient.runtime.friends()
             expect(dids).toEqual(["did:test:1", "did:test:2"])
@@ -117,7 +118,7 @@ export default function runtimeTests(testContext: TestContext) {
             expect(postDeleteAddresses).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL, 'Qm123', 'Qmabc' ])
 
             const postDeleteAgents = await ad4mClient.runtime.getTrustedAgents()
-            expect(postDeleteAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(postDeleteAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
         })
 
         it("can deal with Holochain's agent_infos", async () => {
