@@ -20,9 +20,8 @@ export default function languageTests(testContext: TestContext) {
                     path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"),
                     new LanguageMetaInput("Newly published social-context", "..here for you template")
                 )
+                console.warn("source language is", sourceLanguage);
                 expect(sourceLanguage.name).toBe("Newly published social-context");
-                //TODO/NOTE: this will break if the social-context language version is changed
-                expect(sourceLanguage.address).toBe("QmUvSpKxCnychotba2pVCufCNFSmr5Tj8e9qqdZkpuuxWt");
             })
 
             it('Alice can get the source of her own templated language', async () => {
@@ -32,7 +31,8 @@ export default function languageTests(testContext: TestContext) {
             })
 
             it('Alice can install her own templated language', async () => {
-                await ad4mClient.languages.byAddress(sourceLanguage.address)
+                const install = await ad4mClient.languages.byAddress(sourceLanguage.address);
+                console.warn("ALICE INSTALLED WITH", install, "\n\n\n")
             })
 
             it('Alice can use language.meta() to get meta info of her Language', async() => {
@@ -51,7 +51,6 @@ export default function languageTests(testContext: TestContext) {
                 const sourceLanguageMetaData = JSON.parse(sourceLanguageMeta.data);
                 expect(sourceLanguageMetaData.name).toBe("Newly published social-context")
                 expect(sourceLanguageMetaData.description).toBe("..here for you template")
-                expect(sourceLanguageMetaData.address).toBe("QmUvSpKxCnychotba2pVCufCNFSmr5Tj8e9qqdZkpuuxWt")
             })
 
             it('can publish and template a non-Holochain language and provide correct meta data', async() => {
@@ -106,9 +105,8 @@ export default function languageTests(testContext: TestContext) {
 
                 it("Bob can template Alice's social-context, and alice can install", async () => {
                     //Apply template on above holochain language
-                    applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "Bob's templated social-context"}))
+                    applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({id: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "Bob's templated social-context"}))
                     expect(applyTemplateFromSource.name).toBe("Bob's templated social-context");
-                    expect(applyTemplateFromSource.address).toBe("QmWGSeNRZqNfpmrbuWUvRHZ4yp2BWLg4jkaG4Pc8TvLWdP");
                     
                     //Get language meta for above language and make sure it is correct
                     const langExpr = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
@@ -118,14 +116,12 @@ export default function languageTests(testContext: TestContext) {
                     expect(meta.description).toBe("..here for you template")
                     expect(meta.author).toBe((await bobAd4mClient.agent.status()).did)
                     expect(meta.templateAppliedParams).toBe(JSON.stringify({
-                        "name": "Bob's templated social-context",
-                        "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
+                        "id":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c",
+                        "name": "Bob's templated social-context"
                     }))
-                    expect(meta.address).toBe("QmWGSeNRZqNfpmrbuWUvRHZ4yp2BWLg4jkaG4Pc8TvLWdP")
                     expect(meta.templateSourceLanguageAddress).toBe(sourceLanguage.address)
 
-                    await ad4mClient.runtime.addTrustedAgents([(await ad4mClient.agent.me()).did]);
-                    await sleep(500)
+                    await ad4mClient.runtime.addTrustedAgents([(await bobAd4mClient.agent.me()).did]);
 
                     const installGetLanguage = await ad4mClient.languages.byAddress(applyTemplateFromSource.address);
                     expect(installGetLanguage.address).toBe(applyTemplateFromSource.address);
