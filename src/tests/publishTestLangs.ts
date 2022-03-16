@@ -18,6 +18,8 @@ const publishLanguagesPath = path.join(TEST_DIR, "languages");
 const publishingAgentPath = path.join(`${__dirname}/../../src/tests/publishing-agent`);
 const publishingBootstrapSeedPath = path.join(`${__dirname}/../../src/tests/publishBootstrapSeed.json`);
 const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
+const noteIpfsHashPath = path.join(`${__dirname}/../../scripts/note-ipfs-hash`);
+const socialContextHashPath = path.join(`${__dirname}/../../scripts/social-context-hash`);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -33,7 +35,9 @@ const languageHashes = {
     "directMessageLanguage": "",
     "agentLanguage": "",
     "perspectiveLanguage": "",
-    "neighbourhoodLanguage": ""
+    "neighbourhoodLanguage": "",
+    "noteIpfs": "",
+    "socialContext": ""
 }
 
 function apolloClient(port: number): ApolloClient<any> {
@@ -72,6 +76,11 @@ function injectSystemLanguages() {
     } else {
         throw new Error(`Could not find boostrapSeed at path: ${bootstrapSeedPath}`)
     }
+}
+
+function injectLangAliasHashes() {
+    fs.writeFileSync(noteIpfsHashPath, languageHashes["noteIpfs"]);
+    fs.writeFileSync(socialContextHashPath, languageHashes["socialContext"]);
 }
 
 async function publish() {
@@ -116,8 +125,15 @@ async function publish() {
         if (language === "perspective-language") {
             languageHashes["perspectiveLanguage"] = publishedLang.address;
         }
+        if (language === "note-ipfs") {
+            languageHashes["noteIpfs"] = publishedLang.address;
+        }
+        if (language === "social-context") {
+            languageHashes["socialContext"] = publishedLang.address;
+        }
     }
     injectSystemLanguages()
+    injectLangAliasHashes();
     await core!.exit();
     exit();
 }

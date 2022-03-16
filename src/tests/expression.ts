@@ -1,4 +1,5 @@
 import { TestContext } from './integration.test'
+import fs from "fs";
 
 export default function expressionTests(testContext: TestContext) {
     return () => {
@@ -44,10 +45,9 @@ export default function expressionTests(testContext: TestContext) {
             it('can create valid signatures', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 //@ts-ignore
-                const noteIpfs = (await ad4mClient.languages.byFilter('')).find(l=>l.name ==='note-ipfs')
-                expect(noteIpfs).toBeDefined()
+                const noteIpfs = fs.readFileSync("./scripts/note-ipfs-hash").toString();
 
-                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs!.address)
+                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs)
                 expect(exprAddr).toBeDefined()
 
                 const expr = await ad4mClient.expression.get(exprAddr)
@@ -57,11 +57,9 @@ export default function expressionTests(testContext: TestContext) {
 
             it('can get expression from cache', async () => {
                 const ad4mClient = testContext.ad4mClient!
-                //@ts-ignore
-                const noteIpfs = (await ad4mClient.languages.byFilter('')).find(l=>l.name ==='note-ipfs')
-                expect(noteIpfs).toBeDefined()
+                const noteIpfs = fs.readFileSync("./scripts/note-ipfs-hash").toString();
 
-                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs!.address)
+                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs)
                 expect(exprAddr).toBeDefined()
 
                 const expr = await ad4mClient.expression.get(exprAddr)
@@ -74,7 +72,7 @@ export default function expressionTests(testContext: TestContext) {
                 expect(exprCacheHit.proof.valid).toBeTruthy()
                 expect(exprCacheHit.data).toBe("\"test note\"");
 
-                const objExpr = await ad4mClient.expression.create(JSON.stringify({"key": "value"}), noteIpfs!.address)
+                const objExpr = await ad4mClient.expression.create(JSON.stringify({"key": "value"}), noteIpfs)
                 expect(objExpr).toBeDefined()
 
                 const exprObj = await ad4mClient.expression.get(objExpr)
