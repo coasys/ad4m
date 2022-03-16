@@ -21,7 +21,7 @@
     "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
-    "test": "npm run prepare-test && nix-shell --run \"npm run test-all\""
+    "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/removeLanguageLanguageBundle.js"
   },
   "repository": {
     "type": "git",

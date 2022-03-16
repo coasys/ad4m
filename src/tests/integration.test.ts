@@ -113,7 +113,7 @@ describe("Integration tests", () => {
         core = await main.init({
             appDataPath,
             resourcePath: TEST_DIR,
-            networkBootstrapSeed: "./bootstrapSeed.json",
+            networkBootstrapSeed: "./src/tests/bootstrapSeed.json",
             bootstrapFixtures: {
               languages: [],
               perspectives: [],
@@ -164,12 +164,11 @@ describe("Integration tests", () => {
             bob = await main.init({
                 appDataPath,
                 resourcePath: TEST_DIR,
-                networkBootstrapSeed: "./bootstrapSeed.json",
+                networkBootstrapSeed: "./src/tests/bootstrapSeed.json",
                 bootstrapFixtures: {
                   languages: [],
                   perspectives: [],
                 },
-                appLangAliases: undefined,
                 mocks: false,
                 gqlPort: 14000,
                 hcPortAdmin: 12000,
