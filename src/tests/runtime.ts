@@ -1,7 +1,8 @@
 import { TestContext } from './integration.test'
+import fs from "fs";
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
-const SOCIAL_CONTEXT_OFFICIAL = "QmUvSpKxCnychotba2pVCufCNFSmr5Tj8e9qqdZkpuuxWt"
+const SOCIAL_CONTEXT_OFFICIAL = fs.readFileSync("./scripts/social-context-hash").toString();
 const PUBLISHING_AGENT = "did:key:zQ3shdvPx7A5cy5ZeiXcmXRxC8DFmXDPhUY1RajFmxWPLEf2R"
 
 export default function runtimeTests(testContext: TestContext) {
