@@ -2,14 +2,13 @@ import path from "path"
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, LanguageMetaInput } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
+import fs from "fs";
 
-const LINK_LANGUAGE_PATH = path.join(__dirname, "../test-temp/languages/social-context")
+const SOCIAL_CONTEXT_OFFICIAL = fs.readFileSync("./scripts/social-context-hash").toString();
 
 export default function neighbourhoodTests(testContext: TestContext) {
     return () => {
         describe('Neighbourhood', () => {
-            let neighbourhoodUrl
-
             it('can publish and join locally @alice', async () => {
                 const ad4mClient = testContext.alice!;
 
@@ -18,10 +17,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(create.neighbourhood).toBeNull();
 
                 //Create unique social-context to simulate real scenario
-                const socialContext = await ad4mClient.languages.publish(
-                    path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), 
-                    new LanguageMetaInput("Alice's social-context")
-                )
+                const socialContext = await ad4mClient.languages.applyTemplateAndPublish(SOCIAL_CONTEXT_OFFICIAL, JSON.stringify({name: "Alice's social-context"}));
                 expect(socialContext.name).toBe("Alice's social-context");
 
                 let link = new LinkExpression()
@@ -53,11 +49,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.publish(
-                    path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"), 
-                    new LanguageMetaInput("Alice's neighbourhood with Bob", "")
-
-                )
+                const socialContext = await alice.languages.applyTemplateAndPublish(SOCIAL_CONTEXT_OFFICIAL, JSON.stringify({name: "Alice's neighbourhood with Bob"}));
                 expect(socialContext.name).toBe("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
