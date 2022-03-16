@@ -70,7 +70,7 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             language: async (parent, args, context, info) => {
                 const { address } = args
-                const lang = await core.languageController.languageByRef({address} as LanguageRef) as any
+                const lang = await core.languageController.languageByRef({address, name: ""} as LanguageRef) as any
                 lang.address = address
                 return lang
             },
@@ -507,35 +507,9 @@ function createResolvers(core: PerspectivismCore) {
 
         LanguageHandle: {
             //@ts-ignore
-            constructorIcon: async (language) => {
-                const code = await core.languageController.getConstructorIcon(language);
-                if (code) {
-                    return { code }
-                } else {
-                    return { code: "" }
-                }
-            },
-            //@ts-ignore
-            icon: async (language) => {
-                const code = await core.languageController.getIcon(language);
-                if (code) {
-                    return { code }
-                } else {
-                    return { code: "" }
-                }
-            },
-            //@ts-ignore
             settings: async (language) => {
-                return JSON.stringify(core.languageController.getSettings(language))
+                return JSON.stringify(core.languageController.getSettings(language.address))
             },
-            //@ts-ignore
-            settingsIcon: async (language) => {
-                const code = await core.languageController.getSettingsIcon(language)
-                if(code)
-                    return { code }
-                else
-                    return null
-            }
         },
 
         Agent: {

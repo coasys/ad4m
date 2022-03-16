@@ -24,7 +24,7 @@ const socialContextHashPath = path.join(`${__dirname}/../../scripts/social-conte
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
     "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
-    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
+    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
     "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
     "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
     "social-context": {name: "social-context", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput,
