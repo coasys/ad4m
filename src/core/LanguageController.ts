@@ -102,10 +102,9 @@ export default class LanguageController {
                 try {
                     await this.loadLanguage(bundlePath)
                 } catch(e) {
-                    console.error("LanguageController.loadInstalledLanguages()=========================")
                     console.error("LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE:", bundlePath)
                     console.error(e)
-                    console.error("LanguageController.loadInstalledLanguages()=========================")
+                    throw e
                 }
             }
         }))
@@ -211,12 +210,7 @@ export default class LanguageController {
         const languagePath = path.join(Config.languagesPath, address);
         const sourcePath = path.join(languagePath, 'bundle.js')
         const metaPath = path.join(languagePath, 'meta.json')
-        try {
-            fs.mkdirSync(languagePath)
-        } catch(e) {
-            console.error("Error trying to create directory", languagePath)
-            console.error("Will proceed with installing language anyway...")
-        }
+        fs.mkdirSync(languagePath)
         
         fs.writeFileSync(sourcePath, source)
         fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
@@ -735,13 +729,13 @@ export default class LanguageController {
                     expr.proof.invalid = true
                     delete expr.proof.valid
                 } else {
-                    // console.debug("Valid expr:", ref)
                     expr.proof.valid = true
                     delete expr.proof.invalid
                 }
             } catch(e) {
                 console.error("Error trying to verify expression signature:", e)
                 console.error("For expression:", expr)
+                throw e
             }
         }
 
