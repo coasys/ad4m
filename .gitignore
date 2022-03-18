@@ -6,3 +6,4 @@
 /node_modules
 !/src/rollup-plugin-hc-dna.js
 test-temp
+.DS_Store

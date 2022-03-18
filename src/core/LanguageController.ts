@@ -102,9 +102,17 @@ export default class LanguageController {
                 try {
                     await this.loadLanguage(bundlePath)
                 } catch(e) {
-                    console.error("LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE:", bundlePath)
+                    let errMsg = `LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE: ${bundlePath}`
+                    console.error(errMsg)
                     console.error(e)
-                    throw e
+                    this.pubSub.publish(
+                        PubSub.ERROR_OCCURRED_TOPIC,
+                        {
+                            title: "Failed to load installed language",
+                            message: errMsg,
+                            error: e,
+                        }
+                    );
                 }
             }
         }))
@@ -211,7 +219,6 @@ export default class LanguageController {
         const sourcePath = path.join(languagePath, 'bundle.js')
         const metaPath = path.join(languagePath, 'meta.json')
         fs.mkdirSync(languagePath)
-        
         fs.writeFileSync(sourcePath, source)
         fs.writeFileSync(metaPath, JSON.stringify(languageMeta))
         // console.log(new Date(), "LanguageController: installed language");
@@ -733,9 +740,17 @@ export default class LanguageController {
                     delete expr.proof.invalid
                 }
             } catch(e) {
-                console.error("Error trying to verify expression signature:", e)
-                console.error("For expression:", expr)
-                throw e
+                let errMsg = `Error trying to verify signature for expression: ${expr}`
+                console.error(errMsg)
+                console.error(e)
+                this.pubSub.publish(
+                    PubSub.ERROR_OCCURRED_TOPIC,
+                    {
+                        title: "Failed to get expression",
+                        message: errMsg,
+                        error: e,
+                    }
+                );
             }
         }
 

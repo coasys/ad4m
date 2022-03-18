@@ -503,6 +503,11 @@ function createResolvers(core: PerspectivismCore) {
                 subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC),
                 //@ts-ignore
                 resolve: payload => payload?.uuid
+            },
+            errorOccurred: {
+                subscribe: () => pubsub.asyncIterator(PubSub.ERROR_OCCURRED_TOPIC),
+                //@ts-ignore
+                resolve: payload => payload
             }
         },
 
