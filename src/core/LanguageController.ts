@@ -110,7 +110,6 @@ export default class LanguageController {
                         {
                             title: "Failed to load installed language",
                             message: errMsg,
-                            error: e,
                         }
                     );
                 }
@@ -748,7 +747,6 @@ export default class LanguageController {
                     {
                         title: "Failed to get expression",
                         message: errMsg,
-                        error: e,
                     }
                 );
             }
