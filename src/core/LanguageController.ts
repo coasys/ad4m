@@ -246,14 +246,6 @@ export default class LanguageController {
     }
 
     async languageByRef(ref: LanguageRef): Promise<Language> {
-        this.pubSub.publish(
-            PubSub.EXCEPTION_OCCURRED_TOPIC,
-            {
-                title: "Language by ref title",
-                message: "Language by ref demo",
-                type: ExceptionType.LanguageIsNotLoaded,
-            } as ExceptionInfo
-        );
         const address = languageAliases[ref.address] ? languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
         //If the language is already installed then just return it
