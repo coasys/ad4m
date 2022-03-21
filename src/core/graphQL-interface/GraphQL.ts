@@ -504,8 +504,8 @@ function createResolvers(core: PerspectivismCore) {
                 //@ts-ignore
                 resolve: payload => payload?.uuid
             },
-            errorOccurred: {
-                subscribe: () => pubsub.asyncIterator(PubSub.ERROR_OCCURRED_TOPIC),
+            exceptionOccurred: {
+                subscribe: () => pubsub.asyncIterator(PubSub.EXCEPTION_OCCURRED_TOPIC),
                 //@ts-ignore
                 resolve: payload => payload
             }
