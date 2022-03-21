@@ -2,8 +2,8 @@ import {
     Address, Expression, Language, LanguageContext, 
     LinksAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl 
 } from '@perspect3vism/ad4m';
-import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput } from '@perspect3vism/ad4m';
-import { ExceptionInfo, ExceptionType } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
+import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType } from '@perspect3vism/ad4m';
+import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
 import fs from 'fs'
 import path from 'path'
 import * as Config from './Config'
