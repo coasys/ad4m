@@ -24,8 +24,6 @@ async function main() {
 
     if (fs.existsSync(dbJsonPath)) {
         fs.rmSync(dbJsonPath);
-    } else {
-        throw new Error(`Could not find dbJsonPath at path: ${dbJsonPath}`)
     }
 }
 
