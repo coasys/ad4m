@@ -1,4 +1,4 @@
-import { InteractionCall } from '@perspect3vism/ad4m'
+import { InteractionCall, LanguageMetaInput } from '@perspect3vism/ad4m'
 import { TestContext } from './integration.test'
 import fs from "fs";
 
@@ -89,11 +89,14 @@ export default function expressionTests(testContext: TestContext) {
 
             it('can use expression interactions', async () => {
                 const ad4mClient = testContext.ad4mClient!
-                //@ts-ignore
-                const testLang = (await ad4mClient.languages.byFilter('')).find(l=>l.name ==='test-language')
-                expect(testLang).toBeDefined()
+                //Publish mocking interactions language so it can be used
+                const publish = await ad4mClient.languages.publish("./src/test-temp/languages/test-language/build/bundle.js", {name: "test-language", description: "A test language for interactions"} as LanguageMetaInput)
+                console.warn("Published testing language with result", publish);
 
-                const exprAddr = await ad4mClient.expression.create("test note", testLang!.address)
+                //@ts-ignore
+                const testLangAddress = publish.address;
+
+                const exprAddr = await ad4mClient.expression.create("test note", testLangAddress)
                 expect(exprAddr).toBeDefined()
 
                 let expr = await ad4mClient.expression.get(exprAddr)
