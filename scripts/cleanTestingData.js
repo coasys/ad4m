@@ -3,6 +3,7 @@ const fs = require("fs");
 
 const bootstrapSeedPath = "./src/tests/bootstrapSeed.json";
 const publishingBootstrapSeedPath = "./src/tests/publishBootstrapSeed.json";
+const dbJsonPath = "./src/tests/p-agent/ad4m/data/db.json";
 
 async function main() {
     if (fs.existsSync(bootstrapSeedPath)) {
@@ -19,6 +20,12 @@ async function main() {
         fs.writeFileSync(publishingBootstrapSeedPath, JSON.stringify(bootstrapSeed));
     } else {
         throw new Error(`Could not find publishingBoostrapSeed at path: ${publishingBootstrapSeedPath}`)
+    }
+
+    if (fs.existsSync(dbJsonPath)) {
+        fs.rmSync(dbJsonPath);
+    } else {
+        throw new Error(`Could not find dbJsonPath at path: ${dbJsonPath}`)
     }
 }
 
