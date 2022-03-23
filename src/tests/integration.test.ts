@@ -134,16 +134,16 @@ describe("Integration tests", () => {
     })
 
     afterAll(async () => {
-        expect(await isProcessRunning("holochain")).toBe(true);
-        expect(await isProcessRunning("lair-keystore")).toBe(true);
-        expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(true);
+      expect(await isProcessRunning("holochain")).toBe(true);
+      expect(await isProcessRunning("lair-keystore")).toBe(true);
+      expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(true);
 
-        await core!.exit();
-        await new Promise((resolve)=>setTimeout(resolve, 1000))
-        
-        expect(await isProcessRunning("holochain")).toBe(false);
-        expect(await isProcessRunning("lair-keystore")).toBe(false);
-        expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(false);
+      await core!.exit();
+      await new Promise((resolve)=>setTimeout(resolve, 1000))
+
+      expect(await isProcessRunning("holochain")).toBe(false);
+      expect(await isProcessRunning("lair-keystore")).toBe(false);
+      expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(false);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))

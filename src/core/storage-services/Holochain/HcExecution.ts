@@ -7,9 +7,8 @@ function escapeShellArg (arg: string) {
 }
 
 export function stopProcesses(hcProcess: child_process.ChildProcess, lairProcess: child_process.ChildProcess) {
-    // fs.unlinkSync(`${escapeShellArg(hcDataPath)}/keystore/pid`)
-    hcProcess.kill("SIGINT");
-    lairProcess.kill("SIGINT");
+    hcProcess.kill("SIGTERM");
+    lairProcess.kill("SIGTERM");
 }
 
 export function unpackDna(hcPath: string, dnaPath: string): string {

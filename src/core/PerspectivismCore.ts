@@ -109,7 +109,7 @@ export default class PerspectivismCore {
             perspective.closePrologEngine()
         }
         console.log("Stopping IPFS")
-        await this.#IPFS?.stop();
+        await this.#IPFS?.stop({timeout: 30});
         console.log("Stopping Holochain conductor")
         await this.#holochain?.stop();
         console.log("Done.")
