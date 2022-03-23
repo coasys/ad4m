@@ -1,3 +1,4 @@
+import { InteractionCall } from '@perspect3vism/ad4m'
 import { TestContext } from './integration.test'
 import fs from "fs";
 
@@ -84,6 +85,35 @@ export default function expressionTests(testContext: TestContext) {
                 expect(exprObjCacheHit).toBeDefined()
                 expect(exprObjCacheHit.proof.valid).toBeTruthy()
                 expect(exprObjCacheHit.data).toBe(JSON.stringify({"key": "value"}));
+            })
+
+            it('can use expression interactions', async () => {
+                const ad4mClient = testContext.ad4mClient!
+                //@ts-ignore
+                const testLang = (await ad4mClient.languages.byFilter('')).find(l=>l.name ==='test-language')
+                expect(testLang).toBeDefined()
+
+                const exprAddr = await ad4mClient.expression.create("test note", testLang!.address)
+                expect(exprAddr).toBeDefined()
+
+                let expr = await ad4mClient.expression.get(exprAddr)
+                expect(expr).toBeDefined()
+                expect(expr.proof.valid).toBeTruthy()
+                expect(expr.data).toBe("\"test note\"");
+
+                const interactions = await ad4mClient.expression.interactions(exprAddr)
+
+                expect(interactions.length).toBe(1)
+                expect(interactions[0].name).toBe('modify')
+
+                const interactionCall = new InteractionCall('modify', { newValue: 'modified note' })
+                const result = await ad4mClient.expression.interact(exprAddr, interactionCall)
+                expect(result).toBe('ok')
+
+                expr = await ad4mClient.expression.get(exprAddr)
+                expect(expr).toBeDefined()
+                expect(expr.proof.valid).toBeTruthy()
+                expect(expr.data).toBe("\"modified note\"");
             })
         })
     }
