@@ -12,10 +12,10 @@ import fs from "fs-extra";
 import { exit } from "process";
 
 const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
-const appDataPath = path.join(TEST_DIR, "agents", "publishing-agent");
+const appDataPath = path.join(TEST_DIR, "agents", "p-agent");
 const ipfsRepoPath = path.join(appDataPath);
 const publishLanguagesPath = path.join(TEST_DIR, "languages");
-const publishingAgentPath = path.join(`${__dirname}/../../src/tests/publishing-agent`);
+const publishingAgentPath = path.join(`${__dirname}/../../src/tests/p-agent`);
 const publishingBootstrapSeedPath = path.join(`${__dirname}/../../src/tests/publishBootstrapSeed.json`);
 const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
 const noteIpfsHashPath = path.join(`${__dirname}/../../scripts/note-ipfs-hash`);
