@@ -3,12 +3,12 @@ const fs = require("fs");
 
 const bootstrapSeedPath = "./src/tests/bootstrapSeed.json";
 const publishingBootstrapSeedPath = "./src/tests/publishBootstrapSeed.json";
-const dbJsonPath = "./src/tests/p-agent/ad4m/data/db.json";
 
 async function main() {
     if (fs.existsSync(bootstrapSeedPath)) {
         const bootstrapSeed = JSON.parse(fs.readFileSync(bootstrapSeedPath).toString());
         bootstrapSeed["languageLanguageBundle"] = "";
+        bootstrapSeed["trustedAgents"] = ["did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"];
         fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
     } else {
         throw new Error(`Could not find boostrapSeed at path: ${bootstrapSeedPath}`)
@@ -20,10 +20,6 @@ async function main() {
         fs.writeFileSync(publishingBootstrapSeedPath, JSON.stringify(bootstrapSeed));
     } else {
         throw new Error(`Could not find publishingBoostrapSeed at path: ${publishingBootstrapSeedPath}`)
-    }
-
-    if (fs.existsSync(dbJsonPath)) {
-        fs.rmSync(dbJsonPath);
     }
 }
 

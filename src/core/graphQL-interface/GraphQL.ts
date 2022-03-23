@@ -3,6 +3,7 @@ import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
+import * as Config from "../Config";
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
 
@@ -228,7 +229,7 @@ function createResolvers(core: PerspectivismCore) {
             agentGenerate: async (parent, args, context, info) => {
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
-                await core.initializeAgentsDirectMessageLanguage()
+                if (!Config.languageLanguageOnly) {await core.initializeAgentsDirectMessageLanguage() }
                 return core.agentService.dump()
             },
             //@ts-ignore

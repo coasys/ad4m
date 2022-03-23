@@ -61,7 +61,7 @@ function apolloClient(port: number): ApolloClient<any> {
 
 function createTestingAgent() {
     if (!fs.existsSync(appDataPath)) {
-        fs.copySync(publishingAgentPath, appDataPath);
+        fs.mkdirSync(appDataPath);
     }
 }
 
@@ -106,6 +106,7 @@ async function publish() {
     await core.initLanguages()
 
     const ad4mClient = new Ad4mClient(apolloClient(4000));
+    await ad4mClient.agent.generate("passphrase");
     await ad4mClient.agent.unlock("passphrase");
 
     for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
