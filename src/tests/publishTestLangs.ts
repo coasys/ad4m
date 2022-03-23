@@ -107,7 +107,6 @@ async function publish() {
 
     const ad4mClient = new Ad4mClient(apolloClient(4000));
     await ad4mClient.agent.generate("passphrase");
-    await ad4mClient.agent.unlock("passphrase");
 
     for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
         let bundlePath = path.join(publishLanguagesPath, language, "build", "bundle.js");
