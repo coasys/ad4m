@@ -1,5 +1,5 @@
 import { ApolloServer, withFilter, gql } from 'apollo-server'
-import { Agent, Expression, LanguageRef } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -67,6 +67,12 @@ function createResolvers(core: PerspectivismCore) {
                 const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 return JSON.stringify(expression)
+            },
+            //@ts-ignore
+            expressionInteractions: async (parent, args, context, info) => {
+                const { url } = args
+                const result = await core.languageController.expressionInteractions(url)
+                return result
             },
             //@ts-ignore
             language: async (parent, args, context, info) => {
@@ -288,6 +294,13 @@ function createResolvers(core: PerspectivismCore) {
                 const langref = { address: languageAddress } as LanguageRef
                 const expref = await core.languageController.expressionCreate(langref, JSON.parse(content))
                 return exprRef2String(expref)
+            },
+            //@ts-ignore
+            expressionInteract: async (parent, args, context, info) => {
+                let { url, interactionCall } = args
+                interactionCall = new InteractionCall(interactionCall.name, JSON.parse(interactionCall.parametersStringified))
+                const result = await core.languageController.expressionInteract(url, interactionCall)
+                return result
             },
             //@ts-ignore
             languageApplyTemplateAndPublish: async (parent, args, context, info) => {
