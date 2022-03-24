@@ -63,7 +63,7 @@
   "dependencies": {
     "fs-extra": "^10.0.0",
     "@holochain/client": "0.3.2",
-    "@perspect3vism/ad4m": "0.1.25",
+    "@perspect3vism/ad4m": "0.1.29",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",
