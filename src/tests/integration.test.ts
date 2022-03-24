@@ -30,7 +30,7 @@ Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const TEST_DIR = `${__dirname}/../test-temp`
 
-jest.setTimeout(205000)
+jest.setTimeout(200000)
 let core: PerspectivismCore | null = null
 
 function apolloClient(port: number): ApolloClient<any> {
@@ -139,7 +139,7 @@ describe("Integration tests", () => {
       expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(true);
 
       await core!.exit();
-      await new Promise((resolve)=>setTimeout(resolve, 1000))
+      await new Promise((resolve)=>setTimeout(resolve, 500))
 
       expect(await isProcessRunning("holochain")).toBe(false);
       expect(await isProcessRunning("lair-keystore")).toBe(false);
@@ -194,7 +194,7 @@ describe("Integration tests", () => {
 
         afterAll(async () => {
           await bob!.exit();
-          await new Promise((resolve)=>setTimeout(resolve, 1000))
+          await new Promise((resolve)=>setTimeout(resolve, 500))
         })
 
         describe('Agent Language', agentLanguageTests(testContext))

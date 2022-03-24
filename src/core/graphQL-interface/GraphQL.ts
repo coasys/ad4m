@@ -323,7 +323,6 @@ function createResolvers(core: PerspectivismCore) {
                 meta.templateAppliedParams = internal.templateAppliedParams
                 meta.possibleTemplateParams = internal.possibleTemplateParams
                 meta.sourceCodeLink = internal.sourceCodeLink
-                console.debug("GQL publish:", meta, expression)
                 return meta
             },
             //@ts-ignore
