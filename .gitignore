@@ -9,3 +9,4 @@ test-temp
 /scripts/note-ipfs-hash
 /scripts/social-context-hash
 src/tests/publishing-agent/ad4m/data/db.json
+.DS_Store

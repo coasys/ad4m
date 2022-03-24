@@ -6,6 +6,7 @@ import type PerspectivismCore from '../PerspectivismCore'
 import * as Config from "../Config";
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
+import { ad4mExecutorVersion } from '../Config'
 
 function createResolvers(core: PerspectivismCore) {
     const pubsub = PubSub.get()
@@ -184,6 +185,12 @@ function createResolvers(core: PerspectivismCore) {
                 console.log("runtimeMessageOutbox")
                 const { filter } = args
                 return core.runtimeService.getMessagesOutbox(filter)
+            },
+            //@ts-ignore
+            runtimeInfo: (parent, args) => {
+                return {
+                    ad4mExecutorVersion: ad4mExecutorVersion,
+                }
             }
         },
         Mutation: {
@@ -501,6 +508,11 @@ function createResolvers(core: PerspectivismCore) {
                 subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC),
                 //@ts-ignore
                 resolve: payload => payload?.uuid
+            },
+            exceptionOccurred: {
+                subscribe: () => pubsub.asyncIterator(PubSub.EXCEPTION_OCCURRED_TOPIC),
+                //@ts-ignore
+                resolve: payload => payload
             }
         },
 

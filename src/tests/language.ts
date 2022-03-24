@@ -10,6 +10,7 @@ export default function languageTests(testContext: TestContext) {
             let ad4mClient: Ad4mClient
             let bobAd4mClient: Ad4mClient
             let sourceLanguage: LanguageRef = new LanguageRef()
+            let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published social-context", "..here for you template");
 
             beforeAll(async () => {
                 ad4mClient = testContext.ad4mClient;
@@ -18,7 +19,7 @@ export default function languageTests(testContext: TestContext) {
                 //Publish a source language to start working from
                 sourceLanguage = await ad4mClient.languages.publish(
                     path.join(__dirname, "../test-temp/languages/social-context/build/bundle.js"),
-                    new LanguageMetaInput("Newly published social-context", "..here for you template")
+                    sourceLanguageMeta
                 )
                 console.warn("source language is", sourceLanguage);
                 expect(sourceLanguage.name).toBe("Newly published social-context");
@@ -90,7 +91,7 @@ export default function languageTests(testContext: TestContext) {
                 }
 
                 //@ts-ignore
-                expect(error.toString()).toBe("Error: Language not created by trusted agent and is not templated... aborting language install")
+                expect(error.toString()).toBe(`Error: Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${sourceLanguageMeta}`)
             })
 
             describe('with Bob having added Alice to list of trusted agents', () => {

@@ -2,7 +2,8 @@ import {
     Address, Expression, Language, LanguageContext, 
     LinksAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl 
 } from '@perspect3vism/ad4m';
-import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput } from '@perspect3vism/ad4m';
+import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType } from '@perspect3vism/ad4m';
+import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
 import fs from 'fs'
 import path from 'path'
 import * as Config from './Config'
@@ -125,10 +126,17 @@ export default class LanguageController {
                     try {
                         await this.loadLanguage(bundlePath)
                     } catch(e) {
-                        console.error("LanguageController.loadInstalledLanguages()=========================")
-                        console.error("LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE:", bundlePath)
+                        let errMsg = `LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE: ${bundlePath}`
+                        console.error(errMsg)
                         console.error(e)
-                        console.error("LanguageController.loadInstalledLanguages()=========================")
+                        this.pubSub.publish(
+                            PubSub.EXCEPTION_OCCURRED_TOPIC,
+                            {
+                                title: "Failed to load installed language",
+                                message: errMsg,
+                                type: ExceptionType.LanguageIsNotLoaded
+                            } as ExceptionInfo
+                        );
                     }
                 }
             }
@@ -364,24 +372,32 @@ export default class LanguageController {
                 }
             } else {
                 //Person who created this language is not trusted so lets try and get a source language template
-                if (!languageMetaData.templateAppliedParams) {
-                    throw new Error("Language not created by trusted agent and is not templated... aborting language install")
-                }
                 //Check that there are some template params to even apply
-                if (Object.keys(languageMetaData.templateAppliedParams).length == 0) {
-                    throw new Error("Language not created by trusted agent and is not templated... aborting language install")
-                }
                 //Check that there is a sourceLanguage that we can follow to
-                if (!languageMetaData.templateSourceLanguageAddress) {
-                    throw new Error("Language not created by trusted agent and is not templated... aborting language install");
+                if (!languageMetaData.templateAppliedParams ||
+                    Object.keys(languageMetaData.templateAppliedParams).length == 0 ||
+                    !languageMetaData.templateSourceLanguageAddress
+                ) {
+                    let errMsg = `Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${languageMetaData}`
+                    this.pubSub.publish(
+                        PubSub.EXCEPTION_OCCURRED_TOPIC,
+                        {
+                            title: "Failed to install language",
+                            message: errMsg,
+                            type: ExceptionType.AgentIsUntrusted,
+                            addon: languageAuthor,
+                        } as ExceptionInfo
+                    );
+                    throw new Error(errMsg);
                 }
+                
                 //Get the meta information of the source language
                 const sourceLanguageHash = languageMetaData.templateSourceLanguageAddress;
                 const sourceLanguageMeta = await this.getLanguageExpression(sourceLanguageHash);
                 if (!sourceLanguageMeta) {
                     throw new Error("Could not get the meta for the source language");
                 }
-                const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
+
                 //Check that the agent who authored the original template language is in the current agents trust list
                 if (trustedAgents.find((agent) => agent === sourceLanguageMeta.author)) {
                     //Apply the template information supplied in the language to be installed to the source language and make sure that the resulting
@@ -401,7 +417,17 @@ export default class LanguageController {
                         throw new Error(`Templating of original source language did not result in the same language hash of un-trusted language trying to be installed... aborting language install. Expected hash: ${languageHash}. But got: ${sourceLanguageTemplated.meta.address}`)
                     }
                 } else {
-                    throw new Error("Agent which created source language for language trying to be installed is not a trustedAgent... aborting language install")
+                    let errMsg = "Agent which created source language for language trying to be installed is not a trustedAgent... aborting language install";
+                    this.pubSub.publish(
+                        PubSub.EXCEPTION_OCCURRED_TOPIC,
+                        {
+                            title: "Failed to install language",
+                            message: errMsg,
+                            type: ExceptionType.AgentIsUntrusted,
+                            addon: sourceLanguageMeta.author,
+                        } as ExceptionInfo
+                    );
+                    throw new Error(errMsg)
                 }
             }
         }
@@ -821,13 +847,21 @@ export default class LanguageController {
                     expr.proof.invalid = true
                     delete expr.proof.valid
                 } else {
-                    // console.debug("Valid expr:", ref)
                     expr.proof.valid = true
                     delete expr.proof.invalid
                 }
             } catch(e) {
-                console.error("Error trying to verify expression signature:", e)
-                console.error("For expression:", expr)
+                let errMsg = `Error trying to verify signature for expression: ${expr}`
+                console.error(errMsg)
+                console.error(e)
+                this.pubSub.publish(
+                    PubSub.EXCEPTION_OCCURRED_TOPIC,
+                    {
+                        title: "Failed to get expression",
+                        message: errMsg,
+                        type: ExceptionType.ExpressionIsNotVerified,
+                    } as ExceptionInfo
+                );
             }
         }
 
