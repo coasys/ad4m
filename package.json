@@ -61,7 +61,6 @@
     "unzipper": "^0.10.11"
   },
   "dependencies": {
-    "fs-extra": "^10.0.0",
     "@holochain/client": "0.3.2",
     "@perspect3vism/ad4m": "0.1.29",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
@@ -70,6 +69,7 @@
     "@transmute/did-wallet": "lucksus/did-wallet",
     "@types/json-stable-stringify": "^1.0.33",
     "apollo-server": "^2.18.2",
+    "fs-extra": "^10.0.0",
     "get-port": "5.1.1",
     "graphql": "^15.3.0",
     "ipfs": "0.62.1",
