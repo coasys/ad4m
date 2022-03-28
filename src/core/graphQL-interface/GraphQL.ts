@@ -250,10 +250,10 @@ function createResolvers(core: PerspectivismCore) {
                 return core.agentService.dump()
             },
             //@ts-ignore
-            agentUnlock:  (parent, args, context, info) => {
+            agentUnlock:  async (parent, args, context, info) => {
                 let failed = false
                 try {
-                    core.agentService.unlock(args.passphrase)
+                    await core.agentService.unlock(args.passphrase)
                 } catch(e) {
                     failed = true
                 }
