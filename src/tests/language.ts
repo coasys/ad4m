@@ -38,6 +38,8 @@ export default function languageTests(testContext: TestContext) {
             it('Alice can install her own published language', async () => {
                 const install = await ad4mClient.languages.byAddress(sourceLanguage.address);
                 expect(install.address).toBeDefined();
+                expect(install.constructorIcon).toBeDefined();
+                expect(install.settingsIcon).toBeDefined();
             })
 
             it('Alice can use language.meta() to get meta info of her Language', async() => {
@@ -138,6 +140,8 @@ export default function languageTests(testContext: TestContext) {
                     //Test that bob can install source language when alice is in trusted agents
                     const installSourceTrusted = await bobAd4mClient.languages.byAddress(sourceLanguage.address);
                     expect(installSourceTrusted.address).toBe(sourceLanguage.address);
+                    expect(installSourceTrusted.constructorIcon).toBeDefined();
+                    expect(installSourceTrusted.settingsIcon).toBeDefined();
                 })
 
                 it("Bob can install his own templated language", async () => {
@@ -145,6 +149,8 @@ export default function languageTests(testContext: TestContext) {
                     const installTemplated = await bobAd4mClient.languages.byAddress(applyTemplateFromSource.address);
                     expect(installTemplated.address).toBe(applyTemplateFromSource.address);
                     expect(installTemplated.name).toBe("Bob's templated social-context");
+                    expect(installTemplated.constructorIcon).toBeDefined();
+                    expect(installTemplated.settingsIcon).toBeDefined();
                 })
             })
          })
