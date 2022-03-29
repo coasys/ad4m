@@ -96,8 +96,13 @@ export default class HolochainService {
                 const adminPort = config.admin_interfaces[0].driver.port as number;
     
                 if (adminPort !== this.#adminPort) {
-                    console.debug(`HC PORT: ${this.#adminPort} supplied is different than the PORT: ${adminPort} set in config, using the config port`);
-                    this.#adminPort = adminPort;
+                    console.debug(`HC PORT: ${this.#adminPort} supplied is different than the PORT: ${adminPort} set in config, updating conductor config`);
+                    config.admin_interfaces[0].driver.port = this.#adminPort;
+                    fs.writeFileSync(conductorConfigPath, yaml.dump(config, {
+                        'styles': {
+                          '!!null': 'canonical' // dump null as ~
+                        }
+                    }));
                 }
             }
         }
@@ -136,8 +141,8 @@ export default class HolochainService {
                 console.debug("HolochainService: Holochain admin interface connected on port", this.#adminPort);
                 try {
                     await this.#adminWebsocket!.attachAppInterface({ port: this.#appPort });
-                } catch {
-                    console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...");
+                } catch (e) {
+                    console.warn("HolochainService: Could not attach app interface on port", this.#appPort, ", assuming already attached...", e);
                 }
             };
             if (this.#appWebsocket == undefined) {
