@@ -21,8 +21,6 @@ import { RequestAgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 
-const DM_LANGUAGE_TEMPLATE_ADDRESS = "QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb"
-
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
     ipfsRepoPath?: string,
@@ -111,7 +109,7 @@ export default class PerspectivismCore {
             perspective.closePrologEngine()
         }
         console.log("Stopping IPFS")
-        await this.#IPFS?.stop();
+        await this.#IPFS?.stop({timeout: 15});
         console.log("Stopping Holochain conductor")
         await this.#holochain?.stop();
         console.log("Done.")
@@ -200,12 +198,6 @@ export default class PerspectivismCore {
         this.#resolveLanguagesReady()
     }
 
-    initMockLanguages(hashes: string[], languages: Language[]) {
-        languages.forEach((lang, index) => {
-            this.#languageController!.loadMockLanguage(hashes[index], lang);
-        });
-    }
-
     async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<string> {
         // We only work on the PerspectiveID object.
         // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
@@ -219,8 +211,8 @@ export default class PerspectivismCore {
         }
 
         // Create neighbourhood
-        const neighbourhoodAddress = await (this.languageController.getPerspectiveLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
-        const neighbourhoodUrl = `neighbourhood://${neighbourhoodAddress}`
+        const neighbourhoodAddress = await (this.languageController.getNeighbourhoodLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
+        const neighbourhoodUrl = `${Config.neighbourhoodLanguageAlias}://${neighbourhoodAddress}`
 
         //Add shared perspective to original perpspective and then update controller
         perspectiveID.sharedUrl = neighbourhoodUrl
@@ -308,7 +300,7 @@ export default class PerspectivismCore {
             recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
-        const createdDmLang = await this.languageApplyTemplateAndPublish(DM_LANGUAGE_TEMPLATE_ADDRESS, templateParams)
+        const createdDmLang = await this.languageApplyTemplateAndPublish(Config.directMessageLanguage, templateParams)
         console.debug("DM Language cloned...")
         // Install language by calling languageByRef
         // TODO: extract language installing code into its own function

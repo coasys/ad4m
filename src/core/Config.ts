@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { Expression } from '@perspect3vism/ad4m';
+import { Address, Expression } from '@perspect3vism/ad4m';
 
 export let ad4mExecutorVersion = process.env.npm_package_version;
 export let rootConfigPath = path.join('', 'ad4m')
@@ -11,24 +11,48 @@ export let holochainPath = path.join(rootConfigPath, 'h')
 export let holochainDataPath = path.join(holochainPath, 'd')
 export let holochainConductorPath = path.join(holochainPath, 'c')
 export let resourcePath = ''
+export let languageLanguageOnly = false;
 
-export let builtInLangPath = "";
-export let builtInLangs: string[] = [];
+export let knownLinkLanguages: string[] = [];
+export let trustedAgents: string[] =  [];
+export let systemLanguages: string[] = [];
+export let preloadLanguages: string[] = [];
+export let languageLanguageBundle: string = '';
+export let directMessageLanguage: string = '';
 export let languageAliases: LanguageAlias = {};
-export let bootstrapFixtures: BootstrapFixtures|null = null;
+export let bootstrapFixtures: BootstrapFixtures | null = null;
+export let directMessageLanguageSettings: object | null = null;
+export let agentLanguageSettings: object | null = null;
+export let perspectiveLanguageSettings: object | null = null;
+export let neighbourhoodLanguageSettings: object | null = null;
+export let languageLanguageSettings: object | null = null;
 
+export let agentLanguageAlias = "did";
+export let languageLanguageAlias = "lang";
+export let neighbourhoodLanguageAlias = "neighbourhood";
+export let perspectiveLanguageAlias = "perspective";
 
 export type LanguageAlias = {
-    [key: string]: string;
+    [key: string]: Address;
 }
 
 export interface CoreConfig {
     appDataPath: string
     appResourcePath: string
-    builtInLangPath: string
-    builtInLangs: string[]
+    languageLanguageBundle: string
+    systemLanguages: string[]
+    preloadLanguages: string[]
+    directMessageLanguage: string
+    knownLinkLanguages: string[]
+    trustedAgents: string[]
+    languageLanguageOnly: boolean
     languageAliases?: LanguageAlias
     bootstrapFixtures?: BootstrapFixtures
+    directMessageLanguageSettings?: object
+    agentLanguageSettings?: object
+    perspectiveLanguageSettings?: object
+    neighbourhoodLanguageSettings?: object
+    languageLanguageSettings?: object
 }
 
 
@@ -50,8 +74,8 @@ export function init(c: CoreConfig) {
         fs.mkdirSync(d)
     }
 
-    builtInLangPath = c.builtInLangPath
-    builtInLangs = c.builtInLangs
+    systemLanguages = c.systemLanguages
+    preloadLanguages = c.preloadLanguages
     if(c.languageAliases)
         languageAliases = c.languageAliases
 
@@ -60,22 +84,27 @@ export function init(c: CoreConfig) {
     } else {
         bootstrapFixtures = null
     }
-}
+    directMessageLanguage = c.directMessageLanguage
+    knownLinkLanguages = c.knownLinkLanguages
+    trustedAgents = c.trustedAgents
+    languageLanguageOnly = c.languageLanguageOnly;
+    languageLanguageBundle = c.languageLanguageBundle;
 
-export function getLanguageStoragePath(name: string) {
-    const languageConfigPath = path.join(languagesPath, name)
-    if(!fs.existsSync(languageConfigPath))
-        fs.mkdirSync(languageConfigPath)
-    const storageDirectory = path.join(languageConfigPath, "storage")
-    if(!fs.existsSync(storageDirectory))
-        fs.mkdirSync(storageDirectory)
-    return storageDirectory
-}
-
-export interface BootstrapLanguages {
-    agents: string,
-    languages: string,
-    neighbourhoods: string,
+    if (c.directMessageLanguageSettings) {
+        directMessageLanguageSettings = c.directMessageLanguageSettings
+    }
+    if (c.agentLanguageSettings) {
+        agentLanguageSettings = c.agentLanguageSettings
+    }
+    if (c.perspectiveLanguageSettings) {
+        perspectiveLanguageSettings = c.perspectiveLanguageSettings
+    }
+    if (c.neighbourhoodLanguageSettings) {
+        neighbourhoodLanguageSettings = c.neighbourhoodLanguageSettings
+    }
+    if (c.languageLanguageSettings) {
+        languageLanguageSettings = c.languageLanguageSettings
+    }
 }
 
 export class BootstrapFixtures {

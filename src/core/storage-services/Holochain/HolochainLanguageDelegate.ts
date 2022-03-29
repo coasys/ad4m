@@ -8,10 +8,10 @@ export default class HolochainLanguageDelegate {
     #holochainService
     #queue;
 
-    constructor(languageHash: string, holochainService: HolochainService) {
+    constructor(languageHash: string, holochainService: HolochainService, queue: AsyncQueue) {
         this.#languageHash = languageHash
         this.#holochainService = holochainService
-        this.#queue = new AsyncQueue();
+        this.#queue = queue
     }
 
     async registerDNAs(dnas: Dna[], holochainSignalCallback?: AppSignalCb) {

@@ -9,6 +9,7 @@ import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
 import { RequestAgentInfoResponse } from '@holochain/client'
 import yaml from 'js-yaml';
+import { AsyncQueue } from './Queue'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
@@ -42,6 +43,7 @@ export default class HolochainService {
     #didResolveError: boolean
     #conductorConfigPath?: string
     #signalCallbacks: [CellId, AppSignalCb, string][];
+    #queue: AsyncQueue
 
     constructor(config: HolochainConfiguration) {
         let {
@@ -73,6 +75,7 @@ export default class HolochainService {
         this.#adminPort = holochainAdminPort;
         this.#appPort = holochainAppPort;
         this.#resourcePath = resourcePath;
+        this.#queue = new AsyncQueue();
 
         if (conductorPath) {
             this.#conductorPath = conductorPath;
@@ -299,7 +302,7 @@ export default class HolochainService {
     }
 
     getDelegateForLanguage(languageHash: string) {
-        return new HolochainLanguageDelegate(languageHash, this)
+        return new HolochainLanguageDelegate(languageHash, this, this.#queue)
     }
 
     static dnaID(languageHash: string, dnaNick: string) {

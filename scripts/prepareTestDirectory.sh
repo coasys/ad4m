@@ -6,6 +6,8 @@ mkdir agents
 mkdir languages
 mkdir languages/test-language
 cp -r ../tests/test-language/build languages/test-language/build
+
+# Move binaries
 rm -f hc
 ln -sf `which hc` hc
 rm -f holochain 

@@ -30,7 +30,7 @@ Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const TEST_DIR = `${__dirname}/../test-temp`
 
-jest.setTimeout(205000)
+jest.setTimeout(200000)
 let core: PerspectivismCore | null = null
 
 function apolloClient(port: number): ApolloClient<any> {
@@ -113,22 +113,11 @@ describe("Integration tests", () => {
         core = await main.init({
             appDataPath,
             resourcePath: TEST_DIR,
-            appDefaultLangPath: path.join(TEST_DIR, 'languages'),
-            ad4mBootstrapLanguages: {
-              agents: "agent-expression-store",
-              languages: "languages",
-              neighbourhoods: "neighbourhood-store",
-            },
-            ad4mBootstrapFixtures: {
-              languages: [{
-                address: 'QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb',
-                meta:  {"author":"did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","timestamp":"2022-01-24T17:47:46.855Z","data":{"name":"Direct Message Language","address":"QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb","description":"Template source for personal, per-agent DM languages. Holochain based.","possibleTemplateParams":["recipient_did","recipient_hc_agent_pubkey"],"sourceCodeLink":"https://github.com/perspect3vism/direct-message-language"},"proof":{"signature":"d5f120f0cd225386499c54addd0bd9e5b0706c448d6211c2cf94333f8c78734612f8a3606e8e188ffb370fca6bd6ae301337384b24809febb1d12c38c6cdebcf","key":"#zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","valid":true}},
-                bundle: fs.readFileSync(path.join(TEST_DIR, 'languages', 'direct-message-language', 'build', 'bundle.js')).toString()
-              }],
+            networkBootstrapSeed: "./src/tests/bootstrapSeed.json",
+            bootstrapFixtures: {
+              languages: [],
               perspectives: [],
             },
-            appBuiltInLangs: ['note-ipfs', 'direct-message-language', 'test-language'],
-            appLangAliases: undefined,
             mocks: false,
             ipfsRepoPath,
             hcUseBootstrap: false,
@@ -145,16 +134,16 @@ describe("Integration tests", () => {
     })
 
     afterAll(async () => {
-        expect(await isProcessRunning("holochain")).toBe(true);
-        expect(await isProcessRunning("lair-keystore")).toBe(true);
-        expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(true);
+      expect(await isProcessRunning("holochain")).toBe(true);
+      expect(await isProcessRunning("lair-keystore")).toBe(true);
+      expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(true);
 
-        await core!.exit();
-        await new Promise((resolve)=>setTimeout(resolve, 1000))
-        
-        expect(await isProcessRunning("holochain")).toBe(false);
-        expect(await isProcessRunning("lair-keystore")).toBe(false);
-        expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(false);
+      await core!.exit();
+      await new Promise((resolve)=>setTimeout(resolve, 500))
+
+      expect(await isProcessRunning("holochain")).toBe(false);
+      expect(await isProcessRunning("lair-keystore")).toBe(false);
+      expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(false);
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -175,22 +164,11 @@ describe("Integration tests", () => {
             bob = await main.init({
                 appDataPath,
                 resourcePath: TEST_DIR,
-                appDefaultLangPath: path.join(TEST_DIR, 'languages'),
-                ad4mBootstrapLanguages: {
-                  agents: "agent-expression-store",
-                  languages: "languages",
-                  neighbourhoods: "neighbourhood-store",
-                },
-                ad4mBootstrapFixtures: {
-                  languages: [{
-                    address: 'QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb',
-                    meta:  {"author":"did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","timestamp":"2022-01-24T17:47:46.855Z","data":{"name":"Direct Message Language","address":"QmRENn31FvsZZx99tg8nd8oM52MmGYa1tLUYaDvYdjnJsb","description":"Template source for personal, per-agent DM languages. Holochain based.","possibleTemplateParams":["recipient_did","recipient_hc_agent_pubkey"],"sourceCodeLink":"https://github.com/perspect3vism/direct-message-language"},"proof":{"signature":"d5f120f0cd225386499c54addd0bd9e5b0706c448d6211c2cf94333f8c78734612f8a3606e8e188ffb370fca6bd6ae301337384b24809febb1d12c38c6cdebcf","key":"#zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n","valid":true}},
-                    bundle: fs.readFileSync(path.join(TEST_DIR, 'languages', 'direct-message-language', 'build', 'bundle.js')).toString()
-                  }],
+                networkBootstrapSeed: "./src/tests/bootstrapSeed.json",
+                bootstrapFixtures: {
+                  languages: [],
                   perspectives: [],
                 },
-                appBuiltInLangs: ['note-ipfs', 'direct-message-language', 'test-language'],
-                appLangAliases: undefined,
                 mocks: false,
                 gqlPort: 14000,
                 hcPortAdmin: 12000,
@@ -216,7 +194,7 @@ describe("Integration tests", () => {
 
         afterAll(async () => {
           await bob!.exit();
-          await new Promise((resolve)=>setTimeout(resolve, 1000))
+          await new Promise((resolve)=>setTimeout(resolve, 500))
         })
 
         describe('Agent Language', agentLanguageTests(testContext))

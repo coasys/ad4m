@@ -1,14 +1,12 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { PerspectiveExpression } from '@perspect3vism/ad4m';
+import { knownLinkLanguages, trustedAgents } from "./Config";
 
 const TRUSTED_AGENTS_FILE = "trustedAgents.json"
 const KNOW_LINK_LANGUAGES_FILE = "knownLinkLanguages.json"
 const FRIENDS_FILE = "friends.json"
 const OUTBOX_FILE = "outbox.json"
-
-const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
-const SOCIAL_CONTEXT_OFFICIAL = "QmUvSpKxCnychotba2pVCufCNFSmr5Tj8e9qqdZkpuuxWt"
 
 function _add(items: string[], file: string): void {
     let all: string[];
@@ -104,7 +102,7 @@ export default class RuntimeService {
     }
     
     getTrustedAgents(): string[] {
-        return [this.#did!, PERSPECT3VISM_AGENT, ..._get(this.trustedAgentsPath())]
+        return [this.#did!, ...trustedAgents, ..._get(this.trustedAgentsPath())]
     }
 
     addKnowLinkLanguageTemplates(addresses: string[]): void {
@@ -116,7 +114,7 @@ export default class RuntimeService {
     }
     
     knowLinkLanguageTemplates(): string[] {
-        return [SOCIAL_CONTEXT_OFFICIAL, ..._get(this.knowLinkLanguagesPath())]
+        return [...knownLinkLanguages, ..._get(this.knowLinkLanguagesPath())]
     }
 
     addFriends(addresses: string[]): void {

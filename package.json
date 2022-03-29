@@ -15,11 +15,13 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
-    "prepare-test": "rm -rf src/test-temp && ./scripts/build-test-language.sh && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js",
-    "test-links-lang": "jest --forceExit src/tests/linkLanguage.test.ts",
+    "prepare-test": "rm -rf src/test-temp && ./scripts/build-test-language.sh &&  nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && npm run inject-language-language && npm run publish-test-languages && npm run inject-publishing-agent",
+    "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
+    "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
+    "publish-test-languages": "npm run build && node ./lib/tests/publishTestLangs.js",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
-    "test": "npm run prepare-test && nix-shell --run \"npm run test-all\""
+    "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js"
   },
   "repository": {
     "type": "git",
@@ -72,7 +74,7 @@
     "fs-extra": "^10.0.0",
     "get-port": "5.1.1",
     "graphql": "^15.3.0",
-    "ipfs": "0.62.1",
+    "ipfs": "0.61.0",
     "js-yaml": "^4.1.0",
     "json-stable-stringify": "^1.0.1",
     "lowdb": "^1.0.0",
