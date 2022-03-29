@@ -98,6 +98,28 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
 
     let networkBootstrapSeedData = JSON.parse(fs.readFileSync(networkBootstrapSeed).toString()) as SeedFileSchema;
 
+    if (!languageLanguageOnly) {
+      if (!networkBootstrapSeedData.directMessageLanguage) {
+        throw new Error('Direct Message Language hash not passed in the seed file');
+      }
+
+      if (!networkBootstrapSeedData.languageLanguageBundle) {
+        throw new Error('Language Language bundle not passed in the seed file');
+      }
+
+      if (!networkBootstrapSeedData.agentLanguage) {
+        throw new Error('Agent Language hash not passed in the seed file');
+      }
+      
+      if (!networkBootstrapSeedData.neighbourhoodLanguage) {
+        throw new Error('Neighbourhood Language hash not passed in the seed file');
+      }
+
+      if (!networkBootstrapSeedData.perspectiveLanguage) {
+        throw new Error('Perspective Language hash not passed in the seed file');
+      }
+    }
+
     //Core adm4-executor System languages
     let systemLanguages = [
       networkBootstrapSeedData.languageLanguageBundle,
