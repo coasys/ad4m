@@ -1,7 +1,5 @@
 import type { Address, Interaction, Expression, Language, LanguageContext, PublicSharing } from "@perspect3vism/ad4m";
 
-export const name: string = "test-language"
-
 export default function create(context: LanguageContext): Language {
     const expressions = new Array<Expression>()
 
@@ -25,7 +23,7 @@ export default function create(context: LanguageContext): Language {
     }
 
     return {
-        name,
+        name: "test-language",
         interactions,
         expressionAdapter: {
             get: async (address: Address) => expressions[parseInt(address)],

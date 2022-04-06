@@ -154,10 +154,16 @@ export default class LanguageController {
         // @ts-ignore
         const hash = await this.ipfsHash(bundleBytes)
         
-        const { default: create, name } = require(sourceFilePath)
+        const languageSource = require(sourceFilePath)
+        let create;
+        if (!languageSource.default) {
+            create = languageSource;
+        } else {
+            create =  languageSource.default;
+        }
 
         const customSettings = this.getSettings(hash)
-        const storageDirectory = this.getLanguageStoragePath(name)
+        const storageDirectory = this.getLanguageStoragePath(hash)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.pubSub});
@@ -166,7 +172,7 @@ export default class LanguageController {
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
                 this.#linkObservers.forEach(o => {
-                    o(added, removed, {name, address: hash} as LanguageRef)
+                    o(added, removed, {name: language.name, address: hash} as LanguageRef)
                 })
             })
         }
