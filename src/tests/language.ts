@@ -10,6 +10,7 @@ export default function languageTests(testContext: TestContext) {
             let ad4mClient: Ad4mClient
             let bobAd4mClient: Ad4mClient
             let sourceLanguage: LanguageRef = new LanguageRef()
+            let nonHCSourceLanguage: LanguageRef = new LanguageRef()
             let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published social-context", "..here for you template");
 
             beforeAll(async () => {
@@ -38,8 +39,29 @@ export default function languageTests(testContext: TestContext) {
             it('Alice can install her own published language', async () => {
                 const install = await ad4mClient.languages.byAddress(sourceLanguage.address);
                 expect(install.address).toBeDefined();
-                expect(install.constructorIcon).toBeDefined();
+                expect(install.constructorIcon).toBeNull();
                 expect(install.settingsIcon).toBeDefined();
+            })
+
+            it('Alice can install her own non HC published language', async () => {
+                let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published perspective-language", "..here for you template");
+                let socialContextData = fs.readFileSync("./src/test-temp/languages/perspective-language/build/bundle.js").toString();
+                socialContextData = socialContextData + "\n//Test";
+                fs.writeFileSync("./src/test-temp/languages/perspective-language/build/bundle.js", socialContextData);
+
+                //Publish a source language to start working from
+                nonHCSourceLanguage = await ad4mClient.languages.publish(
+                    path.join(__dirname, "../test-temp/languages/perspective-language/build/bundle.js"),
+                    sourceLanguageMeta
+                )
+                expect(nonHCSourceLanguage.name).toBe(nonHCSourceLanguage.name);
+
+                const install = await ad4mClient.languages.byAddress(nonHCSourceLanguage.address);
+                console.log('Alice install 1', install)
+                expect(install.address).toBeDefined();
+                expect(install.constructorIcon).not.toBeNull();
+                expect(install.icon).not.toBeNull();
+                expect(install.settingsIcon).toBeNull();
             })
 
             it('Alice can use language.meta() to get meta info of her Language', async() => {

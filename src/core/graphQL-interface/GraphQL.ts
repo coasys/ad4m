@@ -531,10 +531,52 @@ function createResolvers(core: PerspectivismCore) {
         },
 
         LanguageHandle: {
+            // @ts-ignore
+            constructorIcon: async (language) => {
+                if (language.expressionUI) {
+                    const code = language.expressionUI.constructorIcon();
+
+                    if (code) {
+                        return { code }
+                    } else {
+                        return { code: "" }
+                    }
+                }
+
+                return null
+            },
+            //@ts-ignore
+            icon: async (language) => {
+                if (language.expressionUI) {
+                    const code = language.expressionUI.icon();
+
+                    if (code) {
+                        return { code }
+                    } else {
+                        return { code: "" }
+                    }
+                }
+
+                return null
+            },
             //@ts-ignore
             settings: async (language) => {
                 return JSON.stringify(core.languageController.getSettings(language.address))
             },
+            //@ts-ignore
+            settingsIcon: async (language) => {
+                if (language.settingsUI) {
+                    const code = language.settingsUI.settingsIcon();
+
+                    if (code) {
+                        return { code }
+                    } else {
+                        return { code: "" }
+                    }
+                }
+
+                return null  
+            }
         },
 
         Agent: {
