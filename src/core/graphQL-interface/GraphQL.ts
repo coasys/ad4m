@@ -6,7 +6,8 @@ import type PerspectivismCore from '../PerspectivismCore'
 import * as Config from "../Config";
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
-import { ad4mExecutorVersion } from '../Config'
+import { ad4mExecutorVersion } from '../Config';
+import * as ucans from "ucans";
 
 function createResolvers(core: PerspectivismCore) {
     const pubsub = PubSub.get()
@@ -639,7 +640,21 @@ export async function startServer(params: StartServerParams) {
     const { core, mocks, port } = params
     const resolvers = createResolvers(core)
     const typeDefs = gql(typeDefsString)
-    const server = new ApolloServer({ typeDefs, resolvers, mocks });
+    const server = new ApolloServer({
+        typeDefs,
+        resolvers,
+        mocks,
+        context: async ({ req }) => {
+            // Get the user token from the headers.
+            const ucanToken = req.headers.authorization || '';
+         
+            // Try to retrieve a user with the token
+            let ucan = await ucans.validate(ucanToken);
+         
+            // Add the user to the context
+            return { ucan };
+          },
+    });
     const { url, subscriptionsUrl } = await server.listen({ port })
     return { url, subscriptionsUrl }
 }
