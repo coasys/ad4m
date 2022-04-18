@@ -7,7 +7,6 @@ import * as Config from "../Config";
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
-import * as ucans from "ucans";
 
 function createResolvers(core: PerspectivismCore) {
     const pubsub = PubSub.get()
