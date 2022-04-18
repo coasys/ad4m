@@ -1154,7 +1154,7 @@
   "resolved" "https://registry.npmjs.org/@stablelib/constant-time/-/constant-time-1.0.1.tgz"
   "version" "1.0.1"
 
-"@stablelib/ed25519@^1.0.1", "@stablelib/ed25519@^1.0.2":
+"@stablelib/ed25519@^1.0.1":
   "integrity" "sha512-FtnvUwvKbp6l1dNcg4CswMAVFVu/nzLK3oC7/PRtjYyHbWsIkD8j+5cjXHmwcCpdCpRCaTGACkEhhMQ1RcdSOQ=="
   "resolved" "https://registry.npmjs.org/@stablelib/ed25519/-/ed25519-1.0.2.tgz"
   "version" "1.0.2"
@@ -7230,11 +7230,6 @@
   dependencies:
     "wrappy" "1"
 
-"one-webcrypto@^1.0.1":
-  "integrity" "sha512-fu9ywBVBPx0gS9K0etIROTiCkvI5S1TDjFsYFb3rC1ewFxeOqsbzq7aIMBHsYfrTHBcGXJaONXXjTl8B01cW1Q=="
-  "resolved" "https://registry.npmjs.org/one-webcrypto/-/one-webcrypto-1.0.3.tgz"
-  "version" "1.0.3"
-
 "onetime@^5.1.2":
   "integrity" "sha512-kbpaSSGJTWdAY5KPVeMOKXSrPtr8C8C7wodJbcsd51jRnmD+GZu8Y0VoU6Dm5Z4vWr0Ig/1NKuWRKf7j5aaYSg=="
   "resolved" "https://registry.npmjs.org/onetime/-/onetime-5.1.2.tgz"
@@ -9014,16 +9009,6 @@
   "integrity" "sha512-TCTIul70LyWe6IJWT8QSYeA54WQe8EjQFU4wY52Fasj5UKx88LNYKCgBEHcOMOrFF1rKGbD8v/xcNWVUq9SymA=="
   "resolved" "https://registry.npmjs.org/typescript/-/typescript-4.5.5.tgz"
   "version" "4.5.5"
-
-"ucans@^0.9.0":
-  "integrity" "sha512-xl9jeO8mK9+JjheOCzKjwb7KAkXLnG3fpTPXQebUaMkJ6l+ovBLaZGhL/Gd4r5IuDWjW12qqwfp7FeBzbLINuQ=="
-  "resolved" "https://registry.npmjs.org/ucans/-/ucans-0.9.0.tgz"
-  "version" "0.9.0"
-  dependencies:
-    "@stablelib/ed25519" "^1.0.2"
-    "one-webcrypto" "^1.0.1"
-    "semver" "^7.3.5"
-    "uint8arrays" "^3.0.0"
 
 "uint8arrays@^3.0.0":
   "integrity" "sha512-HRCx0q6O9Bfbp+HHSfQQKD7wU70+lydKVt4EghkdOvlK/NlrF90z+eXV34mUd48rNvVJXwkrMSPpCATkct8fJA=="

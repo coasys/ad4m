@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
-import type { Language, Expression, PublicSharing, ReadOnlyLanguage } from '@perspect3vism/ad4m';
+import { Language, Expression, PublicSharing, ReadOnlyLanguage, ExceptionType } from '@perspect3vism/ad4m';
 import { Agent, ExpressionProof } from '@perspect3vism/ad4m';
 import secp256k1 from 'secp256k1'
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
@@ -10,6 +10,19 @@ import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'apollo-server';
 import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
+import { v4 as uuidv4 } from 'uuid';
+import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
+
+const AllPermission = "*";
+
+export interface AuthInfo {
+    token: string,
+    expiredAt: number,
+    appName: string,
+    appDesc: string,
+    appURL: string,
+    permission?: string[], 
+}
 
 export default class AgentService {
     #did?: string
@@ -21,6 +34,8 @@ export default class AgentService {
     #agent?: Agent
     #agentLanguage?: Language
     #pubsub: PubSub
+    #tokens: Map<string, AuthInfo>
+    #tokenValidPeriod: number
     
 
     #readyPromise: Promise<void>
@@ -33,6 +48,8 @@ export default class AgentService {
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
         })
+        this.#tokens = new Map()
+        this.#tokenValidPeriod = 7 * 24 * 60 * 60 // 7 days in seconds
     }
 
     get did() {
@@ -271,6 +288,36 @@ export default class AgentService {
             didDocument: this.#didDocument
         }
         return dump
+    }
+
+    requestAuth(appName: string, appDesc: string, appURL: string) {
+        let token = uuidv4();
+        let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
+        let auth = {
+            token,
+            expiredAt,
+            appName,
+            appDesc,
+            appURL,
+        } as AuthInfo
+        
+        this.#pubsub.publish(
+            PubSubInstance.EXCEPTION_OCCURRED_TOPIC,
+            {
+                title: "Request to authenticate application",
+                message: `${appName} is waiting for authentication, go to ad4min for more information.`,
+                type: ExceptionType.RequestAuth,
+                addon: JSON.stringify(auth),
+            } as ExceptionInfo
+        );
+    }
+
+    permitAuth(auth: string, adminToken: string) {
+        let authInfo: AuthInfo = JSON.parse(auth)
+        let adminAuth = this.#tokens.get(adminToken)
+        if(adminAuth && adminAuth.permission!.includes(AllPermission)) {
+            this.#tokens.set(authInfo.token, authInfo)
+        }
     }
 }
 

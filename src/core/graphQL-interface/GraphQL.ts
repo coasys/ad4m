@@ -291,6 +291,16 @@ function createResolvers(core: PerspectivismCore) {
                 return currentAgent;
             },
             //@ts-ignore
+            agentRequestAuth: async (parent, args, context, info) => {
+                const {appName, appDesc, appURL} = args;
+                core.agentService.requestAuth(appName, appDesc, appURL);
+            },
+            //@ts-ignore
+            agentPermitAuth: (parent, args, context, info) => {
+                const {auth, adminToken} = args;
+                core.agentService.permitAuth(auth, adminToken);
+            },
+            //@ts-ignore
             expressionCreate: async (parent, args, context, info) => {
                 const { languageAddress, content } = args
                 const langref = { address: languageAddress } as LanguageRef
