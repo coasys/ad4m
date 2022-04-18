@@ -20,7 +20,7 @@ export interface AuthInfo {
     expiredAt: number,
     appName: string,
     appDesc: string,
-    appURL: string,
+    appUrl: string,
     permission?: string[], 
 }
 
@@ -290,7 +290,7 @@ export default class AgentService {
         return dump
     }
 
-    requestAuth(appName: string, appDesc: string, appURL: string) {
+    requestAuth(appName: string, appDesc: string, appUrl: string) {
         let token = uuidv4();
         let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
         let auth = {
@@ -298,7 +298,7 @@ export default class AgentService {
             expiredAt,
             appName,
             appDesc,
-            appURL,
+            appUrl,
         } as AuthInfo
         
         this.#pubsub.publish(
@@ -309,15 +309,23 @@ export default class AgentService {
                 type: ExceptionType.RequestAuth,
                 addon: JSON.stringify(auth),
             } as ExceptionInfo
-        );
+        )
+
+        return token
     }
 
-    permitAuth(auth: string, adminToken: string) {
+    permitAuth(auth: string, authToken: string) {
+        console.log("=================")
+        console.log("=================")
+        console.log(authToken)
+        console.log(auth)
         let authInfo: AuthInfo = JSON.parse(auth)
-        let adminAuth = this.#tokens.get(adminToken)
+        let adminAuth = this.#tokens.get(authToken)
         if(adminAuth && adminAuth.permission!.includes(AllPermission)) {
             this.#tokens.set(authInfo.token, authInfo)
+            return true
         }
+        return false
     }
 }
 

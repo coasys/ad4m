@@ -291,13 +291,14 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentRequestAuth: async (parent, args, context, info) => {
-                const {appName, appDesc, appURL} = args;
-                core.agentService.requestAuth(appName, appDesc, appURL);
+                const {appName, appDesc, appUrl} = args;
+                let token = core.agentService.requestAuth(appName, appDesc, appUrl);
+                return token;
             },
             //@ts-ignore
             agentPermitAuth: (parent, args, context, info) => {
-                const {auth, adminToken} = args;
-                core.agentService.permitAuth(auth, adminToken);
+                const {auth} = args;
+                return core.agentService.permitAuth(auth, context.authToken);
             },
             //@ts-ignore
             expressionCreate: async (parent, args, context, info) => {
@@ -653,15 +654,18 @@ export async function startServer(params: StartServerParams) {
         typeDefs,
         resolvers,
         mocks,
-        context: async ({ req }) => {
-            // Get the user token from the headers.
-            const ucanToken = req.headers.authorization || '';
-         
-            // Try to retrieve a user with the token
-            let ucan = await ucans.validate(ucanToken);
-         
-            // Add the user to the context
-            return { ucan };
+        context: async ({ req, connection }) => { // TODO this is not working
+            if (connection) {
+                // check connection for metadata
+                return connection.context;
+            } else {
+                // Get the user token from the headers.
+                const authToken = req.headers.authorization || '';
+                console.log("user send token: ", authToken);
+
+                // Add the user to the context
+                return { authToken };
+            }
           },
     });
     const { url, subscriptionsUrl } = await server.listen({ port })
