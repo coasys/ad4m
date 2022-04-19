@@ -21,7 +21,7 @@ export interface AuthInfo {
     appName: string,
     appDesc: string,
     appUrl: string,
-    permission?: string[], 
+    permissions?: string[], 
 }
 
 export default class AgentService {
@@ -41,7 +41,7 @@ export default class AgentService {
     #readyPromise: Promise<void>
     #readyPromiseResolve?: ((value: void | PromiseLike<void>) => void)
 
-    constructor(rootConfigPath: string) {
+    constructor(rootConfigPath: string, reqCredential?: string) {
         this.#file = path.join(rootConfigPath, "agent.json")
         this.#fileProfile = path.join(rootConfigPath, "agentProfile.json")
         this.#pubsub = PubSubInstance.get()
@@ -50,6 +50,18 @@ export default class AgentService {
         })
         this.#tokens = new Map()
         this.#tokenValidPeriod = 7 * 24 * 60 * 60 // 7 days in seconds
+        if (reqCredential) {
+            let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
+            let authInfo = {
+                token: reqCredential,
+                expiredAt,
+                appName: "ad4min",
+                appDesc: "Admin UI of ad4m local service",
+                appUrl: "https://ad4m.dev",
+                permissions: [AllPermission],
+            } as AuthInfo
+            this.#tokens.set(reqCredential, authInfo)
+        }
     }
 
     get did() {
@@ -315,13 +327,14 @@ export default class AgentService {
     }
 
     permitAuth(auth: string, authToken: string) {
-        console.log("=================")
-        console.log("=================")
-        console.log(authToken)
-        console.log(auth)
+        console.log("================= permit auth")
+        console.log("================= permit auth")
+        console.log("auth token is: ", authToken)
+        console.log("auth info: ", auth)
         let authInfo: AuthInfo = JSON.parse(auth)
         let adminAuth = this.#tokens.get(authToken)
-        if(adminAuth && adminAuth.permission!.includes(AllPermission)) {
+        console.log("admin auth: ", adminAuth)
+        if(adminAuth && adminAuth.permissions!.includes(AllPermission)) {
             this.#tokens.set(authInfo.token, authInfo)
             return true
         }
@@ -329,8 +342,8 @@ export default class AgentService {
     }
 }
 
-export function init(rootConfigPath: string): AgentService {
-    const agent = new AgentService(rootConfigPath)
+export function init(rootConfigPath: string, reqCredential?: string): AgentService {
+    const agent = new AgentService(rootConfigPath, reqCredential)
     agent.load()
     return agent
 }

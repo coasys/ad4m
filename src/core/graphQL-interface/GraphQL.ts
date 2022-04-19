@@ -654,18 +654,18 @@ export async function startServer(params: StartServerParams) {
         typeDefs,
         resolvers,
         mocks,
-        context: async ({ req, connection }) => { // TODO this is not working
-            if (connection) {
-                // check connection for metadata
-                return connection.context;
-            } else {
-                // Get the user token from the headers.
-                const authToken = req.headers.authorization || '';
-                console.log("user send token: ", authToken);
-
-                // Add the user to the context
-                return { authToken };
-            }
+        context: (req) => {
+            // Get the user token from the headers.
+            console.log("==== req: ", JSON.stringify(req));
+            console.log("==== req: ");
+            console.log("==== req: ");
+            const authToken = req.connection?.context.headers.authorization || '';
+            console.log("user send token: ", authToken);
+            console.log("================: ");
+            console.log("================: ");
+            console.log("================: ");
+            
+            return { authToken };
           },
     });
     const { url, subscriptionsUrl } = await server.listen({ port })
