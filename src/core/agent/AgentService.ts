@@ -302,6 +302,10 @@ export default class AgentService {
         return dump
     }
 
+    getPermissions(authToken: string) {
+        return this.#tokens.get(authToken)?.permissions
+    }
+
     requestAuth(appName: string, appDesc: string, appUrl: string) {
         let token = uuidv4();
         let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
@@ -326,15 +330,11 @@ export default class AgentService {
         return token
     }
 
-    permitAuth(auth: string, authToken: string) {
-        console.log("================= permit auth")
-        console.log("================= permit auth")
-        console.log("auth token is: ", authToken)
+    permitAuth(auth: string, permissions: string[]) {
+        console.log("user permissions: ", permissions)
         console.log("auth info: ", auth)
         let authInfo: AuthInfo = JSON.parse(auth)
-        let adminAuth = this.#tokens.get(authToken)
-        console.log("admin auth: ", adminAuth)
-        if(adminAuth && adminAuth.permissions!.includes(AllPermission)) {
+        if(permissions.includes(AllPermission)) {
             this.#tokens.set(authInfo.token, authInfo)
             return true
         }

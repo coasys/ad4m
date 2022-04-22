@@ -1,4 +1,4 @@
-import { ApolloServer, withFilter, gql } from 'apollo-server'
+import { ApolloServer, withFilter, gql, AuthenticationError } from 'apollo-server'
 import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
@@ -298,7 +298,7 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             agentPermitAuth: (parent, args, context, info) => {
                 const {auth} = args;
-                return core.agentService.permitAuth(auth, context.authToken);
+                return core.agentService.permitAuth(auth, context.permissions);
             },
             //@ts-ignore
             expressionCreate: async (parent, args, context, info) => {
@@ -656,16 +656,12 @@ export async function startServer(params: StartServerParams) {
         mocks,
         context: (req) => {
             // Get the user token from the headers.
-            console.log("==== req: ", JSON.stringify(req));
-            console.log("==== req: ");
-            console.log("==== req: ");
-            const authToken = req.connection?.context.headers.authorization || '';
-            console.log("user send token: ", authToken);
-            console.log("================: ");
-            console.log("================: ");
-            console.log("================: ");
+            const authToken = req.connection?.context.headers.authorization || ''
+            if(!authToken) throw new AuthenticationError("User is not authenticated.");
+            const permissions = core.agentService.getPermissions(authToken);
+            if(!permissions) throw new AuthenticationError("User permission is empty.")
             
-            return { authToken };
+            return { permissions };
           },
     });
     const { url, subscriptionsUrl } = await server.listen({ port })
