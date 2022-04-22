@@ -657,8 +657,11 @@ export async function startServer(params: StartServerParams) {
         context: (req) => {
             // Get the user token from the headers.
             const authToken = req.connection?.context.headers.authorization || ''
-            if(!authToken) throw new AuthenticationError("User is not authenticated.");
-            const permissions = core.agentService.getPermissions(authToken);
+            
+            if(!authToken) throw new AuthenticationError("User is not authenticated.")
+            if(!core.agentService.isValidToken(authToken)) throw new AuthenticationError("Token is invalid.")
+            
+            const permissions = core.agentService.getPermissions(authToken)
             if(!permissions) throw new AuthenticationError("User permission is empty.")
             
             return { permissions };

@@ -12,17 +12,7 @@ import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-
-const AllPermission = "*";
-
-export interface AuthInfo {
-    token: string,
-    expiredAt: number,
-    appName: string,
-    appDesc: string,
-    appUrl: string,
-    permissions?: string[], 
-}
+import { AllPermission, AuthInfo, DefaultTokenValidPeriod } from './Auth';
 
 export default class AgentService {
     #did?: string
@@ -49,7 +39,7 @@ export default class AgentService {
             this.#readyPromiseResolve = resolve
         })
         this.#tokens = new Map()
-        this.#tokenValidPeriod = 7 * 24 * 60 * 60 // 7 days in seconds
+        this.#tokenValidPeriod = DefaultTokenValidPeriod
         if (reqCredential) {
             let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
             let authInfo = {
@@ -302,6 +292,15 @@ export default class AgentService {
         return dump
     }
 
+    isValidToken(authToken: string) {
+        const auth = this.#tokens.get(authToken)
+        if(auth && auth.expiredAt > new Date().getTime() / 1000) {
+            return true
+        }
+
+        return false
+    }
+    
     getPermissions(authToken: string) {
         return this.#tokens.get(authToken)?.permissions
     }
