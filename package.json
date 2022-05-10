@@ -24,7 +24,7 @@
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
     "test-all:windows": "powershell ./scripts/run-all-test.ps1 & jest --forceExit",
     "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js",
-    "test:windows": "npm run test-all:windows && node scripts/cleanTestingData.js"
+    "test:windows": "npm run prepare-test:windows && npm run test-all:windows && node scripts/cleanTestingData.js"
   },
   "repository": {
     "type": "git",
