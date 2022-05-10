@@ -1,5 +1,4 @@
-#!/bin/bash
-
-cd src/tests/test-language
+Remove-Item -Recurse -Force src/test-temp
+Set-Location src/tests/test-language
 npm i
 npm run build
