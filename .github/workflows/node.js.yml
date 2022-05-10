@@ -67,7 +67,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
             ${{ runner.os }}-cargo
-      - name: Choco install InnoSetup
+      - name: Choco install swipl-prolog
         uses: crazy-max/ghaction-chocolatey@v1
         with:
           args: install swi-prolog
