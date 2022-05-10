@@ -68,7 +68,7 @@ jobs:
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
             ${{ runner.os }}-cargo
       - name: Choco install InnoSetup
-        uses: ./
+        uses: crazy-max/ghaction-chocolatey@v1
         with:
           args: install swi-prolog
       - name: Build Holochain
