@@ -10,15 +10,16 @@ on:
   pull_request:
 
 jobs:
-  test-linux:
+  test:
     name: Linux Test
-    runs-on: ubuntu-latest
 
     strategy:
       matrix:
         platform: [macos-10.14, ubuntu-18.04]
         node-version: [16.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+
+    runs-on: ${{ matrix.platform }}
 
     steps:
     - uses: actions/checkout@v2
