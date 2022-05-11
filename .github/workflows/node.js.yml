@@ -15,7 +15,7 @@ jobs:
 
     strategy:
       matrix:
-        platform: [macos-10.14, ubuntu-18.04]
+        platform: [macos-10.15, ubuntu-18.04]
         node-version: [16.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
@@ -87,4 +87,4 @@ jobs:
       - run: npm install -g npm
       - run: npm i
       - run: npm run build --if-present
-      - run: npm test:windows
+      - run: npm run test:windows
