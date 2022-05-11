@@ -67,18 +67,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
             ${{ runner.os }}-cargo
-      - run: $env:path
-      - name: Choco install swipl-prolog
-        run: |
-          choco install swi-prolog
-          $env:path += ";C:\Program Files\swipl\bin"
-          refreshenv
-          $env:path
-          Get-Command swipl
-      - run: $env:path += ";C:\Program Files\swipl\bin"
-      - run: refreshenv
-      - run: $env:path
-      - run: Get-Command swipl
+
       - name: Build Holochain
         env:
           SQLCIPHER_STATIC: 1
@@ -87,15 +76,18 @@ jobs:
           (cargo install lair_keystore --version 0.0.9 || true)
           (cargo install --locked holochain --git https://github.com/holochain/holochain.git --tag holochain-0.0.127 || true)
           (cargo install holochain_cli --version 0.0.28 || true)
+
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v2
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
-      - run: $env:path
-      - run: refreshenv
-      - run: $env:path
       - run: npm install -g npm
       - run: npm i
-      - run: npm run build --if-present
-      - run: npm run test:windows
+
+      - name: Choco install swipl-prolog
+        run: |
+          choco install swi-prolog
+          $env:path += ";C:\Program Files\swipl\bin"
+          npm run build --if-present
+          npm run test:windows
