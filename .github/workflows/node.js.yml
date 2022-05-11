@@ -74,7 +74,8 @@ jobs:
           args: install swi-prolog
       - run: $env:path += ";C:\Program Files\swipl\bin"
       - run: refreshenv
-      - run: Get-Command swipl.exe
+      - run: $env:path
+      - run: Get-Command swipl
       - name: Build Holochain
         env:
           SQLCIPHER_STATIC: 1
