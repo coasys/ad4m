@@ -84,6 +84,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
+      - run: refreshenv
       - run: npm install -g npm
       - run: npm i
       - run: npm run build --if-present

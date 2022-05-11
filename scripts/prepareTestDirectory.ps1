@@ -26,5 +26,5 @@ Copy-Item $LkPath -Destination lair-keystore.exe
 if (Test-Path swipl.exe) {
   Remove-Item swipl.exe
 }
-$LkPath = Get-Command swipl.exe | Select-Object -ExpandProperty Definition
-Copy-Item $LkPath -Destination swipl.exe
+$SwiplPath = Get-Command swipl.exe | Select-Object -ExpandProperty Definition
+Copy-Item $SwiplPath -Destination swipl.exe
