@@ -72,8 +72,9 @@ jobs:
         uses: crazy-max/ghaction-chocolatey@v1.7.0
         with:
           args: install swi-prolog
+      - run: $env:path += ";C:\Program Files\swipl\bin"
       - run: refreshenv
-      - run: $env:path
+      - run: Get-Command swipl.exe
       - name: Build Holochain
         env:
           SQLCIPHER_STATIC: 1
