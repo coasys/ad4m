@@ -68,7 +68,7 @@ jobs:
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
             ${{ runner.os }}-cargo
       - name: Choco install swipl-prolog
-        uses: crazy-max/ghaction-chocolatey@v1
+        uses: crazy-max/ghaction-chocolatey@v1.7.0
         with:
           args: install swi-prolog
       - name: Build Holochain
@@ -84,7 +84,9 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
+      - run: $env:path
       - run: refreshenv
+      - run: $env:path
       - run: npm install -g npm
       - run: npm i
       - run: npm run build --if-present
