@@ -67,10 +67,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
             ${{ runner.os }}-cargo
+      - run: $env:path
       - name: Choco install swipl-prolog
         uses: crazy-max/ghaction-chocolatey@v1.7.0
         with:
           args: install swi-prolog
+      - run: refreshenv
+      - run: $env:path
       - name: Build Holochain
         env:
           SQLCIPHER_STATIC: 1
