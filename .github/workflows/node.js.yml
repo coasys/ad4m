@@ -69,9 +69,7 @@ jobs:
             ${{ runner.os }}-cargo
       - run: $env:path
       - name: Choco install swipl-prolog
-        uses: crazy-max/ghaction-chocolatey@v1.7.0
-        with:
-          args: install swi-prolog
+        run: choco install swi-prolog
       - run: $env:path += ";C:\Program Files\swipl\bin"
       - run: refreshenv
       - run: $env:path
