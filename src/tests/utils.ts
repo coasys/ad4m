@@ -12,8 +12,6 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
       require('child_process').exec(cmd, (err: Error, stdout: string, stderr: string) => {
         if (err) reject(err)
 
-        console.log('isProcessRunning', process.platform, stdout, err, stderr);
-  
         resolve(stdout.toLowerCase().indexOf(processName.toLowerCase()) > -1)
       })
     })
