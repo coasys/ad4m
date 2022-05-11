@@ -15,7 +15,7 @@ jobs:
 
     strategy:
       matrix:
-        platform: [macos-latest, ubuntu-18.04]
+        platform: [macos-10.15, ubuntu-18.04]
         node-version: [16.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
