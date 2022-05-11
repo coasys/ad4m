@@ -69,7 +69,12 @@ jobs:
             ${{ runner.os }}-cargo
       - run: $env:path
       - name: Choco install swipl-prolog
-        run: choco install swi-prolog
+        run: |
+          choco install swi-prolog
+          $env:path += ";C:\Program Files\swipl\bin"
+          refreshenv
+          $env:path
+          Get-Command swipl
       - run: $env:path += ";C:\Program Files\swipl\bin"
       - run: refreshenv
       - run: $env:path
