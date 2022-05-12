@@ -1,4 +1,4 @@
-export const AllPermission = "*";
+export const AllCapability = "*";
 
 export const DefaultTokenValidPeriod = 7 * 24 * 60 * 60; // 7 days in seconds
 

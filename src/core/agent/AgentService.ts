@@ -12,7 +12,7 @@ import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import { AllPermission, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, PermitResult } from './Auth';
+import { AllCapability, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, PermitResult } from './Auth';
 import { SignOptions, sign, verify, VerifyOptions } from 'jsonwebtoken';
 
 export default class AgentService {
@@ -27,6 +27,7 @@ export default class AgentService {
     #pubsub: PubSub
     #tokens: Map<string, AuthInfo>
     #tokenValidPeriod: number
+    #adminCredential: string
     
 
     #readyPromise: Promise<void>
@@ -41,17 +42,15 @@ export default class AgentService {
         })
         this.#tokens = new Map()
         this.#tokenValidPeriod = DefaultTokenValidPeriod
+        this.#adminCredential = reqCredential || ''
         // if (reqCredential) {
-        //     let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
         //     let authInfo = {
-        //         requestId: reqCredential,
-        //         expiredAt,
-        //         appName: "ad4min",
-        //         appDesc: "Admin UI of ad4m local service",
+        //         appName: "ad4m",
+        //         appDesc: "Admin app of ad4m local service",
         //         appUrl: "https://ad4m.dev",
-        //         permissions: [AllPermission],
+        //         permissions: [AllCapability],
         //     } as AuthInfo
-        //     this.#tokens.set(reqCredential, authInfo)
+        //     this.#tokens.set(genAuthKey(reqCredential, 0), authInfo)
         // }
     }
 
@@ -294,6 +293,10 @@ export default class AgentService {
     }
 
     getCapabilities(token: string) {
+        if (token == this.#adminCredential) {
+            return [AllCapability]
+        }
+        
         const key = this.getSigningKey()
         const pubKey = Buffer.from(key.publicKey, key.encoding)
         const verifyOptions: VerifyOptions = {
@@ -305,10 +308,6 @@ export default class AgentService {
         return decoded.capabilities
     }
     
-    getPermissions(authToken: string) {
-        return this.#tokens.get(authToken)?.capabilities
-    }
-
     requestAuth(appName: string, appDesc: string, appUrl: string, capabilities: string[]) {
         let requestId = uuidv4()
         let authExtended = {
@@ -334,10 +333,10 @@ export default class AgentService {
         return requestId
     }
 
-    permitAuth(adjustedAuth: string, permissions: string[]) {
-        console.log("user permissions: ", permissions)
+    permitAuth(adjustedAuth: string, capabilities: string[]) {
+        console.log("admin user capabilities: ", capabilities)
         console.log("auth info: ", adjustedAuth)
-        if(permissions.includes(AllPermission)) {
+        if(capabilities.includes(AllCapability)) {
             let { requestId, auth }: AuthInfoExtended = JSON.parse(adjustedAuth)
             let rand = genAuthRand()
             this.#tokens.set(genAuthKey(requestId, rand), auth)

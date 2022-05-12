@@ -665,7 +665,7 @@ export async function startServer(params: StartServerParams) {
             
             if(!authToken) throw new AuthenticationError("User is not authenticated.")
             const capabilities = core.agentService.getCapabilities(authToken)
-            if(!capabilities) throw new AuthenticationError("User permission is empty.")
+            if(!capabilities) throw new AuthenticationError("User capability is empty.")
             
             return { capabilities };
           },
