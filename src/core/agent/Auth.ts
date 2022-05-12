@@ -7,8 +7,6 @@ export interface AuthInfoExtended {
     auth: AuthInfo, 
 }
 export interface AuthInfo {
-    requestId: string,
-    expiredAt: number,
     appName: string,
     appDesc: string,
     appUrl: string,

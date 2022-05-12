@@ -12,7 +12,8 @@ import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import { AllPermission, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genRand, PermitResult } from './Auth';
+import { AllPermission, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, PermitResult } from './Auth';
+import { SignOptions, sign, verify, VerifyOptions } from 'jsonwebtoken';
 
 export default class AgentService {
     #did?: string
@@ -292,13 +293,16 @@ export default class AgentService {
         return dump
     }
 
-    isValidToken(authToken: string) {
-        const auth = this.#tokens.get(authToken)
-        if(auth && auth.expiredAt > new Date().getTime() / 1000) {
-            return true
+    getCapabilities(token: string) {
+        const key = this.getSigningKey()
+        const pubKey = Buffer.from(key.publicKey, key.encoding)
+        const verifyOptions: VerifyOptions = {
+            algorithms: ['ES256'],
         }
 
-        return false
+        const decoded = verify(token, pubKey, verifyOptions) as AuthInfo
+
+        return decoded.capabilities
     }
     
     getPermissions(authToken: string) {
@@ -307,11 +311,9 @@ export default class AgentService {
 
     requestAuth(appName: string, appDesc: string, appUrl: string, capabilities: string[]) {
         let requestId = uuidv4()
-        let expiredAt = Math.floor(new Date().getTime() / 1000) + this.#tokenValidPeriod
         let authExtended = {
             requestId,
             auth: {
-                expiredAt,
                 appName,
                 appDesc,
                 appUrl,
@@ -337,7 +339,7 @@ export default class AgentService {
         console.log("auth info: ", adjustedAuth)
         if(permissions.includes(AllPermission)) {
             let { requestId, auth }: AuthInfoExtended = JSON.parse(adjustedAuth)
-            let rand = genRand()
+            let rand = genAuthRand()
             this.#tokens.set(genAuthKey(requestId, rand), auth)
             return {
                 isPermitted: true,
@@ -349,7 +351,23 @@ export default class AgentService {
 
     generateJwt(requestId: string, rand: number) {
         console.log("rand number in request: ", rand)
-        let auth = this.#tokens.get(genAuthKey(requestId, rand))
+        const auth = this.#tokens.get(genAuthKey(requestId, rand))
+
+        if (!auth) {
+            throw new Error("Can't find permitted request")
+        }
+        
+        const key = this.getSigningKey()
+        const privKey = Buffer.from(key.privateKey, key.encoding)
+        const signOptions: SignOptions = {
+            algorithm: 'ES256',
+            expiresIn: `${this.#tokenValidPeriod}s`,
+        }
+        const result = sign(auth, privKey, signOptions)
+        
+        console.log("generate jwt is: ", result)
+
+        return result
     }
 }
 

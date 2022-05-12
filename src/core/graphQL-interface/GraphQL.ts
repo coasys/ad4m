@@ -291,14 +291,19 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentRequestAuth: async (parent, args, context, info) => {
-                const {appName, appDesc, appUrl} = args;
-                let token = core.agentService.requestAuth(appName, appDesc, appUrl);
+                const { appName, appDesc, appUrl, capabilities } = args;
+                let token = core.agentService.requestAuth(appName, appDesc, appUrl, capabilities);
                 return token;
             },
             //@ts-ignore
             agentPermitAuth: (parent, args, context, info) => {
-                const {auth} = args;
-                return core.agentService.permitAuth(auth, context.permissions);
+                const { auth } = args;
+                return core.agentService.permitAuth(auth, context.capabilities);
+            },
+            //@ts-ignore
+            agentGenerateJwt: (parent, args, context, info) => {
+                const { requestId, rand } = args;
+                return core.agentService.generateJwt(requestId, rand);
             },
             //@ts-ignore
             expressionCreate: async (parent, args, context, info) => {
@@ -659,12 +664,10 @@ export async function startServer(params: StartServerParams) {
             const authToken = req.connection?.context.headers.authorization || ''
             
             if(!authToken) throw new AuthenticationError("User is not authenticated.")
-            if(!core.agentService.isValidToken(authToken)) throw new AuthenticationError("Token is invalid.")
+            const capabilities = core.agentService.getCapabilities(authToken)
+            if(!capabilities) throw new AuthenticationError("User permission is empty.")
             
-            const permissions = core.agentService.getPermissions(authToken)
-            if(!permissions) throw new AuthenticationError("User permission is empty.")
-            
-            return { permissions };
+            return { capabilities };
           },
     });
     const { url, subscriptionsUrl } = await server.listen({ port })
