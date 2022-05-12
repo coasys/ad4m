@@ -12,7 +12,7 @@ import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import { AllPermission, AuthInfo, DefaultTokenValidPeriod } from './Auth';
+import { AllPermission, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genRand, PermitResult } from './Auth';
 
 export default class AgentService {
     #did?: string
@@ -40,18 +40,18 @@ export default class AgentService {
         })
         this.#tokens = new Map()
         this.#tokenValidPeriod = DefaultTokenValidPeriod
-        if (reqCredential) {
-            let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
-            let authInfo = {
-                token: reqCredential,
-                expiredAt,
-                appName: "ad4min",
-                appDesc: "Admin UI of ad4m local service",
-                appUrl: "https://ad4m.dev",
-                permissions: [AllPermission],
-            } as AuthInfo
-            this.#tokens.set(reqCredential, authInfo)
-        }
+        // if (reqCredential) {
+        //     let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
+        //     let authInfo = {
+        //         requestId: reqCredential,
+        //         expiredAt,
+        //         appName: "ad4min",
+        //         appDesc: "Admin UI of ad4m local service",
+        //         appUrl: "https://ad4m.dev",
+        //         permissions: [AllPermission],
+        //     } as AuthInfo
+        //     this.#tokens.set(reqCredential, authInfo)
+        // }
     }
 
     get did() {
@@ -302,19 +302,22 @@ export default class AgentService {
     }
     
     getPermissions(authToken: string) {
-        return this.#tokens.get(authToken)?.permissions
+        return this.#tokens.get(authToken)?.capabilities
     }
 
-    requestAuth(appName: string, appDesc: string, appUrl: string) {
-        let token = uuidv4();
-        let expiredAt = new Date().getTime() / 1000 + this.#tokenValidPeriod
-        let auth = {
-            token,
-            expiredAt,
-            appName,
-            appDesc,
-            appUrl,
-        } as AuthInfo
+    requestAuth(appName: string, appDesc: string, appUrl: string, capabilities: string[]) {
+        let requestId = uuidv4()
+        let expiredAt = Math.floor(new Date().getTime() / 1000) + this.#tokenValidPeriod
+        let authExtended = {
+            requestId,
+            auth: {
+                expiredAt,
+                appName,
+                appDesc,
+                appUrl,
+                capabilities,
+            } as AuthInfo,
+        } as AuthInfoExtended
         
         this.#pubsub.publish(
             PubSubInstance.EXCEPTION_OCCURRED_TOPIC,
@@ -322,22 +325,31 @@ export default class AgentService {
                 title: "Request to authenticate application",
                 message: `${appName} is waiting for authentication, go to ad4min for more information.`,
                 type: ExceptionType.RequestAuth,
-                addon: JSON.stringify(auth),
+                addon: JSON.stringify(authExtended),
             } as ExceptionInfo
         )
 
-        return token
+        return requestId
     }
 
-    permitAuth(auth: string, permissions: string[]) {
+    permitAuth(adjustedAuth: string, permissions: string[]) {
         console.log("user permissions: ", permissions)
-        console.log("auth info: ", auth)
-        let authInfo: AuthInfo = JSON.parse(auth)
+        console.log("auth info: ", adjustedAuth)
         if(permissions.includes(AllPermission)) {
-            this.#tokens.set(authInfo.token, authInfo)
-            return true
+            let { requestId, auth }: AuthInfoExtended = JSON.parse(adjustedAuth)
+            let rand = genRand()
+            this.#tokens.set(genAuthKey(requestId, rand), auth)
+            return {
+                isPermitted: true,
+                rand: rand,
+            } as PermitResult
         }
-        return false
+        return { isPermitted: false } as PermitResult
+    }
+
+    generateJwt(requestId: string, rand: number) {
+        console.log("rand number in request: ", rand)
+        let auth = this.#tokens.get(genAuthKey(requestId, rand))
     }
 }
 
