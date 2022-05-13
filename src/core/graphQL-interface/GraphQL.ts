@@ -291,8 +291,8 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentRequestAuth: async (parent, args, context, info) => {
-                const { appName, appDesc, appUrl, capabilities } = args;
-                let token = core.agentService.requestAuth(appName, appDesc, appUrl, capabilities);
+                const { appName, appDesc, appUrl, requestCapabilities } = args;
+                let token = core.agentService.requestAuth(appName, appDesc, appUrl, requestCapabilities);
                 return token;
             },
             //@ts-ignore

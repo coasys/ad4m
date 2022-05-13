@@ -12,7 +12,7 @@ import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import { AllCapability, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, PermitResult } from './Auth';
+import { AllCapability, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, PermitResult, RequestAuthCapability } from './Auth';
 import { SignOptions, sign, verify, VerifyOptions } from 'jsonwebtoken';
 
 export default class AgentService {
@@ -297,6 +297,10 @@ export default class AgentService {
             return [AllCapability]
         }
         
+        if (token === '') {
+            return [RequestAuthCapability]
+        }
+
         const key = this.getSigningKey()
         const pubKey = Buffer.from(key.publicKey, key.encoding)
         const verifyOptions: VerifyOptions = {
@@ -349,8 +353,9 @@ export default class AgentService {
     }
 
     generateJwt(requestId: string, rand: number) {
-        console.log("rand number in request: ", rand)
-        const auth = this.#tokens.get(genAuthKey(requestId, rand))
+        const authKey = genAuthKey(requestId, rand)
+        console.log("rand number in request: ", authKey)
+        const auth = this.#tokens.get(authKey)
 
         if (!auth) {
             throw new Error("Can't find permitted request")
@@ -363,8 +368,9 @@ export default class AgentService {
             expiresIn: `${this.#tokenValidPeriod}s`,
         }
         const result = sign(auth, privKey, signOptions)
-        
         console.log("generate jwt is: ", result)
+
+        this.#tokens.delete(authKey)
 
         return result
     }

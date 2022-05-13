@@ -1,4 +1,20 @@
-export const AllCapability = "*";
+export const AllCapability = "*"
+export const RequestAuthCapability = "RequestAuthCapability"
+
+export const AgentQueryCapability = "AgentQueryCapability"
+export const AgentMutationCapability = "AgentMutationCapability"
+
+export const LanguageQueryCapability = "LanguageQueryCapability"
+export const LanguageMutationCapability = "LanguageMutationCapability"
+
+export const ExpressionQueryCapability = "ExpressionQueryCapability"
+export const ExpressionMutationCapability = "ExpressionMutationCapability"
+
+export const PerspectiveQueryCapability = "PerspectiveQueryCapability"
+export const PerspectiveMutationCapability = "PerspectiveMutationCapability"
+
+export const RuntimeQueryCapability = "RuntimeQueryCapability"
+export const RuntimeMutationCapability = "RuntimeMutationCapability"
 
 export const DefaultTokenValidPeriod = 7 * 24 * 60 * 60; // 7 days in seconds
 
