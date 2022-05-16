@@ -76,6 +76,7 @@
     "get-port": "5.1.1",
     "graphql": "^15.3.0",
     "ipfs": "0.61.0",
+    "jose": "^4.8.1",
     "js-yaml": "^4.1.0",
     "json-stable-stringify": "^1.0.1",
     "jsonwebtoken": "^8.5.1",

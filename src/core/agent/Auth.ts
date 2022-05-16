@@ -29,15 +29,10 @@ export interface AuthInfo {
     capabilities?: string[], 
 }
 
-export interface PermitResult {
-    isPermitted: boolean,
-    rand?: number,
-}
-
 export const genAuthRand = () => {
-    return Math.floor(100000 + Math.random() * 900000)
+    return Math.floor(100000 + Math.random() * 900000).toString()
 }
 
-export const genAuthKey = (requestId: string, rand: number) => {
+export const genAuthKey = (requestId: string, rand: string) => {
     return `${requestId}-${rand}`
 }

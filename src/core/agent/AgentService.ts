@@ -12,8 +12,9 @@ import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import { AllCapability, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, PermitResult, RequestAuthCapability } from './Auth';
+import { AllCapability, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, RequestAuthCapability } from './Auth';
 import { SignOptions, sign, verify, VerifyOptions } from 'jsonwebtoken';
+import * as jose from 'jose'
 
 export default class AgentService {
     #did?: string
@@ -347,12 +348,35 @@ export default class AgentService {
             return {
                 isPermitted: true,
                 rand: rand,
-            } as PermitResult
+            }
         }
-        return { isPermitted: false } as PermitResult
+        return { isPermitted: false }
     }
 
-    generateJwt(requestId: string, rand: number) {
+    // generateJwt(requestId: string, rand: string) {
+    //     const authKey = genAuthKey(requestId, rand)
+    //     console.log("rand number in request: ", authKey)
+    //     const auth = this.#tokens.get(authKey)
+
+    //     if (!auth) {
+    //         throw new Error("Can't find permitted request")
+    //     }
+        
+    //     const key = this.getSigningKey()
+    //     const privKey = Buffer.from(key.privateKey, key.encoding)
+    //     const signOptions: SignOptions = {
+    //         algorithm: 'ES256',
+    //         expiresIn: `${this.#tokenValidPeriod}s`,
+    //     }
+    //     const result = sign(auth, privKey, signOptions)
+    //     console.log("generate jwt is: ", result)
+
+    //     this.#tokens.delete(authKey)
+
+    //     return result
+    // }
+
+    async generateJwt(requestId: string, rand: string) {
         const authKey = genAuthKey(requestId, rand)
         console.log("rand number in request: ", authKey)
         const auth = this.#tokens.get(authKey)
@@ -363,16 +387,20 @@ export default class AgentService {
         
         const key = this.getSigningKey()
         const privKey = Buffer.from(key.privateKey, key.encoding)
-        const signOptions: SignOptions = {
-            algorithm: 'ES256',
-            expiresIn: `${this.#tokenValidPeriod}s`,
-        }
-        const result = sign(auth, privKey, signOptions)
-        console.log("generate jwt is: ", result)
 
+        const jwt = await new jose.SignJWT({...auth})
+            .setProtectedHeader({ alg: 'ES256K' })
+            .setIssuedAt()
+            .setIssuer(this.did || "")
+            .setAudience(`${auth.appName}:${this.did || ""}`)
+            .setExpirationTime(`${this.#tokenValidPeriod}s`)
+            .sign(privKey)
+
+        console.log("generate jwt is: ", jwt)
+        
         this.#tokens.delete(authKey)
 
-        return result
+        return jwt
     }
 }
 

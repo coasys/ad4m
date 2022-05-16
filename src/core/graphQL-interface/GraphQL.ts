@@ -301,9 +301,10 @@ function createResolvers(core: PerspectivismCore) {
                 return core.agentService.permitAuth(auth, context.capabilities);
             },
             //@ts-ignore
-            agentGenerateJwt: (parent, args, context, info) => {
+            agentGenerateJwt: async (parent, args, context, info) => {
                 const { requestId, rand } = args;
-                return core.agentService.generateJwt(requestId, rand);
+                let jwt = await core.agentService.generateJwt(requestId, rand)
+                return jwt;
             },
             //@ts-ignore
             expressionCreate: async (parent, args, context, info) => {
@@ -663,7 +664,6 @@ export async function startServer(params: StartServerParams) {
             // Get the user token from the headers.
             const authToken = req.connection?.context.headers.authorization || ''
             
-            if(!authToken) throw new AuthenticationError("User is not authenticated.")
             const capabilities = core.agentService.getCapabilities(authToken)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
             
