@@ -8,13 +8,13 @@ import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
 import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'apollo-server';
-import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
 import { AllCapability, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, RequestAuthCapability } from './Auth';
-import { SignOptions, sign, verify, VerifyOptions } from 'jsonwebtoken';
 import * as jose from 'jose'
+import * as crypto from "crypto"
+import KeyEncoder from 'key-encoder'
 
 export default class AgentService {
     #did?: string
@@ -293,7 +293,7 @@ export default class AgentService {
         return dump
     }
 
-    getCapabilities(token: string) {
+    async getCapabilities(token: string) {
         if (token == this.#adminCredential) {
             return [AllCapability]
         }
@@ -303,14 +303,13 @@ export default class AgentService {
         }
 
         const key = this.getSigningKey()
-        const pubKey = Buffer.from(key.publicKey, key.encoding)
-        const verifyOptions: VerifyOptions = {
-            algorithms: ['ES256'],
-        }
+        let keyEncoder = new KeyEncoder('secp256k1')
+        const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
 
-        const decoded = verify(token, pubKey, verifyOptions) as AuthInfo
+        const pubKeyObj = crypto.createPublicKey(pemPublicKey)
+        const { payload, protectedHeader } = await jose.jwtVerify(token, pubKeyObj)
 
-        return decoded.capabilities
+        return payload.capabilities
     }
     
     requestAuth(appName: string, appDesc: string, appUrl: string, capabilities: string[]) {
@@ -353,32 +352,9 @@ export default class AgentService {
         return { isPermitted: false }
     }
 
-    // generateJwt(requestId: string, rand: string) {
-    //     const authKey = genAuthKey(requestId, rand)
-    //     console.log("rand number in request: ", authKey)
-    //     const auth = this.#tokens.get(authKey)
-
-    //     if (!auth) {
-    //         throw new Error("Can't find permitted request")
-    //     }
-        
-    //     const key = this.getSigningKey()
-    //     const privKey = Buffer.from(key.privateKey, key.encoding)
-    //     const signOptions: SignOptions = {
-    //         algorithm: 'ES256',
-    //         expiresIn: `${this.#tokenValidPeriod}s`,
-    //     }
-    //     const result = sign(auth, privKey, signOptions)
-    //     console.log("generate jwt is: ", result)
-
-    //     this.#tokens.delete(authKey)
-
-    //     return result
-    // }
-
     async generateJwt(requestId: string, rand: string) {
         const authKey = genAuthKey(requestId, rand)
-        console.log("rand number in request: ", authKey)
+        console.log("rand number with requestId: ", authKey)
         const auth = this.#tokens.get(authKey)
 
         if (!auth) {
@@ -386,18 +362,19 @@ export default class AgentService {
         }
         
         const key = this.getSigningKey()
-        const privKey = Buffer.from(key.privateKey, key.encoding)
+        let keyEncoder = new KeyEncoder('secp256k1')
+        const pemPrivateKey = keyEncoder.encodePrivate(key.privateKey, 'raw', 'pem')
+
+        const keyObj = crypto.createPrivateKey(pemPrivateKey)
 
         const jwt = await new jose.SignJWT({...auth})
-            .setProtectedHeader({ alg: 'ES256K' })
+            .setProtectedHeader({ alg: "ES256K" })
             .setIssuedAt()
             .setIssuer(this.did || "")
             .setAudience(`${auth.appName}:${this.did || ""}`)
             .setExpirationTime(`${this.#tokenValidPeriod}s`)
-            .sign(privKey)
+            .sign(keyObj)
 
-        console.log("generate jwt is: ", jwt)
-        
         this.#tokens.delete(authKey)
 
         return jwt

@@ -660,11 +660,10 @@ export async function startServer(params: StartServerParams) {
         typeDefs,
         resolvers,
         mocks,
-        context: (req) => {
+        context: async (req) => {
             // Get the user token from the headers.
             const authToken = req.connection?.context.headers.authorization || ''
-            
-            const capabilities = core.agentService.getCapabilities(authToken)
+            const capabilities = await core.agentService.getCapabilities(authToken)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
             
             return { capabilities };
