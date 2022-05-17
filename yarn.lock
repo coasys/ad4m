@@ -1603,13 +1603,6 @@
   "resolved" "https://registry.npmjs.org/@types/json-stable-stringify/-/json-stable-stringify-1.0.33.tgz"
   "version" "1.0.33"
 
-"@types/jsonwebtoken@^8.5.8":
-  "integrity" "sha512-zm6xBQpFDIDM6o9r6HSgDeIcLy82TKWctCXEPbJJcXb5AKmi5BNNdLXneixK4lplX3PqIVcwLBCGE/kAGnlD4A=="
-  "resolved" "https://registry.npmjs.org/@types/jsonwebtoken/-/jsonwebtoken-8.5.8.tgz"
-  "version" "8.5.8"
-  dependencies:
-    "@types/node" "*"
-
 "@types/keygrip@*":
   "integrity" "sha512-GJhpTepz2udxGexqos8wgaBx4I/zWIDPh/KOGEwAqtuGDkOUJu5eFvwmdBX4AmB8Odsr+9pHCQqiAqDL/yKMKw=="
   "resolved" "https://registry.npmjs.org/@types/keygrip/-/keygrip-1.0.2.tgz"
