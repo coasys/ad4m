@@ -11,7 +11,7 @@ import type { PubSub } from 'apollo-server';
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import { AllCapability, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, RequestAuthCapability } from './Auth';
+import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, AUTH_CAPABILITY, Capability } from './Auth';
 import * as jose from 'jose'
 import * as crypto from "crypto"
 import KeyEncoder from 'key-encoder'
@@ -44,15 +44,6 @@ export default class AgentService {
         this.#tokens = new Map()
         this.#tokenValidPeriod = DefaultTokenValidPeriod
         this.#adminCredential = reqCredential || ''
-        // if (reqCredential) {
-        //     let authInfo = {
-        //         appName: "ad4m",
-        //         appDesc: "Admin app of ad4m local service",
-        //         appUrl: "https://ad4m.dev",
-        //         permissions: [AllCapability],
-        //     } as AuthInfo
-        //     this.#tokens.set(genAuthKey(reqCredential, 0), authInfo)
-        // }
     }
 
     get did() {
@@ -295,11 +286,11 @@ export default class AgentService {
 
     async getCapabilities(token: string) {
         if (token == this.#adminCredential) {
-            return [AllCapability]
+            return [ALL_CAPABILITY]
         }
         
         if (token === '') {
-            return [RequestAuthCapability]
+            return [AUTH_CAPABILITY]
         }
 
         const key = this.getSigningKey()
@@ -307,12 +298,12 @@ export default class AgentService {
         const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
 
         const pubKeyObj = crypto.createPublicKey(pemPublicKey)
-        const { payload, protectedHeader } = await jose.jwtVerify(token, pubKeyObj)
+        const { payload } = await jose.jwtVerify(token, pubKeyObj)
 
         return payload.capabilities
     }
     
-    requestAuth(appName: string, appDesc: string, appUrl: string, capabilities: string[]) {
+    requestAuth(appName: string, appDesc: string, appUrl: string, capabilities: string) {
         let requestId = uuidv4()
         let authExtended = {
             requestId,
@@ -320,7 +311,7 @@ export default class AgentService {
                 appName,
                 appDesc,
                 appUrl,
-                capabilities,
+                capabilities: JSON.parse(capabilities),
             } as AuthInfo,
         } as AuthInfoExtended
         
@@ -337,19 +328,15 @@ export default class AgentService {
         return requestId
     }
 
-    permitAuth(adjustedAuth: string, capabilities: string[]) {
+    permitAuth(adjustedAuth: string, capabilities: Capability[]) {
         console.log("admin user capabilities: ", capabilities)
         console.log("auth info: ", adjustedAuth)
-        if(capabilities.includes(AllCapability)) {
-            let { requestId, auth }: AuthInfoExtended = JSON.parse(adjustedAuth)
-            let rand = genAuthRand()
-            this.#tokens.set(genAuthKey(requestId, rand), auth)
-            return {
-                isPermitted: true,
-                rand: rand,
-            }
-        }
-        return { isPermitted: false }
+
+        let { requestId, auth }: AuthInfoExtended = JSON.parse(adjustedAuth)
+        let rand = genAuthRand()
+        this.#tokens.set(genAuthKey(requestId, rand), auth)
+        
+        return rand
     }
 
     async generateJwt(requestId: string, rand: string) {

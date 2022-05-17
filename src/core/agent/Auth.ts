@@ -1,20 +1,70 @@
-export const AllCapability = "*"
-export const RequestAuthCapability = "RequestAuthCapability"
+import * as lodash from "lodash"
 
-export const AgentQueryCapability = "AgentQueryCapability"
-export const AgentMutationCapability = "AgentMutationCapability"
+export type Capabilities = Capability[]
+export interface Capability {
+    with: Resource,
+    can: string[],
+}
 
-export const LanguageQueryCapability = "LanguageQueryCapability"
-export const LanguageMutationCapability = "LanguageMutationCapability"
+interface Resource {
+    domain: string,
+    pointers: string[],
+}
 
-export const ExpressionQueryCapability = "ExpressionQueryCapability"
-export const ExpressionMutationCapability = "ExpressionMutationCapability"
+const WILD_CARD = "*"
 
-export const PerspectiveQueryCapability = "PerspectiveQueryCapability"
-export const PerspectiveMutationCapability = "PerspectiveMutationCapability"
+export const ALL_CAPABILITY: Capability = {
+    with: {
+        domain: WILD_CARD,
+        pointers: [WILD_CARD],
+    },
+    can: [WILD_CARD],
+}
+export const AUTH_CAPABILITY: Capability = {
+    with: {
+        domain: "agent",
+        pointers: [WILD_CARD],
+    },
+    can: ["AUTHENTICATE"]
+}
+export const AGENT_QUERY_CAPABILITY: Capability = {
+    with: {
+        domain: "agent",
+        pointers: [WILD_CARD],
+    },
+    can: ["QUERY"]
+}
+export const AGENT_MUTATION_CAPABILITY: Capability = {
+    with: {
+        domain: "agent",
+        pointers: [WILD_CARD],
+    },
+    can: ["MUTATION"]
+}
 
-export const RuntimeQueryCapability = "RuntimeQueryCapability"
-export const RuntimeMutationCapability = "RuntimeMutationCapability"
+export const checkCapability = (capabilities: Capabilities, expected: Capability) => {
+    console.log("~~~~~~~~~~~~~ capabilities ~~~~~~~~~~~~: ", JSON.stringify(capabilities))
+    console.log("~~~~~~~~~~~~~ expected ~~~~~~~~~~~~: ", JSON.stringify(expected))
+    const customCapMatch = (cap: Capability, expected: Capability) => {
+        if (cap.with.domain !== WILD_CARD && cap.with.domain !== expected.with.domain) {
+            return false;
+        }
+
+        if (!lodash.isEqual(cap.with.pointers, [WILD_CARD]) && lodash.difference(expected.with.pointers, cap.with.pointers).length > 0 ) {
+            return false;
+        }
+
+        if (!lodash.isEqual(cap.can, [WILD_CARD]) && lodash.difference(expected.can, cap.can).length > 0) {
+            return false;
+        }
+
+        return true
+    }
+
+    if(!lodash.find(capabilities, cap => lodash.isEqualWith(cap, expected, customCapMatch))) {
+        throw Error("Capability is not matched")
+    }
+}
 
 export const DefaultTokenValidPeriod = 7 * 24 * 60 * 60; // 7 days in seconds
 
@@ -26,7 +76,7 @@ export interface AuthInfo {
     appName: string,
     appDesc: string,
     appUrl: string,
-    capabilities?: string[], 
+    capabilities?: Capability[], 
 }
 
 export const genAuthRand = () => {

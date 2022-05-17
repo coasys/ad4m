@@ -7,6 +7,7 @@ import * as Config from "../Config";
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
+import { AGENT_MUTATION_CAPABILITY, AGENT_QUERY_CAPABILITY, ALL_CAPABILITY, AUTH_CAPABILITY, checkCapability } from '../agent/Auth'
 
 function createResolvers(core: PerspectivismCore) {
     const pubsub = PubSub.get()
@@ -30,7 +31,9 @@ function createResolvers(core: PerspectivismCore) {
                     return null
                 }
             },
-            agentStatus: () => {
+            //@ts-ignore
+            agentStatus: (parent, args, context, info) => {
+                checkCapability(context.capabilities, AGENT_QUERY_CAPABILITY)
                 return core.agentService.dump()
             },
             //@ts-ignore
@@ -252,6 +255,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentUnlock:  async (parent, args, context, info) => {
+                checkCapability(context.capabilities, AGENT_MUTATION_CAPABILITY)
                 let failed = false
                 try {
                     await core.agentService.unlock(args.passphrase)
@@ -292,17 +296,20 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             agentRequestAuth: async (parent, args, context, info) => {
                 const { appName, appDesc, appUrl, requestCapabilities } = args;
+                checkCapability(context.capabilities, AUTH_CAPABILITY)
                 let token = core.agentService.requestAuth(appName, appDesc, appUrl, requestCapabilities);
                 return token;
             },
             //@ts-ignore
             agentPermitAuth: (parent, args, context, info) => {
                 const { auth } = args;
+                checkCapability(context.capabilities, ALL_CAPABILITY)
                 return core.agentService.permitAuth(auth, context.capabilities);
             },
             //@ts-ignore
             agentGenerateJwt: async (parent, args, context, info) => {
                 const { requestId, rand } = args;
+                checkCapability(context.capabilities, AUTH_CAPABILITY)
                 let jwt = await core.agentService.generateJwt(requestId, rand)
                 return jwt;
             },
