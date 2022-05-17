@@ -21,7 +21,8 @@
     "publish-test-languages": "npm run build && node ./lib/tests/publishTestLangs.js",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
-    "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js"
+    "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js",
+    "jest": "jest"
   },
   "repository": {
     "type": "git",

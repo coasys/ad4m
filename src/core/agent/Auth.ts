@@ -43,8 +43,6 @@ export const AGENT_MUTATION_CAPABILITY: Capability = {
 }
 
 export const checkCapability = (capabilities: Capabilities, expected: Capability) => {
-    console.log("~~~~~~~~~~~~~ capabilities ~~~~~~~~~~~~: ", JSON.stringify(capabilities))
-    console.log("~~~~~~~~~~~~~ expected ~~~~~~~~~~~~: ", JSON.stringify(expected))
     const customCapMatch = (cap: Capability, expected: Capability) => {
         if (cap.with.domain !== WILD_CARD && cap.with.domain !== expected.with.domain) {
             return false;
