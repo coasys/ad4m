@@ -26,7 +26,7 @@ export default class AgentService {
     #agent?: Agent
     #agentLanguage?: Language
     #pubsub: PubSub
-    #tokens: Map<string, AuthInfo>
+    #requests: Map<string, AuthInfo>
     #tokenValidPeriod: number
     #adminCredential: string
     
@@ -41,7 +41,7 @@ export default class AgentService {
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
         })
-        this.#tokens = new Map()
+        this.#requests = new Map()
         this.#tokenValidPeriod = DefaultTokenValidPeriod
         this.#adminCredential = reqCredential || ''
     }
@@ -334,7 +334,7 @@ export default class AgentService {
 
         let { requestId, auth }: AuthInfoExtended = JSON.parse(adjustedAuth)
         let rand = genAuthRand()
-        this.#tokens.set(genAuthKey(requestId, rand), auth)
+        this.#requests.set(genAuthKey(requestId, rand), auth)
         
         return rand
     }
@@ -342,7 +342,7 @@ export default class AgentService {
     async generateJwt(requestId: string, rand: string) {
         const authKey = genAuthKey(requestId, rand)
         console.log("rand number with requestId: ", authKey)
-        const auth = this.#tokens.get(authKey)
+        const auth = this.#requests.get(authKey)
 
         if (!auth) {
             throw new Error("Can't find permitted request")
@@ -362,7 +362,7 @@ export default class AgentService {
             .setExpirationTime(`${this.#tokenValidPeriod}s`)
             .sign(keyObj)
 
-        this.#tokens.delete(authKey)
+        this.#requests.delete(authKey)
 
         return jwt
     }
