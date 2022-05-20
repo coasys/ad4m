@@ -77,10 +77,10 @@ export interface AuthInfo {
     capabilities?: Capability[], 
 }
 
-export const genAuthRand = () => {
+export const genRandomDigits = () => {
     return Math.floor(100000 + Math.random() * 900000).toString()
 }
 
-export const genAuthKey = (requestId: string, rand: string) => {
+export const genRequestKey = (requestId: string, rand: string) => {
     return `${requestId}-${rand}`
 }

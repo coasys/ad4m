@@ -1,4 +1,4 @@
-import { AGENT_MUTATION_CAPABILITY, AGENT_QUERY_CAPABILITY, ALL_CAPABILITY, AUTH_CAPABILITY, checkCapability, genAuthKey, genAuthRand } from "./Auth"
+import { AGENT_MUTATION_CAPABILITY, AGENT_QUERY_CAPABILITY, ALL_CAPABILITY, AUTH_CAPABILITY, checkCapability, genRequestKey, genRandomDigits } from "./Auth"
 
 describe('capability constant', () => {
     it('ALL_CAPABILITY is expected', () => {
@@ -70,16 +70,16 @@ describe('checkCapability', () => {
     })
 })
 
-describe('genAuthRand', () => {
+describe('genRandomDigits', () => {
     it('should return a 6-digit string', () => {
-        let rand = genAuthRand()
+        let rand = genRandomDigits()
         expect(rand).toMatch(/^[0-9]{6}$/)
     })
 })
 
-describe('genAuthKey', () => {
+describe('genRequestKey', () => {
     it('should join the requestId and rand', () => {
-        let key = genAuthKey("my-request-id", "123456")
+        let key = genRequestKey("my-request-id", "123456")
         expect(key).toBe("my-request-id-123456")
     })
 })

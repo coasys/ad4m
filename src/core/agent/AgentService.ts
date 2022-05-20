@@ -11,7 +11,7 @@ import type { PubSub } from 'apollo-server';
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genAuthKey, genAuthRand, AUTH_CAPABILITY, Capability } from './Auth';
+import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genRequestKey, genRandomDigits, AUTH_CAPABILITY, Capability } from './Auth';
 import * as jose from 'jose'
 import * as crypto from "crypto"
 import KeyEncoder from 'key-encoder'
@@ -333,14 +333,14 @@ export default class AgentService {
         console.log("auth info: ", authExt)
 
         let { requestId, auth }: AuthInfoExtended = JSON.parse(authExt)
-        let rand = genAuthRand()
-        this.#requests.set(genAuthKey(requestId, rand), auth)
+        let rand = genRandomDigits()
+        this.#requests.set(genRequestKey(requestId, rand), auth)
         
         return rand
     }
 
     async generateJwt(requestId: string, rand: string) {
-        const authKey = genAuthKey(requestId, rand)
+        const authKey = genRequestKey(requestId, rand)
         console.log("rand number with requestId: ", authKey)
         const auth = this.#requests.get(authKey)
 
