@@ -303,7 +303,7 @@ export default class AgentService {
         return payload.capabilities
     }
     
-    requestAuth(appName: string, appDesc: string, appUrl: string, capabilities: string) {
+    requestCapability(appName: string, appDesc: string, appUrl: string, capabilities: string) {
         let requestId = uuidv4()
         let authExtended = {
             requestId,
@@ -320,7 +320,7 @@ export default class AgentService {
             {
                 title: "Request to authenticate application",
                 message: `${appName} is waiting for authentication, go to ad4min for more information.`,
-                type: ExceptionType.RequestAuth,
+                type: ExceptionType.CapabilityRequested,
                 addon: JSON.stringify(authExtended),
             } as ExceptionInfo
         )
@@ -328,11 +328,11 @@ export default class AgentService {
         return requestId
     }
 
-    permitAuth(adjustedAuth: string, capabilities: Capability[]) {
+    permitCapability(authExt: string, capabilities: Capability[]) {
         console.log("admin user capabilities: ", capabilities)
-        console.log("auth info: ", adjustedAuth)
+        console.log("auth info: ", authExt)
 
-        let { requestId, auth }: AuthInfoExtended = JSON.parse(adjustedAuth)
+        let { requestId, auth }: AuthInfoExtended = JSON.parse(authExt)
         let rand = genAuthRand()
         this.#requests.set(genAuthKey(requestId, rand), auth)
         

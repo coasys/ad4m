@@ -294,17 +294,17 @@ function createResolvers(core: PerspectivismCore) {
                 return currentAgent;
             },
             //@ts-ignore
-            agentRequestAuth: async (parent, args, context, info) => {
-                const { appName, appDesc, appUrl, requestCapabilities } = args;
+            agentRequestCapability: async (parent, args, context, info) => {
+                const { appName, appDesc, appUrl, capabilities } = args;
                 checkCapability(context.capabilities, AUTH_CAPABILITY)
-                let token = core.agentService.requestAuth(appName, appDesc, appUrl, requestCapabilities);
+                let token = core.agentService.requestCapability(appName, appDesc, appUrl, capabilities);
                 return token;
             },
             //@ts-ignore
-            agentPermitAuth: (parent, args, context, info) => {
+            agentPermitCapability: (parent, args, context, info) => {
                 const { auth } = args;
                 checkCapability(context.capabilities, ALL_CAPABILITY)
-                return core.agentService.permitAuth(auth, context.capabilities);
+                return core.agentService.permitCapability(auth, context.capabilities);
             },
             //@ts-ignore
             agentGenerateJwt: async (parent, args, context, info) => {
