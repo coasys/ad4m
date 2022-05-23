@@ -10,12 +10,6 @@ import { OuterConfig } from "../types";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import PerspectivismCore from "../core/PerspectivismCore";
-import sleep from "./sleep"
-
-const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
-const appDataPath = path.join(TEST_DIR, "agents", "auth-agent");
-const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
-const ipfsRepoPath = path.join(appDataPath);
 
 function apolloClient(port: number, token?: string): ApolloClient<any> {
     return new ApolloClient({
@@ -47,8 +41,17 @@ function apolloClient(port: number, token?: string): ApolloClient<any> {
 
 describe("Authentication integration tests", () => {
     describe("admin credential is not set", () => {
+        const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
+        const appDataPath = path.join(TEST_DIR, "agents", "unauth-agent");
+        const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
+        const ipfsRepoPath = path.join(appDataPath);
+        const gqlPort = 16000
+        const hcPortAdmin = 16001
+        const hcPortApp = 16002
+        const ipfsSwarmPort = 16003
+
         let core: PerspectivismCore | null = null
-        let unAuthenticatedAppAd4mClient: Ad4mClient | null = null
+        let ad4mClient: Ad4mClient | null = null
 
         beforeAll(async () => {
             if (!fs.existsSync(appDataPath)) {
@@ -64,10 +67,10 @@ describe("Authentication integration tests", () => {
                     perspectives: [],
                 },
                 mocks: false,
-                gqlPort: 14000,
-                hcPortAdmin: 12000,
-                hcPortApp: 11337,
-                ipfsSwarmPort: 14002,
+                gqlPort,
+                hcPortAdmin,
+                hcPortApp,
+                ipfsSwarmPort,
                 ipfsRepoPath,
                 hcUseBootstrap: false,
                 hcUseProxy: false,
@@ -78,31 +81,39 @@ describe("Authentication integration tests", () => {
             core.initControllers()
             await core.initLanguages()
 
-            unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(14000))
-            await unAuthenticatedAppAd4mClient.agent.generate("passphrase")
+            ad4mClient = new Ad4mClient(apolloClient(gqlPort))
+            await ad4mClient.agent.generate("passphrase")
         })
 
         afterAll(async () => {
             await core!.exit();
-            await sleep(500)
         })
 
         it("unauthenticated user has all the capabilities", async () => {
-            let status = await unAuthenticatedAppAd4mClient!.agent.status()
+            let status = await ad4mClient!.agent.status()
             expect(status.isUnlocked).toBeTruthy
 
-            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
+            let requestId = await ad4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
             expect(requestId).toMatch(/.+/)
 
-            let rand = await unAuthenticatedAppAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]}}`)
+            let rand = await ad4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]}}`)
             expect(rand).toMatch(/\d+/)
 
-            let jwt = await unAuthenticatedAppAd4mClient!.agent.generateJwt(requestId, rand)
+            let jwt = await ad4mClient!.agent.generateJwt(requestId, rand)
             expect(jwt).toMatch(/.+/)
         })
     })
 
     describe("admin credential is set", () => {
+        const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
+        const appDataPath = path.join(TEST_DIR, "agents", "auth-agent");
+        const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
+        const ipfsRepoPath = path.join(appDataPath);
+        const gqlPort = 15000
+        const hcPortAdmin = 15001
+        const hcPortApp = 15002
+        const ipfsSwarmPort = 15003
+
         let agentCore: PerspectivismCore | null = null
         let adminAd4mClient: Ad4mClient | null = null
         let unAuthenticatedAppAd4mClient: Ad4mClient | null = null
@@ -121,6 +132,10 @@ describe("Authentication integration tests", () => {
                     perspectives: [],
                 },
                 mocks: false,
+                gqlPort,
+                hcPortAdmin,
+                hcPortApp,
+                ipfsSwarmPort,
                 ipfsRepoPath,
                 hcUseBootstrap: false,
                 hcUseProxy: false,
@@ -132,15 +147,14 @@ describe("Authentication integration tests", () => {
             agentCore.initControllers()
             await agentCore.initLanguages()
 
-            adminAd4mClient = new Ad4mClient(apolloClient(4000, "123"))
+            adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"))
             await adminAd4mClient.agent.generate("passphrase")
 
-            unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(4000))
+            unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort))
         })
 
         afterAll(async () => {
             await agentCore!.exit();
-            await sleep(500)
         })
 
         it("unauthenticated user can not query agent status", async () => {
@@ -192,13 +206,13 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(4000, jwt))
+            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
 
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
         })
 
         it("user with invalid jwt can not query agent status", async () => {
-            let ad4mClient = new Ad4mClient(apolloClient(4000, "invalid-jwt"))
+            let ad4mClient = new Ad4mClient(apolloClient(gqlPort, "invalid-jwt"))
 
             const call = async () => {
                 return await ad4mClient!.agent.status()
@@ -209,12 +223,12 @@ describe("Authentication integration tests", () => {
                 .toThrow("Invalid Compact JWS")
         })
 
-        it("authenticated user can not query agent status if capability is matched", async () => {
+        it("authenticated user can not query agent status if capability is not matched", async () => {
             let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["MUTATION"]}]')
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["MUTATION"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(4000, jwt))
+            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
 
             const call = async () => {
                 return await authenticatedAppAd4mClient!.agent.status()
