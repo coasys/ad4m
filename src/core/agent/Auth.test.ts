@@ -68,6 +68,13 @@ describe('checkCapability', () => {
         }
         expect(call).not.toThrow();
     })
+
+    it('agent with AGENT_QUERY_CAPABILITY can request the agent status', () => {
+        const call = () => {
+            checkCapability([AGENT_QUERY_CAPABILITY], AGENT_QUERY_CAPABILITY)
+        }
+        expect(call).not.toThrow();
+    })
 })
 
 describe('genRandomDigits', () => {
