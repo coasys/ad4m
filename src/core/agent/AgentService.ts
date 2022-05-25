@@ -43,7 +43,12 @@ export default class AgentService {
         })
         this.#requests = new Map()
         this.#tokenValidPeriod = DefaultTokenValidPeriod
-        this.#adminCredential = reqCredential || ''
+        if(reqCredential) {
+            this.#adminCredential = reqCredential
+        } else {
+            console.warn("reqCredential is not set or empty, empty token will possess admin capabililities.")
+            this.#adminCredential = ""
+        }
     }
 
     get did() {
@@ -328,6 +333,8 @@ export default class AgentService {
         return requestId
     }
 
+    // TODO, we may want to change the capability request workflow.
+    // https://github.com/perspect3vism/ad4m-executor/issues/73
     permitCapability(authExt: string, capabilities: Capability[]) {
         console.log("admin user capabilities: ", capabilities)
         console.log("auth info: ", authExt)
