@@ -12,10 +12,13 @@ interface Resource {
 }
 
 const WILD_CARD = "*"
+
 const READ = "READ"
 const CREATE = "CREATE"
 const UPDATE = "UPDATE"
 const DELETE = "DELETE"
+
+const PERSPECTIVE = "perspective"
 
 export const ALL_CAPABILITY: Capability = {
     with: {
@@ -82,6 +85,23 @@ export const EXPRESSION_QUERY_CAPABILITY: Capability = {
     },
     can: ["READ"]
 }
+
+export const EXPRESSION_CREATE_CAPABILITY: Capability = {
+    with: {
+        domain: "expression",
+        pointers: [WILD_CARD],
+    },
+    can: [CREATE]
+}
+
+export const EXPRESSION_UPDATE_CAPABILITY: Capability = {
+    with: {
+        domain: "expression",
+        pointers: [WILD_CARD],
+    },
+    can: [UPDATE]
+}
+
 export const LANGUAGE_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "language",
@@ -89,15 +109,70 @@ export const LANGUAGE_QUERY_CAPABILITY: Capability = {
     },
     can: ["READ"]
 }
+export const LANGUAGE_CREATE_CAPABILITY: Capability = {
+    with: {
+        domain: "language",
+        pointers: [WILD_CARD],
+    },
+    can: [CREATE]
+}
+export const LANGUAGE_UPDATE_CAPABILITY: Capability = {
+    with: {
+        domain: "language",
+        pointers: [WILD_CARD],
+    },
+    can: [UPDATE]
+}
+
 export const perspectiveQueryCapability = (pointers: string[]) => {
     return {
         with: {
-            domain: "perspective",
+            domain: PERSPECTIVE,
             pointers: pointers,
         },
-        can: ["READ"]
+        can: [READ]
     } as Capability
-} 
+}
+export const PERSPECTIVE_CREATE_CAPABILITY: Capability = {
+    with: {
+        domain: PERSPECTIVE,
+        pointers: [WILD_CARD],
+    },
+    can: [CREATE]
+}
+export const perspectiveUpdateCapability = (pointers: string[]) => {
+    return {
+        with: {
+            domain: PERSPECTIVE,
+            pointers: pointers,
+        },
+        can: [UPDATE]
+    } as Capability
+}
+export const perspectiveDeleteCapability = (pointers: string[]) => {
+    return {
+        with: {
+            domain: PERSPECTIVE,
+            pointers: pointers,
+        },
+        can: [DELETE]
+    } as Capability
+}
+
+export const NEIGHBOURHOOD_CREATE_CAPABILITY: Capability = {
+    with: {
+        domain: "neighbourhood",
+        pointers: [WILD_CARD],
+    },
+    can: [CREATE]
+}
+export const NEIGHBOURHOOD_JOIN_CAPABILITY: Capability = {
+    with: {
+        domain: "neighbourhood",
+        pointers: [WILD_CARD],
+    },
+    can: ["JOIN"]
+}
 
 export const RUNTIME_TRUSTED_AGENTS_QUERY_CAPABILITY: Capability = {
     with: {
@@ -172,6 +247,13 @@ export const RUNTIME_FRIEND_STATUS_QUERY_CAPABILITY: Capability = {
     },
     can: ["READ"]
 }
+export const RUNTIME_MY_STATUS_UPDATE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.friend_status",
+        pointers: [WILD_CARD],
+    },
+    can: [UPDATE]
+}
 export const RUNTIME_HC_AGENT_INFO_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.hc_agent_info",
@@ -179,12 +261,33 @@ export const RUNTIME_HC_AGENT_INFO_QUERY_CAPABILITY: Capability = {
     },
     can: ["READ"]
 }
+export const RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.hc_agent_info",
+        pointers: [WILD_CARD],
+    },
+    can: [CREATE]
+}
 export const RUNTIME_MESSAGES_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.messages",
         pointers: [WILD_CARD],
     },
     can: ["READ"]
+}
+export const RUNTIME_MESSAGES_CREATE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.messages",
+        pointers: [WILD_CARD],
+    },
+    can: [CREATE]
+}
+export const RUNTIME_QUIT_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime",
+        pointers: [WILD_CARD],
+    },
+    can: ["QUIT"]
 }
 
 export const checkCapability = (capabilities: Capabilities, expected: Capability) => {
