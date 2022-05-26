@@ -513,7 +513,7 @@ function createResolvers(core: PerspectivismCore) {
 
             //@ts-ignore
             runtimeFriendSendMessage: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, Auth.RUNTIME_MY_STATUS_UPDATE_CAPABILITY)
+                checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_CREATE_CAPABILITY)
                 const { did, message } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
                 const dmLang = await core.friendsDirectMessageLanguage(did)
