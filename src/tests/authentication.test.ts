@@ -93,10 +93,10 @@ describe("Authentication integration tests", () => {
             let status = await ad4mClient!.agent.status()
             expect(status.isUnlocked).toBeTruthy
 
-            let requestId = await ad4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
+            let requestId = await ad4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]')
             expect(requestId).toMatch(/.+/)
 
-            let rand = await ad4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]}}`)
+            let rand = await ad4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
             expect(rand).toMatch(/\d+/)
 
             let jwt = await ad4mClient!.agent.generateJwt(requestId, rand)
@@ -169,7 +169,7 @@ describe("Authentication integration tests", () => {
 
         it("unauthenticated user can request capability", async () => {
             const call = async () => {
-                return await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
+                return await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]')
             }
 
             await expect(call())
@@ -178,9 +178,9 @@ describe("Authentication integration tests", () => {
         })
 
         it("admin user can permit capability", async () => {
-            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
+            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]')
             const call = async () => {
-                return await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]}}`)
+                return await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
             }
 
             await expect(call())
@@ -189,8 +189,8 @@ describe("Authentication integration tests", () => {
         })
 
         it("unauthenticated user can generate jwt with a secret", async () => {
-            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
-            let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]}}`)
+            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]')
+            let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
 
             const call = async () => {
                 return await adminAd4mClient!.agent.generateJwt(requestId, rand)
@@ -202,8 +202,8 @@ describe("Authentication integration tests", () => {
         })
 
         it("authenticated user can query agent status if capability matched", async () => {
-            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
-            let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]}}`)
+            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]')
+            let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))

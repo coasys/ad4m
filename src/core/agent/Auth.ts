@@ -32,7 +32,7 @@ export const AGENT_QUERY_CAPABILITY: Capability = {
         domain: "agent",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
 }
 export const AGENT_MUTATION_CAPABILITY: Capability = {
     with: {
@@ -46,14 +46,14 @@ export const EXPRESSION_QUERY_CAPABILITY: Capability = {
         domain: "expression",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
 }
 export const LANGUAGE_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "language",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
 }
 export const perspectiveQueryCapability = (pointers: string[]) => {
     return {
@@ -61,7 +61,7 @@ export const perspectiveQueryCapability = (pointers: string[]) => {
             domain: "perspective",
             pointers: pointers,
         },
-        can: ["QUERY"]
+        can: ["READ"]
     } as Capability
 } 
 export const RUNTIME_TRUSTED_AGENTS_QUERY_CAPABILITY: Capability = {
@@ -69,42 +69,49 @@ export const RUNTIME_TRUSTED_AGENTS_QUERY_CAPABILITY: Capability = {
         domain: "runtime.trusted_agents",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
+}
+export const RUNTIME_TRUSTED_AGENTS_ADD_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.trusted_agents",
+        pointers: [WILD_CARD],
+    },
+    can: ["CREATE"]
 }
 export const RUNTIME_KNOWN_LINK_LANGUAGES_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.known_link_languages",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
 }
 export const RUNTIME_FRIENDS_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.friends",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
 }
 export const RUNTIME_FRIEND_STATUS_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.friend_status",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
 }
 export const RUNTIME_HC_AGENT_INFO_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.hc_agent_info",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
 }
 export const RUNTIME_MESSAGES_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.messages",
         pointers: [WILD_CARD],
     },
-    can: ["QUERY"]
+    can: ["READ"]
 }
 
 export const checkCapability = (capabilities: Capabilities, expected: Capability) => {

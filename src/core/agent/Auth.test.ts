@@ -16,7 +16,7 @@ describe('capability constant', () => {
     it('AGENT_QUERY_CAPABILITY is expected', () => {
         expect(AGENT_QUERY_CAPABILITY.with.domain).toEqual("agent")
         expect(AGENT_QUERY_CAPABILITY.with.pointers).toEqual(["*"])
-        expect(AGENT_QUERY_CAPABILITY.can).toEqual(["QUERY"])
+        expect(AGENT_QUERY_CAPABILITY.can).toEqual(["READ"])
     })
 
     it('AGENT_MUTATION_CAPABILITY is expected', () => {
