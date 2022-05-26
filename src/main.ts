@@ -45,6 +45,8 @@ export interface OuterConfig {
   hcUseBootstrap?: boolean,
   //Should ad4m-executor connect to an existing holochain instance, or spawn its own
   connectHolochain?: boolean,
+  //The credential used by admin client to make request
+  reqCredential?: string,
 }
 
 export interface SeedFileSchema {
@@ -81,7 +83,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       mocks, gqlPort, 
       hcPortAdmin, hcPortApp,
       ipfsSwarmPort, ipfsRepoPath,
-      hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, connectHolochain
+      hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, connectHolochain, reqCredential
     } = config
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
@@ -176,7 +178,8 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       trustedAgents: networkBootstrapSeedData.trustedAgents,
       languageAliases,
       bootstrapFixtures,
-      languageLanguageOnly
+      languageLanguageOnly,
+      reqCredential
     } as CoreConfig);
 
     console.log("\x1b[34m", "Init services...", "\x1b[0m");
