@@ -164,7 +164,7 @@ describe("Authentication integration tests", () => {
 
             await expect(call())
                 .rejects
-                .toThrow("Capability is not matched");
+                .toThrowError("Capability is not matched");
         })
 
         it("unauthenticated user can request capability", async () => {
@@ -236,7 +236,7 @@ describe("Authentication integration tests", () => {
 
             await expect(call())
                 .rejects
-                .toThrow("Capability is not matched")
+                .toThrowError("Capability is not matched")
         })
     })
 })

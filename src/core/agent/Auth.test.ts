@@ -52,7 +52,7 @@ describe('checkCapability', () => {
         const call = () => {
             checkCapability([AGENT_AUTH_CAPABILITY], AGENT_READ_CAPABILITY)
         }
-        expect(call).toThrow(Error("Capability is not matched"));
+        expect(call).toThrowError("Capability is not matched");
     })
 
     it('agent with AGENT_AUTH_CAPABILITY can not mutate the agent', () => {

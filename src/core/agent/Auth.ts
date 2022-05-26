@@ -18,6 +18,7 @@ const READ = "READ"
 const CREATE = "CREATE"
 const UPDATE = "UPDATE"
 const DELETE = "DELETE"
+const SUBSCRIBE = "SUBSCRIBE"
 
 // capabilities domains
 const AGENT = "agent"
@@ -29,6 +30,7 @@ const RUNTIME = "runtime"
 const RUNTIME_TRUSTED_AGENTS = "runtime.trusted_agents"
 const RUNTIME_KNOWN_LINK_LANGUAGES = "runtime.known_link_languages"
 const RUNTIME_FRIENDS = "runtime.friends"
+const RUNTIME_MESSAGES = "runtime.messages"
 
 // admin capabilities
 export const ALL_CAPABILITY: Capability = {
@@ -88,6 +90,13 @@ export const AGENT_PERMIT_CAPABILITY: Capability = {
         pointers: [WILD_CARD],
     },
     can: ["PERMIT"]
+}
+export const AGENT_SUBSCRIBE_CAPABILITY: Capability = {
+    with: {
+        domain: AGENT,
+        pointers: [WILD_CARD],
+    },
+    can: [SUBSCRIBE]
 }
 
 // expression related capabilites
@@ -172,6 +181,13 @@ export const perspectiveDeleteCapability = (pointers: string[]) => {
         },
         can: [DELETE]
     } as Capability
+}
+export const PERSPECTIVE_SUBSCRIBE_CAPABILITY: Capability = {
+    with: {
+        domain: PERSPECTIVE,
+        pointers: [WILD_CARD],
+    },
+    can: [SUBSCRIBE]
 }
 
 // neighbourhood related capabilities
@@ -287,17 +303,24 @@ export const RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY: Capability = {
 }
 export const RUNTIME_MESSAGES_READ_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.messages",
+        domain: RUNTIME_MESSAGES,
         pointers: [WILD_CARD],
     },
     can: [READ]
 }
 export const RUNTIME_MESSAGES_CREATE_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.messages",
+        domain: RUNTIME_MESSAGES,
         pointers: [WILD_CARD],
     },
     can: [CREATE]
+}
+export const RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY: Capability = {
+    with: {
+        domain: RUNTIME_MESSAGES,
+        pointers: [WILD_CARD],
+    },
+    can: [SUBSCRIBE]
 }
 export const RUNTIME_QUIT_CAPABILITY: Capability = {
     with: {
@@ -305,6 +328,13 @@ export const RUNTIME_QUIT_CAPABILITY: Capability = {
         pointers: [WILD_CARD],
     },
     can: ["QUIT"]
+}
+export const RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.exception",
+        pointers: [WILD_CARD],
+    },
+    can: [SUBSCRIBE]
 }
 
 export const checkCapability = (capabilities: Capabilities, expected: Capability) => {
@@ -325,7 +355,7 @@ export const checkCapability = (capabilities: Capabilities, expected: Capability
     }
 
     if(!lodash.find(capabilities, cap => lodash.isEqualWith(cap, expected, customCapMatch))) {
-        throw Error("Capability is not matched")
+        throw Error(`Capability is not matched, you have capabilities: ${JSON.stringify(capabilities)}, expected: ${JSON.stringify(expected)}`)
     }
 }
 
