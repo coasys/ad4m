@@ -1,4 +1,4 @@
-import { AGENT_MUTATION_CAPABILITY, AGENT_QUERY_CAPABILITY, ALL_CAPABILITY, AUTH_CAPABILITY, checkCapability, genRequestKey, genRandomDigits } from "./Auth"
+import { AGENT_CREATE_CAPABILITY, AGENT_QUERY_CAPABILITY, ALL_CAPABILITY, AUTH_CAPABILITY, checkCapability, genRequestKey, genRandomDigits } from "./Auth"
 
 describe('capability constant', () => {
     it('ALL_CAPABILITY is expected', () => {
@@ -19,10 +19,10 @@ describe('capability constant', () => {
         expect(AGENT_QUERY_CAPABILITY.can).toEqual(["READ"])
     })
 
-    it('AGENT_MUTATION_CAPABILITY is expected', () => {
-        expect(AGENT_MUTATION_CAPABILITY.with.domain).toEqual("agent")
-        expect(AGENT_MUTATION_CAPABILITY.with.pointers).toEqual(["*"])
-        expect(AGENT_MUTATION_CAPABILITY.can).toEqual(["MUTATION"])
+    it('AGENT_CREATE_CAPABILITY is expected', () => {
+        expect(AGENT_CREATE_CAPABILITY.with.domain).toEqual("agent")
+        expect(AGENT_CREATE_CAPABILITY.with.pointers).toEqual(["*"])
+        expect(AGENT_CREATE_CAPABILITY.can).toEqual(["CREATE"])
     })
 })
 
@@ -43,7 +43,7 @@ describe('checkCapability', () => {
 
     it('agent with ALL_CAPABILITY can mutate the agent', () => {
         const call = () => {
-            checkCapability([ALL_CAPABILITY], AGENT_MUTATION_CAPABILITY)
+            checkCapability([ALL_CAPABILITY], AGENT_CREATE_CAPABILITY)
         }
         expect(call).not.toThrow();
     })
@@ -57,7 +57,7 @@ describe('checkCapability', () => {
 
     it('agent with AUTH_CAPABILITY can not mutate the agent', () => {
         const call = () => {
-            checkCapability([AUTH_CAPABILITY], AGENT_MUTATION_CAPABILITY)
+            checkCapability([AUTH_CAPABILITY], AGENT_CREATE_CAPABILITY)
         }
         expect(call).toThrow();
     })

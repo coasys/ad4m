@@ -12,6 +12,10 @@ interface Resource {
 }
 
 const WILD_CARD = "*"
+const READ = "READ"
+const CREATE = "CREATE"
+const UPDATE = "UPDATE"
+const DELETE = "DELETE"
 
 export const ALL_CAPABILITY: Capability = {
     with: {
@@ -20,6 +24,7 @@ export const ALL_CAPABILITY: Capability = {
     },
     can: [WILD_CARD],
 }
+
 export const AUTH_CAPABILITY: Capability = {
     with: {
         domain: "agent",
@@ -34,13 +39,42 @@ export const AGENT_QUERY_CAPABILITY: Capability = {
     },
     can: ["READ"]
 }
-export const AGENT_MUTATION_CAPABILITY: Capability = {
+export const AGENT_CREATE_CAPABILITY: Capability = {
     with: {
         domain: "agent",
         pointers: [WILD_CARD],
     },
-    can: ["MUTATION"]
+    can: [CREATE]
 }
+export const AGENT_UPDATE_CAPABILITY: Capability = {
+    with: {
+        domain: "agent",
+        pointers: [WILD_CARD],
+    },
+    can: [UPDATE]
+}
+export const AGENT_LOCK_CAPABILITY: Capability = {
+    with: {
+        domain: "agent",
+        pointers: [WILD_CARD],
+    },
+    can: ["LOCK"]
+}
+export const AGENT_UNLOCK_CAPABILITY: Capability = {
+    with: {
+        domain: "agent",
+        pointers: [WILD_CARD],
+    },
+    can: ["UNLOCK"]
+}
+export const AGENT_PERMIT_CAPABILITY: Capability = {
+    with: {
+        domain: "agent",
+        pointers: [WILD_CARD],
+    },
+    can: ["PERMIT"]
+}
+
 export const EXPRESSION_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "expression",
@@ -64,6 +98,7 @@ export const perspectiveQueryCapability = (pointers: string[]) => {
         can: ["READ"]
     } as Capability
 } 
+
 export const RUNTIME_TRUSTED_AGENTS_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.trusted_agents",
@@ -71,13 +106,21 @@ export const RUNTIME_TRUSTED_AGENTS_QUERY_CAPABILITY: Capability = {
     },
     can: ["READ"]
 }
-export const RUNTIME_TRUSTED_AGENTS_ADD_CAPABILITY: Capability = {
+export const RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY: Capability = {
     with: {
         domain: "runtime.trusted_agents",
         pointers: [WILD_CARD],
     },
-    can: ["CREATE"]
+    can: [CREATE]
 }
+export const RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.trusted_agents",
+        pointers: [WILD_CARD],
+    },
+    can: [DELETE]
+}
+
 export const RUNTIME_KNOWN_LINK_LANGUAGES_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.known_link_languages",
@@ -85,6 +128,21 @@ export const RUNTIME_KNOWN_LINK_LANGUAGES_QUERY_CAPABILITY: Capability = {
     },
     can: ["READ"]
 }
+export const RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.known_link_languages",
+        pointers: [WILD_CARD],
+    },
+    can: [CREATE]
+}
+export const RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.known_link_languages",
+        pointers: [WILD_CARD],
+    },
+    can: [DELETE]
+}
+
 export const RUNTIME_FRIENDS_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.friends",
@@ -92,6 +150,21 @@ export const RUNTIME_FRIENDS_QUERY_CAPABILITY: Capability = {
     },
     can: ["READ"]
 }
+export const RUNTIME_FRIENDS_CREATE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.friends",
+        pointers: [WILD_CARD],
+    },
+    can: [CREATE]
+}
+export const RUNTIME_FRIENDS_DELETE_CAPABILITY: Capability = {
+    with: {
+        domain: "runtime.friends",
+        pointers: [WILD_CARD],
+    },
+    can: [DELETE]
+}
+
 export const RUNTIME_FRIEND_STATUS_QUERY_CAPABILITY: Capability = {
     with: {
         domain: "runtime.friend_status",
