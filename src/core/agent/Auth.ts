@@ -13,13 +13,24 @@ interface Resource {
 
 const WILD_CARD = "*"
 
+// capabilities operations
 const READ = "READ"
 const CREATE = "CREATE"
 const UPDATE = "UPDATE"
 const DELETE = "DELETE"
 
+// capabilities domains
+const AGENT = "agent"
+const EXPRESSION = "expression"
+const LANGUAGE = "language"
 const PERSPECTIVE = "perspective"
+const NEIGHBOURHOOD = "neighbourhood"
+const RUNTIME = "runtime"
+const RUNTIME_TRUSTED_AGENTS = "runtime.trusted_agents"
+const RUNTIME_KNOWN_LINK_LANGUAGES = "runtime.known_link_languages"
+const RUNTIME_FRIENDS = "runtime.friends"
 
+// admin capabilities
 export const ALL_CAPABILITY: Capability = {
     with: {
         domain: WILD_CARD,
@@ -28,67 +39,69 @@ export const ALL_CAPABILITY: Capability = {
     can: [WILD_CARD],
 }
 
-export const AUTH_CAPABILITY: Capability = {
+// agent related capabilities
+export const AGENT_AUTH_CAPABILITY: Capability = {
     with: {
-        domain: "agent",
+        domain: AGENT,
         pointers: [WILD_CARD],
     },
     can: ["AUTHENTICATE"]
 }
-export const AGENT_QUERY_CAPABILITY: Capability = {
+export const AGENT_READ_CAPABILITY: Capability = {
     with: {
-        domain: "agent",
+        domain: AGENT,
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 export const AGENT_CREATE_CAPABILITY: Capability = {
     with: {
-        domain: "agent",
+        domain: AGENT,
         pointers: [WILD_CARD],
     },
     can: [CREATE]
 }
 export const AGENT_UPDATE_CAPABILITY: Capability = {
     with: {
-        domain: "agent",
+        domain: AGENT,
         pointers: [WILD_CARD],
     },
     can: [UPDATE]
 }
 export const AGENT_LOCK_CAPABILITY: Capability = {
     with: {
-        domain: "agent",
+        domain: AGENT,
         pointers: [WILD_CARD],
     },
     can: ["LOCK"]
 }
 export const AGENT_UNLOCK_CAPABILITY: Capability = {
     with: {
-        domain: "agent",
+        domain: AGENT,
         pointers: [WILD_CARD],
     },
     can: ["UNLOCK"]
 }
 export const AGENT_PERMIT_CAPABILITY: Capability = {
     with: {
-        domain: "agent",
+        domain: AGENT,
         pointers: [WILD_CARD],
     },
     can: ["PERMIT"]
 }
 
-export const EXPRESSION_QUERY_CAPABILITY: Capability = {
+// expression related capabilites
+export const EXPRESSION_READ_CAPABILITY: Capability = {
     with: {
-        domain: "expression",
+        domain: EXPRESSION,
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 
 export const EXPRESSION_CREATE_CAPABILITY: Capability = {
     with: {
-        domain: "expression",
+        domain: EXPRESSION,
         pointers: [WILD_CARD],
     },
     can: [CREATE]
@@ -96,34 +109,36 @@ export const EXPRESSION_CREATE_CAPABILITY: Capability = {
 
 export const EXPRESSION_UPDATE_CAPABILITY: Capability = {
     with: {
-        domain: "expression",
+        domain: EXPRESSION,
         pointers: [WILD_CARD],
     },
     can: [UPDATE]
 }
 
-export const LANGUAGE_QUERY_CAPABILITY: Capability = {
+// language related capabilities
+export const LANGUAGE_READ_CAPABILITY: Capability = {
     with: {
-        domain: "language",
+        domain: LANGUAGE,
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 export const LANGUAGE_CREATE_CAPABILITY: Capability = {
     with: {
-        domain: "language",
+        domain: LANGUAGE,
         pointers: [WILD_CARD],
     },
     can: [CREATE]
 }
 export const LANGUAGE_UPDATE_CAPABILITY: Capability = {
     with: {
-        domain: "language",
+        domain: LANGUAGE,
         pointers: [WILD_CARD],
     },
     can: [UPDATE]
 }
 
+// perspective related capabilities
 export const perspectiveQueryCapability = (pointers: string[]) => {
     return {
         with: {
@@ -159,107 +174,109 @@ export const perspectiveDeleteCapability = (pointers: string[]) => {
     } as Capability
 }
 
+// neighbourhood related capabilities
 export const NEIGHBOURHOOD_CREATE_CAPABILITY: Capability = {
     with: {
-        domain: "neighbourhood",
+        domain: NEIGHBOURHOOD,
         pointers: [WILD_CARD],
     },
     can: [CREATE]
 }
-export const NEIGHBOURHOOD_JOIN_CAPABILITY: Capability = {
+export const NEIGHBOURHOOD_READ_CAPABILITY: Capability = {
     with: {
-        domain: "neighbourhood",
+        domain: NEIGHBOURHOOD,
         pointers: [WILD_CARD],
     },
-    can: ["JOIN"]
+    can: [READ]
 }
 
-export const RUNTIME_TRUSTED_AGENTS_QUERY_CAPABILITY: Capability = {
+// runtime related capabilities
+export const RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.trusted_agents",
+        domain: RUNTIME_TRUSTED_AGENTS,
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 export const RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.trusted_agents",
+        domain: RUNTIME_TRUSTED_AGENTS,
         pointers: [WILD_CARD],
     },
     can: [CREATE]
 }
 export const RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.trusted_agents",
+        domain: RUNTIME_TRUSTED_AGENTS,
         pointers: [WILD_CARD],
     },
     can: [DELETE]
 }
 
-export const RUNTIME_KNOWN_LINK_LANGUAGES_QUERY_CAPABILITY: Capability = {
+export const RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.known_link_languages",
+        domain: RUNTIME_KNOWN_LINK_LANGUAGES,
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 export const RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.known_link_languages",
+        domain: RUNTIME_KNOWN_LINK_LANGUAGES,
         pointers: [WILD_CARD],
     },
     can: [CREATE]
 }
 export const RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.known_link_languages",
+        domain: RUNTIME_KNOWN_LINK_LANGUAGES,
         pointers: [WILD_CARD],
     },
     can: [DELETE]
 }
 
-export const RUNTIME_FRIENDS_QUERY_CAPABILITY: Capability = {
+export const RUNTIME_FRIENDS_READ_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.friends",
+        domain: RUNTIME_FRIENDS,
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 export const RUNTIME_FRIENDS_CREATE_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.friends",
+        domain: RUNTIME_FRIENDS,
         pointers: [WILD_CARD],
     },
     can: [CREATE]
 }
 export const RUNTIME_FRIENDS_DELETE_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.friends",
+        domain: RUNTIME_FRIENDS,
         pointers: [WILD_CARD],
     },
     can: [DELETE]
 }
 
-export const RUNTIME_FRIEND_STATUS_QUERY_CAPABILITY: Capability = {
+export const RUNTIME_FRIEND_STATUS_READ_CAPABILITY: Capability = {
     with: {
         domain: "runtime.friend_status",
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 export const RUNTIME_MY_STATUS_UPDATE_CAPABILITY: Capability = {
     with: {
-        domain: "runtime.friend_status",
+        domain: "runtime.my_status",
         pointers: [WILD_CARD],
     },
     can: [UPDATE]
 }
-export const RUNTIME_HC_AGENT_INFO_QUERY_CAPABILITY: Capability = {
+export const RUNTIME_HC_AGENT_INFO_READ_CAPABILITY: Capability = {
     with: {
         domain: "runtime.hc_agent_info",
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 export const RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY: Capability = {
     with: {
@@ -268,12 +285,12 @@ export const RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY: Capability = {
     },
     can: [CREATE]
 }
-export const RUNTIME_MESSAGES_QUERY_CAPABILITY: Capability = {
+export const RUNTIME_MESSAGES_READ_CAPABILITY: Capability = {
     with: {
         domain: "runtime.messages",
         pointers: [WILD_CARD],
     },
-    can: ["READ"]
+    can: [READ]
 }
 export const RUNTIME_MESSAGES_CREATE_CAPABILITY: Capability = {
     with: {
@@ -284,7 +301,7 @@ export const RUNTIME_MESSAGES_CREATE_CAPABILITY: Capability = {
 }
 export const RUNTIME_QUIT_CAPABILITY: Capability = {
     with: {
-        domain: "runtime",
+        domain: RUNTIME,
         pointers: [WILD_CARD],
     },
     can: ["QUIT"]

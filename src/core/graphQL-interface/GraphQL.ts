@@ -8,14 +8,14 @@ import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
 import {
-    AGENT_QUERY_CAPABILITY, AUTH_CAPABILITY, checkCapability,
-    EXPRESSION_QUERY_CAPABILITY, LANGUAGE_QUERY_CAPABILITY, perspectiveQueryCapability, RUNTIME_FRIENDS_QUERY_CAPABILITY,
-    RUNTIME_FRIEND_STATUS_QUERY_CAPABILITY, RUNTIME_HC_AGENT_INFO_QUERY_CAPABILITY, RUNTIME_MESSAGES_QUERY_CAPABILITY,
-    RUNTIME_KNOWN_LINK_LANGUAGES_QUERY_CAPABILITY, RUNTIME_TRUSTED_AGENTS_QUERY_CAPABILITY, RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
+    AGENT_READ_CAPABILITY, AGENT_AUTH_CAPABILITY, checkCapability,
+    EXPRESSION_READ_CAPABILITY, LANGUAGE_READ_CAPABILITY, perspectiveQueryCapability, RUNTIME_FRIENDS_READ_CAPABILITY,
+    RUNTIME_FRIEND_STATUS_READ_CAPABILITY, RUNTIME_HC_AGENT_INFO_READ_CAPABILITY, RUNTIME_MESSAGES_READ_CAPABILITY,
+    RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY, RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY, RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
     RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY, RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY, RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
     RUNTIME_FRIENDS_CREATE_CAPABILITY, RUNTIME_FRIENDS_DELETE_CAPABILITY, AGENT_UPDATE_CAPABILITY, AGENT_UNLOCK_CAPABILITY,
     AGENT_LOCK_CAPABILITY, AGENT_CREATE_CAPABILITY, AGENT_PERMIT_CAPABILITY, EXPRESSION_CREATE_CAPABILITY, EXPRESSION_UPDATE_CAPABILITY,
-    LANGUAGE_CREATE_CAPABILITY, LANGUAGE_UPDATE_CAPABILITY, NEIGHBOURHOOD_CREATE_CAPABILITY, NEIGHBOURHOOD_JOIN_CAPABILITY,
+    LANGUAGE_CREATE_CAPABILITY, LANGUAGE_UPDATE_CAPABILITY, NEIGHBOURHOOD_CREATE_CAPABILITY, NEIGHBOURHOOD_READ_CAPABILITY,
     PERSPECTIVE_CREATE_CAPABILITY, perspectiveUpdateCapability, perspectiveDeleteCapability, RUNTIME_QUIT_CAPABILITY,
     RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY, RUNTIME_MY_STATUS_UPDATE_CAPABILITY,
 } from '../agent/Auth'
@@ -27,12 +27,12 @@ function createResolvers(core: PerspectivismCore) {
         Query: {
             //@ts-ignore
             agent: (parent, args, context, info) => {
-                checkCapability(context.capabilities, AGENT_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, AGENT_READ_CAPABILITY)
                 return core.agentService.agent
             },
             //@ts-ignore
             agentByDID: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, AGENT_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, AGENT_READ_CAPABILITY)
                 const { did } = args;
                 const agentLanguage = core.languageController.getAgentLanguage().expressionAdapter;
                 if (!agentLanguage) {
@@ -47,12 +47,12 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentStatus: (parent, args, context, info) => {
-                checkCapability(context.capabilities, AGENT_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, AGENT_READ_CAPABILITY)
                 return core.agentService.dump()
             },
             //@ts-ignore
             expression: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, EXPRESSION_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, EXPRESSION_READ_CAPABILITY)
                 const url = args.url.toString();
                 const ref = parseExprUrl(url)
                 const expression = await core.languageController.getExpression(ref);
@@ -65,7 +65,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             expressionMany: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, EXPRESSION_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, EXPRESSION_READ_CAPABILITY)
                 const { urls } = args;
                 const expressionPromises = [];
                 for (const url of urls) {
@@ -84,21 +84,21 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             expressionRaw: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, EXPRESSION_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, EXPRESSION_READ_CAPABILITY)
                 const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 return JSON.stringify(expression)
             },
             //@ts-ignore
             expressionInteractions: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, EXPRESSION_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, EXPRESSION_READ_CAPABILITY)
                 const { url } = args
                 const result = await core.languageController.expressionInteractions(url)
                 return result
             },
             //@ts-ignore
             language: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, LANGUAGE_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const lang = await core.languageController.languageByRef({address, name: ""} as LanguageRef) as any
                 lang.address = address
@@ -106,7 +106,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             languageMeta: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, LANGUAGE_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const languageExpression = await core.languageController.getLanguageExpression(address)
                 if(!languageExpression)
@@ -128,7 +128,7 @@ function createResolvers(core: PerspectivismCore) {
 
             //@ts-ignore
             languageSource: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, LANGUAGE_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const languageSource = await core.languageController.getLanguageSource(address)
                 if(!languageSource)
@@ -139,7 +139,7 @@ function createResolvers(core: PerspectivismCore) {
             
             //@ts-ignore
             languages: (parent, args, context, info) => {
-                checkCapability(context.capabilities, LANGUAGE_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, LANGUAGE_READ_CAPABILITY)
                 let filter
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
@@ -178,31 +178,31 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             getTrustedAgents: (parent, args, context, info) => {
-                checkCapability(context.capabilities, RUNTIME_TRUSTED_AGENTS_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
                 return core.runtimeService.getTrustedAgents();
             },
 
             //@ts-ignore
             runtimeKnownLinkLanguageTemplates: (parent, args, context, info) => {
-                checkCapability(context.capabilities, RUNTIME_KNOWN_LINK_LANGUAGES_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
 
             //@ts-ignore
             runtimeFriends: (parent, args, context, info) => {
-                checkCapability(context.capabilities, RUNTIME_FRIENDS_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, RUNTIME_FRIENDS_READ_CAPABILITY)
                 return core.runtimeService.friends();
             },
 
             //@ts-ignore
             runtimeHcAgentInfos: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, RUNTIME_HC_AGENT_INFO_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
                 return JSON.stringify(await core.holochainRequestAgentInfos())
             },
 
             //@ts-ignore
             runtimeFriendStatus: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, RUNTIME_FRIEND_STATUS_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
                 const { did } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
                 const dmLang = await core.friendsDirectMessageLanguage(did)
@@ -214,7 +214,7 @@ function createResolvers(core: PerspectivismCore) {
 
             //@ts-ignore
             runtimeMessageInbox: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, RUNTIME_MESSAGES_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 const dmLang = await core.myDirectMessageLanguage()
                 return await dmLang.directMessageAdapter!.inbox(filter)
@@ -222,7 +222,7 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             runtimeMessageOutbox: (parent, args, context, info) => {
                 console.log("runtimeMessageOutbox")
-                checkCapability(context.capabilities, RUNTIME_MESSAGES_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 return core.runtimeService.getMessagesOutbox(filter)
             },
@@ -343,7 +343,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentRequestCapability: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, AUTH_CAPABILITY)
+                checkCapability(context.capabilities, AGENT_AUTH_CAPABILITY)
                 const { appName, appDesc, appUrl, capabilities } = args;
                 let token = core.agentService.requestCapability(appName, appDesc, appUrl, capabilities);
                 return token;
@@ -356,7 +356,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentGenerateJwt: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, AUTH_CAPABILITY)
+                checkCapability(context.capabilities, AGENT_AUTH_CAPABILITY)
                 const { requestId, rand } = args;
                 let jwt = await core.agentService.generateJwt(requestId, rand)
                 return jwt;
@@ -410,7 +410,8 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, NEIGHBOURHOOD_JOIN_CAPABILITY)
+                checkCapability(context.capabilities, NEIGHBOURHOOD_READ_CAPABILITY)
+                checkCapability(context.capabilities, PERSPECTIVE_CREATE_CAPABILITY)
                 const { url } = args;
                 try{
                     return await core.installNeighbourhood(url);
