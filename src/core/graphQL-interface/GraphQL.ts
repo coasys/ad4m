@@ -7,18 +7,22 @@ import * as Config from "../Config";
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
-import { AGENT_MUTATION_CAPABILITY, AGENT_QUERY_CAPABILITY, ALL_CAPABILITY, AUTH_CAPABILITY, checkCapability } from '../agent/Auth'
+import * as Auth from '../agent/Auth'
+import { checkCapability } from '../agent/Auth'
 
 function createResolvers(core: PerspectivismCore) {
     const pubsub = PubSub.get()
 
     return {
         Query: {
-            agent: () => {
+            //@ts-ignore
+            agent: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 return core.agentService.agent
             },
             //@ts-ignore
             agentByDID: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 const { did } = args;
                 const agentLanguage = core.languageController.getAgentLanguage().expressionAdapter;
                 if (!agentLanguage) {
@@ -33,11 +37,12 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentStatus: (parent, args, context, info) => {
-                checkCapability(context.capabilities, AGENT_QUERY_CAPABILITY)
+                checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 return core.agentService.dump()
             },
             //@ts-ignore
             expression: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const url = args.url.toString();
                 const ref = parseExprUrl(url)
                 const expression = await core.languageController.getExpression(ref);
@@ -50,6 +55,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             expressionMany: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const { urls } = args;
                 const expressionPromises = [];
                 for (const url of urls) {
@@ -68,18 +74,21 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             expressionRaw: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 return JSON.stringify(expression)
             },
             //@ts-ignore
             expressionInteractions: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const { url } = args
                 const result = await core.languageController.expressionInteractions(url)
                 return result
             },
             //@ts-ignore
             language: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const lang = await core.languageController.languageByRef({address, name: ""} as LanguageRef) as any
                 lang.address = address
@@ -87,6 +96,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             languageMeta: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const languageExpression = await core.languageController.getLanguageExpression(address)
                 if(!languageExpression)
@@ -107,7 +117,8 @@ function createResolvers(core: PerspectivismCore) {
             },
 
             //@ts-ignore
-            languageSource: async (parent, args) => {
+            languageSource: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const languageSource = await core.languageController.getLanguageSource(address)
                 if(!languageSource)
@@ -118,17 +129,21 @@ function createResolvers(core: PerspectivismCore) {
             
             //@ts-ignore
             languages: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 let filter
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
             },
             //@ts-ignore
             perspective: (parent, args, context, info) => {
-                return core.perspectivesController.perspectiveID(args.uuid)
+                const id = args.uuid
+                checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
+                return core.perspectivesController.perspectiveID(id)
             },
             //@ts-ignore
             perspectiveQueryLinks: async (parent, args, context, info) => {
                 const { uuid, query } = args
+                checkCapability(context.capabilities, Auth.perspectiveQueryCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 //console.log("querying on", perspective, query, uuid);
                 return await perspective.getLinks(query)
@@ -136,38 +151,48 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             perspectiveQueryProlog: async (parent, args, context, info) => {
                 const { uuid, query } = args
+                checkCapability(context.capabilities, Auth.perspectiveQueryCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return JSON.stringify(await perspective.prologQuery(query))
             },
             //@ts-ignore
             perspectiveSnapshot: async (parent, args, context, info) => {
-                return await core.perspectivesController.perspectiveSnapshot(args.uuid)
+                const id = args.uuid
+                checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
+                return await core.perspectivesController.perspectiveSnapshot(id)
             },
             //@ts-ignore
             perspectives: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.perspectiveQueryCapability(["*"]))
                 return core.perspectivesController.allPerspectiveHandles()
             },
             //@ts-ignore
             getTrustedAgents: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
                 return core.runtimeService.getTrustedAgents();
             },
 
             //@ts-ignore
-            runtimeKnownLinkLanguageTemplates: () => {
+            runtimeKnownLinkLanguageTemplates: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
 
             //@ts-ignore
-            runtimeFriends: () => {
+            runtimeFriends: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_READ_CAPABILITY)
                 return core.runtimeService.friends();
             },
 
-            runtimeHcAgentInfos: async () => {
+            //@ts-ignore
+            runtimeHcAgentInfos: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
                 return JSON.stringify(await core.holochainRequestAgentInfos())
             },
 
             //@ts-ignore
-            runtimeFriendStatus: async (parent, args) => {
+            runtimeFriendStatus: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
                 const { did } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
                 const dmLang = await core.friendsDirectMessageLanguage(did)
@@ -178,14 +203,16 @@ function createResolvers(core: PerspectivismCore) {
             },
 
             //@ts-ignore
-            runtimeMessageInbox: async (parent, args) => {
+            runtimeMessageInbox: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 const dmLang = await core.myDirectMessageLanguage()
                 return await dmLang.directMessageAdapter!.inbox(filter)
             },
             //@ts-ignore
-            runtimeMessageOutbox: (parent, args) => {
+            runtimeMessageOutbox: (parent, args, context, info) => {
                 console.log("runtimeMessageOutbox")
+                checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 return core.runtimeService.getMessagesOutbox(filter)
             },
@@ -199,30 +226,35 @@ function createResolvers(core: PerspectivismCore) {
         Mutation: {
             //@ts-ignore
             addTrustedAgents: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
                 const { agents } = args;
                 core.runtimeService.addTrustedAgents(agents);
                 return core.runtimeService.getTrustedAgents();
             },
             //@ts-ignore
             deleteTrustedAgents: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
                 const { agents } = args;
                 core.runtimeService.deleteTrustedAgents(agents);
                 return core.runtimeService.getTrustedAgents();
             },
             //@ts-ignore
             runtimeAddKnownLinkLanguageTemplates: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY)
                 const { addresses } = args;
                 core.runtimeService.addKnowLinkLanguageTemplates(addresses);
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
             //@ts-ignore
             runtimeRemoveKnownLinkLanguageTemplates: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY)
                 const { addresses } = args;
                 core.runtimeService.removeKnownLinkLanguageTemplates(addresses);
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
-                                    //@ts-ignore
+            //@ts-ignore
             runtimeAddFriends: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_CREATE_CAPABILITY)
                 const { dids } = args;
                 core.runtimeService.addFriends(dids);
                 //@ts-ignore
@@ -231,12 +263,14 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             runtimeRemoveFriends: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_DELETE_CAPABILITY)
                 const { dids } = args;
                 core.runtimeService.removeFriends(dids);
                 return core.runtimeService.friends();
             },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
                 if (!Config.languageLanguageOnly) {await core.initializeAgentsDirectMessageLanguage() }
@@ -244,18 +278,20 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentImport: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
                 const { did, didDocument, keystore, passphrase } = args;
                 await core.agentService.initialize(did, didDocument, keystore, passphrase)
                 return core.agentService.dump()
             },
             //@ts-ignore
             agentLock: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_LOCK_CAPABILITY)
                 core.agentService.lock(args.passphrase)
                 return core.agentService.dump()
             },
             //@ts-ignore
             agentUnlock:  async (parent, args, context, info) => {
-                checkCapability(context.capabilities, AGENT_MUTATION_CAPABILITY)
+                checkCapability(context.capabilities, Auth.AGENT_UNLOCK_CAPABILITY)
                 let failed = false
                 try {
                     await core.agentService.unlock(args.passphrase)
@@ -272,7 +308,8 @@ function createResolvers(core: PerspectivismCore) {
                 return dump
             },
             //@ts-ignore
-            agentUpdateDirectMessageLanguage: async (parent, args, context, info) => { 
+            agentUpdateDirectMessageLanguage: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_UPDATE_CAPABILITY)
                 const { directMessageLanguage } = args;
                 let currentAgent = core.agentService.agent;
                 if (!currentAgent) {
@@ -283,7 +320,8 @@ function createResolvers(core: PerspectivismCore) {
                 return currentAgent;
             },
             //@ts-ignore
-            agentUpdatePublicPerspective: async (parent, args, context, info) => { 
+            agentUpdatePublicPerspective: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_UPDATE_CAPABILITY)
                 const {perspective} = args;
                 let currentAgent = core.agentService.agent;
                 if (!currentAgent) {
@@ -295,26 +333,27 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             agentRequestCapability: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { appName, appDesc, appUrl, capabilities } = args;
-                checkCapability(context.capabilities, AUTH_CAPABILITY)
                 let token = core.agentService.requestCapability(appName, appDesc, appUrl, capabilities);
                 return token;
             },
             //@ts-ignore
             agentPermitCapability: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_PERMIT_CAPABILITY)
                 const { auth } = args;
-                checkCapability(context.capabilities, ALL_CAPABILITY)
                 return core.agentService.permitCapability(auth, context.capabilities);
             },
             //@ts-ignore
             agentGenerateJwt: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId, rand } = args;
-                checkCapability(context.capabilities, AUTH_CAPABILITY)
                 let jwt = await core.agentService.generateJwt(requestId, rand)
                 return jwt;
             },
             //@ts-ignore
             expressionCreate: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.EXPRESSION_CREATE_CAPABILITY)
                 const { languageAddress, content } = args
                 const langref = { address: languageAddress } as LanguageRef
                 const expref = await core.languageController.expressionCreate(langref, JSON.parse(content))
@@ -322,6 +361,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             expressionInteract: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.EXPRESSION_UPDATE_CAPABILITY)
                 let { url, interactionCall } = args
                 interactionCall = new InteractionCall(interactionCall.name, JSON.parse(interactionCall.parametersStringified))
                 const result = await core.languageController.expressionInteract(url, interactionCall)
@@ -329,11 +369,13 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             languageApplyTemplateAndPublish: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.LANGUAGE_CREATE_CAPABILITY)
                 const { sourceLanguageHash, templateData } = args;
                 return await core.languageApplyTemplateAndPublish(sourceLanguageHash, JSON.parse(templateData));
             },
             //@ts-ignore
             languagePublish: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.LANGUAGE_CREATE_CAPABILITY)
                 const { languagePath, languageMeta } = args;
                 const expression = await core.languagePublish(languagePath, languageMeta);
                 const internal = expression.data
@@ -351,13 +393,15 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             languageWriteSettings: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.LANGUAGE_UPDATE_CAPABILITY)
                 const { languageAddress, settings } = args
                 await core.languageController.putSettings(languageAddress, JSON.parse(settings))
                 return true
             },
             //@ts-ignore
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
-                // console.log(new Date(), "GQL install shared perspective", args);
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
+                checkCapability(context.capabilities, Auth.PERSPECTIVE_CREATE_CAPABILITY)
                 const { url } = args;
                 try{
                     return await core.installNeighbourhood(url);
@@ -369,6 +413,7 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_CREATE_CAPABILITY)
                 const { linkLanguage, meta, perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(perspective.neighbourhood && perspective.sharedUrl)
@@ -384,18 +429,21 @@ function createResolvers(core: PerspectivismCore) {
             },
             //@ts-ignore
             perspectiveAdd: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.PERSPECTIVE_CREATE_CAPABILITY)
                 const { name } = args;
                 return core.perspectivesController.add(name)
             },
             //@ts-ignore
             perspectiveAddLink: (parent, args, context, info) => {
                 const { uuid, link } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return perspective.addLink(link)
             },
             //@ts-ignore
             perspectiveRemove: (parent, args, context, info) => {
                 const { uuid } = args
+                checkCapability(context.capabilities, Auth.perspectiveDeleteCapability([uuid]))
                 core.perspectivesController.remove(uuid)
                 return true
             },
@@ -403,6 +451,7 @@ function createResolvers(core: PerspectivismCore) {
             perspectiveRemoveLink: (parent, args, context, info) => {
                 // console.log("GQL| removeLink:", args)
                 const { uuid, link } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 perspective.removeLink(link)
                 return true
@@ -410,11 +459,13 @@ function createResolvers(core: PerspectivismCore) {
             //@ts-ignore
             perspectiveUpdate: (parent, args, context, info) => {
                 const { uuid, name } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 return core.perspectivesController.update(uuid, name);
             },
             //@ts-ignore
             perspectiveUpdateLink: (parent, args, context, info) => {
                 const { uuid, oldLink, newLink } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return perspective.updateLink(oldLink, newLink)
             },
@@ -425,12 +476,15 @@ function createResolvers(core: PerspectivismCore) {
                 //shell.openExternal(url)
                 return true
             },
-            runtimeQuit: () => {
+            //@ts-ignore
+            runtimeQuit: (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_QUIT_CAPABILITY)
                 process.exit(0)
                 return true
             },
             //@ts-ignore
-            runtimeHcAddAgentInfos: async (parent, args) => {
+            runtimeHcAddAgentInfos: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
                 const { agentInfos } = args
                 //@ts-ignore
                 const parsed = JSON.parse(agentInfos).map(info => {
@@ -449,7 +503,8 @@ function createResolvers(core: PerspectivismCore) {
             },
 
             //@ts-ignore
-            runtimeSetStatus: async (parent, args) => {
+            runtimeSetStatus: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_MY_STATUS_UPDATE_CAPABILITY)
                 const { status } = args
                 const dmLang = await core.myDirectMessageLanguage()
                 await dmLang.directMessageAdapter!.setStatus(status)
@@ -457,7 +512,8 @@ function createResolvers(core: PerspectivismCore) {
             },
 
             //@ts-ignore
-            runtimeFriendSendMessage: async (parent, args) => {
+            runtimeFriendSendMessage: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_CREATE_CAPABILITY)
                 const { did, message } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
                 const dmLang = await core.friendsDirectMessageLanguage(did)
@@ -488,23 +544,36 @@ function createResolvers(core: PerspectivismCore) {
 
         Subscription: {
             agentUpdated: {
-                subscribe: () => pubsub.asyncIterator(PubSub.AGENT_UPDATED),
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.AGENT_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.AGENT_UPDATED)
+                },
                 //@ts-ignore
                 resolve: payload => payload
             },
             runtimeMessageReceived: {
-                subscribe: () => pubsub.asyncIterator(PubSub.DIRECT_MESSAGE_RECEIVED),
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.DIRECT_MESSAGE_RECEIVED)
+                },
                 //@ts-ignore
                 resolve: payload => payload
             },
             perspectiveAdded: {
-                subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_ADDED_TOPIC),
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.PERSPECTIVE_ADDED_TOPIC)
+                },
                 //@ts-ignore
                 resolve: payload => payload?.perspective
             },
             perspectiveLinkAdded: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return withFilter(
                         () => pubsub.asyncIterator(PubSub.LINK_ADDED_TOPIC),
                         (payload, argsInner) => payload.perspective.uuid === argsInner.uuid
@@ -515,25 +584,40 @@ function createResolvers(core: PerspectivismCore) {
             },
             perspectiveLinkRemoved: {
                 //@ts-ignore
-                subscribe: (parent, args, context, info) => withFilter(
-                    () => pubsub.asyncIterator(PubSub.LINK_REMOVED_TOPIC),
-                    (payload, variables) => payload.perspective.uuid === variables.uuid
-                )(undefined, args),
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return withFilter(
+                        () => pubsub.asyncIterator(PubSub.LINK_REMOVED_TOPIC),
+                        (payload, variables) => payload.perspective.uuid === variables.uuid
+                    )(undefined, args)
+                },
                 //@ts-ignore
                 resolve: payload => payload?.link
             },
             perspectiveUpdated: {
-                subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_UPDATED_TOPIC),
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.PERSPECTIVE_UPDATED_TOPIC)
+                },
                 //@ts-ignore
                 resolve: payload => payload?.perspective
             },
             perspectiveRemoved: {
-                subscribe: () => pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC),
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC)
+                },
                 //@ts-ignore
                 resolve: payload => payload?.uuid
             },
             exceptionOccurred: {
-                subscribe: () => pubsub.asyncIterator(PubSub.EXCEPTION_OCCURRED_TOPIC),
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.EXCEPTION_OCCURRED_TOPIC)
+                },
                 //@ts-ignore
                 resolve: payload => payload
             }

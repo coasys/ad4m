@@ -1,77 +1,94 @@
-import { AGENT_MUTATION_CAPABILITY, AGENT_QUERY_CAPABILITY, ALL_CAPABILITY, AUTH_CAPABILITY, checkCapability, genRequestKey, genRandomDigits } from "./Auth"
+import { checkCapability, genRequestKey, genRandomDigits } from "./Auth"
+import * as Auth from "./Auth"
 
 describe('capability constant', () => {
     it('ALL_CAPABILITY is expected', () => {
-        expect(ALL_CAPABILITY.with.domain).toEqual("*")
-        expect(ALL_CAPABILITY.with.pointers).toEqual(["*"])
-        expect(ALL_CAPABILITY.can).toEqual(["*"])
+        expect(Auth.ALL_CAPABILITY.with.domain).toEqual("*")
+        expect(Auth.ALL_CAPABILITY.with.pointers).toEqual(["*"])
+        expect(Auth.ALL_CAPABILITY.can).toEqual(["*"])
     })
 
-    it('AUTH_CAPABILITY is expected', () => {
-        expect(AUTH_CAPABILITY.with.domain).toEqual("agent")
-        expect(AUTH_CAPABILITY.with.pointers).toEqual(["*"])
-        expect(AUTH_CAPABILITY.can).toEqual(["AUTHENTICATE"])
+    it('AGENT_AUTH_CAPABILITY is expected', () => {
+        expect(Auth.AGENT_AUTH_CAPABILITY.with.domain).toEqual("agent")
+        expect(Auth.AGENT_AUTH_CAPABILITY.with.pointers).toEqual(["*"])
+        expect(Auth.AGENT_AUTH_CAPABILITY.can).toEqual(["AUTHENTICATE"])
     })
 
-    it('AGENT_QUERY_CAPABILITY is expected', () => {
-        expect(AGENT_QUERY_CAPABILITY.with.domain).toEqual("agent")
-        expect(AGENT_QUERY_CAPABILITY.with.pointers).toEqual(["*"])
-        expect(AGENT_QUERY_CAPABILITY.can).toEqual(["QUERY"])
+    it('AGENT_READ_CAPABILITY is expected', () => {
+        expect(Auth.AGENT_READ_CAPABILITY.with.domain).toEqual("agent")
+        expect(Auth.AGENT_READ_CAPABILITY.with.pointers).toEqual(["*"])
+        expect(Auth.AGENT_READ_CAPABILITY.can).toEqual(["READ"])
     })
 
-    it('AGENT_MUTATION_CAPABILITY is expected', () => {
-        expect(AGENT_MUTATION_CAPABILITY.with.domain).toEqual("agent")
-        expect(AGENT_MUTATION_CAPABILITY.with.pointers).toEqual(["*"])
-        expect(AGENT_MUTATION_CAPABILITY.can).toEqual(["MUTATION"])
+    it('AGENT_CREATE_CAPABILITY is expected', () => {
+        expect(Auth.AGENT_CREATE_CAPABILITY.with.domain).toEqual("agent")
+        expect(Auth.AGENT_CREATE_CAPABILITY.with.pointers).toEqual(["*"])
+        expect(Auth.AGENT_CREATE_CAPABILITY.can).toEqual(["CREATE"])
+    })
+})
+
+describe('perspectiveQueryCapability', () => {
+    it('query capability is expected', () => {
+        const capability = Auth.perspectiveQueryCapability(["123", "456"])
+        expect(capability.with.domain).toEqual("perspective")
+        expect(capability.with.pointers).toEqual(["123", "456"])
+        expect(capability.can).toEqual(["READ"])
     })
 })
 
 describe('checkCapability', () => {
     it('agent with ALL_CAPABILITY can permit an auth request', () => {
         const call = () => {
-            checkCapability([ALL_CAPABILITY], ALL_CAPABILITY)
+            checkCapability([Auth.ALL_CAPABILITY], Auth.AGENT_PERMIT_CAPABILITY)
         }
         expect(call).not.toThrow();
     })
 
     it('agent with ALL_CAPABILITY can request agent status', () => {
         const call = () => {
-            checkCapability([ALL_CAPABILITY], AGENT_QUERY_CAPABILITY)
+            checkCapability([Auth.ALL_CAPABILITY], Auth.AGENT_READ_CAPABILITY)
         }
         expect(call).not.toThrow();
     })
 
     it('agent with ALL_CAPABILITY can mutate the agent', () => {
         const call = () => {
-            checkCapability([ALL_CAPABILITY], AGENT_MUTATION_CAPABILITY)
+            checkCapability([Auth.ALL_CAPABILITY], Auth.AGENT_CREATE_CAPABILITY)
         }
         expect(call).not.toThrow();
     })
 
-    it('agent with AUTH_CAPABILITY can not request the agent status', () => {
+    it('agent with AGENT_AUTH_CAPABILITY can not request the agent status', () => {
         const call = () => {
-            checkCapability([AUTH_CAPABILITY], AGENT_QUERY_CAPABILITY)
+            checkCapability([Auth.AGENT_AUTH_CAPABILITY], Auth.AGENT_READ_CAPABILITY)
         }
-        expect(call).toThrow(Error("Capability is not matched"));
+        expect(call).toThrowError("Capability is not matched");
     })
 
-    it('agent with AUTH_CAPABILITY can not mutate the agent', () => {
+    it('agent with AGENT_AUTH_CAPABILITY can not mutate the agent', () => {
         const call = () => {
-            checkCapability([AUTH_CAPABILITY], AGENT_MUTATION_CAPABILITY)
+            checkCapability([Auth.AGENT_AUTH_CAPABILITY], Auth.AGENT_CREATE_CAPABILITY)
         }
         expect(call).toThrow();
     })
 
-    it('agent with AUTH_CAPABILITY can request an auth', () => {
+    it('agent with AGENT_AUTH_CAPABILITY can request an auth', () => {
         const call = () => {
-            checkCapability([AUTH_CAPABILITY], AUTH_CAPABILITY)
+            checkCapability([Auth.AGENT_AUTH_CAPABILITY], Auth.AGENT_AUTH_CAPABILITY)
         }
         expect(call).not.toThrow();
     })
 
-    it('agent with AGENT_QUERY_CAPABILITY can request the agent status', () => {
+    it('agent with AGENT_READ_CAPABILITY can request the agent status', () => {
         const call = () => {
-            checkCapability([AGENT_QUERY_CAPABILITY], AGENT_QUERY_CAPABILITY)
+            checkCapability([Auth.AGENT_READ_CAPABILITY], Auth.AGENT_READ_CAPABILITY)
+        }
+        expect(call).not.toThrow();
+    })
+
+    it('agent with perspectiveQueryCapability can query a perspective', () => {
+        const call = () => {
+            checkCapability([Auth.perspectiveQueryCapability(["*"])], Auth.perspectiveQueryCapability(["123"]))
         }
         expect(call).not.toThrow();
     })

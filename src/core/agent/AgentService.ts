@@ -11,7 +11,7 @@ import type { PubSub } from 'apollo-server';
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genRequestKey, genRandomDigits, AUTH_CAPABILITY, Capability } from './Auth';
+import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genRequestKey, genRandomDigits, AGENT_AUTH_CAPABILITY, Capability } from './Auth';
 import * as jose from 'jose'
 import * as crypto from "crypto"
 import KeyEncoder from 'key-encoder'
@@ -295,7 +295,7 @@ export default class AgentService {
         }
         
         if (token === '') {
-            return [AUTH_CAPABILITY]
+            return [AGENT_AUTH_CAPABILITY]
         }
 
         const key = this.getSigningKey()
