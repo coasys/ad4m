@@ -79,10 +79,7 @@ describe("Authentication integration tests", () => {
             } as OuterConfig)
 
             ad4mClient = new Ad4mClient(apolloClient(gqlPort))
-            ad4mClient.agent.generate("passphrase")
-            await core.waitForAgent();
-            core.initControllers()
-            await core.initLanguages()
+            await ad4mClient.agent.generate("passphrase")
         })
 
         afterAll(async () => {
@@ -146,10 +143,10 @@ describe("Authentication integration tests", () => {
 
             
             adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"))
-            adminAd4mClient.agent.generate("passphrase")
-            await agentCore.waitForAgent();
-            agentCore.initControllers()
-            await agentCore.initLanguages()
+            await adminAd4mClient.agent.generate("passphrase")
+            // await agentCore.waitForAgent();
+            // agentCore.initControllers()
+            // await agentCore.initLanguages()
             
 
             unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort))

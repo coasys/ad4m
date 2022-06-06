@@ -282,12 +282,16 @@ function createResolvers(core: PerspectivismCore, config: any) {
                   await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
                 }
                 
-                console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
-
+                
                 if (!Config.languageLanguageOnly) {
+                    await core.waitForAgent();
+                    core.initControllers()
+                    await core.initLanguages()
                     await core.initializeAgentsDirectMessageLanguage()
-                 }
-
+                }
+                
+                console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
+                
                 return core.agentService.dump()
             },
             //@ts-ignore
@@ -315,6 +319,9 @@ function createResolvers(core: PerspectivismCore, config: any) {
 
                 try {
                     core.perspectivesController;
+                    await core.waitForAgent();
+                    core.initControllers()
+                    await core.initLanguages()
                 } catch (e) {
                     // @ts-ignore
                     const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
@@ -323,7 +330,11 @@ function createResolvers(core: PerspectivismCore, config: any) {
                         await core.connectHolochain( {hcPortAdmin, hcPortApp} );
                     } else {
                         await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                        await core.waitForAgent();
+                        core.initControllers()
+                        await core.initLanguages()
                     }
+
 
                     console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                 }
