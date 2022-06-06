@@ -1,6 +1,8 @@
-import child_process from "child_process";
+import child_process, { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
+import { HolochainUnlockConfiguration } from "../../PerspectivismCore";
+import { bootstrapUrl, kitsuneProxy } from "./HolochainService";
 
 function escapeShellArg (arg: string) {
     return arg.replace(" ", "\ ");
@@ -30,6 +32,7 @@ export interface ConductorConfiguration {
     useProxy: boolean,
     useLocalProxy: boolean;
     useMdns: boolean;
+    connectionUrl: string;
 }
 
 export function writeDefaultConductor(conductorConfig: ConductorConfiguration) {
@@ -51,7 +54,7 @@ decryption_service_uri: ~
 dpki: ~
 keystore:
   type: lair_server
-  connection_url: 
+  connection_url: ${conductorConfig.connectionUrl}
 admin_interfaces:
   - driver:
       type: websocket
@@ -87,9 +90,9 @@ network:
     fs.writeFileSync(conductorConfig.conductorConfigPath, conductorStringConfig);
 }
 
-async function initializeLairKeystore(lairPath: string, hcDataPath: string) {
+async function initializeLairKeystore(lairPath: string, hcDataPath: string, config: HolochainUnlockConfiguration) {
     return new Promise(async (resolve, reject) => {
-        const echo = child_process.spawn('echo', ["foobar"])
+        const echo = child_process.spawn('echo', [config.passphrase])
         const keyStoreFolderExists = fs.existsSync(`${escapeShellArg(hcDataPath)}/keystore`);
         if (!keyStoreFolderExists) {
             fs.mkdirSync(`${escapeShellArg(hcDataPath)}/keystore`)
@@ -123,6 +126,41 @@ async function initializeLairKeystore(lairPath: string, hcDataPath: string) {
         });
 
         lairProcess.on('exit', () => {
+            let {
+                conductorPath, 
+                adminPort,
+                appPort,
+                useBootstrap,
+                useProxy,
+                useLocalProxy,
+                useMdns,
+            } = config;
+
+            const conductorConfigPath = path.join(conductorPath!, "conductor-config.yaml");
+            const holochainAppPort = appPort ? appPort : 1337;
+            const holochainAdminPort = adminPort ? adminPort : 2000;
+            if(useMdns === undefined) useMdns = true
+            if(useBootstrap === undefined) useBootstrap = true
+            if(useProxy === undefined) useProxy = true
+            if(useLocalProxy === undefined) useLocalProxy = false;
+
+            const connectionUrl = execSync(`${escapeShellArg(lairPath)} url`, {
+                cwd: `${escapeShellArg(hcDataPath)}/keystore`
+            }).toString();
+
+            writeDefaultConductor({
+                proxyUrl: kitsuneProxy,
+                environmentPath: conductorPath,
+                adminPort: holochainAdminPort,
+                appPort: holochainAppPort,
+                useBootstrap,
+                bootstrapService: bootstrapUrl,
+                conductorConfigPath: conductorConfigPath,
+                useProxy,
+                useLocalProxy,
+                useMdns,
+                connectionUrl,
+            } as ConductorConfiguration);
             resolve(true);
         });
         lairProcess.on('close', () => {
@@ -131,15 +169,15 @@ async function initializeLairKeystore(lairPath: string, hcDataPath: string) {
     });
 }
 
-export async function startLair(resourcePath: string, hcDataPath: string): Promise<child_process.ChildProcess> {
+export async function startLair(resourcePath: string, hcDataPath: string, config: HolochainUnlockConfiguration): Promise<child_process.ChildProcess> {
     const lairPath = path.join(resourcePath, "lair-keystore");
     const islairConfigExist = fs.existsSync(path.join(`${escapeShellArg(hcDataPath)}/keystore`, "lair-keystore-config.yaml"));
 
     if (!islairConfigExist) {
-        await initializeLairKeystore(lairPath, hcDataPath);
+        await initializeLairKeystore(lairPath, hcDataPath, config);
     }
 
-    const echo = child_process.spawn('echo', ["foobar"])
+    const echo = child_process.spawn('echo', [config.passphrase!])
     
     let lairProcess = child_process.spawn(`${escapeShellArg(lairPath)}`, ["server", "-p"], {
         env: { ...process.env, LAIR_DIR: `${escapeShellArg(hcDataPath)}/keystore` },
@@ -179,9 +217,9 @@ export async function startLair(resourcePath: string, hcDataPath: string): Promi
     return lairProcess
 }
 
-export async function runHolochain(resourcePath: string, conductorConfigPath: string, hcDataPath: string): Promise<[child_process.ChildProcess, child_process.ChildProcess]> {
-    let lairProcess = await startLair(resourcePath, hcDataPath)
-    const echo = child_process.spawn('echo', ["foobar"])
+export async function runHolochain(resourcePath: string, conductorConfigPath: string, hcDataPath: string, config: HolochainUnlockConfiguration): Promise<[child_process.ChildProcess, child_process.ChildProcess]> {
+    let lairProcess = await startLair(resourcePath, hcDataPath, config)
+    const echo = child_process.spawn('echo', [config.passphrase!])
     
     let hcProcess = child_process.spawn(`${escapeShellArg(path.join(resourcePath, "holochain"))}`, ["-c", escapeShellArg(conductorConfigPath), "-p"],
         {

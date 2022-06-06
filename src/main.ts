@@ -184,16 +184,13 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
 
     console.log("\x1b[34m", "Init services...", "\x1b[0m");
     await core.initIPFS({ ipfsSwarmPort, ipfsRepoPath });
-    if (connectHolochain) {
-      await core.connectHolochain( {hcPortAdmin, hcPortApp} );
-    } else {
-      await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap });
-    }
     
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
-    await core.startGraphQLServer(gqlPort, mocks)
 
-    console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
+    await core.startGraphQLServer(gqlPort, mocks, config);
+
+    console.log("\x1b[31m", "GraphQL server started, Unlock the agent to start holohchain", "\x1b[0m");
+
     return core
 }
 
