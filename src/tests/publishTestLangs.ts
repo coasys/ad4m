@@ -109,12 +109,13 @@ async function publish() {
         hcUseLocalProxy: false,
         hcUseMdns: true
     } as OuterConfig)
-
+    
+    const ad4mClient = new Ad4mClient(apolloClient(4000));
+    ad4mClient.agent.generate("passphrase");
+    
+    await core.waitForAgent();
     core.initControllers()
     await core.initLanguages()
-
-    const ad4mClient = new Ad4mClient(apolloClient(4000));
-    await ad4mClient.agent.generate("passphrase");
 
     for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
         let bundlePath = path.join(publishLanguagesPath, language, "build", "bundle.js");
