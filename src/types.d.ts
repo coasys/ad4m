@@ -35,6 +35,8 @@ export interface OuterConfig {
   hcUseBootstrap?: boolean,
   //Should ad4m-executor connect to an existing holochain instance, or spawn its own
   connectHolochain?: boolean,
+  //The credential used by admin client to make request
+  reqCredential?: string,
 }
 
 export interface Config {

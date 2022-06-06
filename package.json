@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -24,7 +24,8 @@
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
     "test-all:windows": "powershell ./scripts/run-all-test.ps1 & jest --forceExit",
     "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js",
-    "test:windows": "npm run prepare-test:windows && npm run test-all:windows && node scripts/cleanTestingData.js"
+    "test:windows": "npm run prepare-test:windows && npm run test-all:windows && node scripts/cleanTestingData.js",
+    "jest": "jest"
   },
   "repository": {
     "type": "git",
@@ -67,7 +68,7 @@
   },
   "dependencies": {
     "@holochain/client": "0.3.2",
-    "@perspect3vism/ad4m": "0.1.29",
+    "@perspect3vism/ad4m": "0.1.30",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",
@@ -78,8 +79,11 @@
     "get-port": "5.1.1",
     "graphql": "^15.3.0",
     "ipfs": "0.61.0",
+    "jose": "^4.8.1",
     "js-yaml": "^4.1.0",
     "json-stable-stringify": "^1.0.1",
+    "key-encoder": "^2.0.3",
+    "lodash": "^4.17.21",
     "lowdb": "^1.0.0",
     "node-fetch": "^2.6.1",
     "sha256": "^0.2.0",

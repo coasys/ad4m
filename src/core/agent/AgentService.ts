@@ -1,15 +1,20 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
-import type { Language, Expression, PublicSharing, ReadOnlyLanguage } from '@perspect3vism/ad4m';
+import { Language, Expression, PublicSharing, ReadOnlyLanguage, ExceptionType } from '@perspect3vism/ad4m';
 import { Agent, ExpressionProof } from '@perspect3vism/ad4m';
 import secp256k1 from 'secp256k1'
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
 import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'apollo-server';
-import crypto from 'crypto'
 import { resolver } from '@transmute/did-key.js';
+import { v4 as uuidv4 } from 'uuid';
+import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
+import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genRequestKey, genRandomDigits, AGENT_AUTH_CAPABILITY, Capability } from './Auth';
+import * as jose from 'jose'
+import * as crypto from "crypto"
+import KeyEncoder from 'key-encoder'
 
 export default class AgentService {
     #did?: string
@@ -21,18 +26,29 @@ export default class AgentService {
     #agent?: Agent
     #agentLanguage?: Language
     #pubsub: PubSub
+    #requests: Map<string, AuthInfo>
+    #tokenValidPeriod: number
+    #adminCredential: string
     
 
     #readyPromise: Promise<void>
     #readyPromiseResolve?: ((value: void | PromiseLike<void>) => void)
 
-    constructor(rootConfigPath: string) {
+    constructor(rootConfigPath: string, reqCredential?: string) {
         this.#file = path.join(rootConfigPath, "agent.json")
         this.#fileProfile = path.join(rootConfigPath, "agentProfile.json")
         this.#pubsub = PubSubInstance.get()
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
         })
+        this.#requests = new Map()
+        this.#tokenValidPeriod = DefaultTokenValidPeriod
+        if(reqCredential) {
+            this.#adminCredential = reqCredential
+        } else {
+            console.warn("reqCredential is not set or empty, empty token will possess admin capabililities.")
+            this.#adminCredential = ""
+        }
     }
 
     get did() {
@@ -272,10 +288,95 @@ export default class AgentService {
         }
         return dump
     }
+
+    async getCapabilities(token: string) {
+        if (token == this.#adminCredential) {
+            return [ALL_CAPABILITY]
+        }
+        
+        if (token === '') {
+            return [AGENT_AUTH_CAPABILITY]
+        }
+
+        const key = this.getSigningKey()
+        let keyEncoder = new KeyEncoder('secp256k1')
+        const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
+
+        const pubKeyObj = crypto.createPublicKey(pemPublicKey)
+        const { payload } = await jose.jwtVerify(token, pubKeyObj)
+
+        return payload.capabilities
+    }
+    
+    requestCapability(appName: string, appDesc: string, appUrl: string, capabilities: string) {
+        let requestId = uuidv4()
+        let authExtended = {
+            requestId,
+            auth: {
+                appName,
+                appDesc,
+                appUrl,
+                capabilities: JSON.parse(capabilities),
+            } as AuthInfo,
+        } as AuthInfoExtended
+        
+        this.#pubsub.publish(
+            PubSubInstance.EXCEPTION_OCCURRED_TOPIC,
+            {
+                title: "Request to authenticate application",
+                message: `${appName} is waiting for authentication, go to ad4min for more information.`,
+                type: ExceptionType.CapabilityRequested,
+                addon: JSON.stringify(authExtended),
+            } as ExceptionInfo
+        )
+
+        return requestId
+    }
+
+    // TODO, we may want to change the capability request workflow.
+    // https://github.com/perspect3vism/ad4m-executor/issues/73
+    permitCapability(authExt: string, capabilities: Capability[]) {
+        console.log("admin user capabilities: ", capabilities)
+        console.log("auth info: ", authExt)
+
+        let { requestId, auth }: AuthInfoExtended = JSON.parse(authExt)
+        let rand = genRandomDigits()
+        this.#requests.set(genRequestKey(requestId, rand), auth)
+        
+        return rand
+    }
+
+    async generateJwt(requestId: string, rand: string) {
+        const authKey = genRequestKey(requestId, rand)
+        console.log("rand number with requestId: ", authKey)
+        const auth = this.#requests.get(authKey)
+
+        if (!auth) {
+            throw new Error("Can't find permitted request")
+        }
+        
+        const key = this.getSigningKey()
+        let keyEncoder = new KeyEncoder('secp256k1')
+        const pemPrivateKey = keyEncoder.encodePrivate(key.privateKey, 'raw', 'pem')
+
+        const keyObj = crypto.createPrivateKey(pemPrivateKey)
+
+        const jwt = await new jose.SignJWT({...auth})
+            .setProtectedHeader({ alg: "ES256K" })
+            .setIssuedAt()
+            .setIssuer(this.did || "")
+            .setAudience(`${auth.appName}:${this.did || ""}`)
+            .setExpirationTime(`${this.#tokenValidPeriod}s`)
+            .sign(keyObj)
+
+        this.#requests.delete(authKey)
+
+        return jwt
+    }
 }
 
-export function init(rootConfigPath: string): AgentService {
-    const agent = new AgentService(rootConfigPath)
+export function init(rootConfigPath: string, reqCredential?: string): AgentService {
+    const agent = new AgentService(rootConfigPath, reqCredential)
     agent.load()
     return agent
 }
