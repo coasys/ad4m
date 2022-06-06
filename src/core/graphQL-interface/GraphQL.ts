@@ -275,7 +275,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 await core.agentService.save(args.passphrase)
                 // @ts-ignore
                 const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
-                
+
                 if (connectHolochain) {
                   await core.connectHolochain( {hcPortAdmin, hcPortApp} );
                 } else {
@@ -284,7 +284,9 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 
                 console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
 
-                if (!Config.languageLanguageOnly) {await core.initializeAgentsDirectMessageLanguage() }
+                if (!Config.languageLanguageOnly) {
+                    await core.initializeAgentsDirectMessageLanguage()
+                 }
 
                 return core.agentService.dump()
             },
@@ -311,16 +313,20 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     failed = true
                 }
 
-                // @ts-ignore
-                const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
+                try {
+                    core.perspectivesController;
+                } catch (e) {
+                    // @ts-ignore
+                    const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
+    
+                    if (connectHolochain) {
+                        await core.connectHolochain( {hcPortAdmin, hcPortApp} );
+                    } else {
+                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                    }
 
-                if (connectHolochain) {
-                    await core.connectHolochain( {hcPortAdmin, hcPortApp} );
-                } else {
-                    await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                    console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                 }
-                
-                console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
 
                 const dump = core.agentService.dump() as any
 
