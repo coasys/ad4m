@@ -59,7 +59,7 @@ export default class PerspectivismCore {
     constructor(config: Config.CoreConfig) {
         Config.init(config)
 
-        this.#agentService = new AgentService(Config.rootConfigPath)
+        this.#agentService = new AgentService(Config.rootConfigPath, Config.reqCredential)
         this.#runtimeService = new RuntimeService(Config.rootConfigPath)
         this.#agentService.ready.then(() => {
             this.#runtimeService.did = this.#agentService!.did!

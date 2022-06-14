@@ -12,6 +12,7 @@ export let holochainDataPath = path.join(holochainPath, 'd')
 export let holochainConductorPath = path.join(holochainPath, 'c')
 export let resourcePath = ''
 export let languageLanguageOnly = false;
+export let reqCredential = ''
 
 export let knownLinkLanguages: string[] = [];
 export let trustedAgents: string[] =  [];
@@ -53,6 +54,7 @@ export interface CoreConfig {
     perspectiveLanguageSettings?: object
     neighbourhoodLanguageSettings?: object
     languageLanguageSettings?: object
+    reqCredential?: string
 }
 
 
@@ -66,6 +68,10 @@ export function init(c: CoreConfig) {
     holochainPath = path.join(rootConfigPath, 'h')
     holochainDataPath = path.join(holochainPath, 'd')
     holochainConductorPath = path.join(holochainPath, 'c')
+    
+    if(c.reqCredential) {
+        reqCredential = c.reqCredential
+    }
 
     //Create paths if they do not exist
     const dirs = [rootConfigPath, dataPath, languagesPath, tempLangPath, holochainPath, holochainDataPath, holochainConductorPath]
