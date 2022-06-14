@@ -974,9 +974,9 @@
     "tslib" "^2.3.1"
     "webcrypto-core" "^1.4.0"
 
-"@perspect3vism/ad4m@file:../ad4m":
+"@perspect3vism/ad4m@0.1.31":
   "resolved" "file:../ad4m"
-  "version" "0.1.29"
+  "version" "0.1.31"
   dependencies:
     "@apollo/client" "3.3.20"
     "@holochain/client" "0.3.2"
