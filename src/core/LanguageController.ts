@@ -1,8 +1,8 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinksAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl 
+    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective 
 } from '@perspect3vism/ad4m';
-import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType } from '@perspect3vism/ad4m';
+import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
 import fs from 'fs'
 import path from 'path'
@@ -16,7 +16,7 @@ import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
 
-type LinkObservers = (added: Expression[], removed: Expression[], lang: LanguageRef)=>void;
+type LinkObservers = (diff: PerspectiveDiff, revision: string, lang: LanguageRef)=>void;
 
 interface Services {
     holochainService: HolochainService, 
@@ -170,9 +170,9 @@ export default class LanguageController {
         const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {
-            language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
+            language.linksAdapter.addCallback((diff: PerspectiveDiff, revision: string) => {
                 this.#linkObservers.forEach(o => {
-                    o(added, removed, {name: language.name, address: hash} as LanguageRef)
+                    o(diff, revision, {name: language.name, address: hash} as LanguageRef)
                 })
             })
         }
@@ -208,9 +208,9 @@ export default class LanguageController {
         const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings})
 
         if(language.linksAdapter) {
-            language.linksAdapter.addCallback((added: Expression[], removed: Expression[]) => {
+            language.linksAdapter.addCallback((diff: PerspectiveDiff, revision: string) => {
                 this.#linkObservers.forEach(o => {
-                    o(added, removed, {name: language.name, address: hash} as LanguageRef)
+                    o(diff, revision, {name: language.name, address: hash} as LanguageRef)
                 })
             })
         }
@@ -874,7 +874,7 @@ export default class LanguageController {
         return expr
     }
 
-    async getLinksAdapter(lang: LanguageRef): Promise<LinksAdapter | null> {
+    async getLinksAdapter(lang: LanguageRef): Promise<LinkSyncAdapter | null> {
         try {
             let gotLang = await this.languageByRef(lang)
             if (gotLang.linksAdapter) {
