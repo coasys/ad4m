@@ -1,12 +1,11 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, ExpressionRef, parseExprUrl } from "@perspect3vism/ad4m"
-import { Link, hashLinkExpression, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective } from "@perspect3vism/ad4m"
+import { Link, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
-import { link } from "fs";
 
 export default class Perspective {
     name?: string;
@@ -36,12 +35,16 @@ export default class Perspective {
         this.#prologEngine = null
         this.#prologNeedsRebuild = true
 
-        this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, () => {
-            this.#prologNeedsRebuild = true
+        this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, (perspective: PerspectiveHandle) => {
+            if (perspective.uuid == this.uuid) {
+                this.#prologNeedsRebuild = true
+            }
         })
 
-        this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, () => {
-            this.#prologNeedsRebuild = true
+        this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, (perspective: PerspectiveHandle) => {
+            if (perspective.uuid == this.uuid) {
+                this.#prologNeedsRebuild = true
+            }
         })
 
         const that = this
@@ -49,6 +52,8 @@ export default class Perspective {
         process.on("SIGINT", function () {
             that.#prologEngine?.close()
         });
+
+        this.renderLinksAdapter();
     }
 
     plain(): PerspectiveHandle {
@@ -81,15 +86,49 @@ export default class Perspective {
         throw new Error("Object is neither Link nor Expression: " + JSON.stringify(maybeLink))
     }
 
-    //@ts-ignore
-    private callLinksAdapter(functionName: string, ...args): Promise<LinkExpression[]> {
+    private renderLinksAdapter(): Promise<Ad4mPerspective> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
-            return Promise.resolve([])
+            return Promise.resolve(new Ad4mPerspective([]))
+        } 
+        return new Promise(async (resolve, reject) => {
+            setTimeout(() => resolve(new Ad4mPerspective([])), 20000)
+            try {
+                const address = this.neighbourhood!.linkLanguage;
+                const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
+                if(linksAdapter) {
+                    //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    //@ts-ignore
+                    const result = await linksAdapter["render"]()
+                    //console.debug("Got result:", result)
+                    resolve(result)
+                } else {
+                    console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
+                    // TODO: request install
+                    resolve(new Ad4mPerspective([]))
+                }
+            } catch(e) {
+                console.error("Error while trying to call links adapter:", e)
+                reject(e)
+            }
+        })
+    }
+
+    //@ts-ignore
+    private callLinksAdapter(functionName: string, ...args): Promise<PerspectiveDiff> {
+        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+            //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
+            return Promise.resolve({
+                additions: [],
+                removals: []
+            })
         }
 
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => resolve([]), 20000)
+            setTimeout(() => resolve({
+                additions: [],
+                removals: []
+            }), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
@@ -102,7 +141,10 @@ export default class Perspective {
                 } else {
                     console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
-                    resolve([])
+                    resolve({
+                        additions: [],
+                        removals: []
+                    })
                 }
             } catch(e) {
                 console.error("Error while trying to call links adapter:", e)
@@ -114,7 +156,7 @@ export default class Perspective {
     async syncWithSharingAdapter() {
         //@ts-ignore
         const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link)
-        const remoteLinks = await this.callLinksAdapter('getLinks')
+        const remoteLinks = await this.renderLinksAdapter()
         const includes = (link: LinkExpression, list: LinkExpression[]) => {
             return undefined !== list.find(e =>
                 JSON.stringify(e.author) === JSON.stringify(link.author) &&
@@ -124,27 +166,54 @@ export default class Perspective {
                 e.predicate === link.data.predicate
                 )
         }
+        let linksToCommit = [];
         for(const l of localLinks) {
-            if(!includes(l, remoteLinks)) {
-                await this.callLinksAdapter("addLink", l)
+            if(!includes(l, remoteLinks.links)) {
+                linksToCommit.push(l);
             }
         }
+        if (linksToCommit.length > 0) {
+            await this.callLinksAdapter("commit", {additions: linksToCommit, removals: []})
+        }
 
+        for(const l of remoteLinks.links) {
+            if(!includes(l, localLinks)) {
+                this.addLocalLink(l);
+            }
+        }
     }
-
-    addLink(link: LinkInput | LinkExpressionInput): LinkExpression {
-        const linkExpression = this.ensureLinkExpression(link)
-        this.callLinksAdapter('addLink', linkExpression)
+    
+    addLocalLink(linkExpression: LinkExpression) {
         const hash = new SHA3(256);
         hash.update(JSON.stringify(linkExpression));
         const addr = hash.digest('hex');
 
-        link = linkExpression.data as Link
+        let link = linkExpression.data as Link
 
         this.#db.storeLink(this.uuid, linkExpression, addr)
         this.#db.attachSource(this.uuid, link.source, addr)
         this.#db.attachTarget(this.uuid, link.target, addr)
+    }
 
+    removeLocalLink(linkExpression: LinkExpression) {
+        let foundLink = this.findLink(linkExpression);
+        if (foundLink) {
+            let link = linkExpression.data as Link
+            this.#db.removeSource(this.uuid, link.source, foundLink!)
+            this.#db.removeTarget(this.uuid, link.target, foundLink!)
+            this.#db.remove(this.uuid, foundLink!)
+        }
+    }
+
+    addLink(link: LinkInput | LinkExpressionInput): LinkExpression {
+        const linkExpression = this.ensureLinkExpression(link)
+        this.callLinksAdapter('commit', {
+            additions: [linkExpression],
+            removals: []
+        } as PerspectiveDiff)
+
+        this.addLocalLink(linkExpression)
+        
         this.#prologNeedsRebuild = true
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
@@ -154,19 +223,21 @@ export default class Perspective {
         return linkExpression
     }
 
-    private findLink(linkToFind: LinkExpressionInput): string {
+    private findLink(linkToFind: LinkExpressionInput): string | undefined {
         const allLinks = this.#db.getAllLinks(this.uuid)
         for(const {name, link} of allLinks) {
             if(linkEqual(linkToFind, link)) {
                 return name
             }
         }
-        throw new Error(`Link not found in perspective "${this.plain()}": ${JSON.stringify(linkToFind)}`)
     }
 
     async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
         //console.debug("LINK REPO: updating link:", oldLink, newLink)
         const addr = this.findLink(oldLink)
+        if (!addr) {
+            throw new Error(`Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
+        }
         //console.debug("hash:", addr)
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
@@ -184,7 +255,10 @@ export default class Perspective {
         }
 
         this.#prologNeedsRebuild = true
-        this.callLinksAdapter('updateLink', oldLink, newLinkExpression)
+        this.callLinksAdapter('commit', {
+            additions: [newLink],
+            removals: [oldLink]
+        } as PerspectiveDiff)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: newLinkExpression
@@ -198,15 +272,13 @@ export default class Perspective {
     }
 
     async removeLink(linkExpression: LinkExpressionInput) {
-        const addr = this.findLink(linkExpression)
-        const link = linkExpression.data as Link
-
-        this.#db.removeSource(this.uuid, link.source, addr)
-        this.#db.removeTarget(this.uuid, link.target, addr)
-        this.#db.remove(this.#db.allLinksKey(this.uuid), addr)
+        this.removeLink(linkExpression);
 
         this.#prologNeedsRebuild = true
-        this.callLinksAdapter('removeLink', linkExpression)
+        this.callLinksAdapter('commit',  {
+            additions: [],
+            removals: [linkExpression]
+        } as PerspectiveDiff)
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
@@ -290,20 +362,32 @@ export default class Perspective {
         return result
     }
 
+    async populateLocalLinks(additions: LinkExpression[], removals: LinkExpression[]) {
+        additions.forEach((link) => {
+            this.addLocalLink(link)
+        })
+
+        removals.forEach((link) => {
+            let foundLink = this.findLink(link);
+            if (foundLink) {
+                link = link.data as Link
+                this.#db.removeSource(this.uuid, link.source, foundLink!)
+                this.#db.removeTarget(this.uuid, link.target, foundLink!)
+                this.#db.remove(this.uuid, foundLink!)
+            }
+        })
+    }
+
     async getLinks(query: LinkQuery): Promise<LinkExpression[]> {
+        const remoteLinks = await this.callLinksAdapter('pull')
+        this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+        
         // console.debug("getLinks local...")
-        const localLinks = await this.getLinksLocal(query)
-        // console.debug("getLinks local", localLinks)
-        // console.debug("getLinks remote...")
-        const remoteLinks = await this.callLinksAdapter('getLinks', query)
-        // console.debug("getLinks remote", remoteLinks)
-        const mergedLinks: {[key: number]: LinkExpression} = {};
-        localLinks.forEach(l => mergedLinks[hashLinkExpression(l)] = l)
-        remoteLinks.forEach(l => mergedLinks[hashLinkExpression(l)] = l)
+        const links = await this.getLinksLocal(query)
         
         const reverse = query.fromDate! >= query.untilDate!;
 
-        let values = Object.values(mergedLinks).sort((a, b) => {
+        let values = Object.values(links).sort((a, b) => {
             return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
         });
 
