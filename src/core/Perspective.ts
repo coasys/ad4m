@@ -201,7 +201,7 @@ export default class Perspective {
             let link = linkExpression.data as Link
             this.#db.removeSource(this.uuid, link.source, foundLink!)
             this.#db.removeTarget(this.uuid, link.target, foundLink!)
-            this.#db.remove(this.uuid, foundLink!)
+            this.#db.remove(this.#db.allLinksKey(this.uuid), foundLink!)
         }
     }
 
