@@ -272,7 +272,7 @@ export default class Perspective {
     }
 
     async removeLink(linkExpression: LinkExpressionInput) {
-        this.removeLink(linkExpression);
+        this.removeLocalLink(linkExpression);
 
         this.#prologNeedsRebuild = true
         this.callLinksAdapter('commit',  {
