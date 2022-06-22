@@ -16,7 +16,7 @@ import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
 
-type LinkObservers = (diff: PerspectiveDiff, revision: string, lang: LanguageRef)=>void;
+type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 
 interface Services {
     holochainService: HolochainService, 
@@ -170,9 +170,9 @@ export default class LanguageController {
         const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {
-            language.linksAdapter.addCallback((diff: PerspectiveDiff, revision: string) => {
+            language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.#linkObservers.forEach(o => {
-                    o(diff, revision, {name: language.name, address: hash} as LanguageRef)
+                    o(diff, {name: language.name, address: hash} as LanguageRef)
                 })
             })
         }
@@ -208,9 +208,9 @@ export default class LanguageController {
         const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings})
 
         if(language.linksAdapter) {
-            language.linksAdapter.addCallback((diff: PerspectiveDiff, revision: string) => {
+            language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.#linkObservers.forEach(o => {
-                    o(diff, revision, {name: language.name, address: hash} as LanguageRef)
+                    o(diff, {name: language.name, address: hash} as LanguageRef)
                 })
             })
         }
