@@ -363,19 +363,23 @@ export default class Perspective {
     }
 
     async populateLocalLinks(additions: LinkExpression[], removals: LinkExpression[]) {
-        additions.forEach((link) => {
+        if (additions) {
+            additions.forEach((link) => {
             this.addLocalLink(link)
-        })
+            })
+        }
 
-        removals.forEach((link) => {
-            let foundLink = this.findLink(link);
-            if (foundLink) {
-                link = link.data as Link
-                this.#db.removeSource(this.uuid, link.source, foundLink!)
-                this.#db.removeTarget(this.uuid, link.target, foundLink!)
-                this.#db.remove(this.uuid, foundLink!)
-            }
-        })
+        if (removals) {
+            removals.forEach((link) => {
+                let foundLink = this.findLink(link);
+                if (foundLink) {
+                    link = link.data as Link
+                    this.#db.removeSource(this.uuid, link.source, foundLink!)
+                    this.#db.removeTarget(this.uuid, link.target, foundLink!)
+                    this.#db.remove(this.uuid, foundLink!)
+                }
+            })
+        }
     }
 
     async getLinks(query: LinkQuery): Promise<LinkExpression[]> {
