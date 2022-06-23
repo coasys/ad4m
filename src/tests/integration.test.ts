@@ -24,6 +24,7 @@ import runtimeTests from "./runtime";
 import { Crypto } from "@peculiar/webcrypto"
 import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
+import socialDNATests from "./social-dna-flow";
 //@ts-ignore
 global.crypto = new Crypto();
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
@@ -36,7 +37,7 @@ let core: PerspectivismCore | null = null
 function apolloClient(port: number): ApolloClient<any> {
   return new ApolloClient({
     link: new WebSocketLink({
-        uri: `http://localhost:${port}/graphql`,
+        uri: `ws://localhost:${port}/graphql`,
         options: {
           reconnect: true,
           connectionParams: () => {
@@ -158,6 +159,7 @@ describe("Integration tests", () => {
     describe('Runtime', runtimeTests(testContext))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
+    describe('Social DNA', socialDNATests(testContext))
 
     describe('with Alice and Bob', () => {
         let bob: PerspectivismCore | null = null
