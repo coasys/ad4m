@@ -6,7 +6,6 @@ import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
-import { link } from "fs";
 
 export default class Perspective {
     name?: string;

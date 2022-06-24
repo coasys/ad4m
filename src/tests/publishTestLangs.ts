@@ -43,7 +43,7 @@ const languageHashes = {
 function apolloClient(port: number): ApolloClient<any> {
     return new ApolloClient({
       link: new WebSocketLink({
-          uri: `http://localhost:${port}/graphql`,
+          uri: `ws://localhost:${port}/graphql`,
           options: {
               reconnect: true,
               connectionParams: () => {

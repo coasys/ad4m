@@ -1,14 +1,16 @@
 import fs from "fs-extra";
+import path from "path";
 //@ts-ignore
 import swipl from 'swipl-stdio'
 //@ts-ignore
 import tmp from 'tmp'
+import { resourcePath } from "./Config";
 
 export default class PrologInstance {
     #engine
 
     constructor() {
-        this.#engine = new swipl.Engine()
+        this.#engine = new swipl.Engine(path.join(resourcePath, "swipl"))
     }
 
     async query(input: string) {

@@ -1,3 +1,5 @@
+# Update windows holochain version in github CI as its not using nix
+
 let
   holonixPath = (import ./nix/sources.nix).holonix;
   holonix = import (holonixPath) {

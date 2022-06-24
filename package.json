@@ -15,13 +15,16 @@
   "scripts": {
     "build": "tsc",
     "run": "node lib/main.js",
-    "prepare-test": "rm -rf src/test-temp && ./scripts/build-test-language.sh &&  nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && npm run inject-language-language && npm run publish-test-languages && npm run inject-publishing-agent",
+    "prepare-test": "rm -rf src/test-temp && ./scripts/build-test-language.sh && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && npm run inject-language-language && npm run publish-test-languages && npm run inject-publishing-agent",
+    "prepare-test:windows": "powershell ./scripts/build-test-language.ps1 && powershell ./scripts/prepareTestDirectory.ps1 && node scripts/get-builtin-test-langs.js && npm run inject-language-language && npm run publish-test-languages && npm run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
     "publish-test-languages": "npm run build && node ./lib/tests/publishTestLangs.js",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
+    "test-all:windows": "powershell ./scripts/run-all-test.ps1 & jest --forceExit",
     "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js",
+    "test:windows": "npm run prepare-test:windows && npm run test-all:windows && node scripts/cleanTestingData.js",
     "jest": "jest"
   },
   "repository": {
@@ -65,7 +68,7 @@
   },
   "dependencies": {
     "@holochain/client": "0.3.2",
-    "@perspect3vism/ad4m": "0.1.30",
+    "@perspect3vism/ad4m": "0.1.31",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",
@@ -85,7 +88,7 @@
     "node-fetch": "^2.6.1",
     "sha256": "^0.2.0",
     "sha3": "^2.1.3",
-    "swipl-stdio": "^1.0.4",
+    "swipl-stdio": "https://github.com/perspect3vism/node-swipl-stdio.git",
     "tmp": "^0.2.1"
   }
 }
