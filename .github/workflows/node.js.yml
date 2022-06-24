@@ -82,7 +82,13 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
-      - run: npm install -g npm
+      - name: Temp fix for bug https://github.com/npm/cli/issues/4980
+        if: ${{ (matrix.node == '16' || matrix.node == '18') && matrix.os == 'windows-latest' }}
+        run: |
+          $WhereNode = Get-Command node | Select-Object -ExpandProperty Definition
+          $NodeDirPath = Split-Path $WhereNode -Parent
+          cd $NodeDirPath
+          npm install npm@8.12.1
       - run: npm i
 
       - name: Test
