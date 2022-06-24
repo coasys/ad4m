@@ -79,6 +79,7 @@ describe('Perspective', () => {
                 if(i%2 === 0) {
                     link.source = 'root'
                 }
+                //@ts-ignore
                 allLinks!.push(link)
                 perspective!.addLink(link)
             }

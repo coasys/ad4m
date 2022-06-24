@@ -133,7 +133,7 @@ export default class Perspective {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
-                    //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
@@ -256,7 +256,7 @@ export default class Perspective {
 
         this.#prologNeedsRebuild = true
         this.callLinksAdapter('commit', {
-            additions: [newLink],
+            additions: [newLinkExpression],
             removals: [oldLink]
         } as PerspectiveDiff)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
@@ -365,7 +365,7 @@ export default class Perspective {
     async populateLocalLinks(additions: LinkExpression[], removals: LinkExpression[]) {
         if (additions) {
             additions.forEach((link) => {
-            this.addLocalLink(link)
+                this.addLocalLink(link)
             })
         }
 
@@ -373,9 +373,9 @@ export default class Perspective {
             removals.forEach((link) => {
                 let foundLink = this.findLink(link);
                 if (foundLink) {
-                    link = link.data as Link
-                    this.#db.removeSource(this.uuid, link.source, foundLink!)
-                    this.#db.removeTarget(this.uuid, link.target, foundLink!)
+                    let linkData = new Link(link.data)
+                    this.#db.removeSource(this.uuid, linkData.source, foundLink!)
+                    this.#db.removeTarget(this.uuid, linkData.target, foundLink!)
                     this.#db.remove(this.uuid, foundLink!)
                 }
             })
