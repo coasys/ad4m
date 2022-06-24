@@ -14,7 +14,7 @@ import PerspectivismCore from "../core/PerspectivismCore";
 function apolloClient(port: number, token?: string): ApolloClient<any> {
     return new ApolloClient({
         link: new WebSocketLink({
-            uri: `http://localhost:${port}/graphql`,
+            uri: `ws://localhost:${port}/graphql`,
             options: {
                 reconnect: true,
                 connectionParams: () => {
