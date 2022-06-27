@@ -94,7 +94,7 @@ export default class HolochainService {
                     useProxy,
                     useLocalProxy,
                     useMdns,
-                    connectionUrl: ''
+                    lairConnectionUrl: ''
                 } as ConductorConfiguration);
             } else {
                 const config = yaml.load(fs.readFileSync(conductorConfigPath, 'utf-8')) as any;

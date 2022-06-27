@@ -98,14 +98,6 @@ export class TestContext {
       this.#bobCore = bobCore
     }
 
-    get aliceCore() : PerspectivismCore {
-      return this.#aliceCore!
-    }
-
-    get bobCore(): PerspectivismCore {
-      return this.#bobCore! 
-    }
-
     async makeAllNodesKnown() {
       const aliceAgentInfo = await this.#aliceCore!.holochainRequestAgentInfos()
       const bobAgentInfo = await this.#bobCore!.holochainRequestAgentInfos()

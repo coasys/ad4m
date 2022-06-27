@@ -32,7 +32,7 @@ export interface ConductorConfiguration {
     useProxy: boolean,
     useLocalProxy: boolean;
     useMdns: boolean;
-    connectionUrl: string;
+    lairConnectionUrl: string;
 }
 
 export function writeDefaultConductor(conductorConfig: ConductorConfiguration) {
@@ -54,7 +54,7 @@ decryption_service_uri: ~
 dpki: ~
 keystore:
   type: lair_server
-  connection_url: ${conductorConfig.connectionUrl}
+  connection_url: ${conductorConfig.lairConnectionUrl}
 admin_interfaces:
   - driver:
       type: websocket
@@ -144,7 +144,7 @@ async function initializeLairKeystore(lairPath: string, hcDataPath: string, conf
             if(useProxy === undefined) useProxy = true
             if(useLocalProxy === undefined) useLocalProxy = false;
 
-            const connectionUrl = execSync(`${escapeShellArg(lairPath)} url`, {
+            const lairConnectionUrl = execSync(`${escapeShellArg(lairPath)} url`, {
                 cwd: `${escapeShellArg(hcDataPath)}/keystore`
             }).toString();
 
@@ -159,7 +159,7 @@ async function initializeLairKeystore(lairPath: string, hcDataPath: string, conf
                 useProxy,
                 useLocalProxy,
                 useMdns,
-                connectionUrl,
+                lairConnectionUrl,
             } as ConductorConfiguration);
             resolve(true);
         });
