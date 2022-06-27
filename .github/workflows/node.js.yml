@@ -73,7 +73,7 @@ jobs:
           SQLCIPHER_STATIC: 1
         run: |
           rustup target add wasm32-unknown-unknown
-          (cargo install lair_keystore --version 0.0.9 || true)
+          (cargo install lair_keystore --version 0.1.0 || true)
           (cargo install --locked holochain --git https://github.com/holochain/holochain.git --tag holochain-0.0.127 || true)
           (cargo install holochain_cli --version 0.0.28 || true)
 
@@ -82,7 +82,12 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
-      - run: npm install -g npm
+      - name: Temp fix for bug https://github.com/npm/cli/issues/4980
+        run: |
+          $WhereNode = Get-Command node | Select-Object -ExpandProperty Definition
+          $NodeDirPath = Split-Path $WhereNode -Parent
+          cd $NodeDirPath
+          npm install npm@8.12.1
       - run: npm i
 
       - name: Test
