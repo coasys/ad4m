@@ -4,7 +4,7 @@ import { parseExprUrl, LanguageRef, Neighbourhood } from '@perspect3vism/ad4m'
 import * as Config from './Config'
 import * as Db from './db'
 import type { PerspectivismDb } from './db'
-import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService';
+import HolochainService from './storage-services/Holochain/HolochainService';
 import * as IPFS from './storage-services/IPFS'
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
@@ -31,12 +31,7 @@ export interface InitHolochainParams {
     hcUseBootstrap?: boolean,
     hcUseProxy?: boolean,
     hcUseLocalProxy?: boolean,
-    hcUseMdns?: boolean,
-    passphrase?: string
-}
-
-export interface HolochainUnlockConfiguration extends HolochainConfiguration {
-    passphrase: string;
+    hcUseMdns?: boolean
 }
 
 export interface ConnectHolochainParams {
@@ -120,12 +115,11 @@ export default class PerspectivismCore {
         console.log("Done.")
     }
 
-    async startGraphQLServer(port: number, mocks: boolean, config: any) {
+    async startGraphQLServer(port: number, mocks: boolean) {
         const { url, subscriptionsUrl } = await GraphQL.startServer({
             core: this, 
             mocks,
-            port,
-            config
+            port
         })
         console.log(`🚀  GraphQL Server ready at ${url}`)
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
@@ -140,9 +134,8 @@ export default class PerspectivismCore {
 
     async initHolochain(params: InitHolochainParams) {
         console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
-        console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`);
-
-        const holochainConfig: HolochainConfiguration = {
+        console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
+        this.#holochain = new HolochainService({
             conductorPath: Config.holochainConductorPath, 
             dataPath: Config.holochainDataPath, 
             resourcePath: Config.resourcePath, 
@@ -152,13 +145,8 @@ export default class PerspectivismCore {
             useProxy: params.hcUseProxy,
             useLocalProxy: params.hcUseLocalProxy,
             useMdns: params.hcUseMdns,
-        }
-
-        this.#holochain = new HolochainService(holochainConfig)
-        await this.#holochain.run({
-            ...holochainConfig,
-            passphrase: params.passphrase!
-        });
+        })
+        await this.#holochain.run();
     }
 
     async connectHolochain(params: ConnectHolochainParams) {

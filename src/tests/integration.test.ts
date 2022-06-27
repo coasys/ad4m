@@ -135,6 +135,9 @@ describe("Integration tests", () => {
             hcUseMdns: true
         })
 
+        core.initControllers()
+        await core.initLanguages()
+
         testContext.alice = new Ad4mClient(apolloClient(4000))
         testContext.aliceCore = core
     })
@@ -188,14 +191,14 @@ describe("Integration tests", () => {
                 hcUseMdns: true
           })
 
+          bob.initControllers()
+          await bob.initLanguages()
+
           testContext.bob = new Ad4mClient(apolloClient(14000))
           testContext.bobCore = bob
-          await testContext.bob.agent.generate("passphrase")
-
-          const status = await testContext.bob.agent.status()
-
-          expect(status.isInitialized).toBe(true);
-          expect(status.isUnlocked).toBe(true);
+          const generate = await testContext.bob.agent.generate("passphrase")
+          expect(generate.isInitialized).toBe(true);
+          expect(generate.isUnlocked).toBe(true);
           await testContext.makeAllNodesKnown()
         })
 

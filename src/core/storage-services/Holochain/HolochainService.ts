@@ -10,12 +10,11 @@ import type { ChildProcess } from 'child_process'
 import { RequestAgentInfoResponse } from '@holochain/client'
 import yaml from 'js-yaml';
 import { AsyncQueue } from './Queue'
-import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
 
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
-export const bootstrapUrl = "https://bootstrap-staging.holo.host"
-export const kitsuneProxy = "kitsune-proxy://SYVd4CF3BdJ4DS7KwLLgeU3_DbHoZ34Y-qroZ79DOs8/kitsune-quic/h/165.22.32.11/p/5779/--"
+const bootstrapUrl = "https://bootstrap-staging.holo.host"
+const kitsuneProxy = "kitsune-proxy://SYVd4CF3BdJ4DS7KwLLgeU3_DbHoZ34Y-qroZ79DOs8/kitsune-quic/h/165.22.32.11/p/5779/--"
 
 export interface HolochainConfiguration {
     conductorPath?: string, 
@@ -93,8 +92,7 @@ export default class HolochainService {
                     conductorConfigPath: conductorConfigPath,
                     useProxy,
                     useLocalProxy,
-                    useMdns,
-                    lairConnectionUrl: ''
+                    useMdns
                 } as ConductorConfiguration);
             } else {
                 const config = yaml.load(fs.readFileSync(conductorConfigPath, 'utf-8')) as any;
@@ -163,7 +161,7 @@ export default class HolochainService {
         }
     }
 
-    async run(config: HolochainUnlockConfiguration) {
+    async run() {
         let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)
         if (this.#conductorPath == undefined || this.#conductorConfigPath == undefined) {
@@ -172,7 +170,7 @@ export default class HolochainService {
             resolveReady!()
             return
         }
-        let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath, config);
+        let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath);
         [this.#hcProcess, this.#lairProcess] = hcProcesses;
         console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
 

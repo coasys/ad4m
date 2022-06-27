@@ -10,7 +10,7 @@ import { ad4mExecutorVersion } from '../Config';
 import * as Auth from '../agent/Auth'
 import { checkCapability } from '../agent/Auth'
 
-function createResolvers(core: PerspectivismCore, config: any) {
+function createResolvers(core: PerspectivismCore) {
     const pubsub = PubSub.get()
 
     return {
@@ -273,25 +273,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
-                // @ts-ignore
-                const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
-
-                if (connectHolochain) {
-                  await core.connectHolochain( {hcPortAdmin, hcPortApp} );
-                } else {
-                  await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
-                }
-                
-                
-                if (!Config.languageLanguageOnly) {
-                    await core.waitForAgent();
-                    core.initControllers()
-                    await core.initLanguages()
-                    await core.initializeAgentsDirectMessageLanguage()
-                }
-                
-                console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
-                
+                if (!Config.languageLanguageOnly) {await core.initializeAgentsDirectMessageLanguage() }
                 return core.agentService.dump()
             },
             //@ts-ignore
@@ -315,28 +297,6 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     await core.agentService.unlock(args.passphrase)
                 } catch(e) {
                     failed = true
-                }
-
-                try {
-                    core.perspectivesController;
-                    await core.waitForAgent();
-                    core.initControllers()
-                    await core.initLanguages()
-                } catch (e) {
-                    // @ts-ignore
-                    const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
-    
-                    if (connectHolochain) {
-                        await core.connectHolochain( {hcPortAdmin, hcPortApp} );
-                    } else {
-                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
-                        await core.waitForAgent();
-                        core.initControllers()
-                        await core.initLanguages()
-                    }
-
-
-                    console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                 }
 
                 const dump = core.agentService.dump() as any
@@ -781,12 +741,11 @@ export interface StartServerParams {
     core: PerspectivismCore, 
     mocks: boolean,
     port: number,
-    config: any;
 }
 
 export async function startServer(params: StartServerParams) {
     const { core, mocks, port } = params
-    const resolvers = createResolvers(core, params.config)
+    const resolvers = createResolvers(core)
     const typeDefs = gql(typeDefsString)
     const server = new ApolloServer({
         typeDefs,
