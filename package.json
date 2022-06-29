@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.1.39",
+  "version": "0.1.40",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -10,7 +10,8 @@
     "default.nix",
     "scripts",
     "CHANGELOG.md",
-    "nix"
+    "nix",
+    "holochain_version.nix"
   ],
   "types": "src/types.d.ts",
   "scripts": {
