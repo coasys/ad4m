@@ -592,6 +592,14 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 //@ts-ignore
                 resolve: payload => payload
             },
+            agentStatusChanged: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    return pubsub.asyncIterator(PubSub.AGENT_STATUS_CHANGED)
+                },
+                //@ts-ignore
+                resolve: payload => payload
+            },
             runtimeMessageReceived: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
