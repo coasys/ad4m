@@ -94,14 +94,13 @@ export default class Perspective {
             return Promise.resolve(new Ad4mPerspective([]))
         } 
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => resolve(new Ad4mPerspective([])), 20000)
+            setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
-                    //@ts-ignore
-                    const result = await linksAdapter["render"]()
+                    const result = await linksAdapter.render();
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
@@ -127,10 +126,7 @@ export default class Perspective {
         }
 
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => resolve({
-                additions: [],
-                removals: []
-            }), 20000)
+            setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
