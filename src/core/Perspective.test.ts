@@ -118,7 +118,7 @@ describe('Perspective', () => {
             linksAdapter = new LinksAdapter()
         })
 
-        it('calls link language on getLinks() with the query once', async () => {
+        it('calls pull on link language on getLinks() with the query once', async () => {
             const query = {source: 'root'} as LinkQuery;
             await perspective!.getLinks(query)
 
@@ -126,7 +126,7 @@ describe('Perspective', () => {
             expect(linksAdapter.commit.mock.calls.length).toBe(0)
         })
 
-        it('calls link language on addLink() with link expression once', async () => {
+        it('calls commit on link language on addLink() with link expression once', async () => {
             const link = createLink()
             const linkExpression = await perspective!.addLink(link)
 
@@ -140,7 +140,7 @@ describe('Perspective', () => {
             expect(linksAdapter.render.mock.calls.length).toBe(0)
         })
 
-        it('calls link language on updateLink() with link expression once', async () => {
+        it('calls commit on link language on updateLink() with link expression once', async () => {
             const link1 = createLink()
             const link2 = createLink()
 
@@ -162,7 +162,7 @@ describe('Perspective', () => {
             expect(linksAdapter.pull.mock.calls.length).toBe(0)
         })
 
-        it('calls link language on removeLink() with link expression once', async () => {
+        it('calls commit on link language on removeLink() with link expression once', async () => {
             const link = createLink()
 
             const linkExpression = await perspective!.addLink(link)
@@ -182,7 +182,7 @@ describe('Perspective', () => {
         })
 
         describe('syncWithSharingAdpater', () => {
-            it('adds all missing links from local DB to linksAdapter', async () => {
+            it('commits all missing links from local DB to linksAdapter', async () => {
                 perspective!.neighbourhood = undefined
     
                 const link = createLink()
