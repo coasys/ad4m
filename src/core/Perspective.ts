@@ -53,7 +53,9 @@ export default class Perspective {
             that.#prologEngine?.close()
         });
 
-        this.renderLinksAdapter();
+        this.callLinksAdapter("pull").then((remoteLinks) => {
+            this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+        });
     }
 
     plain(): PerspectiveHandle {
@@ -371,13 +373,7 @@ export default class Perspective {
 
         if (removals) {
             removals.forEach((link) => {
-                let foundLink = this.findLink(link);
-                if (foundLink) {
-                    let linkData = new Link(link.data)
-                    this.#db.removeSource(this.uuid, linkData.source, foundLink!)
-                    this.#db.removeTarget(this.uuid, linkData.target, foundLink!)
-                    this.#db.remove(this.uuid, foundLink!)
-                }
+                this.removeLocalLink(link);
             })
         }
     }
