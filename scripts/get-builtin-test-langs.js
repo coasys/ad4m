@@ -19,11 +19,8 @@ const languages = {
     //dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.2/neighbourhood-store.dna",
     bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.1/bundle.js",
   },
-  "social-context": {
-    zipped: true,
-    targetDnaName: "social-context",
-    resource:
-      "https://github.com/juntofoundation/Social-Context/releases/download/0.0.22/full_features.zip",
+  "perspective-diff-sync": {
+    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/0.0.7/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
