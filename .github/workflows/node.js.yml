@@ -73,9 +73,9 @@ jobs:
           SQLCIPHER_STATIC: 1
         run: |
           rustup target add wasm32-unknown-unknown
-          (cargo install lair_keystore --version 0.1.0 || true)
-          (cargo install --locked holochain --git https://github.com/holochain/holochain.git --tag holochain-0.0.127 || true)
-          (cargo install holochain_cli --version 0.0.28 || true)
+          (cargo install lair_keystore --version 0.2.0 || true)
+          (cargo install --locked holochain --git https://github.com/holochain/holochain.git --tag holochain-0.0.146 || true)
+          (cargo install holochain_cli --version 0.0.44 || true)
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v2
