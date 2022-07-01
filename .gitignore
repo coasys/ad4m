@@ -7,6 +7,6 @@
 !/src/rollup-plugin-hc-dna.js
 test-temp
 /scripts/note-ipfs-hash
-/scripts/social-context-hash
+/scripts/perspective-diff-sync-hash
 src/tests/publishing-agent/ad4m/data/db.json
 .DS_Store
