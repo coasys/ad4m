@@ -534,9 +534,12 @@ export default class LanguageController {
 
             //Delete the line which is next to the comment 
             for (let i = 0; i < indexes.length; i++) {
-                sourceLanguageLines.splice((indexes[i] + 1) -i, 1);
+                //Remove language variable comment
+                sourceLanguageLines.splice((indexes[i]));
+                //Remove template variable
+                sourceLanguageLines.splice((indexes[i]) -i, 1);
             }
-            
+
             templateLines.push(`var ${templateKey} = "${templateValue}";`);
         };
         for (const templateValue of templateLines.reverse()) {

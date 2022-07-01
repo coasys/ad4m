@@ -37,6 +37,21 @@ export default function languageTests(testContext: TestContext) {
                 expect(sourceFromAd4m).toBe(sourceFromFile)
             })
 
+            it('Template data is applied correctly', async() => {
+                let languageLines = [
+                    "//some javascript",
+                    "//@ad4m-language-template-variable",
+                    "var name = testOriginalName",
+                    "function someMore() {",
+                    "console.log('js')",
+                    "}",
+                    "//@ad4m-language-template-variable",
+                    "var uid = ogUid",
+                ]
+                testContext.aliceCore.languageController.applyTemplateData(languageLines, {"name": "newName", "uid": "newUid"})
+                console.warn("Now have language lines", languageLines);
+            })
+
             it('Alice can install her own published language', async () => {
                 const install = await ad4mClient.languages.byAddress(sourceLanguage.address);
                 expect(install.address).toBeDefined();
