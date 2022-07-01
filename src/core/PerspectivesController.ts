@@ -3,7 +3,7 @@ import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, Expression, LanguageRef, PerspectiveDiff } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, Expression, LanguageRef } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -27,7 +27,7 @@ export default class PerspectivesController {
         if(fs.existsSync(FILEPATH)) {
             const fileObject = JSON.parse(fs.readFileSync(FILEPATH).toString())
 
-            Object.keys(fileObject).map(k => {
+            const entries = Object.keys(fileObject).map(k => {
                 let perspective = fileObject[k];
                 console.debug(`PerspectivesController: Found existing perspective "${k}":`, perspective)
                 this.#perspectiveInstances.set(k, new Perspective(perspective, this.#context, perspective.neighbourhood as Neighbourhood))
@@ -35,19 +35,17 @@ export default class PerspectivesController {
             })
         }
 
-        this.#context.languageController!.addLinkObserver((diff: PerspectiveDiff, lang: LanguageRef) => {
+        this.#context.languageController!.addLinkObserver((added: Expression[], removed: Expression[], lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage == lang.address);
             if (perspective) {
-                perspective.populateLocalLinks(diff.additions, diff.removals);
-
-                for (const link of diff.additions) {
+                for (const link of added) {
                     this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
                         perspective: perspective.plain(),
                         link: link
                     })
                 }
 
-                for (const linkRemoved of diff.removals) {
+                for (const linkRemoved of removed) {
                     this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
                         perspective: perspective.plain(),
                         link: linkRemoved

@@ -19,7 +19,7 @@ const publishingAgentPath = path.join(`${__dirname}/../../src/tests/p-agent`);
 const publishingBootstrapSeedPath = path.join(`${__dirname}/../../src/tests/publishBootstrapSeed.json`);
 const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
 const noteIpfsHashPath = path.join(`${__dirname}/../../scripts/note-ipfs-hash`);
-const perspectiveDiffSyncHashPath = path.join(`${__dirname}/../../scripts/perspective-diff-sync-hash`);
+const socialContextHashPath = path.join(`${__dirname}/../../scripts/social-context-hash`);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -27,7 +27,7 @@ const languagesToPublish = {
     "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
     "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
     "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
-    "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput,
+    "social-context": {name: "social-context", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput,
     "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput,
 }
 
@@ -37,7 +37,7 @@ const languageHashes = {
     "perspectiveLanguage": "",
     "neighbourhoodLanguage": "",
     "noteIpfs": "",
-    "perspectiveDiffSync": ""
+    "socialContext": ""
 }
 
 function apolloClient(port: number): ApolloClient<any> {
@@ -88,7 +88,7 @@ function injectSystemLanguages() {
 
 function injectLangAliasHashes() {
     fs.writeFileSync(noteIpfsHashPath, languageHashes["noteIpfs"]);
-    fs.writeFileSync(perspectiveDiffSyncHashPath, languageHashes["perspectiveDiffSync"]);
+    fs.writeFileSync(socialContextHashPath, languageHashes["socialContext"]);
 }
 
 async function publish() {
@@ -137,8 +137,8 @@ async function publish() {
         if (language === "note-ipfs") {
             languageHashes["noteIpfs"] = publishedLang.address;
         }
-        if (language === "perspective-diff-sync") {
-            languageHashes["perspectiveDiffSync"] = publishedLang.address;
+        if (language === "social-context") {
+            languageHashes["socialContext"] = publishedLang.address;
         }
     }
     injectSystemLanguages()
