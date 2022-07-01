@@ -480,12 +480,12 @@ export default class LanguageController {
             //@ts-ignore
             if (templateData.uid) {
                 //@ts-ignore
-                dnaYaml.uid = templateData.uid;
+                dnaYaml.integrity.uid = templateData.uid;
             }
             //@ts-ignore
             for (const [templateKey, templateValue] of Object.entries(templateData)) {
                 //@ts-ignore
-                dnaYaml.properties[templateKey] = templateValue;
+                dnaYaml.integrity.properties[templateKey] = templateValue;
             }
 
             let dnaYamlDump = yaml.dump(dnaYaml, {
@@ -523,23 +523,20 @@ export default class LanguageController {
     applyTemplateData(sourceLanguageLines: string[], templateData: object) {
         let templateLines = [];
         for (const [templateKey, templateValue] of Object.entries(templateData)) {
-            //NOTE: this could be risky and end up removing var ${templateKey} from areas in the code where it is used for normal language operations
-            //We need to somehow split the bundle at a given point and only remove template variables above this point
-            const patterns = [
-                `var ${templateKey} =`, `var ${templateKey}=`, 
-                `const ${templateKey} =`, `const ${templateKey}=`,
-                `let ${templateKey} =`, `let ${templateKey}=`
-            ]
-            let p = 0
-            let index = -1
-            while(index == -1 && p < patterns.length) {
-                index = sourceLanguageLines.findIndex(element => element.includes(patterns[p]));
-                p++
+            //Get lines in sourceLanguageLines which have ad4m-template-variable declared
+            const ad4mTemplatePattern = "//@ad4m-template-variable";
+            var indexes = [];
+            for(let i = 0; i < sourceLanguageLines.length; i++) {
+                if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {
+                    indexes.push(i);
+                }
+            }
+
+            //Delete the line which is next to the comment 
+            for (let i = 0; i < indexes.length; i++) {
+                sourceLanguageLines.splice((indexes[i] + 1) -i, 1);
             }
             
-            if (index != -1) {
-                sourceLanguageLines.splice(index, 1);
-            };
             templateLines.push(`var ${templateKey} = "${templateValue}";`);
         };
         for (const templateValue of templateLines.reverse()) {
