@@ -1011,10 +1011,10 @@
     "tslib" "^2.4.0"
     "webcrypto-core" "^1.7.4"
 
-"@perspect3vism/ad4m@0.1.31":
-  "integrity" "sha512-vRwiDc2UhReEyYRhwiNhs7S2z4AtwC1ANX+x8R7AZDCNSN0NO0Q6xJEES6upvr4+7mWOAU9kU61MabTG6CHS9w=="
-  "resolved" "https://registry.npmjs.org/@perspect3vism/ad4m/-/ad4m-0.1.31.tgz"
-  "version" "0.1.31"
+"@perspect3vism/ad4m@0.1.32":
+  "integrity" "sha512-axcq7txVEruhBbV2ae2of7kUaT0dJLIvC/ucxRKl7PJ25YEyuP2vpk3CM9nWsgVfoa/s/5AwDkCm3n1v3O9tAQ=="
+  "resolved" "https://registry.npmjs.org/@perspect3vism/ad4m/-/ad4m-0.1.32.tgz"
+  "version" "0.1.32"
   dependencies:
     "@apollo/client" "3.3.20"
     "@holochain/client" "0.3.2"
@@ -4135,11 +4135,6 @@
   "integrity" "sha512-OO0pH2lK6a0hZnAdau5ItzHPI6pUlvI7jMVnxUQRtw4owF2wk8lOSabtGDCTP4Ggrg2MbGnWO9X8K1t4+fGMDw=="
   "resolved" "https://registry.npmjs.org/fs.realpath/-/fs.realpath-1.0.0.tgz"
   "version" "1.0.0"
-
-"fsevents@^2.3.2":
-  "integrity" "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA=="
-  "resolved" "https://registry.npmjs.org/fsevents/-/fsevents-2.3.2.tgz"
-  "version" "2.3.2"
 
 "fstream@^1.0.12":
   "integrity" "sha512-WvJ193OHa0GHPEL+AycEJgxvBEwyfRkN1vhjca23OaPVMCaLCXTd5qAu82AjTcgP1UJmytkOKb63Ypde7raDIg=="
