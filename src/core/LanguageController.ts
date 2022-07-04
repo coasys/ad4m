@@ -14,7 +14,7 @@ import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid'
 import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
-import { PerspectivismDb } from './db';
+import { PerspectivismDb } from './db'; 
 
 type LinkObservers = (diff: PerspectiveDiff, lang: string)=>void;
 
@@ -143,6 +143,12 @@ export default class LanguageController {
         }))
     }
 
+    callLinkObservers(diff: PerspectiveDiff, hash: string) {
+        this.#linkObservers.forEach(o => {
+            o(diff, hash)
+        })
+    }
+
     async loadLanguage(sourceFilePath: string): Promise<{
         language: Language,
         hash: string,
@@ -171,9 +177,7 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
-                this.#linkObservers.forEach(o => {
-                    o(diff, hash)
-                })
+                this.callLinkObservers(diff, hash);
             })
         }
 
@@ -209,9 +213,7 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
-                this.#linkObservers.forEach(o => {
-                    o(diff, hash)
-                })
+                this.callLinkObservers(diff, hash);
             })
         }
 
@@ -463,6 +465,7 @@ export default class LanguageController {
             //Unpack the DNA
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result 
             let unpackPath = this.#holochainService.unpackDna(tempDnaPath).replace(/(\r\n|\n|\r)/gm, "");
+            fs.unlinkSync(tempDnaPath);
             //TODO: are all dna's using the same dna.yaml?
             const dnaYamlPath = path.join(unpackPath, "dna.yaml");
             if (!fs.existsSync(dnaYamlPath)) {
@@ -500,7 +503,6 @@ export default class LanguageController {
             const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
 
             //Cleanup temp directory
-            fs.unlinkSync(tempDnaPath);
             fs.rmdirSync(tempTemplatingPath, {recursive: true});
             dnaCodeRes = base64;
         }
@@ -540,6 +542,17 @@ export default class LanguageController {
             sourceLanguageLines.splice((indexes[i]) -i*2, 1);
             //Remove template variable
             sourceLanguageLines.splice((indexes[i]) -i*2, 1);
+        }
+
+        //@ts-ignore
+        if (templateData["dna"]) {
+            let dnaIndex = 0;
+            for(let i = 0; i < sourceLanguageLines.length; i++) {
+                if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {
+                    dnaIndex = i;
+                }
+            }
+            sourceLanguageLines.splice(dnaIndex, 1);
         }
 
         for (const templateValue of templateLines.reverse()) {
