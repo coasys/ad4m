@@ -60,17 +60,17 @@ export default class Perspective {
             }
         });
 
-        //setup polling loop for Perspectives with a linkLanguage
-        setInterval(
-            async () => {
-                let links = await this.callLinksAdapter("pull");
-                this.populateLocalLinks(links.additions, links.removals);
-                if (this.neighbourhood) {
-                    this.#languageController?.callLinkObservers(links, this.neighbourhood!.linkLanguage);
-                }
-            },
-            20000
-        );
+        // //setup polling loop for Perspectives with a linkLanguage
+        // setInterval(
+        //     async () => {
+        //         let links = await this.callLinksAdapter("pull");
+        //         this.populateLocalLinks(links.additions, links.removals);
+        //         if (this.neighbourhood) {
+        //             this.#languageController?.callLinkObservers(links, this.neighbourhood!.linkLanguage);
+        //         }
+        //     },
+        //     20000
+        // );
     }
 
     plain(): PerspectiveHandle {
