@@ -5,28 +5,22 @@ const path = require("path");
 
 const languages = {
   "agent-expression-store": {
-    targetDnaName: "agent-store",
-    dna: "https://github.com/perspect3vism/agent-language/releases/download/0.0.10/agent-store.dna",
-    bundle:
-      "https://github.com/perspect3vism/agent-language/releases/download/0.0.10/bundle.js",
+    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.0.11/bundle.js",
   },
   languages: {
-      targetDnaName: "languages",
       bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.1/bundle.js",
   },
   "neighbourhood-store": {
-    targetDnaName: "neighbourhood-store",
-    //dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.2/neighbourhood-store.dna",
     bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.1/bundle.js",
   },
   "perspective-diff-sync": {
-    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/0.0.7/bundle.js",
+    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/0.0.8/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
   },
   "direct-message-language": {
-    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.4/bundle.js"
+    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.5/bundle.js"
   },
   "perspective-language": {
     bundle: "https://github.com/perspect3vism/perspective-language/releases/download/0.0.1/bundle.js"
