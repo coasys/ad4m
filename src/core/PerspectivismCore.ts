@@ -15,11 +15,11 @@ import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
-import path from 'path'
 import fs from 'fs'
 import { RequestAgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
+import { v4 as uuidv4 } from 'uuid'
 
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
@@ -308,6 +308,7 @@ export default class PerspectivismCore {
         console.log("Agent doesn't have direct message language set yet. Creating from template...")
 
         const templateParams = {
+            uid: uuidv4(),
             recipient_did: this.#agentService.agent?.did,
             recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
         }
