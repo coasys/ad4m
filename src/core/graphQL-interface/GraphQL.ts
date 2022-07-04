@@ -488,12 +488,12 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 return true
             },
             //@ts-ignore
-            perspectiveRemoveLink: (parent, args, context, info) => {
+            perspectiveRemoveLink: async (parent, args, context, info) => {
                 // console.log("GQL| removeLink:", args)
                 const { uuid, link } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                perspective.removeLink(link)
+                await perspective.removeLink(link)
                 return true
             },
             //@ts-ignore
@@ -503,11 +503,11 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 return core.perspectivesController.update(uuid, name);
             },
             //@ts-ignore
-            perspectiveUpdateLink: (parent, args, context, info) => {
+            perspectiveUpdateLink: async (parent, args, context, info) => {
                 const { uuid, oldLink, newLink } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return perspective.updateLink(oldLink, newLink)
+                return await perspective.updateLink(oldLink, newLink)
             },
             //@ts-ignore
             runtimeOpenLink: (parent, args) => {
@@ -673,8 +673,8 @@ function createResolvers(core: PerspectivismCore, config: any) {
             },
 
             //@ts-ignore
-            icon: (expression) => {
-                return { code: core.languageController.getIcon(expression.ref.language) }
+            icon: async (expression) => {
+                return { code: await core.languageController.getIcon(expression.ref.language) }
             }
         },
 
