@@ -37,7 +37,7 @@ export default function languageTests(testContext: TestContext) {
                 expect(sourceFromAd4m).toBe(sourceFromFile)
             })
 
-            it('Template data is applied correctly', async() => {
+            it('Template data is applied correctly', async () => {
                 let languageLines = [
                     "//some javascript",
                     "//@ad4m-language-template-variable",
@@ -48,7 +48,7 @@ export default function languageTests(testContext: TestContext) {
                     "//@ad4m-language-template-variable",
                     "var uid = ogUid",
                 ]
-                testContext.aliceCore.languageController.applyTemplateData(languageLines, {"name": "newName", "uid": "newUid"})
+                testContext.bobCore.languageController.applyTemplateData(languageLines, {"name": "newName", "uid": "newUid"})
                 console.warn("Now have language lines", languageLines);
             })
 
@@ -171,7 +171,7 @@ export default function languageTests(testContext: TestContext) {
 
                     const installGetLanguage = await ad4mClient.languages.byAddress(applyTemplateFromSource.address);
                     expect(installGetLanguage.address).toBe(applyTemplateFromSource.address);
-                    //expect(installGetLanguage.name).toBe(meta.name);
+                    expect(installGetLanguage.name).toBe(meta.name);
                 })
 
                 it("Bob can install Alice's perspective-diff-sync", async () => {
@@ -186,7 +186,7 @@ export default function languageTests(testContext: TestContext) {
                     //Test that bob can install language which is templated from source since source language was created by alice who is now a trusted agent
                     const installTemplated = await bobAd4mClient.languages.byAddress(applyTemplateFromSource.address);
                     expect(installTemplated.address).toBe(applyTemplateFromSource.address);
-                    //expect(installTemplated.name).toBe("Bob's templated perspective-diff-sync");
+                    expect(installTemplated.name).toBe("Bob's templated perspective-diff-sync");
                     expect(installTemplated.constructorIcon).toBeDefined();
                     expect(installTemplated.settingsIcon).toBeDefined();
                 })

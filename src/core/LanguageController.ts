@@ -16,7 +16,7 @@ import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
 
-type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
+type LinkObservers = (diff: PerspectiveDiff, lang: string)=>void;
 
 interface Services {
     holochainService: HolochainService, 
@@ -172,7 +172,7 @@ export default class LanguageController {
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.#linkObservers.forEach(o => {
-                    o(diff, {name: language.name, address: hash} as LanguageRef)
+                    o(diff, hash)
                 })
             })
         }
@@ -210,7 +210,7 @@ export default class LanguageController {
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.#linkObservers.forEach(o => {
-                    o(diff, {name: language.name, address: hash} as LanguageRef)
+                    o(diff, hash)
                 })
             })
         }
@@ -471,7 +471,7 @@ export default class LanguageController {
 
             //Read for files inside wasm path after unpack since we should now have .wasm file there but we do not know which name it may have
             const wasmName = fs.readdirSync(wasmPath);
-            if (wasmName.length == 0 || wasmName.length > 1) {
+            if (wasmName.length == 0) {
                 throw new Error("Got incorrect number of files inside wasm path when unpacking DNA");
             }
 
@@ -523,25 +523,25 @@ export default class LanguageController {
     applyTemplateData(sourceLanguageLines: string[], templateData: object) {
         let templateLines = [];
         for (const [templateKey, templateValue] of Object.entries(templateData)) {
-            //Get lines in sourceLanguageLines which have ad4m-template-variable declared
-            const ad4mTemplatePattern = "//@ad4m-template-variable";
-            var indexes = [];
-            for(let i = 0; i < sourceLanguageLines.length; i++) {
-                if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {
-                    indexes.push(i);
-                }
-            }
-
-            //Delete the line which is next to the comment 
-            for (let i = 0; i < indexes.length; i++) {
-                //Remove language variable comment
-                sourceLanguageLines.splice((indexes[i]));
-                //Remove template variable
-                sourceLanguageLines.splice((indexes[i]) -i, 1);
-            }
-
             templateLines.push(`var ${templateKey} = "${templateValue}";`);
         };
+
+        //Get lines in sourceLanguageLines which have ad4m-template-variable declared
+        const ad4mTemplatePattern = "//@ad4m-template-variable";
+        var indexes = [];
+        for(let i = 0; i < sourceLanguageLines.length; i++) {
+            if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {
+                indexes.push(i);
+            }
+        }
+        //Delete the line which is next to the comment 
+        for (let i = 0; i < indexes.length; i++) {
+            //Remove language variable comment
+            sourceLanguageLines.splice((indexes[i]) -i*2, 1);
+            //Remove template variable
+            sourceLanguageLines.splice((indexes[i]) -i*2, 1);
+        }
+
         for (const templateValue of templateLines.reverse()) {
             sourceLanguageLines.unshift(templateValue);
         };

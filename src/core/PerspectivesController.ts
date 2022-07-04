@@ -35,8 +35,9 @@ export default class PerspectivesController {
             })
         }
 
-        this.#context.languageController!.addLinkObserver((diff: PerspectiveDiff, lang: LanguageRef) => {
-            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage == lang.address);
+        this.#context.languageController!.addLinkObserver((diff: PerspectiveDiff, lang: string) => {
+            console.warn("Have perspectives", this.#perspectiveInstances);
+            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang);
             if (perspective) {
                 perspective.populateLocalLinks(diff.additions, diff.removals);
 
@@ -54,7 +55,7 @@ export default class PerspectivesController {
                     })
                 }
             } else {
-                console.warn(`Could not find perspective for added link with lang: ${lang.address}`)
+                console.warn(`Could not find perspective for added link with lang: ${lang}`)
             }
         })
     }
