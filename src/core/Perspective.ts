@@ -55,7 +55,22 @@ export default class Perspective {
 
         this.callLinksAdapter("pull").then((remoteLinks) => {
             this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+            if (this.neighbourhood) {
+                this.#languageController?.callLinkObservers(remoteLinks, this.neighbourhood!.linkLanguage);
+            }
         });
+
+        //setup polling loop for Perspectives with a linkLanguage
+        setInterval(
+            async () => {
+                let links = await this.callLinksAdapter("pull");
+                this.populateLocalLinks(links.additions, links.removals);
+                if (this.neighbourhood) {
+                    this.#languageController?.callLinkObservers(links, this.neighbourhood!.linkLanguage);
+                }
+            },
+            20000
+        );
     }
 
     plain(): PerspectiveHandle {
