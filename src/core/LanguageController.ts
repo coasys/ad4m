@@ -522,12 +522,7 @@ export default class LanguageController {
         );
     }
 
-    applyTemplateData(sourceLanguageLines: string[], templateData: object) {
-        let templateLines = [];
-        for (const [templateKey, templateValue] of Object.entries(templateData)) {
-            templateLines.push(`var ${templateKey} = "${templateValue}";`);
-        };
-
+    applyTemplateData(sourceLanguageLines: string[], templateData: object) {    
         //Get lines in sourceLanguageLines which have ad4m-template-variable declared
         const ad4mTemplatePattern = "//@ad4m-template-variable";
         var indexes = [];
@@ -536,28 +531,69 @@ export default class LanguageController {
                 indexes.push(i);
             }
         }
-        //Delete the line which is next to the comment 
+    
+        //Possible variable patterns for template variables
+        const patterns = [
+            new RegExp(/var ([a-zA-Z0-9_-]{1,})/g),
+            new RegExp(/const ([a-zA-Z0-9_-]{1,})/g),
+            new RegExp(/let ([a-zA-Z0-9_-]{1,})/g)
+        ];
+    
+        //Look over the template variable indexes
         for (let i = 0; i < indexes.length; i++) {
-            //Remove language variable comment
-            sourceLanguageLines.splice((indexes[i]) -i*2, 1);
-            //Remove template variable
-            sourceLanguageLines.splice((indexes[i]) -i*2, 1);
+            //Get the index of the variable which should be next line after comment denote 
+            let variableIndex = indexes[i] + 1;
+            let variable = sourceLanguageLines[variableIndex];
+    
+            for (const pattern of patterns) {
+                let matches = variable.match(pattern);
+                if (matches) {
+                    //Get variable type and name
+                    let variableType = matches[0].split(" ")[0];
+                    let variableName = matches[0].split(" ")[1];
+                    for (const [key, value] of Object.entries(templateData)) {
+                        //if matching variable name from template data
+                        if (key === variableName) {
+                            //Ensure we use the correct type of variable
+                            if (variableType === "const") {
+                                //Ensure we use quotes where required if variable is a string
+                                if (typeof value === "string") {
+                                    sourceLanguageLines[variableIndex] = `const ${key} = "${value}"`;
+                                } else {
+                                    sourceLanguageLines[variableIndex] = `const ${key} = ${value}`
+                                }
+                            } else if (variableType === "let") {
+                                if (typeof value === "string") {
+                                    sourceLanguageLines[variableIndex] = `let ${key} = "${value}"`;
+                                } else {
+                                    sourceLanguageLines[variableIndex] = `let ${key} = ${value}`
+                                }
+                            } else if (variableType === "var") {
+                                if (typeof value === "string") {
+                                    sourceLanguageLines[variableIndex] = `var ${key} = "${value}"`;
+                                } else {
+                                    sourceLanguageLines[variableIndex] = `var ${key} = ${value}`
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-
+    
+        //Add custom case for inserting templated dna data
+        const dnaPattern = new RegExp(/var (dna{1,})/g);
         //@ts-ignore
         if (templateData["dna"]) {
             let dnaIndex = 0;
             for(let i = 0; i < sourceLanguageLines.length; i++) {
-                if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {
+                if (sourceLanguageLines[i].match(dnaPattern)) {
                     dnaIndex = i;
                 }
             }
-            sourceLanguageLines.splice(dnaIndex, 1);
+            //@ts-ignore
+            sourceLanguageLines[dnaIndex] = `var dna = "${templateData["dna"]}"`;
         }
-
-        for (const templateValue of templateLines.reverse()) {
-            sourceLanguageLines.unshift(templateValue);
-        };
     }
 
     async constructLanguageLanguageInput(
@@ -590,7 +626,7 @@ export default class LanguageController {
         }
         const sourceLanguageLines = sourceLanguage!.split("\n");
         templateData = this.orderObject(templateData);
-        const {dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
+        const { dnaCode } = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
 
         //If there was some dna code in the source language then lets also add that to the language bundle (but not to the templateData as we dont want that on the meta)
         if (dnaCode) {
