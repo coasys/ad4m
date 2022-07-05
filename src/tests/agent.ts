@@ -9,7 +9,7 @@ export default function agentTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!
 
                 const agentUpdated = jest.fn()
-                ad4mClient.agent.addUpdatedListener(agentUpdated)
+                ad4mClient.agent.addAgentStatusChangedListener(agentUpdated)
                 
                 const generate = await ad4mClient.agent.generate("passphrase")
                 expect(generate.isInitialized).toBe(true);
