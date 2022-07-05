@@ -179,6 +179,8 @@ export async function startLair(resourcePath: string, hcDataPath: string, config
 
     const echo = child_process.spawn('echo', [config.passphrase!])
     
+    console.log("Starting lair-keystore version: ", child_process.execFileSync(`${escapeShellArg(lairPath)}`, ["--version"]).toString())
+
     let lairProcess = child_process.spawn(`${escapeShellArg(lairPath)}`, ["server", "-p"], {
         env: { ...process.env, LAIR_DIR: `${escapeShellArg(hcDataPath)}/keystore` },
         cwd: `${escapeShellArg(hcDataPath)}/keystore`
@@ -220,6 +222,8 @@ export async function startLair(resourcePath: string, hcDataPath: string, config
 export async function runHolochain(resourcePath: string, conductorConfigPath: string, hcDataPath: string, config: HolochainUnlockConfiguration): Promise<[child_process.ChildProcess, child_process.ChildProcess]> {
     let lairProcess = await startLair(resourcePath, hcDataPath, config)
     const echo = child_process.spawn('echo', [config.passphrase!])
+
+    console.log("Starting holochain version: ", child_process.execFileSync(`${escapeShellArg(path.join(resourcePath, "holochain"))}`, ["--version"]).toString());
     
     let hcProcess = child_process.spawn(`${escapeShellArg(path.join(resourcePath, "holochain"))}`, ["-c", escapeShellArg(conductorConfigPath), "-p"],
         {
