@@ -289,10 +289,14 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     await core.initLanguages()
                     await core.initializeAgentsDirectMessageLanguage()
                 }
+
+                const agent = core.agentService.dump();
+
+                pubsub.publish(PubSub.AGENT_STATUS_CHANGED, agent)
                 
                 console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                 
-                return core.agentService.dump()
+                return agent;
             },
             //@ts-ignore
             agentImport: async (parent, args, context, info) => {
