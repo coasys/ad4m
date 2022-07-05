@@ -111,6 +111,7 @@ export default class PerspectivismCore {
         console.log("Stopping Prolog engines")
         for(let ph of this.perspectivesController.allPerspectiveHandles()) {
             const perspective = this.perspectivesController.perspective(ph.uuid)
+            perspective.clearPolling()
             perspective.closePrologEngine()
         }
         console.log("Stopping IPFS")

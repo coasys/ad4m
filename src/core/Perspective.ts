@@ -22,6 +22,7 @@ export default class Perspective {
 
     #prologEngine: PrologInstance|null
     #prologNeedsRebuild: boolean
+    #pollingInterval: any;
 
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
         this.updateFromId(id)
@@ -49,8 +50,9 @@ export default class Perspective {
 
         const that = this
 
-        process.on("SIGINT", function () {
+        process.on("SIGINT", () => {
             that.#prologEngine?.close()
+            clearInterval(this.#pollingInterval);
         });
 
         this.callLinksAdapter("pull").then((remoteLinks) => {
@@ -60,18 +62,19 @@ export default class Perspective {
             }
         });
 
-        // //setup polling loop for Perspectives with a linkLanguage
-        // setInterval(
-        //     async () => {
-        //         let links = await this.callLinksAdapter("pull");
-        //         this.populateLocalLinks(links.additions, links.removals);
-        //         if (this.neighbourhood) {
-        //             this.#languageController?.callLinkObservers(links, this.neighbourhood!.linkLanguage);
-        //         }
-        //     },
-        //     20000
-        // );
+        // setup polling loop for Perspectives with a linkLanguage
+        this.#pollingInterval = setInterval(
+            async () => {
+                let links = await this.callLinksAdapter("pull");
+                this.populateLocalLinks(links.additions, links.removals);
+                if (this.neighbourhood) {
+                    this.#languageController?.callLinkObservers(links, this.neighbourhood!.linkLanguage);
+                }
+            },
+            20000
+        );
     }
+    
 
     plain(): PerspectiveHandle {
         const { name, uuid, author, timestamp, sharedUrl, neighbourhood } = this
@@ -144,7 +147,7 @@ export default class Perspective {
             setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
-                const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
+                const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
                     // console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     //@ts-ignore
@@ -168,7 +171,7 @@ export default class Perspective {
 
     async syncWithSharingAdapter() {
         //@ts-ignore
-        const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link)
+        const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link);
         const remoteLinks = await this.renderLinksAdapter()
         const includes = (link: LinkExpression, list: LinkExpression[]) => {
             return undefined !== list.find(e =>
@@ -514,6 +517,10 @@ export default class Perspective {
             await this.spawnPrologEngine()
         
         return await this.#prologEngine!.query(query)
+    }
+
+    clearPolling() {
+        clearInterval(this.#pollingInterval);
     }
 
     closePrologEngine() {

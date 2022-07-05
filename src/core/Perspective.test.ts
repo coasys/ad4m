@@ -61,6 +61,10 @@ describe('Perspective', () => {
         allLinks = []
     })
 
+    afterEach(() => {
+        perspective?.clearPolling();
+    })
+
     it('wraps links in expressions on addLink', () => {
         const link = createLink()
         const expression = perspective!.addLink(link)

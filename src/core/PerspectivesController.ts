@@ -120,11 +120,13 @@ export default class PerspectivesController {
 
     replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood) {
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
+        this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
         this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood));
         this.save()
     }
 
     remove(uuid: string) {
+        this.#perspectiveInstances.get(uuid)?.clearPolling();
         this.#perspectiveHandles.delete(uuid)
         this.#perspectiveInstances.delete(uuid)
         this.save()
