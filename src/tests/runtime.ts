@@ -2,7 +2,7 @@ import { TestContext } from './integration.test'
 import fs from "fs";
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
-const SOCIAL_CONTEXT_OFFICIAL = fs.readFileSync("./scripts/social-context-hash").toString();
+const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 const PUBLISHING_AGENT = JSON.parse(fs.readFileSync("./src/test-temp/agents/p-agent/ad4m/agent.json").toString())["did"];
 
 export default function runtimeTests(testContext: TestContext) {
@@ -41,26 +41,26 @@ export default function runtimeTests(testContext: TestContext) {
             const ad4mClient = testContext.ad4mClient!
 
             const addresses = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(addresses).toEqual([ SOCIAL_CONTEXT_OFFICIAL ])
+            expect(addresses).toEqual([ DIFF_SYNC_OFFICIAL ])
             
             const addAddresses = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
-            expect(addAddresses).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(addAddresses).toStrictEqual([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
 
             //Add the agents again to be sure we cannot get any duplicates
             const addDuplicate = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
-            expect(addDuplicate).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(addDuplicate).toStrictEqual([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
 
             const get = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(get).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(get).toStrictEqual([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
 
             const deleted = await ad4mClient.runtime.removeKnownLinkLanguageTemplates(["Qm123"])
-            expect(deleted).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL, "Qmabc" ])
+            expect(deleted).toStrictEqual([ DIFF_SYNC_OFFICIAL, "Qmabc" ])
 
             const deleted2 = await ad4mClient.runtime.removeKnownLinkLanguageTemplates(["Qm123", "Qmabc"])
-            expect(deleted2).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL ])
+            expect(deleted2).toStrictEqual([ DIFF_SYNC_OFFICIAL ])
 
             const getPostDelete = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(getPostDelete).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL  ])
+            expect(getPostDelete).toStrictEqual([ DIFF_SYNC_OFFICIAL  ])
         })
 
         it('CRUD for friends', async () => {
@@ -96,14 +96,14 @@ export default function runtimeTests(testContext: TestContext) {
             await ad4mClient.runtime.addFriends(["did:test:1", "did:test:2"]);
 
             const addresses = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(addresses).toEqual([ SOCIAL_CONTEXT_OFFICIAL ])
+            expect(addresses).toEqual([ DIFF_SYNC_OFFICIAL ])
 
             const initalAgents = await ad4mClient.runtime.getTrustedAgents();
             expect(initalAgents).toEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
 
 
             const addAddresses = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
-            expect(addAddresses).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(addAddresses).toStrictEqual([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
 
             const addAgents = await ad4mClient.runtime.addTrustedAgents(["agentPubKey", "agentPubKey2"]);
             expect(addAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
@@ -116,7 +116,7 @@ export default function runtimeTests(testContext: TestContext) {
             expect(deleted).toStrictEqual([ ])
 
             const postDeleteAddresses = await ad4mClient.runtime.knownLinkLanguageTemplates()
-            expect(postDeleteAddresses).toStrictEqual([ SOCIAL_CONTEXT_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(postDeleteAddresses).toStrictEqual([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
 
             const postDeleteAgents = await ad4mClient.runtime.getTrustedAgents()
             expect(postDeleteAgents).toStrictEqual([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])

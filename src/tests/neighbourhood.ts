@@ -4,7 +4,7 @@ import { TestContext } from './integration.test'
 import sleep from "./sleep";
 import fs from "fs";
 
-const SOCIAL_CONTEXT_OFFICIAL = fs.readFileSync("./scripts/social-context-hash").toString();
+const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
 export default function neighbourhoodTests(testContext: TestContext) {
     return () => {
@@ -16,9 +16,9 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(create.name).toEqual("publish-test");
                 expect(create.neighbourhood).toBeNull();
 
-                //Create unique social-context to simulate real scenario
-                const socialContext = await ad4mClient.languages.applyTemplateAndPublish(SOCIAL_CONTEXT_OFFICIAL, JSON.stringify({name: "Alice's social-context"}));
-                expect(socialContext.name).toBe("Alice's social-context");
+                //Create unique perspective-diff-sync to simulate real scenario
+                const socialContext = await ad4mClient.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({name: "Alice's perspective-diff-sync"}));
+                expect(socialContext.name).toBe("Alice's perspective-diff-sync");
 
                 let link = new LinkExpression()
                 link.author = "did:test";
@@ -49,7 +49,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(SOCIAL_CONTEXT_OFFICIAL, JSON.stringify({name: "Alice's neighbourhood with Bob"}));
+                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({name: "Alice's neighbourhood with Bob"}));
                 expect(socialContext.name).toBe("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
