@@ -20,13 +20,14 @@ import { RequestAgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 import { v4 as uuidv4 } from 'uuid'
+import { MainConfig } from './Config'
 
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
     ipfsRepoPath?: string,
 }
 export interface InitHolochainParams {
-    hcPortAdmin?: number, 
+    hcPortAdmin?: number,
     hcPortApp?: number,
     hcUseBootstrap?: boolean,
     hcUseProxy?: boolean,
@@ -40,11 +41,12 @@ export interface HolochainUnlockConfiguration extends HolochainConfiguration {
 }
 
 export interface ConnectHolochainParams {
-    hcPortAdmin: number, 
+    hcPortAdmin: number,
     hcPortApp: number,
 }
 
 export default class PerspectivismCore {
+    #config: MainConfig;
     #holochain?: HolochainService
     #IPFS?: IPFSType
 
@@ -62,16 +64,16 @@ export default class PerspectivismCore {
     #resolveLanguagesReady: (value: void) => void
 
     constructor(config: Config.CoreConfig) {
-        Config.init(config)
+        this.#config = Config.init(config);
 
-        this.#agentService = new AgentService(Config.rootConfigPath, Config.reqCredential)
-        this.#runtimeService = new RuntimeService(Config.rootConfigPath)
+        this.#agentService = new AgentService(this.#config.rootConfigPath, this.#config.reqCredential)
+        this.#runtimeService = new RuntimeService(this.#config)
         this.#agentService.ready.then(() => {
             this.#runtimeService.did = this.#agentService!.did!
         })
         this.#agentService.load()
-        this.#db = Db.init(Config.dataPath)
-        this.#didResolver = DIDs.init(Config.dataPath)
+        this.#db = Db.init(this.#config.dataPath)
+        this.#didResolver = DIDs.init(this.#config.dataPath)
         this.#signatures = new Signatures(this.#didResolver)
         const that = this
         this.#resolveLanguagesReady = () => {}
@@ -123,7 +125,7 @@ export default class PerspectivismCore {
 
     async startGraphQLServer(port: number, mocks: boolean, config: any) {
         const { url, subscriptionsUrl } = await GraphQL.startServer({
-            core: this, 
+            core: this,
             mocks,
             port,
             config
@@ -134,20 +136,20 @@ export default class PerspectivismCore {
 
     async initIPFS(params: InitIPFSParams) {
         console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
-        
+
         let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
         this.#IPFS = ipfs;
     }
 
     async initHolochain(params: InitHolochainParams) {
-        console.log("Init HolochainService with data path: ", Config.holochainDataPath, ". Conductor path: ", Config.holochainConductorPath, ". Resource path: ", Config.resourcePath)
+        console.log("Init HolochainService with data path: ", this.#config.holochainDataPath, ". Conductor path: ", this.#config.holochainConductorPath, ". Resource path: ", this.#config.resourcePath)
         console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`);
 
         const holochainConfig: HolochainConfiguration = {
-            conductorPath: Config.holochainConductorPath, 
-            dataPath: Config.holochainDataPath, 
-            resourcePath: Config.resourcePath, 
-            adminPort: params.hcPortAdmin, 
+            conductorPath: this.#config.holochainConductorPath,
+            dataPath: this.#config.holochainDataPath,
+            resourcePath: this.#config.resourcePath,
+            adminPort: params.hcPortAdmin,
             appPort: params.hcPortApp,
             useBootstrap: params.hcUseBootstrap,
             useProxy: params.hcUseProxy,
@@ -163,12 +165,12 @@ export default class PerspectivismCore {
     }
 
     async connectHolochain(params: ConnectHolochainParams) {
-        console.log("Init ad4m service with resource path ", Config.resourcePath)
+        console.log("Init ad4m service with resource path ", this.#config.resourcePath)
         console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
         this.#holochain = new HolochainService({
-            dataPath: Config.holochainDataPath, 
-            resourcePath: Config.resourcePath, 
-            adminPort: params.hcPortAdmin, 
+            dataPath: this.#config.holochainDataPath,
+            resourcePath: this.#config.resourcePath,
+            adminPort: params.hcPortAdmin,
             appPort: params.hcPortApp,
         })
         await this.#holochain.connect();
@@ -181,7 +183,7 @@ export default class PerspectivismCore {
     async waitForLanguages(): Promise<void> {
         return this.#languagesReady
     }
-    
+
     languageSignal(signal: any) {
         //@ts-ignore
         console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
@@ -197,12 +199,14 @@ export default class PerspectivismCore {
             IPFS: this.#IPFS,
             signatures: this.#signatures,
             ad4mSignal: this.languageSignal,
+            config: this.#config,
         }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, signatures: this.#signatures, db: this.#db } )
 
-        this.#perspectivesController = new PerspectivesController(Config.rootConfigPath, {
+        this.#perspectivesController = new PerspectivesController(this.#config.rootConfigPath, {
             db: this.#db,
             agentService: this.agentService,
-            languageController: this.#languageController
+            languageController: this.#languageController,
+            config: this.#config
         })
     }
 
@@ -243,7 +247,7 @@ export default class PerspectivismCore {
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
         await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
 
-        return this.#perspectivesController!.add("", url, neighbourhood);        
+        return this.#perspectivesController!.add("", url, neighbourhood);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
@@ -261,7 +265,7 @@ export default class PerspectivismCore {
         if (!this.#languageController) {
             throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
-        
+
         const sourceLanguage = fs.readFileSync(languagePath).toString();
         const sourceLanguageLines = sourceLanguage!.split("\n");
 
@@ -281,7 +285,7 @@ export default class PerspectivismCore {
         } catch(e) {
             console.error("Core.installAndPublish(): ERROR creating new language:", e)
             throw e
-        } 
+        }
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
@@ -314,7 +318,7 @@ export default class PerspectivismCore {
             recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
-        const createdDmLang = await this.languageApplyTemplateAndPublish(Config.directMessageLanguage, templateParams)
+        const createdDmLang = await this.languageApplyTemplateAndPublish(this.#config.directMessageLanguage, templateParams)
         console.debug("DM Language cloned...")
         // Install language by calling languageByRef
         // TODO: extract language installing code into its own function

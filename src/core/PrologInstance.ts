@@ -4,13 +4,15 @@ import path from "path";
 import swipl from 'swipl-stdio'
 //@ts-ignore
 import tmp from 'tmp'
-import { resourcePath } from "./Config";
+import { MainConfig } from "./Config";
 
 export default class PrologInstance {
     #engine
+    #config?: MainConfig;
 
-    constructor() {
-        this.#engine = new swipl.Engine(path.join(resourcePath, "swipl"))
+    constructor(config: MainConfig) {
+        this.#config = config;
+        this.#engine = new swipl.Engine(path.join(config.resourcePath, "swipl"))
     }
 
     async query(input: string) {

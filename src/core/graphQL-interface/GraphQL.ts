@@ -112,7 +112,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 meta.templateAppliedParams = internal.templateAppliedParams
                 meta.possibleTemplateParams = internal.possibleTemplateParams
                 meta.sourceCodeLink = internal.sourceCodeLink
-                
+
                 return meta
             },
 
@@ -126,7 +126,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
 
                 return languageSource
             },
-            
+
             //@ts-ignore
             languages: (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
@@ -281,9 +281,9 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 } else {
                   await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
                 }
-                
-                
-                if (!Config.languageLanguageOnly) {
+
+
+                if (!config.languageLanguageOnly) {
                     await core.waitForAgent();
                     core.initControllers()
                     await core.initLanguages()
@@ -293,9 +293,9 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 const agent = core.agentService.dump();
 
                 pubsub.publish(PubSub.AGENT_STATUS_CHANGED, agent)
-                
+
                 console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
-                
+
                 return agent;
             },
             //@ts-ignore
@@ -329,7 +329,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 } catch (e) {
                     // @ts-ignore
                     const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
-    
+
                     if (connectHolochain) {
                         await core.connectHolochain( {hcPortAdmin, hcPortApp} );
                     } else {
@@ -453,7 +453,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     console.error(`Error while trying to join neighbourhood '${url}':`, e)
                     throw e
                 }
-                
+
             },
             //@ts-ignore
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
@@ -469,7 +469,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     console.error(`Error while trying to publish:`, e)
                     throw e
                 }
-                
+
             },
             //@ts-ignore
             perspectiveAdd: (parent, args, context, info) => {
@@ -735,7 +735,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     }
                 }
 
-                return null  
+                return null
             }
         },
 
@@ -790,7 +790,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
 }
 
 export interface StartServerParams {
-    core: PerspectivismCore, 
+    core: PerspectivismCore,
     mocks: boolean,
     port: number,
     config: any;
@@ -813,7 +813,7 @@ export async function startServer(params: StartServerParams) {
             }
             const capabilities = await core.agentService.getCapabilities(authToken)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
-            
+
             return { capabilities };
           },
     });
