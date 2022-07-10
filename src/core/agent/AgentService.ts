@@ -227,14 +227,12 @@ export default class AgentService {
         // @ts-ignore
         this.#wallet.unlock(password)
         await this.storeAgentProfile()
-        this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump())
         this.#readyPromiseResolve!()
     }
 
     lock(password: string) {
         // @ts-ignore
         this.#wallet.lock(password)
-        this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump())
     }
 
     async save(password: string) {

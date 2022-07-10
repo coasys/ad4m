@@ -7,15 +7,10 @@ export default function agentTests(testContext: TestContext) {
         describe('basic agent operations', () => {
             it('can get and create agent store', async () => {
                 const ad4mClient = testContext.ad4mClient!
-
-                const agentUpdated = jest.fn()
-                ad4mClient.agent.addAgentStatusChangedListener(agentUpdated)
                 
                 const generate = await ad4mClient.agent.generate("passphrase")
                 expect(generate.isInitialized).toBe(true);
                 expect(generate.isUnlocked).toBe(true);
-
-                expect(agentUpdated.mock.calls.length).toBe(1)
     
                 // //Should be able to create a perspective
                 // const create = await ad4mClient.perspective.add("test");
@@ -24,8 +19,6 @@ export default function agentTests(testContext: TestContext) {
                 const lockAgent = await ad4mClient.agent.lock("passphrase");
                 expect(lockAgent.isInitialized).toBe(true);
                 expect(lockAgent.isUnlocked).toBe(false);
-
-                expect(agentUpdated.mock.calls.length).toBe(2)
     
                 // //Should not be able to create a perspective
                 // const createLocked = await ad4mClient.perspective.add("test2");
@@ -34,8 +27,6 @@ export default function agentTests(testContext: TestContext) {
                 const unlockAgent = await ad4mClient.agent.unlock("passphrase");
                 expect(unlockAgent.isInitialized).toBe(true);
                 expect(unlockAgent.isUnlocked).toBe(true);
-
-                expect(agentUpdated.mock.calls.length).toBe(3)
     
                 // //Should be able to create a perspective
                 // const create = await ad4mClient.perspective.add("test3");
