@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.1.41-alpha-7",
+  "version": "0.1.41-alpha-8",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -90,7 +90,7 @@
     "node-fetch": "^2.6.1",
     "sha256": "^0.2.0",
     "sha3": "^2.1.3",
-    "swipl-stdio": "perspect3vism/node-swipl-stdio.git#edc4001c43cff9af465ae5e589145617014c245b",
+    "swipl-stdio": "perspect3vism/node-swipl-stdio.git#7dd5ad48852f77f791a7abd6cc163ad28233ed58",
     "tmp": "^0.2.1"
   }
 }
