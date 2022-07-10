@@ -289,10 +289,14 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     await core.initLanguages()
                     await core.initializeAgentsDirectMessageLanguage()
                 }
+
+                const agent = core.agentService.dump();
+
+                pubsub.publish(PubSub.AGENT_STATUS_CHANGED, agent)
                 
                 console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                 
-                return core.agentService.dump()
+                return agent;
             },
             //@ts-ignore
             agentImport: async (parent, args, context, info) => {
@@ -488,12 +492,12 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 return true
             },
             //@ts-ignore
-            perspectiveRemoveLink: (parent, args, context, info) => {
+            perspectiveRemoveLink: async (parent, args, context, info) => {
                 // console.log("GQL| removeLink:", args)
                 const { uuid, link } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                perspective.removeLink(link)
+                await perspective.removeLink(link)
                 return true
             },
             //@ts-ignore
@@ -503,11 +507,11 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 return core.perspectivesController.update(uuid, name);
             },
             //@ts-ignore
-            perspectiveUpdateLink: (parent, args, context, info) => {
+            perspectiveUpdateLink: async (parent, args, context, info) => {
                 const { uuid, oldLink, newLink } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return perspective.updateLink(oldLink, newLink)
+                return await perspective.updateLink(oldLink, newLink)
             },
             //@ts-ignore
             runtimeOpenLink: (parent, args) => {
@@ -588,6 +592,14 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 subscribe: (parent, args, context, info) => {
                     checkCapability(context.capabilities, Auth.AGENT_SUBSCRIBE_CAPABILITY)
                     return pubsub.asyncIterator(PubSub.AGENT_UPDATED)
+                },
+                //@ts-ignore
+                resolve: payload => payload
+            },
+            agentStatusChanged: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    return pubsub.asyncIterator(PubSub.AGENT_STATUS_CHANGED)
                 },
                 //@ts-ignore
                 resolve: payload => payload
@@ -673,8 +685,8 @@ function createResolvers(core: PerspectivismCore, config: any) {
             },
 
             //@ts-ignore
-            icon: (expression) => {
-                return { code: core.languageController.getIcon(expression.ref.language) }
+            icon: async (expression) => {
+                return { code: await core.languageController.getIcon(expression.ref.language) }
             }
         },
 

@@ -1,6 +1,7 @@
 import { PubSub } from 'apollo-server'
 
 export const AGENT_UPDATED = 'agent-updated-topic'
+export const AGENT_STATUS_CHANGED = 'agent-status-changed-topic'
 export const DIRECT_MESSAGE_RECEIVED = 'direct-message-received-topic'
 export const PERSPECTIVE_ADDED_TOPIC = 'perspective-added-topic'
 export const PERSPECTIVE_UPDATED_TOPIC = 'perspective-updated-topic'
