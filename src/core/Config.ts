@@ -13,6 +13,8 @@ export let holochainConductorPath = path.join(holochainPath, 'c')
 export let resourcePath = ''
 export let languageLanguageOnly = false;
 export let reqCredential = ''
+export let swiplPath:string|undefined = undefined
+export let swiplHomePath:string|undefined = undefined
 
 export let knownLinkLanguages: string[] = [];
 export let trustedAgents: string[] =  [];
@@ -55,6 +57,8 @@ export interface CoreConfig {
     neighbourhoodLanguageSettings?: object
     languageLanguageSettings?: object
     reqCredential?: string
+    swiplPath?: string,
+    swiplHomePath?: string,
 }
 
 
@@ -68,6 +72,8 @@ export function init(c: CoreConfig) {
     holochainPath = path.join(rootConfigPath, 'h')
     holochainDataPath = path.join(holochainPath, 'd')
     holochainConductorPath = path.join(holochainPath, 'c')
+    swiplPath = c.swiplPath
+    swiplHomePath = c.swiplHomePath
     
     if(c.reqCredential) {
         reqCredential = c.reqCredential

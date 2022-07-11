@@ -90,7 +90,7 @@
     "node-fetch": "^2.6.1",
     "sha256": "^0.2.0",
     "sha3": "^2.1.3",
-    "swipl-stdio": "https://github.com/perspect3vism/node-swipl-stdio.git",
+    "swipl-stdio": "perspect3vism/node-swipl-stdio.git#7dd5ad48852f77f791a7abd6cc163ad28233ed58",
     "tmp": "^0.2.1"
   }
 }
