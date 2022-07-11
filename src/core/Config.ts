@@ -65,7 +65,7 @@ export interface CoreConfig {
 export function init(c: CoreConfig) {
     //Reinit vars
     resourcePath = c.appResourcePath;
-    rootConfigPath = path.join(c.appDataPath, 'ad4m')
+    rootConfigPath = c.appDataPath
     dataPath = path.join(rootConfigPath, 'data')
     languagesPath = path.join(rootConfigPath, 'languages')
     tempLangPath = path.join(languagesPath, "temp")
