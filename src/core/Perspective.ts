@@ -488,15 +488,16 @@ export default class Perspective {
         } 
 
         if(error) throw error
-        
-        this.#prologNeedsRebuild = false
         this.#prologEngine = prolog
     }
 
     async prologQuery(query: string): Promise<any> {
         await this.callLinksAdapter("pull");
-        if(!this.#prologEngine || this.#prologNeedsRebuild)
+        if(!this.#prologEngine || this.#prologNeedsRebuild) {
+            this.#prologNeedsRebuild = false
             await this.spawnPrologEngine()
+        }
+            
         
         return await this.#prologEngine!.query(query)
     }
