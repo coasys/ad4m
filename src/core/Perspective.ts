@@ -540,9 +540,9 @@ export default class Perspective {
                 this.#prologNeedsRebuild = false
             }
             if(this.#prologNeedsRebuild) {
+                this.#prologNeedsRebuild = false
                 const facts = await this.initEngineFacts()
                 await this.#prologEngine!.consult(facts)
-                this.#prologNeedsRebuild = false
             }
         })
         
