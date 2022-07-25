@@ -1,2 +1,3 @@
 nix/*
 .github/*
+src/test-temp/*
