@@ -25,7 +25,7 @@
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
     "test-all:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/run-all-test.ps1 & jest --forceExit",
-    "test": "jest",
+    "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js",
     "test:windows": "npm run prepare-test:windows && npm run test-all:windows && node scripts/cleanTestingData.js",
     "jest": "jest"
   },
