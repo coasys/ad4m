@@ -118,7 +118,27 @@ describe('Perspective', () => {
             await perspective!.removeLink(link)
             const result = await perspective!.prologQuery("triple(X,Y,Z)");
             expect(result.length).toEqual(4)
+        })
+    })
 
+    describe('Prolog Engine', () => {
+        it('answers correctly in a run with multiple link additions/removals', async () => {
+            let result 
+            let l1 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test1'})
+
+            result = await perspective!.prologQuery("triple(Source,Pred,Target)")
+            expect(result.length).toEqual(1)
+            expect(result[0].Source).toBe('ad4m://self')
+            expect(result[0].Target).toBe('ad4m://test1')
+
+            let l2 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test2'})
+
+            result = await perspective!.prologQuery("triple(Source,Pred,Target)")
+            expect(result.length).toEqual(2)
+            expect(result[1].Source).toBe('ad4m://self')
+            expect(result[1].Target).toBe('ad4m://test2')
+
+            //...TBC
         })
     })
 
