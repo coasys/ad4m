@@ -439,6 +439,8 @@ export default class Perspective {
     }
 
     async addLinkToProlog(link: LinkExpression) {
+        this.#prologNeedsRebuild = true
+        return
         if(this.isSDNALink(link)) {
             this.#prologNeedsRebuild = true
         } else {
@@ -448,6 +450,8 @@ export default class Perspective {
     }
 
     async removeLinkFromProlog(link: LinkExpression) {
+        this.#prologNeedsRebuild = true
+        return
         if(this.isSDNALink(link)) {
             this.#prologNeedsRebuild = true
         } else {
@@ -468,6 +472,7 @@ export default class Perspective {
         //-------------------
         // triple/3
         //-------------------
+        lines.push(":- discontiguous triple/3.")            
         lines = allLinks.map(this.linkFact)
 
         //-------------------
@@ -525,12 +530,16 @@ export default class Perspective {
 
     async prologQuery(query: string): Promise<any> {
         await this.callLinksAdapter("pull");
-        if(!this.#prologEngine || this.#prologNeedsRebuild) {
-            this.#prologNeedsRebuild = false
+        if(!this.#prologEngine) {
             await this.spawnPrologEngine()
+            this.#prologNeedsRebuild = false
+        }
+        if(this.#prologNeedsRebuild) {
+            const facts = await this.initEngineFacts()
+            await this.#prologEngine!.consult(facts)
+            this.#prologNeedsRebuild = false
         }
             
-        
         return await this.#prologEngine!.query(query)
     }
 
