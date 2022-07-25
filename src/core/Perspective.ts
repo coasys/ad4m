@@ -6,6 +6,7 @@ import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
+import { Mutex } from 'async-mutex'
 
 export default class Perspective {
     name?: string;
@@ -22,6 +23,7 @@ export default class Perspective {
 
     #prologEngine: PrologInstance|null
     #prologNeedsRebuild: boolean
+    #prologMutex: Mutex
 
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
         this.updateFromId(id)
@@ -56,6 +58,8 @@ export default class Perspective {
         this.callLinksAdapter("pull").then((remoteLinks) => {
             this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
         });
+
+        this.#prologMutex = new Mutex()
     }
 
     plain(): PerspectiveHandle {
@@ -530,16 +534,18 @@ export default class Perspective {
 
     async prologQuery(query: string): Promise<any> {
         await this.callLinksAdapter("pull");
-        if(!this.#prologEngine) {
-            await this.spawnPrologEngine()
-            this.#prologNeedsRebuild = false
-        }
-        if(this.#prologNeedsRebuild) {
-            const facts = await this.initEngineFacts()
-            await this.#prologEngine!.consult(facts)
-            this.#prologNeedsRebuild = false
-        }
-            
+        await this.#prologMutex.runExclusive(async () => {
+            if(!this.#prologEngine) {
+                await this.spawnPrologEngine()
+                this.#prologNeedsRebuild = false
+            }
+            if(this.#prologNeedsRebuild) {
+                const facts = await this.initEngineFacts()
+                await this.#prologEngine!.consult(facts)
+                this.#prologNeedsRebuild = false
+            }
+        })
+        
         return await this.#prologEngine!.query(query)
     }
 
