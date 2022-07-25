@@ -203,7 +203,7 @@ export default class Perspective {
         }
     }
 
-    addLink(link: LinkInput | LinkExpressionInput): LinkExpression {
+    async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
         const linkExpression = this.ensureLinkExpression(link)
         this.callLinksAdapter('commit', {
             additions: [linkExpression],
@@ -211,7 +211,7 @@ export default class Perspective {
         } as PerspectiveDiff)
 
         this.addLocalLink(linkExpression)
-        this.addLinkToProlog(linkExpression)
+        await this.addLinkToProlog(linkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
@@ -251,8 +251,8 @@ export default class Perspective {
             this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
-        this.removeLinkFromProlog(oldLink)
-        this.addLinkToProlog(newLinkExpression);
+        await this.removeLinkFromProlog(oldLink)
+        await this.addLinkToProlog(newLinkExpression);
         this.callLinksAdapter('commit', {
             additions: [newLinkExpression],
             removals: [oldLink]
@@ -271,7 +271,7 @@ export default class Perspective {
 
     async removeLink(linkExpression: LinkExpressionInput) {
         this.removeLocalLink(linkExpression);
-        this.removeLinkFromProlog(linkExpression);
+        await this.removeLinkFromProlog(linkExpression);
         this.callLinksAdapter('commit',  {
             additions: [],
             removals: [linkExpression]
@@ -451,7 +451,9 @@ export default class Perspective {
         if(this.isSDNALink(link)) {
             this.#prologNeedsRebuild = true
         } else {
-            await this.#prologEngine?.consult(`retract(${this.linkFact(link)}).`)
+            const fact = this.linkFact(link)
+            const factWithoutDot = fact.substring(0, fact.length-1)
+            await this.#prologEngine?.consult(`retract(${factWithoutDot}).`)
         }
     }
 
