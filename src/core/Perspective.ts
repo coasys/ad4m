@@ -445,24 +445,39 @@ export default class Perspective {
     async addLinkToProlog(link: LinkExpression) {
         this.#prologNeedsRebuild = true
         return
-        if(this.isSDNALink(link)) {
-            this.#prologNeedsRebuild = true
-        } else {
-            let lines = [this.linkFact(link), ...await this.nodeFacts([link])]
-            await this.#prologEngine?.consult(lines.join('\n'))
-        }
+
+        // Leaving this dead code here to potentially get reactivated in the future.
+        // This doesn't work because consult/1 is more intelligent than I had expected,
+        // it first removes all old facts&rules to any predicate that it finds again when
+        // consulting. So we can just use consult/1 below in `prologQuery` to update the
+        // state with no problem.
+        // This is fine for now, but if our Prolog program becomes very large because of a
+        // large perspective, we might not want to always recreate the whole program file
+        // and instead use a different Prolog command to load our changes. Then we might
+        // want to surgically only alter the affected links like attempted here...
+        //
+        //
+        //if(this.isSDNALink(link)) {
+        //    this.#prologNeedsRebuild = true
+        //} else {
+        //    let lines = [this.linkFact(link), ...await this.nodeFacts([link])]
+        //    await this.#prologEngine?.consult(lines.join('\n'))
+        //}
     }
 
     async removeLinkFromProlog(link: LinkExpression) {
         this.#prologNeedsRebuild = true
         return
-        if(this.isSDNALink(link)) {
-            this.#prologNeedsRebuild = true
-        } else {
-            const fact = this.linkFact(link)
-            const factWithoutDot = fact.substring(0, fact.length-1)
-            await this.#prologEngine?.consult(`retract(${factWithoutDot}).`)
-        }
+
+        // See above.
+        //
+        //if(this.isSDNALink(link)) {
+        //    this.#prologNeedsRebuild = true
+        //} else {
+        //    const fact = this.linkFact(link)
+        //    const factWithoutDot = fact.substring(0, fact.length-1)
+        //    await this.#prologEngine?.consult(`retract(${factWithoutDot}).`)
+        //}
     }
 
     isSDNALink(link: LinkExpression): boolean {
