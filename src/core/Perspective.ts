@@ -211,8 +211,7 @@ export default class Perspective {
         } as PerspectiveDiff)
 
         this.addLocalLink(linkExpression)
-        
-        this.#prologNeedsRebuild = true
+        this.addLinkToProlog(linkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
@@ -252,7 +251,8 @@ export default class Perspective {
             this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
-        this.#prologNeedsRebuild = true
+        this.removeLinkFromProlog(oldLink)
+        this.addLinkToProlog(newLinkExpression);
         this.callLinksAdapter('commit', {
             additions: [newLinkExpression],
             removals: [oldLink]
@@ -271,8 +271,7 @@ export default class Perspective {
 
     async removeLink(linkExpression: LinkExpressionInput) {
         this.removeLocalLink(linkExpression);
-
-        this.#prologNeedsRebuild = true
+        this.removeLinkFromProlog(linkExpression);
         this.callLinksAdapter('commit',  {
             additions: [],
             removals: [linkExpression]
@@ -397,26 +396,11 @@ export default class Perspective {
         return values;
     }
 
-    async createPrologFacts(): Promise<string> {
-        let lines = []
+    linkFact(l: LinkExpression): string {
+        return `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`
+    }
 
-        const allLinks = await this.getLinks(new LinkQuery({}))
-        //-------------------
-        // triple/3
-        //-------------------
-        lines = allLinks.map(l => `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`)
-
-        //-------------------
-        // reachable/2
-        //-------------------
-        lines.push("reachable(A,B) :- triple(A,_,B).")
-        lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
-
-        //-------------------
-        // hiddenExpression/1
-        //-------------------
-        lines.push(":- discontiguous hiddenExpression/1.")            
-
+    async nodeFacts(allLinks: LinkExpression[]): Promise<string[]> {
         //-------------------
         // languageAddress/2
         // languageName/2
@@ -451,7 +435,53 @@ export default class Perspective {
             }
         }
 
-        lines = [...lines, ...langAddrs, ...langNames, ...exprAddrs]
+        return [...langAddrs, ...langNames, ...exprAddrs]
+    }
+
+    async addLinkToProlog(link: LinkExpression) {
+        if(this.isSDNALink(link)) {
+            this.#prologNeedsRebuild = true
+        } else {
+            let lines = [this.linkFact(link), ...await this.nodeFacts([link])]
+            await this.#prologEngine?.consult(lines.join('\n'))
+        }
+    }
+
+    async removeLinkFromProlog(link: LinkExpression) {
+        if(this.isSDNALink(link)) {
+            this.#prologNeedsRebuild = true
+        } else {
+            await this.#prologEngine?.consult(`retract(${this.linkFact(link)}).`)
+        }
+    }
+
+    isSDNALink(link: LinkExpression): boolean {
+        return link.source == 'self' && link.predicate == 'ad4m://has_zome'
+    }
+
+    async initEngineFacts(): Promise<string> {
+        let lines = []
+
+        const allLinks = await this.getLinks(new LinkQuery({}))
+        //-------------------
+        // triple/3
+        //-------------------
+        lines = allLinks.map(this.linkFact)
+
+        //-------------------
+        // reachable/2
+        //-------------------
+        lines.push("reachable(A,B) :- triple(A,_,B).")
+        lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
+
+        //-------------------
+        // hiddenExpression/1
+        //-------------------
+        lines.push(":- discontiguous hiddenExpression/1.")            
+
+
+
+        lines = [...lines, ...await this.nodeFacts(allLinks)]
 
         //-------------------
         // Social DNA zomes
@@ -459,7 +489,7 @@ export default class Perspective {
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
-            if(link.source == 'self' && link.predicate == 'ad4m://has_zome') {
+            if(this.isSDNALink(link)) {
                 let code = Literal.fromUrl(link.target).get()
                 lines.push(code)
             }
@@ -480,7 +510,7 @@ export default class Perspective {
         const prolog = new PrologInstance()
 
         try {
-            const facts = await this.createPrologFacts()
+            const facts = await this.initEngineFacts()
             await prolog.consult(facts)
         } catch(e) {
             error = e
