@@ -36,7 +36,8 @@ const languageController = {
             return linksAdapter
         else
             return null
-    })
+    }),
+    languageByRef: jest.fn(ref => ref)
 }
 
 
@@ -61,9 +62,9 @@ describe('Perspective', () => {
         allLinks = []
     })
 
-    it('wraps links in expressions on addLink', () => {
+    it('wraps links in expressions on addLink', async () => {
         const link = createLink()
-        const expression = perspective!.addLink(link)
+        const expression = await perspective!.addLink(link)
         expect(expression.author).toEqual(agentService.agent.did)
         expect(expression.data).toEqual(link)
         expect(agentService.createSignedExpression.mock.calls.length).toBe(1)
@@ -71,15 +72,15 @@ describe('Perspective', () => {
     })
 
     describe('after adding 5 links', () => {
-        beforeEach(() => {
+        beforeEach(async () => {
             for(let i=0; i<5; i++) {
                 const link = createLink()
                 if(i%2 === 0) {
                     link.source = 'root'
                 }
                 //@ts-ignore
-                allLinks!.push(link)
-                perspective!.addLink(link)
+                allLinks!.push(await perspective!.addLink(link))
+                
             }
         })
 
@@ -95,7 +96,7 @@ describe('Perspective', () => {
             for(let i=0; i<5; i++) {
                 expect(result).toEqual(
                     expect.arrayContaining(
-                        [expect.objectContaining({data: allLinks![i]})]
+                        [expect.objectContaining(allLinks![i])]
                     )
                 )
             }
@@ -104,6 +105,40 @@ describe('Perspective', () => {
         it('can get links by source', async () => {
             const result = await perspective!.getLinks({source: 'root'} as LinkQuery)
             expect(result.length).toEqual(3)
+        })
+
+        it('Prolog queries return 5 triples', async () => {
+            const result = await perspective!.prologQuery("triple(X,Y,Z).")
+            expect(result.length).toEqual(5)
+        })
+
+        it('Prolog gets correctly updated when removing links', async () => {
+            const link = allLinks![0]
+            console.log("LINK TO REMOVE", link)
+            await perspective!.removeLink(link)
+            const result = await perspective!.prologQuery("triple(X,Y,Z)");
+            expect(result.length).toEqual(4)
+        })
+    })
+
+    describe('Prolog Engine', () => {
+        it('answers correctly in a run with multiple link additions/removals', async () => {
+            let result 
+            let l1 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test1'})
+
+            result = await perspective!.prologQuery("triple(Source,Pred,Target)")
+            expect(result.length).toEqual(1)
+            expect(result[0].Source).toBe('ad4m://self')
+            expect(result[0].Target).toBe('ad4m://test1')
+
+            let l2 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test2'})
+
+            result = await perspective!.prologQuery("triple(Source,Pred,Target)")
+            expect(result.length).toEqual(2)
+            expect(result[1].Source).toBe('ad4m://self')
+            expect(result[1].Target).toBe('ad4m://test2')
+
+            //...TBC
         })
     })
 

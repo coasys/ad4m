@@ -6,6 +6,7 @@ import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
+import { Mutex } from 'async-mutex'
 
 export default class Perspective {
     name?: string;
@@ -22,6 +23,7 @@ export default class Perspective {
 
     #prologEngine: PrologInstance|null
     #prologNeedsRebuild: boolean
+    #prologMutex: Mutex
 
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
         this.updateFromId(id)
@@ -56,6 +58,8 @@ export default class Perspective {
         this.callLinksAdapter("pull").then((remoteLinks) => {
             this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
         });
+
+        this.#prologMutex = new Mutex()
     }
 
     plain(): PerspectiveHandle {
@@ -203,7 +207,7 @@ export default class Perspective {
         }
     }
 
-    addLink(link: LinkInput | LinkExpressionInput): LinkExpression {
+    async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
         const linkExpression = this.ensureLinkExpression(link)
         this.callLinksAdapter('commit', {
             additions: [linkExpression],
@@ -211,8 +215,7 @@ export default class Perspective {
         } as PerspectiveDiff)
 
         this.addLocalLink(linkExpression)
-        
-        this.#prologNeedsRebuild = true
+        await this.addLinkToProlog(linkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
@@ -252,7 +255,8 @@ export default class Perspective {
             this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
-        this.#prologNeedsRebuild = true
+        await this.removeLinkFromProlog(oldLink)
+        await this.addLinkToProlog(newLinkExpression);
         this.callLinksAdapter('commit', {
             additions: [newLinkExpression],
             removals: [oldLink]
@@ -271,8 +275,7 @@ export default class Perspective {
 
     async removeLink(linkExpression: LinkExpressionInput) {
         this.removeLocalLink(linkExpression);
-
-        this.#prologNeedsRebuild = true
+        await this.removeLinkFromProlog(linkExpression);
         this.callLinksAdapter('commit',  {
             additions: [],
             removals: [linkExpression]
@@ -397,26 +400,11 @@ export default class Perspective {
         return values;
     }
 
-    async createPrologFacts(): Promise<string> {
-        let lines = []
+    linkFact(l: LinkExpression): string {
+        return `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`
+    }
 
-        const allLinks = await this.getLinks(new LinkQuery({}))
-        //-------------------
-        // triple/3
-        //-------------------
-        lines = allLinks.map(l => `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`)
-
-        //-------------------
-        // reachable/2
-        //-------------------
-        lines.push("reachable(A,B) :- triple(A,_,B).")
-        lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
-
-        //-------------------
-        // hiddenExpression/1
-        //-------------------
-        lines.push(":- discontiguous hiddenExpression/1.")            
-
+    async nodeFacts(allLinks: LinkExpression[]): Promise<string[]> {
         //-------------------
         // languageAddress/2
         // languageName/2
@@ -451,7 +439,75 @@ export default class Perspective {
             }
         }
 
-        lines = [...lines, ...langAddrs, ...langNames, ...exprAddrs]
+        return [...langAddrs, ...langNames, ...exprAddrs]
+    }
+
+    async addLinkToProlog(link: LinkExpression) {
+        this.#prologNeedsRebuild = true
+        return
+
+        // Leaving this dead code here to potentially get reactivated in the future.
+        // This doesn't work because consult/1 is more intelligent than I had expected,
+        // it first removes all old facts&rules to any predicate that it finds again when
+        // consulting. So we can just use consult/1 below in `prologQuery` to update the
+        // state with no problem.
+        // This is fine for now, but if our Prolog program becomes very large because of a
+        // large perspective, we might not want to always recreate the whole program file
+        // and instead use a different Prolog command to load our changes. Then we might
+        // want to surgically only alter the affected links like attempted here...
+        //
+        //
+        //if(this.isSDNALink(link)) {
+        //    this.#prologNeedsRebuild = true
+        //} else {
+        //    let lines = [this.linkFact(link), ...await this.nodeFacts([link])]
+        //    await this.#prologEngine?.consult(lines.join('\n'))
+        //}
+    }
+
+    async removeLinkFromProlog(link: LinkExpression) {
+        this.#prologNeedsRebuild = true
+        return
+
+        // See above.
+        //
+        //if(this.isSDNALink(link)) {
+        //    this.#prologNeedsRebuild = true
+        //} else {
+        //    const fact = this.linkFact(link)
+        //    const factWithoutDot = fact.substring(0, fact.length-1)
+        //    await this.#prologEngine?.consult(`retract(${factWithoutDot}).`)
+        //}
+    }
+
+    isSDNALink(link: LinkExpression): boolean {
+        return link.source == 'self' && link.predicate == 'ad4m://has_zome'
+    }
+
+    async initEngineFacts(): Promise<string> {
+        let lines = []
+
+        const allLinks = await this.getLinks(new LinkQuery({}))
+        //-------------------
+        // triple/3
+        //-------------------
+        lines.push(":- discontiguous triple/3.")            
+        lines = allLinks.map(this.linkFact)
+
+        //-------------------
+        // reachable/2
+        //-------------------
+        lines.push("reachable(A,B) :- triple(A,_,B).")
+        lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
+
+        //-------------------
+        // hiddenExpression/1
+        //-------------------
+        lines.push(":- discontiguous hiddenExpression/1.")            
+
+
+
+        lines = [...lines, ...await this.nodeFacts(allLinks)]
 
         //-------------------
         // Social DNA zomes
@@ -459,7 +515,7 @@ export default class Perspective {
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
-            if(link.source == 'self' && link.predicate == 'ad4m://has_zome') {
+            if(this.isSDNALink(link)) {
                 let code = Literal.fromUrl(link.target).get()
                 lines.push(code)
             }
@@ -480,7 +536,7 @@ export default class Perspective {
         const prolog = new PrologInstance()
 
         try {
-            const facts = await this.createPrologFacts()
+            const facts = await this.initEngineFacts()
             await prolog.consult(facts)
         } catch(e) {
             error = e
@@ -493,11 +549,17 @@ export default class Perspective {
 
     async prologQuery(query: string): Promise<any> {
         await this.callLinksAdapter("pull");
-        if(!this.#prologEngine || this.#prologNeedsRebuild) {
-            this.#prologNeedsRebuild = false
-            await this.spawnPrologEngine()
-        }
-            
+        await this.#prologMutex.runExclusive(async () => {
+            if(!this.#prologEngine) {
+                await this.spawnPrologEngine()
+                this.#prologNeedsRebuild = false
+            }
+            if(this.#prologNeedsRebuild) {
+                this.#prologNeedsRebuild = false
+                const facts = await this.initEngineFacts()
+                await this.#prologEngine!.consult(facts)
+            }
+        })
         
         return await this.#prologEngine!.query(query)
     }
