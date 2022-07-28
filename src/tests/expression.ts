@@ -127,10 +127,13 @@ export default function expressionTests(testContext: TestContext) {
                 expect(exprRef.language.address).toBe("literal")
 
                 const expr = Literal.fromUrl(addr).get()
+                delete expr.proof.invalid
 
                 expect(expr.data).toBe(TEST_DATA)
 
-                const expr2 = await ad4mClient.expression.get(addr)
+                const expr2Raw = await ad4mClient.expression.getRaw(addr)
+                const expr2 = JSON.parse(expr2Raw)
+                console.log(expr2)
 
                 expect(expr2).toStrictEqual(expr)
             })

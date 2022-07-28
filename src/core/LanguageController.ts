@@ -832,7 +832,7 @@ export default class LanguageController {
         }
         let expr;
 
-        if(ref.language.address == "literal") {
+        if(ref.language.address == "literal" || ref.language.name == 'literal') {
             expr = Literal.fromUrl(`literal://${ref.expression}`).get()
         } else {
             const lang = this.languageForExpression(ref);
