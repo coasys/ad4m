@@ -1,6 +1,6 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective 
+    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective, Literal 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
@@ -765,6 +765,10 @@ export default class LanguageController {
     }
 
     async expressionCreate(lang: LanguageRef, content: object): Promise<ExpressionRef> {
+        if(lang.address == "literal") {
+            const expr = (this.#context as LanguageContext).agent.createSignedExpression(content)
+            return parseExprUrl(Literal.from(expr).toUrl())
+        }
         const language = await this.languageByRef(lang)
         if (!language.expressionAdapter) {
             throw new Error("Language does not have an expressionAdapter")
@@ -826,26 +830,34 @@ export default class LanguageController {
             const fixtureLang = Config.bootstrapFixtures.languages!.find(f=>f.address===ref.expression)
             if(fixtureLang && fixtureLang.meta) return fixtureLang.meta
         }
-        const lang = this.languageForExpression(ref);
-        if (!lang.expressionAdapter) {
-            throw Error("Language does not have an expresionAdapter!")
-        };
-        const langIsImmutable = await this.isImmutableExpression(ref);
         let expr;
-        if (langIsImmutable) {
-            console.log("Calling cache for expression...");
-            const cachedExpression = this.#db.getExpression(ref.expression);
-            if (cachedExpression) {
-                console.log("Cache hit...");
-                expr = JSON.parse(cachedExpression) as Expression
-            } else {
-                console.log("Cache miss...");
-                expr = await lang.expressionAdapter.get(ref.expression);
-                if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
-            };
+
+        if(ref.language.address == "literal" || ref.language.name == 'literal') {
+            expr = Literal.fromUrl(`literal://${ref.expression}`).get()
         } else {
-            expr = await lang.expressionAdapter.get(ref.expression);
+            const lang = this.languageForExpression(ref);
+            if (!lang.expressionAdapter) {
+                throw Error("Language does not have an expresionAdapter!")
+            };
+            
+            const langIsImmutable = await this.isImmutableExpression(ref);
+            if (langIsImmutable) {
+                console.log("Calling cache for expression...");
+                const cachedExpression = this.#db.getExpression(ref.expression);
+                if (cachedExpression) {
+                    console.log("Cache hit...");
+                    expr = JSON.parse(cachedExpression) as Expression
+                } else {
+                    console.log("Cache miss...");
+                    expr = await lang.expressionAdapter.get(ref.expression);
+                    if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
+                };
+            } else {
+                expr = await lang.expressionAdapter.get(ref.expression);
+            }
         }
+        
+
         if(expr) {
             try{
                 if(! await this.#signatures.verify(expr)) {
@@ -893,6 +905,7 @@ export default class LanguageController {
     }
 
     async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {
+        if(ref.language.address == "literal") return true
         const language = await this.languageByRef(ref.language);
         if (!language.isImmutableExpression) {
             return false

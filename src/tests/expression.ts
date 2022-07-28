@@ -1,4 +1,4 @@
-import { InteractionCall, LanguageMetaInput } from '@perspect3vism/ad4m'
+import { InteractionCall, LanguageMetaInput, Literal, parseExprUrl } from '@perspect3vism/ad4m'
 import { TestContext } from './integration.test'
 import fs from "fs";
 
@@ -116,6 +116,26 @@ export default function expressionTests(testContext: TestContext) {
                 expect(expr).toBeDefined()
                 expect(expr.proof.valid).toBeTruthy()
                 expect(expr.data).toBe("\"modified note\"");
+            })
+
+            it('Literal language expressions can be created with signature and can get resolved from URL', async () => {
+                const ad4mClient = testContext.ad4mClient!
+
+                const TEST_DATA = "Hello World"
+                const addr = await ad4mClient.expression.create(TEST_DATA, "literal")
+                const exprRef = parseExprUrl(addr)
+                expect(exprRef.language.address).toBe("literal")
+
+                const expr = Literal.fromUrl(addr).get()
+                delete expr.proof.invalid
+
+                expect(expr.data).toBe(TEST_DATA)
+
+                const expr2Raw = await ad4mClient.expression.getRaw(addr)
+                const expr2 = JSON.parse(expr2Raw)
+                console.log(expr2)
+
+                expect(expr2).toStrictEqual(expr)
             })
         })
     }
