@@ -135,6 +135,8 @@ describe('Perspective', () => {
 
             result = await perspective!.prologQuery("triple(Source,Pred,Target)")
             expect(result.length).toEqual(2)
+            //@ts-ignore
+            result.sort((a,b) => a.Target < b.Target)
             expect(result[1].Source).toBe('ad4m://self')
             expect(result[1].Target).toBe('ad4m://test2')
 
