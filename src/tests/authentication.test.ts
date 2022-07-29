@@ -11,8 +11,6 @@ import { Ad4mClient } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import PerspectivismCore from "../core/PerspectivismCore";
 
-jest.setTimeout(10000)
-
 function apolloClient(port: number, token?: string): ApolloClient<any> {
     return new ApolloClient({
         link: new WebSocketLink({
@@ -155,6 +153,7 @@ describe("Authentication integration tests", () => {
         })
 
         afterAll(async () => {
+            console.warn("After all called");
             await agentCore!.exit();
         })
 
@@ -207,8 +206,9 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
+            console.warn("Init ad4m client1");
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
-
+            console.warn("Finish init 1");
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
         })
 
@@ -229,7 +229,9 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["CREATE"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
+            console.warn("Init client 2");
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+            console.warn("Finish init2");
 
             const call = async () => {
                 return await authenticatedAppAd4mClient!.agent.status()
