@@ -76,7 +76,7 @@ describe('Perspective', () => {
             for(let i=0; i<5; i++) {
                 const link = createLink()
                 if(i%2 === 0) {
-                    link.source = 'root'
+                    link.source = 'ad4m://self'
                 }
                 //@ts-ignore
                 allLinks!.push(await perspective!.addLink(link))
@@ -103,7 +103,7 @@ describe('Perspective', () => {
         })
 
         it('can get links by source', async () => {
-            const result = await perspective!.getLinks({source: 'root'} as LinkQuery)
+            const result = await perspective!.getLinks({source: 'ad4m://self'} as LinkQuery)
             expect(result.length).toEqual(3)
         })
 
