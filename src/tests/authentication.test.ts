@@ -10,6 +10,7 @@ import { OuterConfig } from "../types";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import PerspectivismCore from "../core/PerspectivismCore";
+import sleep from "./sleep";
 
 function apolloClient(port: number, token?: string): ApolloClient<any> {
     return new ApolloClient({
@@ -153,6 +154,7 @@ describe("Authentication integration tests", () => {
         })
 
         afterAll(async () => {
+            await sleep(1000)
             await agentCore!.exit();
         })
 
