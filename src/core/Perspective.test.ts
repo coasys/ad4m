@@ -135,10 +135,14 @@ describe('Perspective', () => {
 
             result = await perspective!.prologQuery("triple(Source,Pred,Target)")
             expect(result.length).toEqual(2)
-            //@ts-ignore
-            result.sort((a,b) => a.Target < b.Target)
+
+            let targetSet = new Set<string>()
+            targetSet.add(result[0].Target)
+            targetSet.add(result[1].Target)
+
             expect(result[1].Source).toBe('ad4m://self')
-            expect(result[1].Target).toBe('ad4m://test2')
+            expect(targetSet.has('ad4m://test1')).toBeTruthy()
+            expect(targetSet.has('ad4m://test2')).toBeTruthy()
 
             //...TBC
         })
