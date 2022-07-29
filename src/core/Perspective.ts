@@ -436,9 +436,9 @@ export default class Perspective {
 
         let nodes = new Set<string>()
         for(let link of allLinks) {
-            nodes.add(link.data.source)
-            nodes.add(link.data.predicate)
-            nodes.add(link.data.target)
+            if(link.data.source) nodes.add(link.data.source)
+            if(link.data.predicate) nodes.add(link.data.predicate)
+            if(link.data.target) nodes.add(link.data.target)
         }
 
         for(let node of nodes) {
