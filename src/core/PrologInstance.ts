@@ -8,13 +8,11 @@ import { MainConfig } from "./Config";
 
 export default class PrologInstance {
     #engine
-    #config?: MainConfig;
 
     constructor(config: MainConfig) {
-        this.#config = config;
         this.#engine = new swipl.Engine(
-            this.#config.swiplPath ? this.#config.swiplPath : path.join(this.#config.resourcePath, "swipl"),
-            this.#config.swiplHomePath
+            config.swiplPath ? config.swiplPath : path.join(config.resourcePath, "swipl"),
+            config.swiplHomePath
         )
     }
 

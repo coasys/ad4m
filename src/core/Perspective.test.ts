@@ -7,6 +7,8 @@ import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/a
 import Memory from 'lowdb/adapters/Memory'
 import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
+import { MainConfig } from './Config'
+import path from "path";
 
 
 const did = 'did:local-test-agent'
@@ -46,6 +48,8 @@ describe('Perspective', () => {
     let allLinks: LinkExpression[] | undefined
 
     beforeEach(() => {
+        const TEST_DIR = `${__dirname}/../test-temp`
+        const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
         const db = new PerspectivismDb(new Memory(""))
         perspective = new Perspective(
             {
@@ -53,11 +57,12 @@ describe('Perspective', () => {
                 name: "Test Perspective",
                 sharedUrl: undefined
             } as PerspectiveHandle,
-            // @ts-ignore
+            //@ts-ignore
             {
                 agentService,
                 db,
-                languageController
+                languageController,
+                config: new MainConfig(TEST_DIR, appDataPath)
             } as PerspectiveContext)
         allLinks = []
     })
