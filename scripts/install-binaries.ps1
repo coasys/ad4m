@@ -5,8 +5,8 @@ $HoloPath = Get-Command holochain | Select-Object -ExpandProperty Definition
 if (Test-Path $HoloPath) {
   $Version = Invoke-Expression "$HoloPath --version"
 
-  if($Version -notlike '*0.0.146*') {
-    cargo install --locked holochain --git https://github.com/holochain/holochain.git --tag holochain-0.0.146 --force
+  if($Version -notlike '*0.0.151*') {
+    cargo install --locked holochain --git https://github.com/holochain/holochain.git --tag holochain-0.0.151 --force
   }
 }
 
@@ -15,8 +15,8 @@ $HcPath = Get-Command hc | Select-Object -ExpandProperty Definition
 if (Test-Path $HcPath) {
   $Version = Invoke-Expression "$HcPath --version"
 
-  if($Version -notlike '*0.0.44*') {
-    cargo install holochain_cli --version 0.0.44 --force
+  if($Version -notlike '*0.0.49*') {
+    cargo install holochain_cli --version 0.0.49 --force
   }
 }
 
