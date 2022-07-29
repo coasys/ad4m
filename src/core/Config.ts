@@ -32,6 +32,8 @@ export class MainConfig {
     perspectiveLanguageSettings: object | null = null;
     neighbourhoodLanguageSettings: object | null = null;
     languageLanguageSettings: object | null = null;
+    swiplPath: string | null = null;
+    swiplHomePath: string | null = null;
 
     constructor(resourcePath = '', appDataPath = '') {
         this.resourcePath = resourcePath;
