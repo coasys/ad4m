@@ -23,12 +23,12 @@ const perspectiveDiffSyncHashPath = path.join(`${__dirname}/../../scripts/perspe
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
-    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
-    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["uid", "recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
-    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
-    "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
-    "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
-    "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
+    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["network_seed", "name", "description"]} as LanguageMetaInput, 
+    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["network_seed", "recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
+    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["network_seed", "name", "description"]} as LanguageMetaInput, 
+    "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["network_seed", "name", "description"]} as LanguageMetaInput, 
+    "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["network_seed", "name", "description"]} as LanguageMetaInput,
+    "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["network_seed", "name", "description"]} as LanguageMetaInput,
 }
 
 const languageHashes = {

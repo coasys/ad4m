@@ -483,9 +483,9 @@ export default class LanguageController {
             //Read the yaml file
             let dnaYaml = yaml.load(fs.readFileSync(dnaYamlPath, 'utf8'));
             //@ts-ignore
-            if (templateData.uid) {
+            if (templateData.network_seed) {
                 //@ts-ignore
-                dnaYaml.integrity.uid = templateData.uid;
+                dnaYaml.integrity.network_seed = templateData.network_seed;
             }
             //@ts-ignore
             for (const [templateKey, templateValue] of Object.entries(templateData)) {
