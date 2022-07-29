@@ -679,7 +679,14 @@ function createResolvers(core: PerspectivismCore, config: any) {
             //@ts-ignore
             language: async (expression) => {
                 //console.log("GQL LANGUAGE", expression)
-                const lang = await core.languageController.languageForExpression(expression.ref) as any
+                let lang
+                try {
+                    lang = await core.languageController.languageForExpression(expression.ref) as any    
+                } catch(e) {
+                    console.error("While trying to get language for expression", expression, ":", e)
+                    lang = {}
+                }
+                
                 lang.address = expression.ref.language.address
                 return lang
             },

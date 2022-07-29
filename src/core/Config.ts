@@ -67,6 +67,8 @@ export interface CoreConfig {
     neighbourhoodLanguageSettings?: object
     languageLanguageSettings?: object
     reqCredential?: string
+    swiplPath?: string,
+    swiplHomePath?: string,
 }
 
 

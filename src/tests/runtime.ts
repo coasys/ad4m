@@ -3,7 +3,7 @@ import fs from "fs";
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
-const PUBLISHING_AGENT = JSON.parse(fs.readFileSync("./src/test-temp/agents/p-agent/ad4m/agent.json").toString())["did"];
+const PUBLISHING_AGENT = JSON.parse(fs.readFileSync("./src/test-temp/agents/p-agent/agent.json").toString())["did"];
 
 export default function runtimeTests(testContext: TestContext) {
     return () => {

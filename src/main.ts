@@ -47,6 +47,10 @@ export interface OuterConfig {
   connectHolochain?: boolean,
   //The credential used by admin client to make request
   reqCredential?: string,
+  //Path to swipl executable
+  swiplPath?: string,
+  //Path to swipl home directory
+  swiplHomePath?: string,
 }
 
 export interface SeedFileSchema {
@@ -83,7 +87,8 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       mocks, gqlPort, 
       hcPortAdmin, hcPortApp,
       ipfsSwarmPort, ipfsRepoPath,
-      hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, connectHolochain, reqCredential
+      hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, connectHolochain, reqCredential,
+      swiplPath, swiplHomePath
     } = config
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
@@ -179,7 +184,9 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       languageAliases,
       bootstrapFixtures,
       languageLanguageOnly,
-      reqCredential
+      reqCredential,
+      swiplPath,
+      swiplHomePath
     } as CoreConfig);
 
     console.log("\x1b[34m", "Init services...", "\x1b[0m");

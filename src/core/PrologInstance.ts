@@ -12,7 +12,10 @@ export default class PrologInstance {
 
     constructor(config: MainConfig) {
         this.#config = config;
-        this.#engine = new swipl.Engine(path.join(config.resourcePath, "swipl"))
+        this.#engine = new swipl.Engine(
+            this.#config.swiplPath ? this.#config.swiplPath : path.join(this.#config.resourcePath, "swipl"),
+            this.#config.swiplHomePath
+        )
     }
 
     async query(input: string) {

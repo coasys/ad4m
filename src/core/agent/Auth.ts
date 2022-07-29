@@ -359,7 +359,7 @@ export const checkCapability = (capabilities: Capabilities, expected: Capability
     }
 }
 
-export const DefaultTokenValidPeriod = 7 * 24 * 60 * 60; // 7 days in seconds
+export const DefaultTokenValidPeriod = 180 * 24 * 60 * 60; // 180 days in seconds
 
 export interface AuthInfoExtended {
     requestId: string,

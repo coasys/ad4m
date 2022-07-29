@@ -1,6 +1,6 @@
 const fs = require("fs");
 
-const publishingAgentPath = "./src/test-temp/agents/p-agent/ad4m/agent.json";
+const publishingAgentPath = "./src/test-temp/agents/p-agent/agent.json";
 const bootstrapSeedPath = "./src/tests/bootstrapSeed.json";
 
 async function main() {
