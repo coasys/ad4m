@@ -32,8 +32,8 @@ export class MainConfig {
     perspectiveLanguageSettings: object | null = null;
     neighbourhoodLanguageSettings: object | null = null;
     languageLanguageSettings: object | null = null;
-    swiplPath: string | null = null;
-    swiplHomePath: string | null = null;
+    swiplPath: string | undefined = undefined;
+    swiplHomePath: string | undefined = undefined;
 
     constructor(resourcePath = '', appDataPath = '') {
         this.resourcePath = resourcePath;
@@ -119,6 +119,8 @@ export function init(c: CoreConfig): MainConfig {
     if (c.languageLanguageSettings) {
         mainConfig.languageLanguageSettings = c.languageLanguageSettings
     }
+    mainConfig.swiplPath = c.swiplPath
+    mainConfig.swiplHomePath = c.swiplHomePath
 
     return mainConfig;
 }

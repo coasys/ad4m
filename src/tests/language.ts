@@ -135,7 +135,7 @@ export default function languageTests(testContext: TestContext) {
 
                 it("Bob can template Alice's perspective-diff-sync, and alice can install", async () => {
                     //Apply template on above holochain language
-                    applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({network_seed: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "Bob's templated perspective-diff-sync"}))
+                    applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "Bob's templated perspective-diff-sync"}))
                     expect(applyTemplateFromSource.name).toBe("Bob's templated perspective-diff-sync");
                     expect(applyTemplateFromSource.address).not.toEqual(sourceLanguage.address);
                     
@@ -148,7 +148,7 @@ export default function languageTests(testContext: TestContext) {
                     expect(meta.author).toBe((await bobAd4mClient.agent.status()).did)
                     expect(meta.templateAppliedParams).toBe(JSON.stringify({
                         "name": "Bob's templated perspective-diff-sync",
-                        "network_seed":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
+                        "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
                     }))
                     expect(meta.templateSourceLanguageAddress).toBe(sourceLanguage.address)
 
