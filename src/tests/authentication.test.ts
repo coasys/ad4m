@@ -10,7 +10,8 @@ import { OuterConfig } from "../types";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import PerspectivismCore from "../core/PerspectivismCore";
-import sleep from "./sleep";
+
+jest.setTimeout(10000)
 
 function apolloClient(port: number, token?: string): ApolloClient<any> {
     return new ApolloClient({
@@ -206,15 +207,9 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-            try {
-                let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
 
-                expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
-            } catch (e) {
-                console.error("test error", e)
-                //@ts-ignore
-                throw new Error(e)
-            }
+            expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
         })
 
         it("user with invalid jwt can not query agent status", async () => {
@@ -234,21 +229,15 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["CREATE"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-            try {
-                let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
 
-                const call = async () => {
-                    return await authenticatedAppAd4mClient!.agent.status()
-                }
-    
-                await expect(call())
-                    .rejects
-                    .toThrowError("Capability is not matched")
-            } catch (e) {
-                console.error("test error2", e);
-                //@ts-ignore
-                throw new Error(e);
+            const call = async () => {
+                return await authenticatedAppAd4mClient!.agent.status()
             }
+
+            await expect(call())
+                .rejects
+                .toThrowError("Capability is not matched")
         })
     })
 })
