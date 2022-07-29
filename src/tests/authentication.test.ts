@@ -154,7 +154,6 @@ describe("Authentication integration tests", () => {
         })
 
         afterAll(async () => {
-            await sleep(1000)
             await agentCore!.exit();
         })
 
@@ -207,9 +206,15 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+            try {
+                let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
 
-            expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
+                expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
+            } catch (e) {
+                console.error("test error", e)
+                //@ts-ignore
+                throw new Error(e)
+            }
         })
 
         it("user with invalid jwt can not query agent status", async () => {
@@ -229,15 +234,21 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["CREATE"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+            try {
+                let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
 
-            const call = async () => {
-                return await authenticatedAppAd4mClient!.agent.status()
+                const call = async () => {
+                    return await authenticatedAppAd4mClient!.agent.status()
+                }
+    
+                await expect(call())
+                    .rejects
+                    .toThrowError("Capability is not matched")
+            } catch (e) {
+                console.error("test error2", e);
+                //@ts-ignore
+                throw new Error(e);
             }
-
-            await expect(call())
-                .rejects
-                .toThrowError("Capability is not matched")
         })
     })
 })
