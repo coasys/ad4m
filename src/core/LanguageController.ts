@@ -16,7 +16,7 @@ import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
 
-type LinkObservers = (diff: PerspectiveDiff, lang: string)=>void;
+type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 
 interface Services {
     holochainService: HolochainService,
@@ -145,9 +145,9 @@ export default class LanguageController {
         }))
     }
 
-    callLinkObservers(diff: PerspectiveDiff, hash: string) {
+    callLinkObservers(diff: PerspectiveDiff, ref: LanguageRef) {
         this.#linkObservers.forEach(o => {
-            o(diff, hash)
+            o(diff, ref)
         })
     }
 
@@ -179,7 +179,7 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
-                this.callLinkObservers(diff, hash);
+                this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
         }
 
@@ -215,7 +215,7 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
-                this.callLinkObservers(diff, hash);
+                this.callLinkObservers(diff, {address: hash, name: language.name});
             })
         }
 
