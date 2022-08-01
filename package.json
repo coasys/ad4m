@@ -23,8 +23,8 @@
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
     "publish-test-languages": "npm run build && node ./lib/tests/publishTestLangs.js",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
-    "test-all": "PATH=$PATH:./src/test-temp jest --forceExit",
-    "test-all:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/run-all-test.ps1 & jest --forceExit",
+    "test-all": "PATH=$PATH:./src/test-temp jest --forceExit --runInBand",
+    "test-all:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/run-all-test.ps1 & jest --forceExit --runInBand",
     "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js",
     "test:windows": "npm run prepare-test:windows && npm run test-all:windows && node scripts/cleanTestingData.js",
     "jest": "jest"
