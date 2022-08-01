@@ -159,12 +159,15 @@ describe("Authentication integration tests", () => {
 
         it("unauthenticated user can not query agent status", async () => {
             const call = async () => {
+                console.warn("blocked 1");
                 return await unAuthenticatedAppAd4mClient!.agent.status()
             }
 
             await expect(call())
                 .rejects
                 .toThrowError("Capability is not matched");
+
+            console.warn("blocked 2");
         })
 
         it("unauthenticated user can request capability", async () => {
