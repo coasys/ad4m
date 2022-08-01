@@ -16,7 +16,6 @@ function apolloClient(port: number, token?: string): ApolloClient<any> {
         link: new WebSocketLink({
             uri: `ws://localhost:${port}/graphql`,
             options: {
-                reconnect: true,
                 connectionParams: () => {
                     return {
                         headers: {
