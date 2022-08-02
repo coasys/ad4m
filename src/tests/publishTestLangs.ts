@@ -41,7 +41,14 @@ const languageHashes = {
 function apolloClient(port: number, token?: string): ApolloClient<any> {
     const wsLink = new GraphQLWsLink(createClient({
         url: `ws://localhost:${port}/graphql`,
-        webSocketImpl: Websocket
+        webSocketImpl: Websocket,
+        connectionParams: () => {
+            return {
+                headers: {
+                    authorization: token
+                }
+            }
+        },
     }));
 
     return new ApolloClient({
