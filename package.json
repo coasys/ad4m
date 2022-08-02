@@ -48,7 +48,7 @@
     "url": "https://github.com/perspect3vism/ad4m-executor/issues"
   },
   "devDependencies": {
-    "@apollo/client": "3.3.20",
+    "@apollo/client": "^3.6.9",
     "@peculiar/webcrypto": "^1.1.7",
     "@types/faker": "^5.5.7",
     "@types/fs-extra": "^9.0.12",
@@ -60,6 +60,7 @@
     "@types/secp256k1": "^4.0.3",
     "@types/sha256": "^0.2.0",
     "@types/uuid": "^8.3.1",
+    "@types/ws": "^8.5.3",
     "faker": "^5.1.0",
     "jest": "^27.2.5",
     "node-wget-js": "^1.0.1",
@@ -70,6 +71,7 @@
     "ws": "^8.8.0"
   },
   "dependencies": {
+    "@graphql-tools/schema": "^8.5.1",
     "@holochain/client": "0.3.2",
     "@perspect3vism/ad4m": "0.1.33",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
@@ -77,11 +79,15 @@
     "@transmute/did-key.js": "^0.2.1-unstable.29",
     "@transmute/did-wallet": "lucksus/did-wallet",
     "@types/json-stable-stringify": "^1.0.33",
-    "apollo-server": "^2.18.2",
+    "apollo-server": "^3.10.0",
+    "apollo-server-express": "^3.10.0",
     "async-mutex": "^0.3.2",
+    "express": "^4.18.1",
     "fs-extra": "^10.0.0",
     "get-port": "5.1.1",
     "graphql": "^15.3.0",
+    "graphql-subscriptions": "^2.0.0",
+    "graphql-ws": "^5.9.1",
     "ipfs": "0.61.0",
     "jose": "^4.8.1",
     "js-yaml": "^4.1.0",
@@ -92,6 +98,7 @@
     "node-fetch": "^2.6.1",
     "sha256": "^0.2.0",
     "sha3": "^2.1.3",
+    "subscriptions-transport-ws": "^0.11.0",
     "swipl-stdio": "perspect3vism/node-swipl-stdio.git#9d82de7fb3301f4ead2077aa7636d34159d93631",
     "tmp": "^0.2.1"
   }

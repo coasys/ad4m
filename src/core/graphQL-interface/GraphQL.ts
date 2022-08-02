@@ -1,4 +1,9 @@
-import { ApolloServer, withFilter, gql, AuthenticationError } from 'apollo-server'
+import { ApolloServer, gql, AuthenticationError,  } from 'apollo-server-express'
+import express from 'express';
+import { createServer } from 'http';
+import { execute, subscribe } from 'graphql';
+import { SubscriptionServer, ConnectionContext } from 'subscriptions-transport-ws';
+import { makeExecutableSchema } from '@graphql-tools/schema';
 import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
@@ -9,6 +14,7 @@ import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
 import * as Auth from '../agent/Auth'
 import { checkCapability } from '../agent/Auth'
+import { withFilter } from 'graphql-subscriptions';
 
 function createResolvers(core: PerspectivismCore, config: any) {
     const pubsub = PubSub.get()
@@ -805,14 +811,39 @@ export interface StartServerParams {
 
 export async function startServer(params: StartServerParams) {
     const { core, mocks, port } = params
+    const app = express();
+    const httpServer = createServer(app);
     const resolvers = createResolvers(core, params.config)
     const typeDefs = gql(typeDefsString)
+    const schema = makeExecutableSchema({ typeDefs, resolvers });
+    
+    let subscriptionServer: any;
     const server = new ApolloServer({
-        typeDefs,
-        resolvers,
-        mocks,
-        context: async (req) => {
-            let headers = req.connection?.context.headers
+        schema,
+        plugins: [{
+            async serverWillStart() {
+                return {
+                    async drainServer() {
+                        subscriptionServer.close();
+                    }
+                };
+            }
+        }],
+    });
+
+    console.log('server', server)
+    
+    subscriptionServer = SubscriptionServer.create({
+        schema,
+        execute,
+        subscribe,
+        validationRules: server.requestOptions.validationRules,
+        async onConnect(
+            connectionParams: Object,
+            webSocket: WebSocket,
+            context: ConnectionContext
+        ) {
+            let headers = context.request.headers;
             let authToken = ''
             if(headers) {
                 // Get the request token from the authorization header.
@@ -822,8 +853,22 @@ export async function startServer(params: StartServerParams) {
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
 
             return { capabilities };
-          },
+        }
+        }, {
+        server: httpServer,
+        path: server.graphqlPath,
     });
-    const { url, subscriptionsUrl } = await server.listen({ port })
-    return { url, subscriptionsUrl }
+
+    await server.start();
+
+    server.applyMiddleware({ app });
+
+    httpServer.listen({ port });
+
+    console.log('subscriptionServer', subscriptionServer)
+    
+    return { 
+        url: `http://localhost:${port}/graphql`,
+        subscriptionsUrl: `ws://localhost:${port}/graphql`
+    }
 }

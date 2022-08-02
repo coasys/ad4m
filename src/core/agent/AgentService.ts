@@ -7,7 +7,7 @@ import secp256k1 from 'secp256k1'
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
 import * as PubSubInstance from '../graphQL-interface/PubSub'
-import type { PubSub } from 'apollo-server';
+import type { PubSub } from 'graphql-subscriptions';
 import { resolver } from '@transmute/did-key.js';
 import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';

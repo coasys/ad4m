@@ -10,22 +10,24 @@ import { OuterConfig } from "../types";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import PerspectivismCore from "../core/PerspectivismCore";
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
+import { createClient } from "graphql-ws";
 
 function apolloClient(port: number, token?: string): ApolloClient<any> {
     return new ApolloClient({
-        link: new WebSocketLink({
-            uri: `ws://localhost:${port}/graphql`,
-            options: {
+        link: new GraphQLWsLink(
+            createClient({
+                url: `ws://localhost:${port}/graphql`,
                 connectionParams: () => {
                     return {
                         headers: {
                             authorization: token
                         }
                     }
-                }
-            },
-            webSocketImpl: ws,
-        }),
+                },
+                webSocketImpl: ws
+            }),
+          ),
         cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
         defaultOptions: {
             watchQuery: {
@@ -77,6 +79,7 @@ describe("Authentication integration tests", () => {
                 hcUseMdns: true
             } as OuterConfig)
 
+            // @ts-ignore
             ad4mClient = new Ad4mClient(apolloClient(gqlPort))
             await ad4mClient.agent.generate("passphrase")
         })
@@ -140,7 +143,7 @@ describe("Authentication integration tests", () => {
                 reqCredential: "123"
             } as OuterConfig)
 
-            
+            // @ts-ignore            
             adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"))
             await adminAd4mClient.agent.generate("passphrase")
             // await agentCore.waitForAgent();
@@ -148,6 +151,7 @@ describe("Authentication integration tests", () => {
             // await agentCore.initLanguages()
             
 
+            // @ts-ignore
             unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort))
         })
 
@@ -209,12 +213,14 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             console.warn("Init ad4m client1");
+            // @ts-ignore
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
             console.warn("Finish init 1");
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
         })
 
         it("user with invalid jwt can not query agent status", async () => {
+            // @ts-ignore
             let ad4mClient = new Ad4mClient(apolloClient(gqlPort, "invalid-jwt"))
 
             const call = async () => {
@@ -232,6 +238,7 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             console.warn("Init client 2");
+            // @ts-ignore
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
             console.warn("Finish init2");
 
