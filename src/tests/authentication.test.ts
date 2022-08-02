@@ -1,9 +1,5 @@
-import {
-    ApolloClient,
-    InMemoryCache,
-} from "@apollo/client/core";
-import { WebSocketLink } from '@apollo/client/link/ws';
-import ws from "ws"
+import { ApolloClient, InMemoryCache } from "@apollo/client/core";
+import Websocket from "ws";
 import main from "../main";
 import path from "path";
 import { OuterConfig } from "../types";
@@ -14,20 +10,45 @@ import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { createClient } from "graphql-ws";
 
 function apolloClient(port: number, token?: string): ApolloClient<any> {
+    // const httpLink = new HttpLink({
+    //     uri: `http://localhost:${port}/graphql`,
+    //     fetch,
+    //     headers: {
+    //         authorization: token
+    //     }
+    // });
+    
+    const wsLink = new GraphQLWsLink(createClient({
+        url: `ws://localhost:${port}/graphql`,
+        webSocketImpl: Websocket,
+        connectionParams: () => {
+            return {
+                headers: {
+                    authorization: token
+                }
+            }
+        },
+    }));
+
+    // const errorLink = onError(({ graphQLErrors, networkError }) => {
+    //     if (graphQLErrors) graphQLErrors.map(({ message }) => console.error(`GraphQL Error: ${message}`))
+    //     if (networkError) console.error(`GraphQL Network Error: ${networkError}`)
+    // })
+    
+    // const splitLink = split(
+    //     ({ query }) => {
+    //       const definition = getMainDefinition(query);
+    //       return (
+    //         definition.kind === 'OperationDefinition' &&
+    //         definition.operation === 'subscription'
+    //       );
+    //     },
+    //     wsLink,
+    //     httpLink,
+    // );
+
     return new ApolloClient({
-        link: new GraphQLWsLink(
-            createClient({
-                url: `ws://localhost:${port}/graphql`,
-                connectionParams: () => {
-                    return {
-                        headers: {
-                            authorization: token
-                        }
-                    }
-                },
-                webSocketImpl: ws
-            }),
-          ),
+        link: wsLink,
         cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
         defaultOptions: {
             watchQuery: {
@@ -156,22 +177,18 @@ describe("Authentication integration tests", () => {
         })
 
         afterAll(async () => {
-            console.warn("After all called");
             await agentCore!.exit();
         })
 
-        // it("unauthenticated user can not query agent status", async () => {
-        //     const call = async () => {
-        //         console.warn("blocked 1");
-        //         return await unAuthenticatedAppAd4mClient!.agent.status()
-        //     }
+        it("unauthenticated user can not query agent status", async () => {
+            const call = async () => {
+                return await unAuthenticatedAppAd4mClient!.agent.status()
+            }
 
-        //     await expect(call())
-        //         .rejects
-        //         .toThrowError("Capability is not matched");
-
-        //     console.warn("blocked 2");
-        // })
+            await expect(call())
+                .rejects
+                .toThrowError("Capability is not matched");
+        })
 
         it("unauthenticated user can request capability", async () => {
             const call = async () => {

@@ -1,9 +1,7 @@
-import {
-    ApolloClient,
-    InMemoryCache,
-} from "@apollo/client/core";
-import { WebSocketLink } from '@apollo/client/link/ws';
-import ws from "ws"
+import { ApolloClient, InMemoryCache } from "@apollo/client/core";
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
+import { createClient } from "graphql-ws";
+import Websocket from "ws";
 import main from "../main";
 import path from "path";
 import { OuterConfig } from "../types";
@@ -40,31 +38,24 @@ const languageHashes = {
     "perspectiveDiffSync": ""
 }
 
-function apolloClient(port: number): ApolloClient<any> {
+function apolloClient(port: number, token?: string): ApolloClient<any> {
+    const wsLink = new GraphQLWsLink(createClient({
+        url: `ws://localhost:${port}/graphql`,
+        webSocketImpl: Websocket
+    }));
+
     return new ApolloClient({
-      link: new WebSocketLink({
-          uri: `ws://localhost:${port}/graphql`,
-          options: {
-              reconnect: true,
-              connectionParams: () => {
-                return {
-                  headers: {
-                  }
-                }
-              }
-          },
-          webSocketImpl: ws,
-      }),
-      cache: new InMemoryCache({resultCaching: false, addTypename: false}),
-      defaultOptions: {
-          watchQuery: {
-              fetchPolicy: "no-cache",
-          },
-          query: {
-              fetchPolicy: "no-cache",
-          }
-      },
-  });
+        link: wsLink,
+        cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
+        defaultOptions: {
+            watchQuery: {
+                fetchPolicy: "no-cache",
+            },
+            query: {
+                fetchPolicy: "no-cache",
+            }
+        },
+    });
 }
 
 function createTestingAgent() {

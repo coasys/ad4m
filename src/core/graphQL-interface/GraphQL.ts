@@ -1,4 +1,4 @@
-import { ApolloServer, gql, AuthenticationError,  } from 'apollo-server-express'
+import { ApolloServer, gql, AuthenticationError } from 'apollo-server-express'
 import express from 'express';
 import { createServer } from 'http';
 import {
@@ -842,8 +842,8 @@ export async function startServer(params: StartServerParams) {
             {
                 async serverWillStart() {
                     return {
-                            async drainServer() {
-                                await serverCleanup.dispose();
+                        async drainServer() {
+                            await serverCleanup.dispose();
                         },
                     };
                 },
@@ -861,7 +861,7 @@ export async function startServer(params: StartServerParams) {
     serverCleanup = useServer({
         schema,
         context: async (context, msg, args) => {
-            let headers = context.extra.request.headers;
+            let headers: any = context.connectionParams!.headers;
             let authToken = ''
             
             if(headers) {
