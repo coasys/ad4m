@@ -820,6 +820,18 @@ export async function startServer(params: StartServerParams) {
     let subscriptionServer: any;
     const server = new ApolloServer({
         schema,
+        context: async (context) => {
+            let headers = context.req.headers;
+            let authToken = ''
+            if(headers) {
+                // Get the request token from the authorization header.
+                authToken = headers.authorization || ''
+            }
+            const capabilities = await core.agentService.getCapabilities(authToken)
+            if(!capabilities) throw new AuthenticationError("User capability is empty.")
+
+            return { capabilities };
+        },
         plugins: [{
             async serverWillStart() {
                 return {
