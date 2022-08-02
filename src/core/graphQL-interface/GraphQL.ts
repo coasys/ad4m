@@ -45,6 +45,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
             },
             //@ts-ignore
             agentStatus: (parent, args, context, info) => {
+                console.warn('gggg', context);
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 return core.agentService.dump()
             },
@@ -666,6 +667,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
             perspectiveRemoved: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
+                    console.log('test 101', parent, args, context, info)
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC)
                 },
@@ -821,15 +823,19 @@ export async function startServer(params: StartServerParams) {
     
     let serverCleanup: any;
     const server = new ApolloServer({
-        schema,
+        typeDefs,
+        resolvers,
         context: async (context) => {
+            console.log('wellllll', context)
             let headers = context.req.headers;
             let authToken = ''
+            
             if(headers) {
                 // Get the request token from the authorization header.
                 authToken = headers.authorization || ''
             }
             const capabilities = await core.agentService.getCapabilities(authToken)
+            console.log('wellllll', capabilities)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
 
             return { capabilities };
@@ -838,11 +844,11 @@ export async function startServer(params: StartServerParams) {
             ApolloServerPluginDrainHttpServer({ httpServer }),
             {
                 async serverWillStart() {
-                return {
-                    async drainServer() {
-                    await serverCleanup.dispose();
-                    },
-                };
+                    return {
+                            async drainServer() {
+                                await serverCleanup.dispose();
+                        },
+                    };
                 },
             },
         ]
@@ -853,8 +859,7 @@ export async function startServer(params: StartServerParams) {
     const wsServer = new WebSocketServer({
         server: httpServer,
         path: server.graphqlPath,
-        
-      });
+    });
 
     serverCleanup = useServer({ schema }, wsServer);
 
