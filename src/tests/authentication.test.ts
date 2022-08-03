@@ -229,7 +229,6 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-            console.warn("Init ad4m client1");
             // @ts-ignore
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
             console.warn("Finish init 1");
