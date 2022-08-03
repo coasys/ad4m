@@ -45,7 +45,6 @@ function createResolvers(core: PerspectivismCore, config: any) {
             },
             //@ts-ignore
             agentStatus: (parent, args, context, info) => {
-                console.warn('gggg', context);
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 return core.agentService.dump()
             },
