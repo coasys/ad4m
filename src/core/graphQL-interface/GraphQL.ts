@@ -850,7 +850,6 @@ export async function startServer(params: StartServerParams) {
         ]
     });
 
-    console.log('server', server)
 
     const wsServer = new WebSocketServer({
         server: httpServer,
