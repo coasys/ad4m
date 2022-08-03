@@ -19,9 +19,9 @@ import { PerspectivismDb } from './db';
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 
 interface Services {
-    holochainService: HolochainService, 
-    runtimeService: RuntimeService, 
-    signatures: Signatures, 
+    holochainService: HolochainService,
+    runtimeService: RuntimeService,
+    signatures: Signatures,
     db: PerspectivismDb
 }
 
@@ -34,6 +34,7 @@ export default class LanguageController {
     #runtimeService: RuntimeService;
     #signatures: Signatures;
     #db: PerspectivismDb;
+    #config: Config.MainConfig;
 
     #agentLanguage?: Language
     #languageLanguage?: Language
@@ -49,14 +50,15 @@ export default class LanguageController {
         this.#db = services.db
         this.#languages = new Map()
         this.#languageConstructors = new Map()
-        this.#linkObservers = []   
+        this.#linkObservers = []
         this.pubSub = PubSub.get()
+        this.#config = (context as any).config;
     }
 
     async loadLanguages() {
         try {
             await this.loadSystemLanguages()
-            if (!Config.languageLanguageOnly) await this.loadInstalledLanguages()
+            if (this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
         } catch (e) {
             throw new Error(`Error loading languages ${e}`);
         }
@@ -64,51 +66,51 @@ export default class LanguageController {
 
     async loadSystemLanguages() {
         //Install language language from the bundle file and then update languageAliases to point to language hash
-        const { sourcePath, hash: calculatedHash } = await this.saveLanguageBundle(Config.languageLanguageBundle);
-        if (Config.languageLanguageSettings) {
+        const { sourcePath, hash: calculatedHash } = await this.saveLanguageBundle(this.#config.languageLanguageBundle);
+        if (this.#config.languageLanguageSettings) {
             console.log("Found settings for languageLanguage, writting settings");
-            this.writeSettings(calculatedHash, Config.languageLanguageSettings);
+            this.writeSettings(calculatedHash, this.#config.languageLanguageSettings);
         }
         const { hash, language: languageLanguage } = await this.loadLanguage(sourcePath);
-        Config.languageAliases[Config.languageLanguageAlias] = hash;
+        this.#config.languageAliases[Config.languageLanguageAlias] = hash;
         this.#languageLanguage = languageLanguage!;
 
-        if (!Config.languageLanguageOnly) {
+        if (!this.#config.languageLanguageOnly) {
             //Install the agent language and set
-            if (Config.agentLanguageSettings) {
+            if (this.#config.agentLanguageSettings) {
                 console.log("Found settings for agentLanguage, writting settings");
-                this.writeSettings(Config.languageAliases[Config.agentLanguageAlias], Config.agentLanguageSettings);
+                this.writeSettings(this.#config.languageAliases[Config.agentLanguageAlias], this.#config.agentLanguageSettings);
             }
-            const agentLanguage = await this.installLanguage(Config.languageAliases[Config.agentLanguageAlias], null);
+            const agentLanguage = await this.installLanguage(this.#config.languageAliases[Config.agentLanguageAlias], null);
             this.#agentLanguage = agentLanguage!;
             ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
 
             //Install the neighbourhood language and set
-            if (Config.neighbourhoodLanguageSettings) {
+            if (this.#config.neighbourhoodLanguageSettings) {
                 console.log("Found settings for neighbourhoodLanguage, writting settings");
-                this.writeSettings(Config.languageAliases[Config.neighbourhoodLanguageAlias], Config.neighbourhoodLanguageSettings);
+                this.writeSettings(this.#config.languageAliases[Config.neighbourhoodLanguageAlias], this.#config.neighbourhoodLanguageSettings);
             }
-            const neighbourhoodLanguage = await this.installLanguage(Config.languageAliases[Config.neighbourhoodLanguageAlias], null);
+            const neighbourhoodLanguage = await this.installLanguage(this.#config.languageAliases[Config.neighbourhoodLanguageAlias], null);
             this.#neighbourhoodLanguage = neighbourhoodLanguage!;
 
             //Install the perspective language and set
-            if (Config.perspectiveLanguageSettings) {
+            if (this.#config.perspectiveLanguageSettings) {
                 console.log("Found settings for a perspectiveLanguage, writting settings")
-                this.writeSettings(Config.languageAliases[Config.perspectiveLanguageAlias], Config.perspectiveLanguageSettings);
+                this.writeSettings(this.#config.languageAliases[Config.perspectiveLanguageAlias], this.#config.perspectiveLanguageSettings);
             }
-            const perspectiveLanguage = await this.installLanguage(Config.languageAliases[Config.perspectiveLanguageAlias], null);
+            const perspectiveLanguage = await this.installLanguage(this.#config.languageAliases[Config.perspectiveLanguageAlias], null);
             this.#perspectiveLanguage = perspectiveLanguage!;
 
             //Install preload languages
-            await Promise.all(Config.preloadLanguages.map(async hash => {
+            await Promise.all(this.#config.preloadLanguages.map(async hash => {
                 await this.installLanguage(hash, null);
             }))
 
             //Load bootstrap languages
-            if (Config.bootstrapFixtures) {
-                if (Config.bootstrapFixtures!.languages) {
-                    await Promise.all(Config.bootstrapFixtures!.languages!.map(async file => {
-                        const { sourcePath } = await this.saveLanguageBundle(Config.languageLanguageBundle);
+            if (this.#config.bootstrapFixtures) {
+                if (this.#config.bootstrapFixtures!.languages) {
+                    await Promise.all(this.#config.bootstrapFixtures!.languages!.map(async file => {
+                        const { sourcePath } = await this.saveLanguageBundle(this.#config.languageLanguageBundle);
                         await this.loadLanguage(sourcePath);
                     }))
                 }
@@ -117,11 +119,11 @@ export default class LanguageController {
     }
 
     async loadInstalledLanguages() {
-        const files = fs.readdirSync(Config.languagesPath)
+        const files = fs.readdirSync(this.#config.languagesPath)
         return Promise.all(files.map(async file => {
             //Ensure we do not loaded previously loaded system languages again
-            if (!Config.systemLanguages.find((lang) => lang === file) && !Config.preloadLanguages.find((lang) => lang === file)) {
-                const bundlePath = path.join(Config.languagesPath, file, 'bundle.js')
+            if (!this.#config.systemLanguages.find((lang) => lang === file) && !this.#config.preloadLanguages.find((lang) => lang === file)) {
+                const bundlePath = path.join(this.#config.languagesPath, file, 'bundle.js')
                 if(fs.existsSync(bundlePath)) {
                     try {
                         await this.loadLanguage(bundlePath)
@@ -143,6 +145,12 @@ export default class LanguageController {
         }))
     }
 
+    callLinkObservers(diff: PerspectiveDiff, ref: LanguageRef) {
+        this.#linkObservers.forEach(o => {
+            o(diff, ref)
+        })
+    }
+
     async loadLanguage(sourceFilePath: string): Promise<{
         language: Language,
         hash: string,
@@ -153,7 +161,7 @@ export default class LanguageController {
         const bundleBytes = fs.readFileSync(sourceFilePath)
         // @ts-ignore
         const hash = await this.ipfsHash(bundleBytes)
-        
+
         const languageSource = require(sourceFilePath)
         let create;
         if (!languageSource.default) {
@@ -171,9 +179,7 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
-                this.#linkObservers.forEach(o => {
-                    o(diff, {name: language.name, address: hash} as LanguageRef)
-                })
+                this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
         }
 
@@ -209,9 +215,7 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
-                this.#linkObservers.forEach(o => {
-                    o(diff, {name: language.name, address: hash} as LanguageRef)
-                })
+                this.callLinkObservers(diff, {address: hash, name: language.name});
             })
         }
 
@@ -227,15 +231,15 @@ export default class LanguageController {
     }
 
     async saveLanguageBundle(bundle: string, languageMeta?: object, hash?: string): Promise<{
-        languagePath: string, 
-        sourcePath: string, 
-        metaPath: string, 
+        languagePath: string,
+        sourcePath: string,
+        metaPath: string,
         hash: string
     }> {
         if (!hash) {
             hash = await this.ipfsHash(bundle);
         }
-        const languagePath = path.join(Config.languagesPath, hash);
+        const languagePath = path.join(this.#config.languagesPath, hash);
         const sourcePath = path.join(languagePath, 'bundle.js')
         const metaPath = path.join(languagePath, 'meta.json')
         console.log("Saving at path", sourcePath);
@@ -243,7 +247,7 @@ export default class LanguageController {
         if (!fs.existsSync(languagePath)) {
             fs.mkdirSync(languagePath)
         }
-        
+
         fs.writeFileSync(sourcePath, bundle)
         if (languageMeta) { fs.writeFileSync(metaPath, JSON.stringify(languageMeta)) }
 
@@ -259,9 +263,9 @@ export default class LanguageController {
     async installLanguage(address: Address, languageMeta: null|Expression): Promise<Language | undefined> {
         const language = this.#languages.get(address)
         if (language) return language
-        
+
         //Check that the metafile already exists with language with this address to avoid refetch
-        const metaFile = path.join(path.join(Config.languagesPath, address), "meta.json");
+        const metaFile = path.join(path.join(this.#config.languagesPath, address), "meta.json");
         if(!fs.existsSync(metaFile)) {
             //Get language meta information
             console.log(new Date(), "installLanguage: installing language with address", address);
@@ -279,9 +283,9 @@ export default class LanguageController {
             //@ts-ignore
             languageMeta = {data: {}};
         }
-        
+
         console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
-        let bundlePath = path.join(path.join(Config.languagesPath, address), "bundle.js");
+        let bundlePath = path.join(path.join(this.#config.languagesPath, address), "bundle.js");
         let source;
         let hash;
         //Check if the bundle file already exists to avoid refetching
@@ -331,7 +335,7 @@ export default class LanguageController {
     }
 
     languageForExpression(e: ExpressionRef): Language {
-        const address = Config.languageAliases[e.language.address] ? Config.languageAliases[e.language.address] : e.language.address
+        const address = this.#config.languageAliases[e.language.address] ? this.#config.languageAliases[e.language.address] : e.language.address
         const language = this.#languages.get(address)
         if(language) {
             return language
@@ -341,7 +345,7 @@ export default class LanguageController {
     }
 
     async languageByRef(ref: LanguageRef): Promise<Language> {
-        const address = Config.languageAliases[ref.address] ? Config.languageAliases[ref.address] : ref.address
+        const address = this.#config.languageAliases[ref.address] ? this.#config.languageAliases[ref.address] : ref.address
         const language = this.#languages.get(address)
         //If the language is already installed then just return it
         if(language) {
@@ -396,7 +400,7 @@ export default class LanguageController {
                     );
                     throw new Error(errMsg);
                 }
-                
+
                 //Get the meta information of the source language
                 const sourceLanguageHash = languageMetaData.templateSourceLanguageAddress;
                 const sourceLanguageMeta = await this.getLanguageExpression(sourceLanguageHash);
@@ -413,7 +417,7 @@ export default class LanguageController {
                     if (!languageSource) {
                         throw new Error("Could not get languageSource for language")
                     }
-                    //Hash the language source and ensure its the same as the templated language 
+                    //Hash the language source and ensure its the same as the templated language
                     const languageHash = await this.ipfsHash(languageSource);
                     if (sourceLanguageTemplated.meta.address === languageHash) {
                         //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
@@ -448,7 +452,7 @@ export default class LanguageController {
                 sourceLanguageHash = uuidv4();
             }
             //Create a directory for all of our DNA templating operations
-            const tempTemplatingPath = path.join(Config.tempLangPath, sourceLanguageHash);
+            const tempTemplatingPath = path.join(this.#config.tempLangPath, sourceLanguageHash);
             fs.mkdirSync(tempTemplatingPath);
             //The place where we will put the .dna from the b64
             const tempDnaPath = path.join(tempTemplatingPath, `${sourceLanguageHash}.dna`);
@@ -459,10 +463,11 @@ export default class LanguageController {
             //TODO: here was are assuming that the first character is " and the last two "; we should check for this and not assume
             dnaCode = dnaCode.substring(1, dnaCode.length-2);
             fs.writeFileSync(tempDnaPath, Buffer.from(dnaCode, "base64"));
-            
+
             //Unpack the DNA
-            //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result 
+            //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             let unpackPath = this.#holochainService.unpackDna(tempDnaPath).replace(/(\r\n|\n|\r)/gm, "");
+            fs.unlinkSync(tempDnaPath);
             //TODO: are all dna's using the same dna.yaml?
             const dnaYamlPath = path.join(unpackPath, "dna.yaml");
             if (!fs.existsSync(dnaYamlPath)) {
@@ -471,7 +476,7 @@ export default class LanguageController {
 
             //Read for files inside wasm path after unpack since we should now have .wasm file there but we do not know which name it may have
             const wasmName = fs.readdirSync(wasmPath);
-            if (wasmName.length == 0 || wasmName.length > 1) {
+            if (wasmName.length == 0) {
                 throw new Error("Got incorrect number of files inside wasm path when unpacking DNA");
             }
 
@@ -480,12 +485,12 @@ export default class LanguageController {
             //@ts-ignore
             if (templateData.uid) {
                 //@ts-ignore
-                dnaYaml.uid = templateData.uid;
+                dnaYaml.integrity.network_seed = templateData.uid;
             }
             //@ts-ignore
             for (const [templateKey, templateValue] of Object.entries(templateData)) {
                 //@ts-ignore
-                dnaYaml.properties[templateKey] = templateValue;
+                dnaYaml.integrity.properties[templateKey] = templateValue;
             }
 
             let dnaYamlDump = yaml.dump(dnaYaml, {
@@ -495,12 +500,11 @@ export default class LanguageController {
             });
             fs.writeFileSync(dnaYamlPath, dnaYamlDump);
 
-            //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result 
+            //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             let packPath = this.#holochainService.packDna(unpackPath).replace(/(\r\n|\n|\r)/gm, "");
             const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
 
             //Cleanup temp directory
-            fs.unlinkSync(tempDnaPath);
             fs.rmdirSync(tempTemplatingPath, {recursive: true});
             dnaCodeRes = base64;
         }
@@ -511,44 +515,91 @@ export default class LanguageController {
 
     orderObject(templateData: object): object {
         return Object.keys(templateData).sort().reduce(
-            (obj, key) => { 
+            (obj, key) => {
                 //@ts-ignore
-                obj[key] = templateData[key]; 
+                obj[key] = templateData[key];
                 return obj;
-            }, 
+            },
             {}
         );
     }
 
     applyTemplateData(sourceLanguageLines: string[], templateData: object) {
-        let templateLines = [];
-        for (const [templateKey, templateValue] of Object.entries(templateData)) {
-            //NOTE: this could be risky and end up removing var ${templateKey} from areas in the code where it is used for normal language operations
-            //We need to somehow split the bundle at a given point and only remove template variables above this point
-            const patterns = [
-                `var ${templateKey} =`, `var ${templateKey}=`, 
-                `const ${templateKey} =`, `const ${templateKey}=`,
-                `let ${templateKey} =`, `let ${templateKey}=`
-            ]
-            let p = 0
-            let index = -1
-            while(index == -1 && p < patterns.length) {
-                index = sourceLanguageLines.findIndex(element => element.includes(patterns[p]));
-                p++
+        //Get lines in sourceLanguageLines which have ad4m-template-variable declared
+        const ad4mTemplatePattern = "//@ad4m-template-variable";
+        var indexes = [];
+        for(let i = 0; i < sourceLanguageLines.length; i++) {
+            if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {
+                indexes.push(i);
             }
-            
-            if (index != -1) {
-                sourceLanguageLines.splice(index, 1);
-            };
-            templateLines.push(`var ${templateKey} = "${templateValue}";`);
-        };
-        for (const templateValue of templateLines.reverse()) {
-            sourceLanguageLines.unshift(templateValue);
-        };
+        }
+
+        //Possible variable patterns for template variables
+        const patterns = [
+            new RegExp(/var ([a-zA-Z0-9_-]{1,})/g),
+            new RegExp(/const ([a-zA-Z0-9_-]{1,})/g),
+            new RegExp(/let ([a-zA-Z0-9_-]{1,})/g)
+        ];
+
+        //Look over the template variable indexes
+        for (let i = 0; i < indexes.length; i++) {
+            //Get the index of the variable which should be next line after comment denote
+            let variableIndex = indexes[i] + 1;
+            let variable = sourceLanguageLines[variableIndex];
+
+            for (const pattern of patterns) {
+                let matches = variable.match(pattern);
+                if (matches) {
+                    //Get variable type and name
+                    let variableType = matches[0].split(" ")[0];
+                    let variableName = matches[0].split(" ")[1];
+                    for (const [key, value] of Object.entries(templateData)) {
+                        //if matching variable name from template data
+                        if (key === variableName) {
+                            //Ensure we use the correct type of variable
+                            if (variableType === "const") {
+                                //Ensure we use quotes where required if variable is a string
+                                if (typeof value === "string") {
+                                    sourceLanguageLines[variableIndex] = `const ${key} = "${value}"`;
+                                } else {
+                                    sourceLanguageLines[variableIndex] = `const ${key} = ${value}`
+                                }
+                            } else if (variableType === "let") {
+                                if (typeof value === "string") {
+                                    sourceLanguageLines[variableIndex] = `let ${key} = "${value}"`;
+                                } else {
+                                    sourceLanguageLines[variableIndex] = `let ${key} = ${value}`
+                                }
+                            } else if (variableType === "var") {
+                                if (typeof value === "string") {
+                                    sourceLanguageLines[variableIndex] = `var ${key} = "${value}"`;
+                                } else {
+                                    sourceLanguageLines[variableIndex] = `var ${key} = ${value}`
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        //Add custom case for inserting templated dna data
+        const dnaPattern = new RegExp(/var (dna{1,})/g);
+        //@ts-ignore
+        if (templateData["dna"]) {
+            let dnaIndex = 0;
+            for(let i = 0; i < sourceLanguageLines.length; i++) {
+                if (sourceLanguageLines[i].match(dnaPattern)) {
+                    dnaIndex = i;
+                }
+            }
+            //@ts-ignore
+            sourceLanguageLines[dnaIndex] = `var dna = "${templateData["dna"]}"`;
+        }
     }
 
     async constructLanguageLanguageInput(
-        sourceLanguageLines: string[], 
+        sourceLanguageLines: string[],
         metaInput: LanguageMetaInput
     ): Promise<LanguageLanguageInput> {
         const languageData = sourceLanguageLines.join('\n');
@@ -577,7 +628,7 @@ export default class LanguageController {
         }
         const sourceLanguageLines = sourceLanguage!.split("\n");
         templateData = this.orderObject(templateData);
-        const {dnaCode} = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
+        const { dnaCode } = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
 
         //If there was some dna code in the source language then lets also add that to the language bundle (but not to the templateData as we dont want that on the meta)
         if (dnaCode) {
@@ -623,8 +674,8 @@ export default class LanguageController {
     }
 
     async getLanguageExpression(address: string): Promise<LanguageExpression | null> {
-        if(Config.bootstrapFixtures) {
-            const fixtures = Config.bootstrapFixtures.languages;
+        if(this.#config.bootstrapFixtures) {
+            const fixtures = this.#config.bootstrapFixtures.languages;
             if (fixtures) {
                 const fixtureLanguage = fixtures.find(f=>f.address===address)
                 if(fixtureLanguage && fixtureLanguage.meta) {
@@ -641,8 +692,8 @@ export default class LanguageController {
     }
 
     async getLanguageSource(address: string): Promise<string | null> {
-        if(Config.bootstrapFixtures) {
-            const fixtures = Config.bootstrapFixtures.languages;
+        if(this.#config.bootstrapFixtures) {
+            const fixtures = this.#config.bootstrapFixtures.languages;
             if (fixtures) {
                 const fixtureLanguage = fixtures.find(f=>f.address===address)
                 if(fixtureLanguage && fixtureLanguage.bundle) {
@@ -658,8 +709,8 @@ export default class LanguageController {
     }
 
     async getPerspective(address: string): Promise<Expression | null> {
-        if(Config.bootstrapFixtures) {
-            const perspectives = Config.bootstrapFixtures.perspectives;
+        if(this.#config.bootstrapFixtures) {
+            const perspectives = this.#config.bootstrapFixtures.perspectives;
             if (perspectives) {
                 const perspective = perspectives.find(f=>f.address===address)
                 if(perspective && perspective.expression) {
@@ -733,7 +784,7 @@ export default class LanguageController {
     }
 
     getSettings(hash: string): object {
-        const FILEPATH = path.join(Config.languagesPath, hash, 'settings.json')
+        const FILEPATH = path.join(this.#config.languagesPath, hash, 'settings.json')
         if(fs.existsSync(FILEPATH)) {
             return JSON.parse(fs.readFileSync(FILEPATH).toString())
         } else {
@@ -742,7 +793,7 @@ export default class LanguageController {
     }
 
     writeSettings(hash: string, settings: object) {
-        const directory = path.join(Config.languagesPath, hash)
+        const directory = path.join(this.#config.languagesPath, hash)
         if(!fs.existsSync(directory))
             fs.mkdirSync(directory)
         const FILEPATH = path.join(directory, 'settings.json')
@@ -755,7 +806,7 @@ export default class LanguageController {
     }
 
     getLanguageStoragePath(hash: string) {
-        const languageConfigPath = path.join(Config.languagesPath, hash)
+        const languageConfigPath = path.join(this.#config.languagesPath, hash)
         if(!fs.existsSync(languageConfigPath))
             fs.mkdirSync(languageConfigPath)
         const storageDirectory = path.join(languageConfigPath, "storage")
@@ -795,8 +846,8 @@ export default class LanguageController {
 
         // This makes sure that Expression references used in Links (i.e. in Perspectives) use the aliased Language schemas.
         // Especially important for DIDs
-        for(const alias of Object.keys(Config.languageAliases)) {
-            const target = Config.languageAliases[alias]
+        for(const alias of Object.keys(this.#config.languageAliases)) {
+            const target = this.#config.languageAliases[alias]
             if(lang.address === target) {
                 lang.address = alias
             }
@@ -822,12 +873,12 @@ export default class LanguageController {
     }
 
     async getExpression(ref: ExpressionRef): Promise<Expression | null> {
-        if(Config.bootstrapFixtures?.perspectives && ref.language.address === "neighbourhood") {
-            const fixturePerspective = Config.bootstrapFixtures.perspectives!.find(f=>f.address===ref.expression)
+        if(this.#config.bootstrapFixtures?.perspectives && ref.language.address === "neighbourhood") {
+            const fixturePerspective = this.#config.bootstrapFixtures.perspectives!.find(f=>f.address===ref.expression)
             if(fixturePerspective && fixturePerspective.expression) return fixturePerspective.expression
         }
-        if(Config.bootstrapFixtures?.languages && ref.language.address === "lang") {
-            const fixtureLang = Config.bootstrapFixtures.languages!.find(f=>f.address===ref.expression)
+        if(this.#config.bootstrapFixtures?.languages && ref.language.address === "lang") {
+            const fixtureLang = this.#config.bootstrapFixtures.languages!.find(f=>f.address===ref.expression)
             if(fixtureLang && fixtureLang.meta) return fixtureLang.meta
         }
         let expr;
@@ -897,7 +948,7 @@ export default class LanguageController {
         } catch(e) {
             return null
         }
-        
+
     }
 
     addLinkObserver(observer: LinkObservers) {

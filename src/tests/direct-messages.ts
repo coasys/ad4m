@@ -59,7 +59,7 @@ export default function directMessageTests(testContext: TestContext) {
                 const statusBob = new Perspective([link])
                 //@ts-ignore
                 await bob.runtime.setStatus(statusBob)
-                await sleep(100)    
+                await sleep(1000)    
                 //@ts-ignore
                 const statusAlice = await alice.runtime.friendStatus(didBob)
                 expect(statusAlice).toBeDefined()
@@ -74,7 +74,7 @@ export default function directMessageTests(testContext: TestContext) {
                 await bob.runtime.addMessageCallback(bobMessageCallback)
                 //@ts-ignore
                 await alice.runtime.friendSendMessage(didBob, message)
-                await sleep(100)
+                await sleep(1000)
                 //@ts-ignore
                 const bobsInbox = await bob.runtime.messageInbox()
                 expect(bobsInbox.length).toBe(1)

@@ -4,15 +4,15 @@ import path from "path";
 import swipl from 'swipl-stdio'
 //@ts-ignore
 import tmp from 'tmp'
-import { resourcePath, swiplPath, swiplHomePath } from "./Config";
+import { MainConfig } from "./Config";
 
 export default class PrologInstance {
     #engine
 
-    constructor() {
+    constructor(config: MainConfig) {
         this.#engine = new swipl.Engine(
-            swiplPath ? swiplPath : path.join(resourcePath, "swipl"),
-            swiplHomePath
+            config.swiplPath ? config.swiplPath : path.join(config.resourcePath, "swipl"),
+            config.swiplHomePath
         )
     }
 

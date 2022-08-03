@@ -1,9 +1,7 @@
-import {
-    ApolloClient,
-    InMemoryCache,
-} from "@apollo/client/core";
-import { WebSocketLink } from '@apollo/client/link/ws';
-import ws from "ws"
+import { ApolloClient, InMemoryCache } from "@apollo/client/core";
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
+import { createClient } from "graphql-ws";
+import Websocket from "ws";
 import main from "../main";
 import path from "path";
 import { OuterConfig } from "../types";
@@ -23,12 +21,12 @@ const perspectiveDiffSyncHashPath = path.join(`${__dirname}/../../scripts/perspe
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
-    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
-    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
-    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
-    "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput, 
-    "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput,
-    "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["id", "name", "description"]} as LanguageMetaInput,
+    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
+    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["uid", "recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
+    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
+    "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
+    "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
+    "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
 }
 
 const languageHashes = {
@@ -40,31 +38,31 @@ const languageHashes = {
     "perspectiveDiffSync": ""
 }
 
-function apolloClient(port: number): ApolloClient<any> {
-    return new ApolloClient({
-      link: new WebSocketLink({
-          uri: `ws://localhost:${port}/graphql`,
-          options: {
-              reconnect: true,
-              connectionParams: () => {
-                return {
-                  headers: {
-                  }
+function apolloClient(port: number, token?: string): ApolloClient<any> {
+    const wsLink = new GraphQLWsLink(createClient({
+        url: `ws://localhost:${port}/graphql`,
+        webSocketImpl: Websocket,
+        connectionParams: () => {
+            return {
+                headers: {
+                    authorization: token
                 }
-              }
-          },
-          webSocketImpl: ws,
-      }),
-      cache: new InMemoryCache({resultCaching: false, addTypename: false}),
-      defaultOptions: {
-          watchQuery: {
-              fetchPolicy: "no-cache",
-          },
-          query: {
-              fetchPolicy: "no-cache",
-          }
-      },
-  });
+            }
+        },
+    }));
+
+    return new ApolloClient({
+        link: wsLink,
+        cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
+        defaultOptions: {
+            watchQuery: {
+                fetchPolicy: "no-cache",
+            },
+            query: {
+                fetchPolicy: "no-cache",
+            }
+        },
+    });
 }
 
 function createTestingAgent() {

@@ -8,13 +8,19 @@ link(A,B):-
     linkFact(A,X),
     link(X,B).`
 
+const config = {
+    resourcePath: ''
+}
+
 describe('PrologInstance', () => {
     it('smoke test', async () => {
-        const instance = new PrologInstance()
+        // @ts-ignore
+        const instance = new PrologInstance(config)
     })
 
     it('runs Prolog', async () => {
-        const instance = new PrologInstance()
+        // @ts-ignore
+        const instance = new PrologInstance(config)
 
         await instance.consult(linksProgram)
 
@@ -24,16 +30,17 @@ describe('PrologInstance', () => {
     })
 
     it('can destructure query results', async () => {
-        const instance = new PrologInstance()
+        // @ts-ignore
+        const instance = new PrologInstance(config)
         await instance.consult(linksProgram)
-        
+
         expect(await instance.query('link(1,X).')).toEqual([
-            {'X': 2}, 
+            {'X': 2},
             {'X': 3}
         ])
 
         expect(await instance.query('link(Y,3).')).toEqual([
-            {'Y': 2}, 
+            {'Y': 2},
             {'Y': 1}
         ])
         expect(await instance.query('link(Y,4).')).toEqual(false)

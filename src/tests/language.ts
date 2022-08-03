@@ -156,7 +156,7 @@ export default function languageTests(testContext: TestContext) {
 
                     const installGetLanguage = await ad4mClient.languages.byAddress(applyTemplateFromSource.address);
                     expect(installGetLanguage.address).toBe(applyTemplateFromSource.address);
-                    //expect(installGetLanguage.name).toBe(meta.name);
+                    expect(installGetLanguage.name).toBe(meta.name);
                 })
 
                 it("Bob can install Alice's perspective-diff-sync", async () => {
@@ -171,7 +171,7 @@ export default function languageTests(testContext: TestContext) {
                     //Test that bob can install language which is templated from source since source language was created by alice who is now a trusted agent
                     const installTemplated = await bobAd4mClient.languages.byAddress(applyTemplateFromSource.address);
                     expect(installTemplated.address).toBe(applyTemplateFromSource.address);
-                    //expect(installTemplated.name).toBe("Bob's templated perspective-diff-sync");
+                    expect(installTemplated.name).toBe("Bob's templated perspective-diff-sync");
                     expect(installTemplated.constructorIcon).toBeDefined();
                     expect(installTemplated.settingsIcon).toBeDefined();
                 })

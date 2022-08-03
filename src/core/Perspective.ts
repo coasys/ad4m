@@ -6,6 +6,7 @@ import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
+import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
 
 export default class Perspective {
@@ -20,9 +21,11 @@ export default class Perspective {
     #agent: AgentService;
     #languageController?: LanguageController
     #pubsub: any
+    #config?: MainConfig;
 
     #prologEngine: PrologInstance|null
     #prologNeedsRebuild: boolean
+    #pollingInterval: any;
     #prologMutex: Mutex
 
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
@@ -32,6 +35,7 @@ export default class Perspective {
         this.#db = context.db
         this.#agent = context.agentService!
         this.#languageController = context.languageController!
+        this.#config = context.config;
 
         this.#pubsub = PubSub.get()
         this.#prologEngine = null
@@ -51,16 +55,32 @@ export default class Perspective {
 
         const that = this
 
-        process.on("SIGINT", function () {
+        process.on("SIGINT", () => {
             that.#prologEngine?.close()
+            clearInterval(this.#pollingInterval);
         });
 
         this.callLinksAdapter("pull").then((remoteLinks) => {
             this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+            if (this.neighbourhood) {
+                this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
+            }
         });
 
+        // setup polling loop for Perspectives with a linkLanguage
+        this.#pollingInterval = setInterval(
+            async () => {
+                let links = await this.callLinksAdapter("pull");
+                this.populateLocalLinks(links.additions, links.removals);
+                if (this.neighbourhood) {
+                    this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
+                }
+            },
+            20000
+        );
         this.#prologMutex = new Mutex()
     }
+
 
     plain(): PerspectiveHandle {
         const { name, uuid, author, timestamp, sharedUrl, neighbourhood } = this
@@ -96,7 +116,7 @@ export default class Perspective {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve(new Ad4mPerspective([]))
-        } 
+        }
         return new Promise(async (resolve, reject) => {
             setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000)
             try {
@@ -133,7 +153,7 @@ export default class Perspective {
             setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
-                const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
+                const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
                     // console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     //@ts-ignore
@@ -157,7 +177,7 @@ export default class Perspective {
 
     async syncWithSharingAdapter() {
         //@ts-ignore
-        const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link)
+        const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link);
         const remoteLinks = await this.renderLinksAdapter()
         const includes = (link: LinkExpression, list: LinkExpression[]) => {
             return undefined !== list.find(e =>
@@ -184,7 +204,7 @@ export default class Perspective {
             }
         }
     }
-    
+
     addLocalLink(linkExpression: LinkExpression) {
         const hash = new SHA3(256);
         hash.update(JSON.stringify(linkExpression));
@@ -380,17 +400,17 @@ export default class Perspective {
     async getLinks(query: LinkQuery): Promise<LinkExpression[]> {
         const remoteLinks = await this.callLinksAdapter('pull')
         this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
-        
+
         // console.debug("getLinks local...")
         const links = await this.getLinksLocal(query)
-        
+
         const reverse = query.fromDate! >= query.untilDate!;
 
         let values = Object.values(links).sort((a, b) => {
             return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
         });
 
-        
+
         if (query.limit) {
             const startLimit = reverse ? values.length - query.limit : 0;
             const endLimit = reverse ? (values.length - query.limit) + query.limit : query.limit;
@@ -428,7 +448,7 @@ export default class Perspective {
                 let lang
                 if(!ref.language.name)
                     lang = await this.#languageController?.languageByRef(ref.language)
-                else 
+                else
                     lang = ref.language
 
                 langAddrs.push(`languageAddress("${node}", "${ref.language.address}").`)
@@ -533,7 +553,7 @@ export default class Perspective {
         }
 
         let error
-        const prolog = new PrologInstance()
+        const prolog = new PrologInstance(this.#config!)
 
         try {
             const facts = await this.initEngineFacts()
@@ -541,7 +561,7 @@ export default class Perspective {
         } catch(e) {
             error = e
             prolog.close()
-        } 
+        }
 
         if(error) throw error
         this.#prologEngine = prolog
@@ -562,6 +582,10 @@ export default class Perspective {
         })
         
         return await this.#prologEngine!.query(query)
+    }
+
+    clearPolling() {
+        clearInterval(this.#pollingInterval);
     }
 
     closePrologEngine() {

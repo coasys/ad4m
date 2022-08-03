@@ -1,32 +1,54 @@
-import {
-    ApolloClient,
-    InMemoryCache,
-} from "@apollo/client/core";
-import { WebSocketLink } from '@apollo/client/link/ws';
-import ws from "ws"
+import { ApolloClient, InMemoryCache } from "@apollo/client/core";
+import Websocket from "ws";
 import main from "../main";
 import path from "path";
 import { OuterConfig } from "../types";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import PerspectivismCore from "../core/PerspectivismCore";
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
+import { createClient } from "graphql-ws";
 
 function apolloClient(port: number, token?: string): ApolloClient<any> {
-    return new ApolloClient({
-        link: new WebSocketLink({
-            uri: `ws://localhost:${port}/graphql`,
-            options: {
-                reconnect: true,
-                connectionParams: () => {
-                    return {
-                        headers: {
-                            authorization: token
-                        }
-                    }
+    // const httpLink = new HttpLink({
+    //     uri: `http://localhost:${port}/graphql`,
+    //     fetch,
+    //     headers: {
+    //         authorization: token
+    //     }
+    // });
+    
+    const wsLink = new GraphQLWsLink(createClient({
+        url: `ws://localhost:${port}/graphql`,
+        webSocketImpl: Websocket,
+        connectionParams: () => {
+            return {
+                headers: {
+                    authorization: token
                 }
-            },
-            webSocketImpl: ws,
-        }),
+            }
+        },
+    }));
+
+    // const errorLink = onError(({ graphQLErrors, networkError }) => {
+    //     if (graphQLErrors) graphQLErrors.map(({ message }) => console.error(`GraphQL Error: ${message}`))
+    //     if (networkError) console.error(`GraphQL Network Error: ${networkError}`)
+    // })
+    
+    // const splitLink = split(
+    //     ({ query }) => {
+    //       const definition = getMainDefinition(query);
+    //       return (
+    //         definition.kind === 'OperationDefinition' &&
+    //         definition.operation === 'subscription'
+    //       );
+    //     },
+    //     wsLink,
+    //     httpLink,
+    // );
+
+    return new ApolloClient({
+        link: wsLink,
         cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
         defaultOptions: {
             watchQuery: {
@@ -78,6 +100,7 @@ describe("Authentication integration tests", () => {
                 hcUseMdns: true
             } as OuterConfig)
 
+            // @ts-ignore
             ad4mClient = new Ad4mClient(apolloClient(gqlPort))
             await ad4mClient.agent.generate("passphrase")
         })
@@ -141,7 +164,7 @@ describe("Authentication integration tests", () => {
                 reqCredential: "123"
             } as OuterConfig)
 
-            
+            // @ts-ignore            
             adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"))
             await adminAd4mClient.agent.generate("passphrase")
             // await agentCore.waitForAgent();
@@ -149,6 +172,7 @@ describe("Authentication integration tests", () => {
             // await agentCore.initLanguages()
             
 
+            // @ts-ignore
             unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort))
         })
 
@@ -205,12 +229,13 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
+            // @ts-ignore
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
-
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
         })
 
         it("user with invalid jwt can not query agent status", async () => {
+            // @ts-ignore
             let ad4mClient = new Ad4mClient(apolloClient(gqlPort, "invalid-jwt"))
 
             const call = async () => {
@@ -227,6 +252,7 @@ describe("Authentication integration tests", () => {
             let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["CREATE"]}]}}`)
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
+            // @ts-ignore
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
 
             const call = async () => {

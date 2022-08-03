@@ -1,4 +1,4 @@
-import { PubSub } from 'apollo-server'
+import { PubSub } from 'graphql-subscriptions'
 
 export const AGENT_UPDATED = 'agent-updated-topic'
 export const AGENT_STATUS_CHANGED = 'agent-status-changed-topic'

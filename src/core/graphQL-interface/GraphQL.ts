@@ -1,14 +1,22 @@
-import { ApolloServer, withFilter, gql, AuthenticationError } from 'apollo-server'
+import { ApolloServer, gql, AuthenticationError } from 'apollo-server-express'
+import express from 'express';
+import { createServer } from 'http';
+import {
+    ApolloServerPluginDrainHttpServer,
+} from "apollo-server-core";
+import { WebSocketServer } from 'ws';
+import { useServer } from 'graphql-ws/lib/use/ws';
+import { makeExecutableSchema } from '@graphql-tools/schema';
 import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
-import * as Config from "../Config";
 import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
 import * as Auth from '../agent/Auth'
 import { checkCapability } from '../agent/Auth'
+import { withFilter } from 'graphql-subscriptions';
 
 function createResolvers(core: PerspectivismCore, config: any) {
     const pubsub = PubSub.get()
@@ -112,7 +120,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 meta.templateAppliedParams = internal.templateAppliedParams
                 meta.possibleTemplateParams = internal.possibleTemplateParams
                 meta.sourceCodeLink = internal.sourceCodeLink
-                
+
                 return meta
             },
 
@@ -126,7 +134,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
 
                 return languageSource
             },
-            
+
             //@ts-ignore
             languages: (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
@@ -281,9 +289,9 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 } else {
                   await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
                 }
-                
-                
-                if (!Config.languageLanguageOnly) {
+
+
+                if (!config.languageLanguageOnly) {
                     await core.waitForAgent();
                     core.initControllers()
                     await core.initLanguages()
@@ -293,9 +301,9 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 const agent = core.agentService.dump();
 
                 pubsub.publish(PubSub.AGENT_STATUS_CHANGED, agent)
-                
+
                 console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
-                
+
                 return agent;
             },
             //@ts-ignore
@@ -329,7 +337,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 } catch (e) {
                     // @ts-ignore
                     const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
-    
+
                     if (connectHolochain) {
                         await core.connectHolochain( {hcPortAdmin, hcPortApp} );
                     } else {
@@ -453,7 +461,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     console.error(`Error while trying to join neighbourhood '${url}':`, e)
                     throw e
                 }
-                
+
             },
             //@ts-ignore
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
@@ -469,7 +477,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     console.error(`Error while trying to publish:`, e)
                     throw e
                 }
-                
+
             },
             //@ts-ignore
             perspectiveAdd: (parent, args, context, info) => {
@@ -742,7 +750,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     }
                 }
 
-                return null  
+                return null
             }
         },
 
@@ -797,7 +805,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
 }
 
 export interface StartServerParams {
-    core: PerspectivismCore, 
+    core: PerspectivismCore,
     mocks: boolean,
     port: number,
     config: any;
@@ -805,25 +813,74 @@ export interface StartServerParams {
 
 export async function startServer(params: StartServerParams) {
     const { core, mocks, port } = params
+    const app = express();
+    const httpServer = createServer(app);
     const resolvers = createResolvers(core, params.config)
     const typeDefs = gql(typeDefsString)
+    const schema = makeExecutableSchema({ typeDefs, resolvers });
+    
+    let serverCleanup: any;
     const server = new ApolloServer({
         typeDefs,
         resolvers,
-        mocks,
-        context: async (req) => {
-            let headers = req.connection?.context.headers
+        context: async (context) => {
+            let headers = context.req.headers;
             let authToken = ''
+            
             if(headers) {
                 // Get the request token from the authorization header.
                 authToken = headers.authorization || ''
             }
             const capabilities = await core.agentService.getCapabilities(authToken)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
-            
+
             return { capabilities };
-          },
+        },
+        plugins: [
+            ApolloServerPluginDrainHttpServer({ httpServer }),
+            {
+                async serverWillStart() {
+                    return {
+                        async drainServer() {
+                            await serverCleanup.dispose();
+                        },
+                    };
+                },
+            },
+        ]
     });
-    const { url, subscriptionsUrl } = await server.listen({ port })
-    return { url, subscriptionsUrl }
+
+
+    const wsServer = new WebSocketServer({
+        server: httpServer,
+        path: server.graphqlPath,
+    });
+
+    serverCleanup = useServer({
+        schema,
+        context: async (context, msg, args) => {
+            let headers: any = context.connectionParams!.headers;
+            let authToken = ''
+            
+            if(headers) {
+                // Get the request token from the authorization header.
+                authToken = headers.authorization || ''
+            }
+            const capabilities = await core.agentService.getCapabilities(authToken)
+            if(!capabilities) throw new AuthenticationError("User capability is empty.")
+
+            return { capabilities };
+        }
+    }, wsServer);
+
+    await server.start();
+
+    server.applyMiddleware({ app });
+
+    httpServer.listen({ port });
+
+    return { 
+        url: `http://localhost:${port}/graphql`,
+        subscriptionsUrl: `ws://localhost:${port}/graphql`
+    }
 }

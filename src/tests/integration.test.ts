@@ -1,13 +1,11 @@
-import {
-    ApolloClient,
-    InMemoryCache,
-} from "@apollo/client/core";
-import { WebSocketLink } from '@apollo/client/link/ws';
+import { ApolloClient, InMemoryCache, HttpLink, split, ApolloLink } from "@apollo/client/core";
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
+import { createClient } from "graphql-ws";
+import Websocket from "ws";
 import PerspectivismCore from '../core/PerspectivismCore'
 import main from "../main";
 import fs from 'fs-extra'
 import path from 'path'
-import ws from "ws"
 import { isProcessRunning } from "./utils";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 
@@ -25,6 +23,7 @@ import { Crypto } from "@peculiar/webcrypto"
 import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
+
 //@ts-ignore
 global.crypto = new Crypto();
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
@@ -34,31 +33,31 @@ const TEST_DIR = `${__dirname}/../test-temp`
 jest.setTimeout(200000)
 let core: PerspectivismCore | null = null
 
-function apolloClient(port: number): ApolloClient<any> {
-  return new ApolloClient({
-    link: new WebSocketLink({
-        uri: `ws://localhost:${port}/graphql`,
-        options: {
-          reconnect: true,
-          connectionParams: () => {
-            return {
+function apolloClient(port: number, token?: string): ApolloClient<any> {
+  const wsLink = new GraphQLWsLink(createClient({
+      url: `ws://localhost:${port}/graphql`,
+      webSocketImpl: Websocket,
+      connectionParams: () => {
+          return {
               headers: {
+                  authorization: token
               }
-            }
           }
-        },
-        webSocketImpl: ws,
-    }),
-    cache: new InMemoryCache({resultCaching: false, addTypename: false}),
-    defaultOptions: {
-        watchQuery: {
-            fetchPolicy: "no-cache",
-        },
-        query: {
-            fetchPolicy: "no-cache",
-        }
-    },
-});
+      },
+  }));
+
+  return new ApolloClient({
+      link: wsLink,
+      cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
+      defaultOptions: {
+          watchQuery: {
+              fetchPolicy: "no-cache",
+          },
+          query: {
+              fetchPolicy: "no-cache",
+          }
+      },
+  });
 }
 
 

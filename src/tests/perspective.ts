@@ -160,7 +160,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(pSeenInUpdateCB.name).toStrictEqual(p1.name)
 
                 const linkAdded = jest.fn()
-                // TODO: @fayeed update this
                 await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
                 const linkRemoved = jest.fn()
                 await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])

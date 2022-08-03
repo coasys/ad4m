@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { PerspectiveExpression } from '@perspect3vism/ad4m';
-import { knownLinkLanguages, trustedAgents } from "./Config";
+import { MainConfig } from './Config';
 
 const TRUSTED_AGENTS_FILE = "trustedAgents.json"
 const KNOW_LINK_LANGUAGES_FILE = "knownLinkLanguages.json"
@@ -15,7 +15,7 @@ function _add(items: string[], file: string): void {
         all = all.concat(items);
         all = Array.from(new Set(all));
     } else {
-        all = items 
+        all = items
     }
 
     fs.writeFileSync(file, JSON.stringify(all))
@@ -27,7 +27,7 @@ function _addObject(item: object, file: string): void {
         all = Array.from(JSON.parse(fs.readFileSync(file).toString()));
         all.push(item)
     } else {
-        all = [item] 
+        all = [item]
     }
 
     fs.writeFileSync(file, JSON.stringify(all))
@@ -46,7 +46,7 @@ function _delete(items: string[], file: string): void {
 function _get(file: string): string[] {
     let all: string[] = []
     if (fs.existsSync(file)) {
-        all.push(...Array.from<string>(JSON.parse(fs.readFileSync(file).toString())));   
+        all.push(...Array.from<string>(JSON.parse(fs.readFileSync(file).toString())));
     }
     return all
 }
@@ -65,11 +65,12 @@ export interface Message {
 }
 
 export default class RuntimeService {
-    #rootConfigPath: string
+    #config: MainConfig
     #did: string
 
-    constructor(rootConfigPath: string) {
-        this.#rootConfigPath = rootConfigPath
+
+    constructor(config: MainConfig) {
+        this.#config = config
         this.#did = ""
     }
 
@@ -78,19 +79,19 @@ export default class RuntimeService {
     }
 
     trustedAgentsPath(): string {
-        return path.join(this.#rootConfigPath, TRUSTED_AGENTS_FILE)
+        return path.join(this.#config.rootConfigPath, TRUSTED_AGENTS_FILE)
     }
 
     knowLinkLanguagesPath(): string {
-        return path.join(this.#rootConfigPath, KNOW_LINK_LANGUAGES_FILE)
+        return path.join(this.#config.rootConfigPath, KNOW_LINK_LANGUAGES_FILE)
     }
 
     friendsPath(): string {
-        return path.join(this.#rootConfigPath, FRIENDS_FILE)
+        return path.join(this.#config.rootConfigPath, FRIENDS_FILE)
     }
 
     outboxPath(): string {
-        return path.join(this.#rootConfigPath, OUTBOX_FILE)
+        return path.join(this.#config.rootConfigPath, OUTBOX_FILE)
     }
 
     addTrustedAgents(agents: string[]): void {
@@ -100,9 +101,9 @@ export default class RuntimeService {
     deleteTrustedAgents(agents: string[]): void {
         _delete(agents, this.trustedAgentsPath())
     }
-    
+
     getTrustedAgents(): string[] {
-        return [this.#did!, ...trustedAgents, ..._get(this.trustedAgentsPath())]
+        return [this.#did!, ...this.#config.trustedAgents, ..._get(this.trustedAgentsPath())]
     }
 
     addKnowLinkLanguageTemplates(addresses: string[]): void {
@@ -112,9 +113,9 @@ export default class RuntimeService {
     removeKnownLinkLanguageTemplates(addresses: string[]): void {
         _delete(addresses, this.knowLinkLanguagesPath())
     }
-    
+
     knowLinkLanguageTemplates(): string[] {
-        return [...knownLinkLanguages, ..._get(this.knowLinkLanguagesPath())]
+        return [...this.#config.knownLinkLanguages, ..._get(this.knowLinkLanguagesPath())]
     }
 
     addFriends(addresses: string[]): void {
@@ -124,7 +125,7 @@ export default class RuntimeService {
     removeFriends(addresses: string[]): void {
         _delete(addresses, this.friendsPath())
     }
-    
+
     friends(): string[] {
         return _get(this.friendsPath())
     }
