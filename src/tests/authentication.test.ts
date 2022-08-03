@@ -231,7 +231,6 @@ describe("Authentication integration tests", () => {
 
             // @ts-ignore
             let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
-            console.warn("Finish init 1");
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).toBeTruthy
         })
 
