@@ -61,9 +61,11 @@ export default class Perspective {
         });
 
         this.callLinksAdapter("pull").then((remoteLinks) => {
-            this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
-            if (this.neighbourhood) {
-                this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
+            if (remoteLinks.additions && remoteLinks.removals) {
+                this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+                if (this.neighbourhood) {
+                    this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
+                }
             }
         });
 
@@ -71,9 +73,11 @@ export default class Perspective {
         this.#pollingInterval = setInterval(
             async () => {
                 let links = await this.callLinksAdapter("pull");
-                this.populateLocalLinks(links.additions, links.removals);
-                if (this.neighbourhood) {
-                    this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
+                if (links.additions && links.removals) {
+                    this.populateLocalLinks(links.additions, links.removals);
+                    if (this.neighbourhood) {
+                        this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
+                    }
                 }
             },
             20000
@@ -206,15 +210,18 @@ export default class Perspective {
     }
 
     addLocalLink(linkExpression: LinkExpression) {
-        const hash = new SHA3(256);
-        hash.update(JSON.stringify(linkExpression));
-        const addr = hash.digest('hex');
-
-        let link = linkExpression.data as Link
-
-        this.#db.storeLink(this.uuid, linkExpression, addr)
-        this.#db.attachSource(this.uuid, link.source, addr)
-        this.#db.attachTarget(this.uuid, link.target, addr)
+        let foundLink = this.findLink(linkExpression);
+        if (!foundLink) {
+            const hash = new SHA3(256);
+            hash.update(JSON.stringify(linkExpression));
+            const addr = hash.digest('hex');
+    
+            let link = linkExpression.data as Link
+    
+            this.#db.storeLink(this.uuid, linkExpression, addr)
+            this.#db.attachSource(this.uuid, link.source, addr)
+            this.#db.attachTarget(this.uuid, link.target, addr)
+        }
     }
 
     removeLocalLink(linkExpression: LinkExpression) {
@@ -399,7 +406,9 @@ export default class Perspective {
 
     async getLinks(query: LinkQuery): Promise<LinkExpression[]> {
         const remoteLinks = await this.callLinksAdapter('pull')
-        this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+        if (remoteLinks.additions && remoteLinks.removals) {
+            this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);   
+        }
 
         // console.debug("getLinks local...")
         const links = await this.getLinksLocal(query)
@@ -568,7 +577,6 @@ export default class Perspective {
     }
 
     async prologQuery(query: string): Promise<any> {
-        await this.callLinksAdapter("pull");
         await this.#prologMutex.runExclusive(async () => {
             if(!this.#prologEngine) {
                 await this.spawnPrologEngine()
