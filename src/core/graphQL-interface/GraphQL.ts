@@ -17,8 +17,9 @@ import { ad4mExecutorVersion } from '../Config';
 import * as Auth from '../agent/Auth'
 import { checkCapability } from '../agent/Auth'
 import { withFilter } from 'graphql-subscriptions';
+import { OuterConfig } from '../../main';
 
-function createResolvers(core: PerspectivismCore, config: any) {
+function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     const pubsub = PubSub.get()
 
     return {
@@ -281,11 +282,10 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
-                // @ts-ignore
                 const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
 
                 if (connectHolochain) {
-                  await core.connectHolochain( {hcPortAdmin, hcPortApp} );
+                  await core.connectHolochain( {hcPortAdmin: hcPortAdmin!, hcPortApp: hcPortApp!} );
                 } else {
                   await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
                 }
@@ -320,7 +320,7 @@ function createResolvers(core: PerspectivismCore, config: any) {
                 return core.agentService.dump()
             },
             //@ts-ignore
-            agentUnlock:  async (parent, args, context, info) => {
+            agentUnlock: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.AGENT_UNLOCK_CAPABILITY)
                 let failed = false
                 try {
@@ -333,13 +333,13 @@ function createResolvers(core: PerspectivismCore, config: any) {
                     core.perspectivesController;
                     await core.waitForAgent();
                     core.initControllers()
-                    await core.initLanguages()
+                    await core.initLanguages();
                 } catch (e) {
                     // @ts-ignore
                     const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
 
                     if (connectHolochain) {
-                        await core.connectHolochain( {hcPortAdmin, hcPortApp} );
+                        await core.connectHolochain( {hcPortAdmin: hcPortAdmin!, hcPortApp: hcPortApp!} );
                     } else {
                         await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
                         await core.waitForAgent();
@@ -808,7 +808,7 @@ export interface StartServerParams {
     core: PerspectivismCore,
     mocks: boolean,
     port: number,
-    config: any;
+    config: OuterConfig;
 }
 
 export async function startServer(params: StartServerParams) {
