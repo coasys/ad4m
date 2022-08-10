@@ -21,6 +21,7 @@ import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 import { v4 as uuidv4 } from 'uuid'
 import { MainConfig } from './Config'
+import { OuterConfig } from '../main'
 
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
@@ -123,7 +124,7 @@ export default class PerspectivismCore {
         console.log("Done.")
     }
 
-    async startGraphQLServer(port: number, mocks: boolean, config: any) {
+    async startGraphQLServer(port: number, mocks: boolean, config: OuterConfig) {
         const { url, subscriptionsUrl } = await GraphQL.startServer({
             core: this,
             mocks,
