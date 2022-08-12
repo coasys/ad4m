@@ -69,7 +69,7 @@ export default class HolochainService {
 
         const holochainAppPort = appPort ? appPort : 1337;
         const holochainAdminPort = adminPort ? adminPort : 2000;
-        if(useMdns === undefined) useMdns = true
+        if(useMdns === undefined) useMdns = false
         if(useBootstrap === undefined) useBootstrap = true
         if(useProxy === undefined) useProxy = true
         if(useLocalProxy === undefined) useLocalProxy = false
