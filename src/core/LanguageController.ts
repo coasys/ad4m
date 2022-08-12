@@ -58,7 +58,7 @@ export default class LanguageController {
     async loadLanguages() {
         try {
             await this.loadSystemLanguages()
-            if (this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
+            if (!this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
         } catch (e) {
             throw new Error(`Error loading languages ${e}`);
         }
