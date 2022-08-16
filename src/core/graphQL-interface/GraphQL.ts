@@ -824,6 +824,7 @@ export async function startServer(params: StartServerParams) {
     const server = new ApolloServer({
         typeDefs,
         resolvers,
+        csrfPrevention: false,
         context: async (context) => {
             let headers = context.req.headers;
             let authToken = ''
