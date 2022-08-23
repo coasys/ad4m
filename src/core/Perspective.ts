@@ -429,8 +429,12 @@ export default class Perspective {
         return values;
     }
 
-    linkFact(l: LinkExpression): string {
+    tripleFact(l: LinkExpression): string {
         return `triple("${l.data.source}", "${l.data.predicate}", "${l.data.target}").`
+    }
+
+    linkFact(l: LinkExpression): string {
+        return `link("${l.data.source}", "${l.data.predicate}", "${l.data.target}", ${new Date(l.timestamp).getTime()}, "${l.author}").`
     }
 
     async nodeFacts(allLinks: LinkExpression[]): Promise<string[]> {
@@ -489,7 +493,7 @@ export default class Perspective {
         //if(this.isSDNALink(link)) {
         //    this.#prologNeedsRebuild = true
         //} else {
-        //    let lines = [this.linkFact(link), ...await this.nodeFacts([link])]
+        //    let lines = [this.tripleFact(link), ...await this.nodeFacts([link])]
         //    await this.#prologEngine?.consult(lines.join('\n'))
         //}
     }
@@ -503,7 +507,7 @@ export default class Perspective {
         //if(this.isSDNALink(link)) {
         //    this.#prologNeedsRebuild = true
         //} else {
-        //    const fact = this.linkFact(link)
+        //    const fact = this.tripleFact(link)
         //    const factWithoutDot = fact.substring(0, fact.length-1)
         //    await this.#prologEngine?.consult(`retract(${factWithoutDot}).`)
         //}
@@ -521,7 +525,11 @@ export default class Perspective {
         // triple/3
         //-------------------
         lines.push(":- discontiguous triple/3.")            
-        lines = allLinks.map(this.linkFact)
+
+        for (const link of allLinks) {
+            lines.push(this.tripleFact(link));
+            lines.push(this.linkFact(link));
+        };
 
         //-------------------
         // reachable/2
