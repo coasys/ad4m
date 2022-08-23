@@ -197,6 +197,14 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(result[0].X).toBe('note-ipfs://Qm123')
 
                 expect(await p.infer('reachable("ad4m://root", "todo-ontology://is-todo")')).toBeTruthy()
+
+                const linkResult = await p.infer('link(X, _, "todo-ontology://is-todo", Timestamp, Author).')
+                console.warn("got prolog link result", linkResult);
+                expect(linkResult).toBeTruthy()
+                expect(linkResult.length).toBe(1)
+                expect(linkResult[0].X).toBe('note-ipfs://Qm123');
+                expect(linkResult[0].Timestamp).not.toBeNaN();
+                expect(linkResult[0].Author).not.toBeNull();
             })
         })
 
