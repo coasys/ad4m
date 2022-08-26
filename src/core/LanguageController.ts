@@ -284,7 +284,7 @@ export default class LanguageController {
             languageMeta = {data: {}};
         }
 
-        console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
+        console.log("LanguageController.installLanguage: INSTALLING LANGUAGE:", languageMeta.data)
         let bundlePath = path.join(path.join(this.#config.languagesPath, address), "bundle.js");
         let source;
         let hash;

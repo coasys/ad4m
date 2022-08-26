@@ -38,6 +38,7 @@ export default class PerspectivesController {
         this.#context.languageController!.addLinkObserver((diff: PerspectiveDiff, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
+                console.log("PerspectiveController: received signal from linkObserver, adding remote links from a language to a local perspective...");
                 perspective.populateLocalLinks(diff.additions, diff.removals);
 
                 for (const link of diff.additions) {
