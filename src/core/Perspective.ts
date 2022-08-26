@@ -9,6 +9,11 @@ import PrologInstance from "./PrologInstance";
 import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
 
+type PerspectiveSubscription = {
+    perspective: PerspectiveHandle,
+    link: LinkExpression
+}
+
 export default class Perspective {
     name?: string;
     uuid?: string;
@@ -41,7 +46,7 @@ export default class Perspective {
         this.#prologEngine = null
         this.#prologNeedsRebuild = true
 
-        this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, (perspective: PerspectiveHandle) => {
+        this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
             console.log("GOT LINKS SIGNAL", perspective, this.uuid);
             if (perspective.uuid === this.uuid) {
                 console.log("setting to rebuild prolog");
@@ -49,7 +54,7 @@ export default class Perspective {
             }
         })
 
-        this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, (perspective: PerspectiveHandle) => {
+        this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
             console.log("GOT LINKS REMOVED SIGNAL", perspective, this.uuid);
             if (perspective.uuid === this.uuid) {
                 console.log("removed setting to rebuild prolog");
