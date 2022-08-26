@@ -553,8 +553,12 @@ export default class Perspective {
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
             if(this.isSDNALink(link)) {
-                let code = Literal.fromUrl(link.target).get()
-                lines.push(code)
+                try {
+                    let code = Literal.fromUrl(link.target).get()
+                    lines.push(code)
+                } catch {
+                    console.error("Perspective.initEngineFacts: Error loading SocialDNA link target as literal... Ignoring SocialDNA link.");
+                }
             }
         }
 
