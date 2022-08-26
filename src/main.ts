@@ -92,12 +92,12 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     } = config
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
-    if(!hcPortAdmin) hcPortAdmin = await getPort({ port: 2000 });
-    if(!hcPortApp) hcPortApp = await getPort({ port: 1337 });
-    if(hcUseMdns === undefined) hcUseMdns = false
-    if(hcUseProxy === undefined) hcUseProxy = true
-    if(hcUseBootstrap === undefined) hcUseBootstrap = true
-    if(languageLanguageOnly === undefined) languageLanguageOnly = false;
+    if(!hcPortAdmin) config.hcPortAdmin = await getPort({ port: 2000 });
+    if(!hcPortApp) config.hcPortApp = await getPort({ port: 1337 });
+    if(hcUseMdns === undefined) config.hcUseMdns = false
+    if(hcUseProxy === undefined) config.hcUseProxy = true
+    if(hcUseBootstrap === undefined) config.hcUseBootstrap = true
+    if(languageLanguageOnly === undefined) config.languageLanguageOnly = false;
 
     if(!fs.existsSync(networkBootstrapSeed)) {
       throw new Error(`Could not find networkBootstrapSeed at path ${networkBootstrapSeed}`)
