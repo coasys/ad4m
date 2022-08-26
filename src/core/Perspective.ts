@@ -42,13 +42,17 @@ export default class Perspective {
         this.#prologNeedsRebuild = true
 
         this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, (perspective: PerspectiveHandle) => {
-            if (perspective.uuid == this.uuid) {
+            console.log("GOT LINKS SIGNAL", perspective, this.uuid);
+            if (perspective.uuid === this.uuid) {
+                console.log("setting to rebuild prolog");
                 this.#prologNeedsRebuild = true
             }
         })
 
         this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, (perspective: PerspectiveHandle) => {
-            if (perspective.uuid == this.uuid) {
+            console.log("GOT LINKS REMOVED SIGNAL", perspective, this.uuid);
+            if (perspective.uuid === this.uuid) {
+                console.log("removed setting to rebuild prolog");
                 this.#prologNeedsRebuild = true
             }
         })
@@ -63,6 +67,7 @@ export default class Perspective {
         this.callLinksAdapter("pull").then((remoteLinks) => {
             if (remoteLinks.additions && remoteLinks.removals) {
                 this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+                this.#prologNeedsRebuild = true
                 if (this.neighbourhood) {
                     this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
                 }
@@ -75,6 +80,7 @@ export default class Perspective {
                 let links = await this.callLinksAdapter("pull");
                 if (links.additions && links.removals) {
                     this.populateLocalLinks(links.additions, links.removals);
+                    this.#prologNeedsRebuild = true
                     if (this.neighbourhood) {
                         this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
                     }
@@ -94,8 +100,8 @@ export default class Perspective {
     }
 
     updateFromId(id: PerspectiveHandle) {
-        if(id.name) this.name = id.name
-        if(id.uuid) this.uuid = id.uuid
+        this.name = id.name
+        this.uuid = id.uuid
         if(id.sharedUrl) this.sharedUrl = id.sharedUrl
         if(id.neighbourhood) this.neighbourhood = id.neighbourhood
     }
@@ -242,7 +248,6 @@ export default class Perspective {
         } as PerspectiveDiff)
 
         this.addLocalLink(linkExpression)
-        await this.addLinkToProlog(linkExpression)
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
@@ -282,19 +287,18 @@ export default class Perspective {
             this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
-        await this.removeLinkFromProlog(oldLink)
-        await this.addLinkToProlog(newLinkExpression);
         this.callLinksAdapter('commit', {
             additions: [newLinkExpression],
             removals: [oldLink]
         } as PerspectiveDiff)
-        this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-            perspective: this.plain(),
-            link: newLinkExpression
-        })
+        const perspective = this.plain();
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
-            perspective: this.plain(),
+            perspective: perspective,
             link: oldLink
+        })
+        this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+            perspective: perspective,
+            link: newLinkExpression
         })
 
         return newLinkExpression
@@ -302,7 +306,6 @@ export default class Perspective {
 
     async removeLink(linkExpression: LinkExpressionInput) {
         this.removeLocalLink(linkExpression);
-        await this.removeLinkFromProlog(linkExpression);
         this.callLinksAdapter('commit',  {
             additions: [],
             removals: [linkExpression]
@@ -407,6 +410,7 @@ export default class Perspective {
     async getLinks(query: LinkQuery): Promise<LinkExpression[]> {
         const remoteLinks = await this.callLinksAdapter('pull')
         if (remoteLinks.additions && remoteLinks.removals) {
+            this.#prologNeedsRebuild = true;
             this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);   
         }
 
@@ -595,6 +599,7 @@ export default class Perspective {
                 this.#prologNeedsRebuild = false
             }
             if(this.#prologNeedsRebuild) {
+                console.log("Perspective.prologQuery: Making prolog query but first rebuilding facts");
                 this.#prologNeedsRebuild = false
                 const facts = await this.initEngineFacts()
                 await this.#prologEngine!.consult(facts)

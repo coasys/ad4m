@@ -9,6 +9,7 @@ import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
 import { MainConfig } from './Config'
 import path from "path";
+import sleep from '../tests/sleep'
 
 
 const did = 'did:local-test-agent'
@@ -149,7 +150,6 @@ describe('Perspective', () => {
             expect(linkResult[0].Timestamp).not.toBeNaN();
 
             let l2 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test2'})
-
             result = await perspective!.prologQuery("triple(Source,Pred,Target)")
             expect(result.length).toEqual(2)
             linkResult = await perspective!.prologQuery("link(Source,Pred,Target,Timestamp,Author)")
