@@ -47,17 +47,13 @@ export default class Perspective {
         this.#prologNeedsRebuild = true
 
         this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
-            console.log("GOT LINKS SIGNAL", perspective, this.uuid);
             if (perspective.uuid === this.uuid) {
-                console.log("setting to rebuild prolog");
                 this.#prologNeedsRebuild = true
             }
         })
 
         this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
-            console.log("GOT LINKS REMOVED SIGNAL", perspective, this.uuid);
             if (perspective.uuid === this.uuid) {
-                console.log("removed setting to rebuild prolog");
                 this.#prologNeedsRebuild = true
             }
         })
@@ -253,6 +249,7 @@ export default class Perspective {
         } as PerspectiveDiff)
 
         this.addLocalLink(linkExpression)
+        this.#prologNeedsRebuild = true;
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
@@ -297,6 +294,7 @@ export default class Perspective {
             removals: [oldLink]
         } as PerspectiveDiff)
         const perspective = this.plain();
+        this.#prologNeedsRebuild = true;
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: perspective,
             link: oldLink
@@ -314,7 +312,8 @@ export default class Perspective {
         this.callLinksAdapter('commit',  {
             additions: [],
             removals: [linkExpression]
-        } as PerspectiveDiff)
+        } as PerspectiveDiff);
+        this.#prologNeedsRebuild = true;
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
