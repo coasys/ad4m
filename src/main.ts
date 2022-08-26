@@ -84,20 +84,16 @@ export interface SeedFileSchema {
 export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let { 
       resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
-      mocks, gqlPort, 
-      hcPortAdmin, hcPortApp,
-      ipfsSwarmPort, ipfsRepoPath,
-      hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, connectHolochain, reqCredential,
-      swiplPath, swiplHomePath
+      mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, reqCredential, swiplPath, swiplHomePath
     } = config
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
-    if(!hcPortAdmin) config.hcPortAdmin = await getPort({ port: 2000 });
-    if(!hcPortApp) config.hcPortApp = await getPort({ port: 1337 });
-    if(hcUseMdns === undefined) config.hcUseMdns = false
-    if(hcUseProxy === undefined) config.hcUseProxy = true
-    if(hcUseBootstrap === undefined) config.hcUseBootstrap = true
-    if(languageLanguageOnly === undefined) config.languageLanguageOnly = false;
+    if(!config.hcPortAdmin) config.hcPortAdmin = await getPort({ port: 2000 });
+    if(!config.hcPortApp) config.hcPortApp = await getPort({ port: 1337 });
+    if(config.hcUseMdns === undefined) config.hcUseMdns = false
+    if(config.hcUseProxy === undefined) config.hcUseProxy = true
+    if(config.hcUseBootstrap === undefined) config.hcUseBootstrap = true
+    if(config.languageLanguageOnly === undefined) config.languageLanguageOnly = false;
 
     if(!fs.existsSync(networkBootstrapSeed)) {
       throw new Error(`Could not find networkBootstrapSeed at path ${networkBootstrapSeed}`)
