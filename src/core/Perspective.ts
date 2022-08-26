@@ -514,7 +514,7 @@ export default class Perspective {
     }
 
     isSDNALink(link: LinkExpression): boolean {
-        return link.source == 'self' && link.predicate == 'ad4m://has_zome'
+        return link.source == 'ad4m://self' && link.predicate == 'ad4m://has_zome'
     }
 
     async initEngineFacts(): Promise<string> {
