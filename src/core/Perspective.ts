@@ -571,7 +571,6 @@ export default class Perspective {
         }
 
         const factsCode = lines.join('\n')
-        console.debug(factsCode)
         return factsCode
     }
 
