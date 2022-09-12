@@ -58,7 +58,7 @@ export default class LanguageController {
     async loadLanguages() {
         try {
             await this.loadSystemLanguages()
-            if (this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
+            if (!this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
         } catch (e) {
             throw new Error(`Error loading languages ${e}`);
         }
@@ -284,7 +284,7 @@ export default class LanguageController {
             languageMeta = {data: {}};
         }
 
-        console.log("LanguageController: INSTALLING NEW LANGUAGE:", languageMeta.data)
+        console.log("LanguageController.installLanguage: INSTALLING LANGUAGE:", languageMeta.data)
         let bundlePath = path.join(path.join(this.#config.languagesPath, address), "bundle.js");
         let source;
         let hash;

@@ -36,17 +36,17 @@ export default function socialDNATests(testContext: TestContext) {
                 expect(perspective.name).toEqual("sdna-test");
             
                 await perspective.add(new Link({
-                    source: 'self', 
+                    source: 'ad4m://self', 
                     predicate: 'ad4m://has_zome',
                     target: Literal.from(sdna.join('\n')).toUrl(),
                 }))
 
-                let sDNAFacts = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "self", predicate: "ad4m://has_zome"}));
+                let sDNAFacts = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "ad4m://self", predicate: "ad4m://has_zome"}));
                 expect(sDNAFacts.length).toEqual(1);
                 let flows = await perspective.sdnaFlows()
                 expect(flows[0]).toBe('TODO')
 
-                await perspective.add(new Link({source: 'self', target: 'test-lang://1234'}))
+                await perspective.add(new Link({source: 'ad4m://self', target: 'test-lang://1234'}))
                 let availableFlows = await perspective.availableFlows('test-lang://1234')
                 expect(availableFlows.length).toEqual(1)
                 expect(availableFlows[0]).toEqual('TODO')

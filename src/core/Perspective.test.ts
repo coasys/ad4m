@@ -9,6 +9,7 @@ import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
 import { MainConfig } from './Config'
 import path from "path";
+import sleep from '../tests/sleep'
 
 
 const did = 'did:local-test-agent'
@@ -133,6 +134,7 @@ describe('Perspective', () => {
     describe('Prolog Engine', () => {
         it('answers correctly in a run with multiple link additions/removals', async () => {
             let result 
+            let linkResult
             let l1 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test1'})
 
             result = await perspective!.prologQuery("triple(Source,Pred,Target)")
@@ -140,10 +142,18 @@ describe('Perspective', () => {
             expect(result[0].Source).toBe('ad4m://self')
             expect(result[0].Target).toBe('ad4m://test1')
 
-            let l2 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test2'})
+            linkResult = await perspective!.prologQuery("link(Source,Pred,Target,Timestamp,Author)")
+            expect(linkResult.length).toEqual(1)
+            expect(linkResult[0].Source).toBe('ad4m://self')
+            expect(linkResult[0].Target).toBe('ad4m://test1')
+            expect(linkResult[0].Author).toBe("did:local-test-agent")
+            expect(linkResult[0].Timestamp).not.toBeNaN();
 
+            let l2 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test2'})
             result = await perspective!.prologQuery("triple(Source,Pred,Target)")
             expect(result.length).toEqual(2)
+            linkResult = await perspective!.prologQuery("link(Source,Pred,Target,Timestamp,Author)")
+            expect(linkResult.length).toEqual(2)
 
             let targetSet = new Set<string>()
             targetSet.add(result[0].Target)
