@@ -8422,9 +8422,9 @@
   "resolved" "https://registry.npmjs.org/supports-preserve-symlinks-flag/-/supports-preserve-symlinks-flag-1.0.0.tgz"
   "version" "1.0.0"
 
-"swipl-stdio@perspect3vism/node-swipl-stdio.git#9d82de7fb3301f4ead2077aa7636d34159d93631":
-  "integrity" "sha512-QFqywWN7TNaJgJYjgOK/AkJk3ChL9FxIMCxZnQ7S1cfNY0kHtRe+i5EiWExqNH2cvK/3cluvwcQO9qNYTWUhXg=="
-  "resolved" "git+ssh://git@github.com/perspect3vism/node-swipl-stdio.git#9d82de7fb3301f4ead2077aa7636d34159d93631"
+"swipl-stdio@perspect3vism/node-swipl-stdio.git#7094a055a4ec3511530140ca7a4447d6649a9dee":
+  "integrity" "sha512-FgQYJyyoO9ngsxf1JUbAWoSUihgYJLYyMfAioKULVkAmaGcWWyIzCj5EHvjW2IZsc+XX1VIUPsIPKp2yIsOMpQ=="
+  "resolved" "git+ssh://git@github.com/perspect3vism/node-swipl-stdio.git#7094a055a4ec3511530140ca7a4447d6649a9dee"
   "version" "1.0.4"
   dependencies:
     "debug" "^2.6.4"
