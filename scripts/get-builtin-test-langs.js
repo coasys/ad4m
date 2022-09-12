@@ -5,7 +5,7 @@ const path = require("path");
 
 const languages = {
   "agent-expression-store": {
-    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.0.12/bundle.js",
+    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.0.13/bundle.js",
   },
   languages: {
       bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.1/bundle.js",
@@ -14,13 +14,13 @@ const languages = {
     bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.1/bundle.js",
   },
   "perspective-diff-sync": {
-    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/0.0.9/bundle.js",
+    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/v0.1.0-alpha/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
   },
   "direct-message-language": {
-    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.6/bundle.js"
+    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.7/bundle.js"
   },
   "perspective-language": {
     bundle: "https://github.com/perspect3vism/perspective-language/releases/download/0.0.1/bundle.js"
