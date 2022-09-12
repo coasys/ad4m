@@ -244,7 +244,8 @@ export async function runHolochain(resourcePath: string, conductorConfigPath: st
         {
             env: {
                 ...process.env,
-                RUST_LOG: process.env.RUST_LOG ? process.env.RUST_LOG : "wasmer_compiler_cranelift=error,holochain::conductor::manager=warn,info,holochain::core::workflow::publish_dht_ops_workflow::publish_query=warn",
+                RUST_LOG: process.env.RUST_LOG ? process.env.RUST_LOG : "wasmer_compiler_cranelift=error,holochain::conductor::manager=warn,holochain::core::workflow::publish_dht_ops_workflow::publish_query=warn,publish_dht_ops_workflow=error,kitsune_p2p_types::metrics=error,kitsune_p2p::gossip::sharded_gossip=error,wasm_trace=debug,app_validation_workflow=error",
+                WASM_LOG: process.env.WASM_LOG ? process.env.WASM_LOG: "wasmer_compiler_cranelift=error,holochain::conductor::manager=warn,holochain::core::workflow::publish_dht_ops_workflow::publish_query=warn,publish_dht_ops_workflow=error,kitsune_p2p_types::metrics=error,kitsune_p2p::gossip::sharded_gossip=error,wasm_trace=debug,app_validation_workflow=error"
             },
         }
     );
