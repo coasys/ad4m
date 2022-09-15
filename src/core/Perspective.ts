@@ -65,26 +65,34 @@ export default class Perspective {
             clearInterval(this.#pollingInterval);
         });
 
-        this.callLinksAdapter("pull").then((remoteLinks) => {
-            if (remoteLinks.additions && remoteLinks.removals) {
-                this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
-                this.#prologNeedsRebuild = true
-                if (this.neighbourhood) {
-                    this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
+        try {
+            this.callLinksAdapter("pull").then((remoteLinks) => {
+                if (remoteLinks.additions && remoteLinks.removals) {
+                    this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+                    this.#prologNeedsRebuild = true
+                    if (this.neighbourhood) {
+                        this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
+                    }
                 }
-            }
-        });
+            });
+        } catch (e) {
+            console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
+        }
 
         // setup polling loop for Perspectives with a linkLanguage
         this.#pollingInterval = setInterval(
             async () => {
-                let links = await this.callLinksAdapter("pull");
-                if (links.additions && links.removals) {
-                    this.populateLocalLinks(links.additions, links.removals);
-                    this.#prologNeedsRebuild = true
-                    if (this.neighbourhood) {
-                        this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
+                try {
+                    let links = await this.callLinksAdapter("pull");
+                    if (links.additions && links.removals) {
+                        this.populateLocalLinks(links.additions, links.removals);
+                        this.#prologNeedsRebuild = true
+                        if (this.neighbourhood) {
+                            this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
+                        }
                     }
+                } catch (e) {
+                    console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
                 }
             },
             20000
