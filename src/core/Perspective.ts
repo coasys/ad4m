@@ -420,12 +420,6 @@ export default class Perspective {
     }
 
     async getLinks(query: LinkQuery): Promise<LinkExpression[]> {
-        const remoteLinks = await this.callLinksAdapter('pull')
-        if (remoteLinks.additions && remoteLinks.removals) {
-            this.#prologNeedsRebuild = true;
-            this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);   
-        }
-
         // console.debug("getLinks local...")
         const links = await this.getLinksLocal(query)
 
