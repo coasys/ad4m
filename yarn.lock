@@ -1076,10 +1076,10 @@
     "tslib" "^2.4.0"
     "webcrypto-core" "^1.7.4"
 
-"@perspect3vism/ad4m@0.1.34":
-  "integrity" "sha512-7+0iy3ZASoQ9dPBfQ6iz0oXuS2jESu2igTwtWgwVq3x3CcNEP5h97HiqAMiR0O3K+tAPT3+lZ80ZccyIkWDK6g=="
-  "resolved" "https://registry.npmjs.org/@perspect3vism/ad4m/-/ad4m-0.1.34.tgz"
-  "version" "0.1.34"
+"@perspect3vism/ad4m@0.1.35":
+  "integrity" "sha512-hFhaOeSwPkiQRzbIuHR8ke4YDb/jN1qknBnNC7W4fOhb4z5Le7yBW+GgGlXblxxNnoZ6zUv5JV8oquqSWYYaTQ=="
+  "resolved" "https://registry.npmjs.org/@perspect3vism/ad4m/-/ad4m-0.1.35.tgz"
+  "version" "0.1.35"
   dependencies:
     "@apollo/client" "3.6.9"
     "@holochain/client" "0.3.2"
