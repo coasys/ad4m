@@ -539,11 +539,15 @@ export default class Perspective {
         const allLinks = await this.getLinks(new LinkQuery({}))
         //-------------------
         // triple/3
+        // link/5
         //-------------------
         lines.push(":- discontiguous triple/3.")            
+        lines.push(":- discontiguous link/5.")  
 
         for (const link of allLinks) {
             lines.push(this.tripleFact(link));
+        }
+        for (const link of allLinks) {
             lines.push(this.linkFact(link));
         };
 
