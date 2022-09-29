@@ -68,10 +68,12 @@ export default class Perspective {
         try {
             this.callLinksAdapter("pull").then((remoteLinks) => {
                 if (remoteLinks.additions && remoteLinks.removals) {
-                    this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
-                    this.#prologNeedsRebuild = true
-                    if (this.neighbourhood) {
-                        this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
+                    if (remoteLinks.additions.length > 0 || remoteLinks.removals.length > 0) {
+                        this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
+                        this.#prologNeedsRebuild = true
+                        if (this.neighbourhood) {
+                            this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
+                        }
                     }
                 }
             });
@@ -85,10 +87,12 @@ export default class Perspective {
                 try {
                     let links = await this.callLinksAdapter("pull");
                     if (links.additions && links.removals) {
-                        this.populateLocalLinks(links.additions, links.removals);
-                        this.#prologNeedsRebuild = true
-                        if (this.neighbourhood) {
-                            this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
+                        if (links.additions.length > 0 || links.removals.length > 0) {
+                            this.populateLocalLinks(links.additions, links.removals);
+                            this.#prologNeedsRebuild = true
+                            if (this.neighbourhood) {
+                                this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
+                            }
                         }
                     }
                 } catch (e) {
