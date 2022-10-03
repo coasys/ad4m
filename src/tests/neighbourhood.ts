@@ -64,6 +64,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1!.neighbourhood!.linkLanguage).toBe(socialContext.address);
                 expect(bobP1!.neighbourhood!.meta.links.length).toBe(0);
 
+                await sleep(1000)
+
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
 
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
