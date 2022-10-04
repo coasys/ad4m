@@ -108,6 +108,18 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return lang
             },
             //@ts-ignore
+            languageRemove: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.LANGUAGE_DELETE_CAPABILITY)
+                const { address } = args
+                try {
+                    await core.languageController.languageRemove(address)
+                } catch (e) {
+                    console.error("Executor.languageDelete: Error removing language", e)
+                    return false
+                }
+                return true
+            },
+            //@ts-ignore
             languageMeta: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args

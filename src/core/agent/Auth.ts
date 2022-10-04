@@ -146,6 +146,13 @@ export const LANGUAGE_UPDATE_CAPABILITY: Capability = {
     },
     can: [UPDATE]
 }
+export const LANGUAGE_DELETE_CAPABILITY: Capability = {
+    with: {
+        domain: LANGUAGE,
+        pointers: [WILD_CARD],
+    },
+    can: [DELETE]
+}
 
 // perspective related capabilities
 export const perspectiveQueryCapability = (pointers: string[]) => {
