@@ -75,7 +75,7 @@
   "dependencies": {
     "@graphql-tools/schema": "^8.5.1",
     "@holochain/client": "0.3.2",
-    "@perspect3vism/ad4m": "0.1.35",
+    "@perspect3vism/ad4m": "0.1.37",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",

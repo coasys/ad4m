@@ -127,7 +127,11 @@ export default class PerspectivesController {
     }
 
     remove(uuid: string) {
-        this.#perspectiveInstances.get(uuid)?.clearPolling();
+        let perspective = this.#perspectiveInstances.get(uuid);
+        perspective?.clearPolling();
+        if (perspective?.neighbourhood) {
+            this.#context.languageController?.languageRemove(perspective.neighbourhood.linkLanguage);
+        }
         this.#perspectiveHandles.delete(uuid)
         this.#perspectiveInstances.delete(uuid)
         this.save()

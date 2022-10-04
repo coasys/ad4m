@@ -303,6 +303,14 @@ export default class HolochainService {
         };
     }
 
+    async removeDnaForLang(lang: string) {
+        const activeApps = await this.#adminWebsocket!.listActiveApps();
+        if(activeApps.includes(lang)) {
+            const app = activeApps.filter(a => a == lang)[0];
+            await this.#adminWebsocket!.uninstallApp({installed_app_id: app});
+        }
+    }
+
     getDelegateForLanguage(languageHash: string) {
         return new HolochainLanguageDelegate(languageHash, this, this.#queue)
     }
