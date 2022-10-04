@@ -178,14 +178,6 @@ describe('Perspective', () => {
             linksAdapter = new LinksAdapter()
         })
 
-        it('calls pull on link language on getLinks() with the query once', async () => {
-            const query = {source: 'root'} as LinkQuery;
-            await perspective!.getLinks(query)
-
-            expect(linksAdapter.pull.mock.calls.length).toBe(1)
-            expect(linksAdapter.commit.mock.calls.length).toBe(0)
-        })
-
         it('calls commit on link language on addLink() with link expression once', async () => {
             const link = createLink()
             const linkExpression = await perspective!.addLink(link)
