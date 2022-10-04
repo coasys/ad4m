@@ -8424,7 +8424,7 @@
 
 "swipl-stdio@perspect3vism/node-swipl-stdio.git#7094a055a4ec3511530140ca7a4447d6649a9dee":
   "integrity" "sha512-FgQYJyyoO9ngsxf1JUbAWoSUihgYJLYyMfAioKULVkAmaGcWWyIzCj5EHvjW2IZsc+XX1VIUPsIPKp2yIsOMpQ=="
-  "resolved" "git+ssh://git@github.com/perspect3vism/node-swipl-stdio.git#7094a055a4ec3511530140ca7a4447d6649a9dee"
+  "resolved" "git+ssh://git@github.com/perspect3vism/node-swipl-stdio.git"
   "version" "1.0.4"
   dependencies:
     "debug" "^2.6.4"
