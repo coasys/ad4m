@@ -107,7 +107,7 @@ db_sync_strategy: Fast
 
 async function initializeLairKeystore(lairPath: string, hcDataPath: string, config: HolochainUnlockConfiguration) {
     return new Promise(async (resolve, reject) => {
-        const echo = child_process.spawn('echo', [config.passphrase])
+        const echo = child_process.exec(`echo ${config.passphrase}`);
         const keyStoreFolderExists = fs.existsSync(`${escapeShellArg(hcDataPath)}/keystore`);
         if (!keyStoreFolderExists) {
             fs.mkdirSync(`${escapeShellArg(hcDataPath)}/keystore`)
@@ -118,7 +118,7 @@ async function initializeLairKeystore(lairPath: string, hcDataPath: string, conf
             cwd: `${escapeShellArg(hcDataPath)}/keystore`
         });
 
-        echo.stdout.on('data', (data) => {
+        echo.stdout?.on('data', (data) => {
             lairProcess.stdin.write(data);
         })
 
