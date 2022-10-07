@@ -105,6 +105,20 @@ export default class Perspective {
                                 this.isFastPolling = false;
                                 clearInterval(this.#pollingInterval);
                                 this.#pollingInterval = this.setupPolling(30000);
+
+                                //Lets also publish the links we have commited but not pushed since we were not connected
+                                const mutations = this.#db.getPendingDiffs(this.uuid);
+                                const batchedMutations = {
+                                    additions: [],
+                                    removals: []
+                                } as PerspectiveDiff
+                                for (const addition of mutations.additions) {
+                                    batchedMutations.additions.push(addition);
+                                }
+                                for (const removal of mutations.removals) {
+                                    batchedMutations.removals.push(removal);
+                                }
+                                await this.callLinksAdapter('commit', batchedMutations);
                             }
                             this.populateLocalLinks(links.additions, links.removals);
                             this.#prologNeedsRebuild = true
@@ -322,11 +336,16 @@ export default class Perspective {
     }
 
     async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
-        const linkExpression = this.ensureLinkExpression(link)
-        this.callLinksAdapter('commit', {
+        const linkExpression = this.ensureLinkExpression(link);
+        const diff = {
             additions: [linkExpression],
             removals: []
-        } as PerspectiveDiff)
+        } as PerspectiveDiff
+        const addLink = await this.commit(diff);
+
+        if (!addLink) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        }
 
         this.addLocalLink(linkExpression)
         this.#prologNeedsRebuild = true;
@@ -348,12 +367,10 @@ export default class Perspective {
     }
 
     async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
-        //console.debug("LINK REPO: updating link:", oldLink, newLink)
         const addr = this.findLink(oldLink)
         if (!addr) {
             throw new Error(`Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
         }
-        //console.debug("hash:", addr)
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
 
@@ -369,10 +386,16 @@ export default class Perspective {
             this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
-        this.callLinksAdapter('commit', {
+        const diff = {
             additions: [newLinkExpression],
             removals: [oldLink]
-        } as PerspectiveDiff)
+        } as PerspectiveDiff
+        const mutation = await this.commit(diff);
+
+        if (!mutation) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        }
+
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
@@ -389,10 +412,17 @@ export default class Perspective {
 
     async removeLink(linkExpression: LinkExpressionInput) {
         this.removeLocalLink(linkExpression);
-        this.callLinksAdapter('commit',  {
+
+        const diff = {
             additions: [],
             removals: [linkExpression]
-        } as PerspectiveDiff);
+        } as PerspectiveDiff
+        const mutation = await this.commit(diff);
+        
+        if (!mutation) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        }
+
         this.#prologNeedsRebuild = true;
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),

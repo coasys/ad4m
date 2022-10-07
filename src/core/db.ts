@@ -1,7 +1,7 @@
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
-import type { Expression, LinkExpression } from "@perspect3vism/ad4m";  
+import type { PerspectiveDiff } from "@perspect3vism/ad4m";  
 
 export class PerspectivismDb {
     #db: any
@@ -25,6 +25,10 @@ export class PerspectivismDb {
 
     targetKey(pUUID: string, target: string) {
         return `${pUUID}-to_target-${target}`
+    }
+
+    pendingLinkKey(pUUID: string) {
+        return `${pUUID}-pending_links`
     }
 
     storeLink(pUUID: string, link: object, linkName: string): void {
@@ -121,7 +125,6 @@ export class PerspectivismDb {
         this.remove(key, linkName)
     }
 
-
     remove(key: string, linkName: string): void {
         //@ts-ignore
         this.#db.get(key).remove(l => l===linkName).write()
@@ -132,6 +135,22 @@ export class PerspectivismDb {
     }
 
     getExpression(key: string): string | undefined {
+        return this.#db.get(key).value()
+    }
+
+    addPendingDiff(pUUID: string, diff: PerspectiveDiff): void {
+        const key = this.pendingLinkKey(pUUID);
+        if(!this.#db.has(key).value()) {
+            this.#db.set(key, []).write()
+        }
+
+        this.#db.get(key)
+            .push(diff)
+            .write()
+    }
+
+    getPendingDiffs(pUUID: string): PerspectiveDiff[] {
+        const key = this.pendingLinkKey(pUUID);
         return this.#db.get(key).value()
     }
 }
