@@ -78,11 +78,11 @@ export default class Perspective {
         // setup polling loop for Perspectives with a linkLanguage
         this.getCurrentRevision().then(revision => {
             // if revision is null, then we are not connected to the network yet, so we need to poll fast
-            if(revision) {
-                this.#pollingInterval = this.setupPolling(30000);
-            } else {
+            if(!revision && this.createdFromJoin) {
                 this.isFastPolling = true;
                 this.#pollingInterval = this.setupPolling(5000);
+            } else {
+                this.#pollingInterval = this.setupPolling(30000);
             }
         })
 
