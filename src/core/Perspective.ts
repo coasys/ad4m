@@ -73,22 +73,6 @@ export default class Perspective {
             clearInterval(this.#pollingInterval);
         });
 
-        try {
-            this.callLinksAdapter("pull").then((remoteLinks) => {
-                if (remoteLinks.additions && remoteLinks.removals) {
-                    if (remoteLinks.additions.length > 0 || remoteLinks.removals.length > 0) {
-                        this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
-                        this.#prologNeedsRebuild = true
-                        if (this.neighbourhood) {
-                            this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
-                        }
-                    }
-                }
-            });
-        } catch (e) {
-            console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
-        }
-
         // setup polling loop for Perspectives with a linkLanguage
         this.#pollingInterval = setInterval(
             async () => {
@@ -204,6 +188,57 @@ export default class Perspective {
                 reject(e)
             }
         })
+    }
+
+    private getCurrentRevision(): Promise<String | null> {
+        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+            return Promise.resolve(null)
+        }
+
+        return new Promise(async (resolve, reject) => {
+            setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000);
+            try {
+                const address = this.neighbourhood!.linkLanguage;
+                const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
+                if(linksAdapter) {
+                    const result = await linksAdapter.currentRevision();
+                    resolve(result)
+                } else {
+                    console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
+                    // TODO: request install
+                    resolve(null)
+                }
+            } catch(e) {
+                console.error("Error while trying to call links adapter:", e)
+                reject(e)
+            }
+        })
+    }
+
+    private async commit(diff: PerspectiveDiff): Promise<PerspectiveDiff | null> {
+        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+            return null;
+        }
+
+        let canCommit = false;
+        if (!this.createdFromJoin){
+            //If current agent created neighbourhood, then we should always be allowed to commit
+            canCommit = true;
+        } else {
+            //We did not create the neighbourhood, so we should check if we already have some data sync'd before making a commit
+            const currentRevision = this.getCurrentRevision();
+            if (currentRevision != null) {
+                canCommit = true;
+            }
+        }
+
+        if (canCommit) {
+            //Call the links adapter to commit the diff
+            const returnedDiff = await this.callLinksAdapter('commit', diff);
+            return returnedDiff;
+        } else {
+            return null;
+        }
     }
 
     async syncWithSharingAdapter() {
