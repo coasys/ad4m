@@ -22,6 +22,7 @@ export default class Perspective {
     neighbourhood?: Neighbourhood;
     sharedUrl?: string;
     createdFromJoin: boolean;
+    isFastPolling: boolean;
 
     #db: any;
     #agent: AgentService;
@@ -37,6 +38,7 @@ export default class Perspective {
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood, createdFromJoin?: boolean) {
         this.updateFromId(id)
         this.createdFromJoin = false;
+        this.isFastPolling = false;
 
         if (neighbourhood) {
             this.neighbourhood = neighbourhood
@@ -74,12 +76,32 @@ export default class Perspective {
         });
 
         // setup polling loop for Perspectives with a linkLanguage
-        this.#pollingInterval = setInterval(
+        this.getCurrentRevision().then(revision => {
+            // if revision is null, then we are not connected to the network yet, so we need to poll fast
+            if(revision) {
+                this.#pollingInterval = this.setupPolling(30000);
+            } else {
+                this.isFastPolling = true;
+                this.#pollingInterval = this.setupPolling(5000);
+            }
+        })
+
+        this.#prologMutex = new Mutex()
+    }
+
+    setupPolling(intervalMs: number) {
+        return setInterval(
             async () => {
                 try {
                     let links = await this.callLinksAdapter("pull");
                     if (links.additions && links.removals) {
                         if (links.additions.length > 0 || links.removals.length > 0) {
+                            //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
+                            if (this.isFastPolling) {
+                                this.isFastPolling = false;
+                                clearInterval(this.#pollingInterval);
+                                this.#pollingInterval = this.setupPolling(30000);
+                            }
                             this.populateLocalLinks(links.additions, links.removals);
                             this.#prologNeedsRebuild = true
                             if (this.neighbourhood) {
@@ -91,9 +113,8 @@ export default class Perspective {
                     console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
                 }
             },
-            20000
+            intervalMs
         );
-        this.#prologMutex = new Mutex()
     }
 
 
