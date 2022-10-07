@@ -21,6 +21,7 @@ export default class Perspective {
     timestamp?: string;
     neighbourhood?: Neighbourhood;
     sharedUrl?: string;
+    createdFromJoin: boolean;
 
     #db: any;
     #agent: AgentService;
@@ -33,9 +34,16 @@ export default class Perspective {
     #pollingInterval: any;
     #prologMutex: Mutex
 
-    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
+    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood, createdFromJoin?: boolean) {
         this.updateFromId(id)
-        if (neighbourhood) this.neighbourhood = neighbourhood;
+        this.createdFromJoin = false;
+
+        if (neighbourhood) {
+            this.neighbourhood = neighbourhood
+            if (createdFromJoin) {
+                this.createdFromJoin = createdFromJoin;
+            };
+        };
 
         this.#db = context.db
         this.#agent = context.agentService!

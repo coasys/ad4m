@@ -28,10 +28,11 @@ export default class PerspectivesController {
             const fileObject = JSON.parse(fs.readFileSync(FILEPATH).toString())
 
             Object.keys(fileObject).map(k => {
-                let perspective = fileObject[k];
-                console.debug(`PerspectivesController: Found existing perspective "${k}":`, perspective)
-                this.#perspectiveInstances.set(k, new Perspective(perspective, this.#context, perspective.neighbourhood as Neighbourhood))
-                this.#perspectiveHandles.set(k, perspective)
+                let perspectiveHandle = fileObject[k].perspectiveHandle;
+                let createdFromJoin = fileObject[k].createdFromJoin;
+                console.debug(`PerspectivesController: Found existing perspective "${k}":`, perspectiveHandle)
+                this.#perspectiveInstances.set(k, new Perspective(perspectiveHandle, this.#context, perspectiveHandle.neighbourhood as Neighbourhood, createdFromJoin))
+                this.#perspectiveHandles.set(k, perspectiveHandle)
             })
         }
 
@@ -65,8 +66,9 @@ export default class PerspectivesController {
         const FILEPATH = path.join(this.#rootConfigPath, FILENAME)
         const obj = {}
         this.#perspectiveHandles.forEach((perspectiveHandle, uuid) => {
+            const perspective = this.#perspectiveInstances.get(uuid);
             //@ts-ignore
-            obj[uuid] = perspectiveHandle
+            obj[uuid] = {perspectiveHandle: perspectiveHandle, createdFromJoin: perspective?.createdFromJoin}
         })
         fs.writeFileSync(FILEPATH, JSON.stringify(obj))
     }
@@ -105,7 +107,7 @@ export default class PerspectivesController {
         return new Ad4mPerspective(await perspective.getLinks({} as LinkQuery));
     }
 
-    add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood): PerspectiveHandle {
+    add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean): PerspectiveHandle {
         let perspective = {
             uuid: uuidv4(),
             name,
@@ -113,16 +115,16 @@ export default class PerspectivesController {
             neighbourhood: neighbourhood
         } as PerspectiveHandle;
         this.#perspectiveHandles.set(perspective.uuid, perspective)
-        this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood))
+        this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood, createdFromJoin))
         this.save()
         this.pubsub.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
         return perspective
     }
 
-    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood) {
+    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean) {
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
         this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
-        this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood));
+        this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin));
         this.save()
     }
 
