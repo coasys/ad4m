@@ -81,7 +81,7 @@ export default class Perspective {
                 // if revision is null, then we are not connected to the network yet, so we need to poll fast
                 if(!revision && this.createdFromJoin) {
                     this.isFastPolling = true;
-                    this.#pollingInterval = this.setupPolling(5000);
+                    this.#pollingInterval = this.setupPolling(3000);
                 } else {
                     this.#pollingInterval = this.setupPolling(30000);
                 }
@@ -97,29 +97,32 @@ export default class Perspective {
         return setInterval(
             async () => {
                 try {
+                    const currentRevision = await this.getCurrentRevision();
+
+                    //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
+                    if (this.isFastPolling && currentRevision) {
+                        this.isFastPolling = false;
+                        clearInterval(this.#pollingInterval);
+                        this.#pollingInterval = this.setupPolling(30000);
+
+                        //Lets also publish the links we have commited but not pushed since we were not connected
+                        const mutations = this.#db.getPendingDiffs(this.uuid);
+                        const batchedMutations = {
+                            additions: [],
+                            removals: []
+                        } as PerspectiveDiff
+                        for (const addition of mutations.additions) {
+                            batchedMutations.additions.push(addition);
+                        }
+                        for (const removal of mutations.removals) {
+                            batchedMutations.removals.push(removal);
+                        }
+                        await this.callLinksAdapter('commit', batchedMutations);
+                    }
+
                     let links = await this.callLinksAdapter("pull");
                     if (links.additions && links.removals) {
                         if (links.additions.length > 0 || links.removals.length > 0) {
-                            //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                            if (this.isFastPolling) {
-                                this.isFastPolling = false;
-                                clearInterval(this.#pollingInterval);
-                                this.#pollingInterval = this.setupPolling(30000);
-
-                                //Lets also publish the links we have commited but not pushed since we were not connected
-                                const mutations = this.#db.getPendingDiffs(this.uuid);
-                                const batchedMutations = {
-                                    additions: [],
-                                    removals: []
-                                } as PerspectiveDiff
-                                for (const addition of mutations.additions) {
-                                    batchedMutations.additions.push(addition);
-                                }
-                                for (const removal of mutations.removals) {
-                                    batchedMutations.removals.push(removal);
-                                }
-                                await this.callLinksAdapter('commit', batchedMutations);
-                            }
                             this.populateLocalLinks(links.additions, links.removals);
                             this.#prologNeedsRebuild = true
                             if (this.neighbourhood) {
