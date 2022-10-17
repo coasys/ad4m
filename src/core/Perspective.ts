@@ -21,6 +21,8 @@ export default class Perspective {
     timestamp?: string;
     neighbourhood?: Neighbourhood;
     sharedUrl?: string;
+    createdFromJoin: boolean;
+    isFastPolling: boolean;
 
     #db: any;
     #agent: AgentService;
@@ -33,9 +35,17 @@ export default class Perspective {
     #pollingInterval: any;
     #prologMutex: Mutex
 
-    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood) {
+    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood, createdFromJoin?: boolean) {
         this.updateFromId(id)
-        if (neighbourhood) this.neighbourhood = neighbourhood;
+        this.createdFromJoin = false;
+        this.isFastPolling = false;
+
+        if (neighbourhood) {
+            this.neighbourhood = neighbourhood
+            if (createdFromJoin) {
+                this.createdFromJoin = createdFromJoin;
+            };
+        };
 
         this.#db = context.db
         this.#agent = context.agentService!
@@ -65,26 +75,51 @@ export default class Perspective {
             clearInterval(this.#pollingInterval);
         });
 
+        // setup polling loop for Perspectives with a linkLanguage
         try {
-            this.callLinksAdapter("pull").then((remoteLinks) => {
-                if (remoteLinks.additions && remoteLinks.removals) {
-                    if (remoteLinks.additions.length > 0 || remoteLinks.removals.length > 0) {
-                        this.populateLocalLinks(remoteLinks.additions, remoteLinks.removals);
-                        this.#prologNeedsRebuild = true
-                        if (this.neighbourhood) {
-                            this.#languageController?.callLinkObservers(remoteLinks, {address: this.neighbourhood!.linkLanguage, name: ""});
-                        }
-                    }
+            this.getCurrentRevision().then(revision => {
+                // if revision is null, then we are not connected to the network yet, so we need to poll fast
+                if(!revision && this.createdFromJoin) {
+                    this.isFastPolling = true;
+                    this.#pollingInterval = this.setupPolling(3000);
+                } else {
+                    this.#pollingInterval = this.setupPolling(30000);
                 }
-            });
+            })
         } catch (e) {
-            console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
+            console.error("Perspective.constructor(): Got error when trying to get current revision and setting polling loop", e);
         }
 
-        // setup polling loop for Perspectives with a linkLanguage
-        this.#pollingInterval = setInterval(
+        this.#prologMutex = new Mutex()
+    }
+
+    setupPolling(intervalMs: number) {
+        return setInterval(
             async () => {
                 try {
+                    const currentRevision = await this.getCurrentRevision();
+
+                    //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
+                    if (this.isFastPolling && currentRevision) {
+                        this.isFastPolling = false;
+                        clearInterval(this.#pollingInterval);
+                        this.#pollingInterval = this.setupPolling(30000);
+
+                        //Lets also publish the links we have commited but not pushed since we were not connected
+                        const mutations = this.#db.getPendingDiffs(this.uuid);
+                        const batchedMutations = {
+                            additions: [],
+                            removals: []
+                        } as PerspectiveDiff
+                        for (const addition of mutations.additions) {
+                            batchedMutations.additions.push(addition);
+                        }
+                        for (const removal of mutations.removals) {
+                            batchedMutations.removals.push(removal);
+                        }
+                        await this.callLinksAdapter('commit', batchedMutations);
+                    }
+
                     let links = await this.callLinksAdapter("pull");
                     if (links.additions && links.removals) {
                         if (links.additions.length > 0 || links.removals.length > 0) {
@@ -99,9 +134,8 @@ export default class Perspective {
                     console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
                 }
             },
-            20000
+            intervalMs
         );
-        this.#prologMutex = new Mutex()
     }
 
 
@@ -198,6 +232,57 @@ export default class Perspective {
         })
     }
 
+    private getCurrentRevision(): Promise<String | null> {
+        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+            return Promise.resolve(null)
+        }
+
+        return new Promise(async (resolve, reject) => {
+            setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000);
+            try {
+                const address = this.neighbourhood!.linkLanguage;
+                const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
+                if(linksAdapter) {
+                    const result = await linksAdapter.currentRevision();
+                    resolve(result)
+                } else {
+                    console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
+                    // TODO: request install
+                    resolve(null)
+                }
+            } catch(e) {
+                console.error("Error while trying to call links adapter:", e)
+                reject(e)
+            }
+        })
+    }
+
+    private async commit(diff: PerspectiveDiff): Promise<PerspectiveDiff | null> {
+        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+            return null;
+        }
+
+        let canCommit = false;
+        if (!this.createdFromJoin){
+            //If current agent created neighbourhood, then we should always be allowed to commit
+            canCommit = true;
+        } else {
+            //We did not create the neighbourhood, so we should check if we already have some data sync'd before making a commit
+            const currentRevision = this.getCurrentRevision();
+            if (currentRevision != null) {
+                canCommit = true;
+            }
+        }
+
+        if (canCommit) {
+            //Call the links adapter to commit the diff
+            const returnedDiff = await this.callLinksAdapter('commit', diff);
+            return returnedDiff;
+        } else {
+            return null;
+        }
+    }
+
     async syncWithSharingAdapter() {
         //@ts-ignore
         const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link);
@@ -254,11 +339,16 @@ export default class Perspective {
     }
 
     async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
-        const linkExpression = this.ensureLinkExpression(link)
-        this.callLinksAdapter('commit', {
+        const linkExpression = this.ensureLinkExpression(link);
+        const diff = {
             additions: [linkExpression],
             removals: []
-        } as PerspectiveDiff)
+        } as PerspectiveDiff
+        const addLink = await this.commit(diff);
+
+        if (!addLink) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        }
 
         this.addLocalLink(linkExpression)
         this.#prologNeedsRebuild = true;
@@ -280,12 +370,10 @@ export default class Perspective {
     }
 
     async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
-        //console.debug("LINK REPO: updating link:", oldLink, newLink)
         const addr = this.findLink(oldLink)
         if (!addr) {
             throw new Error(`Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
         }
-        //console.debug("hash:", addr)
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
 
@@ -301,10 +389,16 @@ export default class Perspective {
             this.#db.attachTarget(this.uuid, newLink.target, addr)
         }
 
-        this.callLinksAdapter('commit', {
+        const diff = {
             additions: [newLinkExpression],
             removals: [oldLink]
-        } as PerspectiveDiff)
+        } as PerspectiveDiff
+        const mutation = await this.commit(diff);
+
+        if (!mutation) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        }
+
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
@@ -321,10 +415,17 @@ export default class Perspective {
 
     async removeLink(linkExpression: LinkExpressionInput) {
         this.removeLocalLink(linkExpression);
-        this.callLinksAdapter('commit',  {
+
+        const diff = {
             additions: [],
             removals: [linkExpression]
-        } as PerspectiveDiff);
+        } as PerspectiveDiff
+        const mutation = await this.commit(diff);
+        
+        if (!mutation) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        }
+
         this.#prologNeedsRebuild = true;
         this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),

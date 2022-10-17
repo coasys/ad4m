@@ -33,15 +33,19 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             agentByDID: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 const { did } = args;
-                const agentLanguage = core.languageController.getAgentLanguage().expressionAdapter;
-                if (!agentLanguage) {
-                    throw Error("Agent language does not have an expression adapter")
-                }
-                const expr = await agentLanguage.get(did);
-                if (expr != null) {
-                    return expr.data;
+                if (did != core.agentService.did) {
+                    const agentLanguage = core.languageController.getAgentLanguage().expressionAdapter;
+                    if (!agentLanguage) {
+                        throw Error("Agent language does not have an expression adapter")
+                    }
+                    const expr = await agentLanguage.get(did);
+                    if (expr != null) {
+                        return expr.data;
+                    } else {
+                        return null
+                    }
                 } else {
-                    return null
+                    return core.agentService.agent
                 }
             },
             //@ts-ignore
