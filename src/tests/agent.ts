@@ -98,7 +98,7 @@ export default function agentTests(testContext: TestContext) {
 
                 const currentAgent = await ad4mClient.agent.me();
                 expect(currentAgent.perspective).toBeDefined()
-                expect(currentAgent.perspective!.links.length).toBe(0);
+                expect(currentAgent.perspective!.links.length).toBe(1);
                 expect(currentAgent.directMessageLanguage).toBeDefined();
 
                 await ad4mClient.agent.mutatePublicPerspective({
@@ -112,7 +112,7 @@ export default function agentTests(testContext: TestContext) {
 
                 const currentAgentPostMutation = await ad4mClient.agent.me();
                 expect(currentAgentPostMutation.perspective).toBeDefined()
-                expect(currentAgentPostMutation.perspective!.links.length).toBe(1);
+                expect(currentAgentPostMutation.perspective!.links.length).toBe(2);
                 const link = currentAgentPostMutation.perspective!.links[0];
 
                 await ad4mClient.agent.mutatePublicPerspective({
@@ -122,7 +122,7 @@ export default function agentTests(testContext: TestContext) {
 
                 const currentAgentPostDeletion = await ad4mClient.agent.me();
                 expect(currentAgentPostDeletion.perspective).toBeDefined()
-                expect(currentAgentPostDeletion.perspective!.links.length).toBe(0);
+                expect(currentAgentPostDeletion.perspective!.links.length).toBe(1);
             })
         })
     }
