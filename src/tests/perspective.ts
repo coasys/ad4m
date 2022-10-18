@@ -52,7 +52,10 @@ export default function perspectiveTests(testContext: TestContext) {
                 await create.remove(linkAdd);
 
                 const linksPostDelete = await create.get({} as LinkQuery);
-                expect(linksPostDelete.length).toBe(1);
+                expect(linksPostDelete.length).toBe(0);
+
+                const snapshot = await create.snapshot();
+                expect(snapshot.links.length).toBe(0);
             })
 
             it('test local perspective links - time query', async () => {
