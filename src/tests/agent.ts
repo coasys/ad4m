@@ -93,6 +93,37 @@ export default function agentTests(testContext: TestContext) {
                 const getInvalidDid = await ad4mClient.agent.byDID("na");
                 expect(getInvalidDid).toBe(null);
             })
+            it('can mutate agent public profile', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+
+                const currentAgent = await ad4mClient.agent.me();
+                expect(currentAgent.perspective).toBeDefined()
+                expect(currentAgent.perspective!.links.length).toBe(0);
+                expect(currentAgent.directMessageLanguage).toBeDefined();
+
+                await ad4mClient.agent.mutatePublicPerspective({
+                    additions: [new Link({
+                        source: "test://source-test",
+                        predicate: "test://predicate-test",
+                        target: "test://target-test"
+                    })],
+                    removals: []
+                });
+
+                const currentAgentPostMutation = await ad4mClient.agent.me();
+                expect(currentAgentPostMutation.perspective).toBeDefined()
+                expect(currentAgentPostMutation.perspective!.links.length).toBe(1);
+                const link = currentAgentPostMutation.perspective!.links[0];
+
+                await ad4mClient.agent.mutatePublicPerspective({
+                    additions: [],
+                    removals: [link]
+                });
+
+                const currentAgentPostDeletion = await ad4mClient.agent.me();
+                expect(currentAgentPostDeletion.perspective).toBeDefined()
+                expect(currentAgentPostDeletion.perspective!.links.length).toBe(0);
+            })
         })
     }
 }
