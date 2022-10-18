@@ -50,12 +50,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentStatus: (parent, args, context, info) => {
-                checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
-                return core.agentService.dump()
-            },
-            //@ts-ignore
-            agentIsLocked: (parent, args, context, info) => {
-                return !core.agentService.isUnlocked
+                const {isInitialized, isUnlocked} = core.agentService.dump()
+                return { isInitialized, isUnlocked }
             },
             //@ts-ignore
             expression: async (parent, args, context, info) => {
