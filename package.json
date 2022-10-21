@@ -18,6 +18,7 @@
     "build": "tsc",
     "run": "node lib/main.js",
     "prepare-test": "rm -rf src/test-temp && ./scripts/build-test-language.sh && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && npm run inject-language-language && npm run publish-test-languages && npm run inject-publishing-agent",
+    "prepare-test-no-nix": "rm -rf src/test-temp && ./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && npm run inject-language-language && npm run publish-test-languages && npm run inject-publishing-agent",
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && node scripts/get-builtin-test-langs.js && npm run inject-language-language && npm run publish-test-languages && npm run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
@@ -27,6 +28,7 @@
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit --runInBand",
     "test-all:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/run-all-test.ps1 & jest --forceExit --runInBand",
     "test": "npm run prepare-test && nix-shell --run \"npm run test-all\" && node scripts/cleanTestingData.js",
+    "test-no-nix": "npm run prepare-test-no-nix && npm run test-all && node scripts/cleanTestingData.js",
     "test-auth": "npm run prepare-test && jest --forceExit src/tests/authentication.test.ts && node scripts/cleanTestingData.js",
     "test:windows": "npm run prepare-test:windows && npm run test-all:windows && node scripts/cleanTestingData.js",
     "jest": "jest"
@@ -75,7 +77,7 @@
   "dependencies": {
     "@graphql-tools/schema": "^8.5.1",
     "@holochain/client": "0.3.2",
-    "@perspect3vism/ad4m": "0.1.37",
+    "@perspect3vism/ad4m": "0.1.38",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
     "@transmute/did-key-secp256k1": "^0.2.1-unstable.29",
     "@transmute/did-key.js": "^0.2.1-unstable.29",
