@@ -1076,10 +1076,10 @@
     "tslib" "^2.4.0"
     "webcrypto-core" "^1.7.4"
 
-"@perspect3vism/ad4m@0.1.37":
-  "integrity" "sha512-TRYCUPKXvAmpp66DcE4xjQVCcZnHth4sCKXLaWwEyexUb24Z5T8RJ6aR8rINbbJh5ewBIpCxflxJt9GO07EuNA=="
-  "resolved" "https://registry.npmjs.org/@perspect3vism/ad4m/-/ad4m-0.1.37.tgz"
-  "version" "0.1.37"
+"@perspect3vism/ad4m@0.1.38":
+  "integrity" "sha512-DhQA8GYjo25pzmhEEdyPeS+cRirRfOdyRuNCXCrP6oV2kSitk1VET57hDXNgavuCrGZvR9zpkglx8g6gqK4WHQ=="
+  "resolved" "https://registry.npmjs.org/@perspect3vism/ad4m/-/ad4m-0.1.38.tgz"
+  "version" "0.1.38"
   dependencies:
     "@apollo/client" "3.6.9"
     "@holochain/client" "0.3.2"
@@ -8424,7 +8424,7 @@
 
 "swipl-stdio@perspect3vism/node-swipl-stdio.git#7094a055a4ec3511530140ca7a4447d6649a9dee":
   "integrity" "sha512-FgQYJyyoO9ngsxf1JUbAWoSUihgYJLYyMfAioKULVkAmaGcWWyIzCj5EHvjW2IZsc+XX1VIUPsIPKp2yIsOMpQ=="
-  "resolved" "git+ssh://git@github.com/perspect3vism/node-swipl-stdio.git"
+  "resolved" "git+ssh://git@github.com/perspect3vism/node-swipl-stdio.git#7094a055a4ec3511530140ca7a4447d6649a9dee"
   "version" "1.0.4"
   dependencies:
     "debug" "^2.6.4"
