@@ -335,6 +335,12 @@ export default class LanguageController {
     }
 
     async languageRemove(hash: String): Promise<void> {
+        //Teardown any intervals the language has running
+        const language = this.#languages.get(hash as string);
+        if (language?.teardown) { 
+            language.teardown();
+        }
+
         this.#holochainService.removeDnaForLang(hash as string);
 
         //Remove language files

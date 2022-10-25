@@ -134,6 +134,8 @@ export default function runtimeTests(testContext: TestContext) {
             const ad4mClient = testContext.ad4mClient!
             const runtimeInfo = await ad4mClient.runtime.info();
             expect(runtimeInfo.ad4mExecutorVersion).toBe(process.env.npm_package_version);
+            expect(runtimeInfo.isUnlocked).toBe(true);
+            expect(runtimeInfo.isInitialized).toBe(true);
         })
     }
 }

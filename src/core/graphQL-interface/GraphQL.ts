@@ -228,15 +228,18 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             runtimeMessageOutbox: (parent, args, context, info) => {
-                console.log("runtimeMessageOutbox")
                 checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 return core.runtimeService.getMessagesOutbox(filter)
             },
             //@ts-ignore
             runtimeInfo: (parent, args) => {
+                const isInitialized = core.agentService.isInitialized();
+                const isUnlocked = core.agentService.isUnlocked();
                 return {
                     ad4mExecutorVersion: ad4mExecutorVersion,
+                    isUnlocked,
+                    isInitialized
                 }
             }
         },
@@ -508,6 +511,13 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveAddLink: async (parent, args, context, info) => {
+                const { uuid, link } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
+                const perspective = core.perspectivesController.perspective(uuid)
+                return await perspective.addLink(link)
+            },
+            //@ts-ignore
+            perspectiveAddLinkExpression: async (parent, args, context, info) => {
                 const { uuid, link } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)

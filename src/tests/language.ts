@@ -175,6 +175,11 @@ export default function languageTests(testContext: TestContext) {
                     expect(installTemplated.constructorIcon).toBeDefined();
                     expect(installTemplated.settingsIcon).toBeDefined();
                 })
+
+                it('Bob can delete a language', async () => {
+                    const deleteLanguage = await bobAd4mClient.languages.remove(sourceLanguage.address);
+                    expect(deleteLanguage).toBe(true);
+                })
             })
          })
     }
