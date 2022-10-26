@@ -162,6 +162,8 @@ export default class LanguageController {
         // @ts-ignore
         const hash = await this.ipfsHash(bundleBytes)
 
+        //NOTE: this likely has be upraded to use process.dlopen (since we are migrating to ESM for executor)
+        //see: https://nodejs.org/api/process.html#processdlopenmodule-filename-flags
         const languageSource = require(sourceFilePath)
         let create;
         if (!languageSource.default) {

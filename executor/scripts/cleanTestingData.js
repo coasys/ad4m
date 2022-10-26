@@ -1,5 +1,4 @@
 //Remove languageLanguage bundle so that when running tests & making commit to github, the languageLanguage bundle is not comitted also
-import fs from "fs";
 
 const bootstrapSeedPath = "./src/tests/bootstrapSeed.json";
 const publishingBootstrapSeedPath = "./src/tests/publishBootstrapSeed.json";
