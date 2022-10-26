@@ -1,4 +1,4 @@
-const fs = require("fs");
+import fs from "fs";
 
 const languageLanguagePath = "./src/test-temp/languages/languages/build/bundle.js";
 const bootstrapSeedPath = "./src/tests/bootstrapSeed.json";
