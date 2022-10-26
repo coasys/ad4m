@@ -1,5 +1,5 @@
 {
-  "name": "flux-monorepo",
+  "name": "ad4m-executor-monorepo",
   "version": "0.1.0",
   "workspaces": [
     "core",
