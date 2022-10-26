@@ -13,6 +13,7 @@
     "nix",
     "holochain_version.nix"
   ],
+  "type": "module",
   "types": "src/types.d.ts",
   "scripts": {
     "build": "tsc",
