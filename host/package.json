@@ -5,6 +5,7 @@
   "bin": {
     "ad4m": "build/cli.js"
   },
+  "type": "module",
   "scripts": {
     "prepare-dev": "yarn run build-holochain",
     "build-holochain": "echo \"\n\n\n\nThis next stage will fail if Nix is not installed!! You can install here: https://nixos.wiki/wiki/Nix_Installation_Guide\" && sleep 5 && nix-shell --run ./scripts/copy-hc.sh",
