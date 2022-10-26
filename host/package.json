@@ -55,8 +55,8 @@
   "homepage": "https://github.com/fluxsocial/ad4m-host#readme",
   "dependencies": {
     "@apollo/client": "^3.6.9",
-    "@perspect3vism/ad4m": "^0.1.40",
-    "@perspect3vism/ad4m-executor": "0.1.54",
+    "@perspect3vism/ad4m": "file:../core",
+    "@perspect3vism/ad4m-executor": "file:../executor",
     "appdata-path": "perspect3vism/appdata-path",
     "esm": "^3.2.25",
     "fs-extra": "^9.1.0",
