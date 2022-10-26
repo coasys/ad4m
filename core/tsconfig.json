@@ -1,5 +1,6 @@
 {
   "include": ["./src/buildSchema.ts", "./src/Ad4mClient.test.ts"], 
+  "exclude": ["./src/*.test.ts"],
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig.json to read more about this file */
 
