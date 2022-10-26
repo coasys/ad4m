@@ -10,3 +10,11 @@ executor/scripts/note-ipfs-hash
 executor/scripts/perspective-diff-sync-hash
 executorsrc/tests/publishing-agent/ad4m/data/db.json
 .DS_Store
+
+core/Links.test.js
+core/lib/*
+coverage
+.DS_store
+docs-src/api.md
+docs-src/typedoc
+docs-src/_book

@@ -1,0 +1,580 @@
+
+<!DOCTYPE HTML>
+<html lang="" >
+    <head>
+        <meta charset="UTF-8">
+        <title>Writing and using Social DNA · AD4M Documentation</title>
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="description" content="">
+        <meta name="generator" content="HonKit 4.0.0">
+        <meta name="author" content="Nicolas Luck">
+        
+        
+    
+    <link rel="stylesheet" href="gitbook/style.css">
+
+    
+            
+                
+                <link rel="stylesheet" href="gitbook/@honkit/honkit-plugin-highlight/website.css">
+                
+            
+                
+                <link rel="stylesheet" href="gitbook/gitbook-plugin-search/search.css">
+                
+            
+                
+                <link rel="stylesheet" href="gitbook/gitbook-plugin-fontsettings/website.css">
+                
+            
+        
+
+    
+
+    
+        
+    
+        
+    
+        
+    
+        
+    
+        
+    
+        
+    
+
+        
+    
+    
+    <meta name="HandheldFriendly" content="true"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <link rel="apple-touch-icon-precomposed" sizes="152x152" href="gitbook/images/apple-touch-icon-precomposed-152.png">
+    <link rel="shortcut icon" href="gitbook/images/favicon.ico" type="image/x-icon">
+
+    
+    <link rel="next" href="api.html" />
+    
+    
+    <link rel="prev" href="language.html" />
+    
+
+    </head>
+    <body>
+        
+<div class="book honkit-cloak">
+    <div class="book-summary">
+        <img src="ad4mlogo_green_angle2_colouremblem.png" style="width: 100%;">
+        <div class="version-container" style="display: flex; justify-content: right; margin-top: -9px;">
+            <div class="version" style="padding-right: 12px">v0.1.37</div>
+        </div>
+        
+        
+            
+            
+                <nav role="navigation">
+                
+
+
+<ul class="summary">
+    
+    
+
+    
+
+    
+        
+        
+    
+        <li class="chapter " data-level="1.1" data-path="./">
+            
+                <a href="./">
+            
+                    
+                    Introduction
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="1.2" data-path="start.html">
+            
+                <a href="start.html">
+            
+                    
+                    Getting Started
+            
+                </a>
+            
+
+            
+            <ul class="articles">
+                
+    
+        <li class="chapter " data-level="1.2.1" data-path="start.html">
+            
+                <a href="start.html#1-install-ad4min">
+            
+                    
+                    Install AD4Min
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="1.2.2" data-path="start.html">
+            
+                <a href="start.html#2-setup-app-to-connect-to-ad4m">
+            
+                    
+                    Setup app / connect to AD4M
+            
+                </a>
+            
+
+            
+        </li>
+    
+
+            </ul>
+            
+        </li>
+    
+        <li class="chapter " data-level="1.3" data-path="tutorial.html">
+            
+                <a href="tutorial.html">
+            
+                    
+                    Tutorial
+            
+                </a>
+            
+
+            
+            <ul class="articles">
+                
+    
+        <li class="chapter " data-level="1.3.1" data-path="tutorial.html">
+            
+                <a href="tutorial.html#1-create-a-perspective-and-add-content">
+            
+                    
+                    Create Perspective
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="1.3.2" data-path="tutorial.html">
+            
+                <a href="tutorial.html#2-publish-perspective-as-neighbourhood">
+            
+                    
+                    Publish Neighbourhood
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="1.3.3" data-path="tutorial.html">
+            
+                <a href="tutorial.html#3-joining-a-neighbourhood-on-another-nodeagent">
+            
+                    
+                    Join Neighbourhood
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="1.3.4" data-path="tutorial.html">
+            
+                <a href="tutorial.html#4-listening-to-perspective-changes">
+            
+                    
+                    Change Listener
+            
+                </a>
+            
+
+            
+        </li>
+    
+
+            </ul>
+            
+        </li>
+    
+
+    
+        
+        <li class="divider"></li>
+        
+        
+    
+        <li class="chapter " data-level="2.1" data-path="language.html">
+            
+                <a href="language.html">
+            
+                    
+                    Creating AD4M Languages
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter active" data-level="2.2" data-path="sdna.html">
+            
+                <a href="sdna.html">
+            
+                    
+                    Writing and using Social DNA
+            
+                </a>
+            
+
+            
+        </li>
+    
+
+    
+        
+        <li class="divider"></li>
+        
+        
+    
+        <li class="chapter " data-level="3.1" data-path="api.html">
+            
+                <a href="api.html">
+            
+                    
+                    API Reference
+            
+                </a>
+            
+
+            
+            <ul class="articles">
+                
+    
+        <li class="chapter " data-level="3.1.1" data-path="api.html">
+            
+                <a href="api.html#class-agent">
+            
+                    
+                    Agent
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.2" data-path="api.html">
+            
+                <a href="api.html#interface-language">
+            
+                    
+                    Language
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.3" data-path="api.html">
+            
+                <a href="api.html#class-perspective">
+            
+                    
+                    Perspective
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.4" data-path="api.html">
+            
+                <a href="api.html#class-perspectiveproxy">
+            
+                    
+                    PerspectiveProxy
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.5" data-path="api.html">
+            
+                <a href="api.html#class-ad4mclient">
+            
+                    
+                    Ad4mClient
+            
+                </a>
+            
+
+            
+            <ul class="articles">
+                
+    
+        <li class="chapter " data-level="3.1.5.1" data-path="api.html">
+            
+                <a href="api.html#class-agentclient">
+            
+                    
+                    AgentClient
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.5.2" data-path="api.html">
+            
+                <a href="api.html#class-languageclient">
+            
+                    
+                    LanguageClient
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.5.3" data-path="api.html">
+            
+                <a href="api.html#class-expressionclient">
+            
+                    
+                    ExpressionClient
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.5.4" data-path="api.html">
+            
+                <a href="api.html#class-perspectiveclient">
+            
+                    
+                    PerspectiveClient
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.5.5" data-path="api.html">
+            
+                <a href="api.html#class-neighbourhoodclient">
+            
+                    
+                    NeighbourhoodClient
+            
+                </a>
+            
+
+            
+        </li>
+    
+        <li class="chapter " data-level="3.1.5.6" data-path="api.html">
+            
+                <a href="api.html#class-runtimeclient">
+            
+                    
+                    RuntimeClient
+            
+                </a>
+            
+
+            
+        </li>
+    
+
+            </ul>
+            
+        </li>
+    
+
+            </ul>
+            
+        </li>
+    
+
+    
+
+    <li class="divider"></li>
+
+    <li>
+        <a href="https://perspect3vism.org" target="blank" class="gitbook-link">
+            by Perspect3vism Foundation
+        </a>
+    </li>
+</ul>
+
+
+                </nav>
+            
+        
+    </div>
+
+    <div class="book-body">
+        
+            <div class="body-inner">
+                
+                    
+
+<div class="book-header" role="navigation">
+    
+
+    <!-- Title -->
+    <h1>
+        <i class="fa fa-circle-o-notch fa-spin"></i>
+        <a href="." >Writing and using Social DNA</a>
+    </h1>
+</div>
+
+
+
+
+                    <div class="page-wrapper" tabindex="-1" role="main">
+                        <div class="page-inner">
+                            
+                                <section class="normal markdown-section">
+                                
+                                <h1 id="writing-and-using-social-dna">Writing and using Social DNA</h1>
+<p>COMING SOON</p>
+
+                                
+                                </section>
+                            
+                        </div>
+                    </div>
+                
+            </div>
+
+            
+                
+                <a href="language.html" class="navigation navigation-prev " aria-label="Previous page: Creating AD4M Languages">
+                    <i class="fa fa-angle-left"></i>
+                </a>
+                
+                
+                <a href="api.html" class="navigation navigation-next " aria-label="Next page: API Reference">
+                    <i class="fa fa-angle-right"></i>
+                </a>
+                
+            
+        
+    </div>
+
+    <script>
+        var gitbook = gitbook || [];
+        gitbook.push(function() {
+            gitbook.page.hasChanged({"page":{"title":"Writing and using Social DNA","level":"2.2","depth":1,"next":{"title":"API Reference","level":"3.1","depth":1,"path":"api.md","ref":"api.md","articles":[{"title":"Agent","level":"3.1.1","depth":2,"anchor":"#class-agent","path":"api.md","ref":"api.md#class-agent","articles":[]},{"title":"Language","level":"3.1.2","depth":2,"anchor":"#interface-language","path":"api.md","ref":"api.md#interface-language","articles":[]},{"title":"Perspective","level":"3.1.3","depth":2,"anchor":"#class-perspective","path":"api.md","ref":"api.md#class-perspective","articles":[]},{"title":"PerspectiveProxy","level":"3.1.4","depth":2,"anchor":"#class-perspectiveproxy","path":"api.md","ref":"api.md#class-perspectiveproxy","articles":[]},{"title":"Ad4mClient","level":"3.1.5","depth":2,"anchor":"#class-ad4mclient","path":"api.md","ref":"api.md#class-ad4mclient","articles":[{"title":"AgentClient","level":"3.1.5.1","depth":3,"anchor":"#class-agentclient","path":"api.md","ref":"api.md#class-agentclient","articles":[]},{"title":"LanguageClient","level":"3.1.5.2","depth":3,"anchor":"#class-languageclient","path":"api.md","ref":"api.md#class-languageclient","articles":[]},{"title":"ExpressionClient","level":"3.1.5.3","depth":3,"anchor":"#class-expressionclient","path":"api.md","ref":"api.md#class-expressionclient","articles":[]},{"title":"PerspectiveClient","level":"3.1.5.4","depth":3,"anchor":"#class-perspectiveclient","path":"api.md","ref":"api.md#class-perspectiveclient","articles":[]},{"title":"NeighbourhoodClient","level":"3.1.5.5","depth":3,"anchor":"#class-neighbourhoodclient","path":"api.md","ref":"api.md#class-neighbourhoodclient","articles":[]},{"title":"RuntimeClient","level":"3.1.5.6","depth":3,"anchor":"#class-runtimeclient","path":"api.md","ref":"api.md#class-runtimeclient","articles":[]}]}]},"previous":{"title":"Creating AD4M Languages","level":"2.1","depth":1,"path":"language.md","ref":"language.md","articles":[]},"dir":"ltr"},"config":{"plugins":["livereload"],"styles":{"website":"styles/website.css","pdf":"styles/pdf.css","epub":"styles/epub.css","mobi":"styles/mobi.css","ebook":"styles/ebook.css","print":"styles/print.css"},"pluginsConfig":{"livereload":{},"highlight":{},"search":{},"lunr":{"maxIndexSize":1000000,"ignoreSpecialCharacters":false},"fontsettings":{"theme":"white","family":"sans","size":2},"theme-default":{"styles":{"website":"styles/website.css","pdf":"styles/pdf.css","epub":"styles/epub.css","mobi":"styles/mobi.css","ebook":"styles/ebook.css","print":"styles/print.css"},"showLevel":false}},"theme":"default","author":"Nicolas Luck","pdf":{"pageNumbers":true,"fontSize":12,"fontFamily":"Arial","paperSize":"a4","chapterMark":"pagebreak","pageBreaksBefore":"/","margin":{"right":62,"left":62,"top":56,"bottom":56},"embedFonts":false},"structure":{"langs":"LANGS.md","readme":"README.md","glossary":"GLOSSARY.md","summary":"SUMMARY.md"},"variables":{"ad4mVersion":"0.1.37"},"title":"AD4M Documentation","gitbook":"*"},"file":{"path":"sdna.md","mtime":"2022-10-18T11:45:15.518Z","type":"markdown"},"gitbook":{"version":"4.0.0","time":"2022-10-23T15:38:49.010Z"},"basePath":".","book":{"language":""}});
+        });
+    </script>
+</div>
+
+        
+    <noscript>
+        <style>
+            .honkit-cloak {
+                display: block !important;
+            }
+        </style>
+    </noscript>
+    <script>
+        // Restore sidebar state as critical path for prevent layout shift
+        function __init__getSidebarState(defaultValue){
+            var baseKey = "";
+            var key = baseKey + ":sidebar";
+            try {
+                var value = localStorage[key];
+                if (value === undefined) {
+                    return defaultValue;
+                }
+                var parsed = JSON.parse(value);
+                return parsed == null ? defaultValue : parsed;
+            } catch (e) {
+                return defaultValue;
+            }
+        }
+        function __init__restoreLastSidebarState() {
+            var isMobile = window.matchMedia("(max-width: 600px)").matches;
+            if (isMobile) {
+                // Init last state if not mobile
+                return;
+            }
+            var sidebarState = __init__getSidebarState(true);
+            var book = document.querySelector(".book");
+            // Show sidebar if it enabled
+            if (sidebarState && book) {
+                book.classList.add("without-animation", "with-summary");
+            }
+        }
+
+        try {
+            __init__restoreLastSidebarState();
+        } finally {
+            var book = document.querySelector(".book");
+            book.classList.remove("honkit-cloak");
+        }
+    </script>
+    <script src="gitbook/gitbook.js"></script>
+    <script src="gitbook/theme.js"></script>
+    
+        
+        <script src="gitbook/gitbook-plugin-livereload/plugin.js"></script>
+        
+    
+        
+        <script src="gitbook/gitbook-plugin-search/search-engine.js"></script>
+        
+    
+        
+        <script src="gitbook/gitbook-plugin-search/search.js"></script>
+        
+    
+        
+        <script src="gitbook/gitbook-plugin-lunr/lunr.min.js"></script>
+        
+    
+        
+        <script src="gitbook/gitbook-plugin-lunr/search-lunr.js"></script>
+        
+    
+        
+        <script src="gitbook/gitbook-plugin-fontsettings/fontsettings.js"></script>
+        
+    
+
+    </body>
+</html>
+
