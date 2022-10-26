@@ -1,14 +1,17 @@
 {
-  "include": ["./src/buildSchema.ts", "./src/Ad4mClient.test.ts"], 
-  "exclude": ["./src/*.test.ts"],
+  "include": ["./src/**/*.ts", "./src/*.ts", "./shims"],
+  "exclude": ["./src/*.test.ts", "./src/*.test.ts"],
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig.json to read more about this file */
-
+    // "paths": {
+    //   "type-graphql": ["./shims/type-graphql.ts"],
+    //   "reflect-metadata": ["./shims/reflect-metadata.ts"]
+    // },
     /* Basic Options */
     // "incremental": true,                         /* Enable incremental compilation */
-    "target": "es2018",                                /* Specify ECMAScript target version: 'ES3' (default), 'ES5', 'ES2015', 'ES2016', 'ES2017', 'ES2018', 'ES2019', 'ES2020', or 'ESNEXT'. */
-    "lib": ["es2018", "esnext.asynciterable"],
-    "module": "commonjs",                           /* Specify module code generation: 'none', 'commonjs', 'amd', 'system', 'umd', 'es2015', 'es2020', or 'ESNext'. */
+    "target": "es2020",                                /* Specify ECMAScript target version: 'ES3' (default), 'ES5', 'ES2015', 'ES2016', 'ES2017', 'ES2018', 'ES2019', 'es2015', or 'ESNEXT'. */
+    "lib": ["es2020", "esnext.asynciterable"],
+    "module": "es2020",                           /* Specify module code generation: 'none', 'commonjs', 'amd', 'system', 'umd', 'es2015', 'es2020', or 'ESNext'. */
     // "lib": [],                                   /* Specify library files to be included in the compilation. */
     // "allowJs": true,                             /* Allow javascript files to be compiled. */
     // "checkJs": true,                             /* Report errors in .js files. */
@@ -17,7 +20,7 @@
     // "declarationMap": true,                      /* Generates a sourcemap for each corresponding '.d.ts' file. */
     // "sourceMap": true,                           /* Generates corresponding '.map' file. */
     // "outFile": "./",                             /* Concatenate and emit output to single file. */
-    "rootDir": "./src",                             /* Specify the root directory of input files. Use to control the output directory structure with --outDir. */
+    "rootDir": "./",                             /* Specify the root directory of input files. Use to control the output directory structure with --outDir. */
     "outDir": "./lib",
     // "composite": true,                           /* Enable project compilation */
     // "tsBuildInfoFile": "./",                     /* Specify file to store incremental compilation information */

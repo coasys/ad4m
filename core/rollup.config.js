@@ -1,13 +1,19 @@
 import alias from '@rollup/plugin-alias';
-import resolve from '@rollup/plugin-node-resolve';
+import nodeResolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 
 module.exports = {
   input: 'lib/src/index.js',
-  output: {
-    dir: 'lib',
-    format: 'cjs'
-  },
+  output: [
+    {
+      format: 'cjs',
+      file: "lib/index.cjs",
+    },
+    {
+      format: 'esm',
+      file: "lib/index.js",
+    }
+  ],
   plugins: [
     alias({
       entries: [
@@ -15,7 +21,7 @@ module.exports = {
         { find: 'reflect-metadata', replacement: './lib/shims/reflect-metadata.js' }
       ]
     }),
-    resolve(),
+    nodeResolve(),
     commonjs()
   ]
 };

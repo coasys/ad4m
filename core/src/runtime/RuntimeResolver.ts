@@ -1,4 +1,3 @@
-import 'reflect-metadata'
 import { Arg, Mutation, Resolver, Query, Subscription, ObjectType, Field } from "type-graphql";
 import { Perspective, PerspectiveExpression, PerspectiveInput } from "../perspectives/Perspective";
 import { ExpressionProof } from "../expression/Expression";
