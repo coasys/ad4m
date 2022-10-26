@@ -6,7 +6,7 @@
     "ad4m": "build/cli.js"
   },
   "scripts": {
-    "prepare-dev": "npm run build-holochain",
+    "prepare-dev": "yarn run build-holochain",
     "build-holochain": "echo \"\n\n\n\nThis next stage will fail if Nix is not installed!! You can install here: https://nixos.wiki/wiki/Nix_Installation_Guide\" && sleep 5 && nix-shell --run ./scripts/copy-hc.sh",
     "copy-swipl": "echo \"\n\n\n\nThis next stage will fail if Nix is not installed!! You can install here: https://nixos.wiki/wiki/Nix_Installation_Guide\" && sleep 5 && nix-shell --run ./scripts/copy-swipl.sh",
     "relink-swipl-macos": "./scripts/relink-swipl-macos.sh",
@@ -18,11 +18,11 @@
     "package-macos": "pkg . -o dist/ad4m-macos-x64 -t node16-macos-x64 --public-packages \"*\"",
     "package-linux": "pkg . -o dist/ad4m-linux-x64 -t node16-linux-x64 --public-packages \"*\"",
     "package-windows": "pkg . -o dist/ad4m-windows-x64 -t node16-windows-x64 --public-packages \"*\"",
-    "release-macos": "npm run build && npm run package-macos",
-    "dev": "npm run build && node build/cli.js",
+    "release-macos": "yarn run build && yarn run package-macos",
+    "dev": "yarn run build && node build/cli.js",
     "postinstall": "rm -rf node_modules/ipfs-core-types/src && ln -sf node_modules/@perspect3vism/ad4m-executor/default.nix default.nix",
-    "build-all-linux": "npm run build && npm run build-holochain && npm run relink-holochain-linux && npm run copy-swipl && npm run relink-swipl-linux && npm run package-linux",
-    "build-all-macos": "npm run build && npm run build-holochain && npm run relink-holochain-macos && npm run copy-swipl && npm run relink-swipl-macos && npm run package-macos"
+    "build-all-linux": "yarn run build && yarn run build-holochain && yarn run relink-holochain-linux && yarn run copy-swipl && yarn run relink-swipl-linux && yarn run package-linux",
+    "build-all-macos": "yarn run build && yarn run build-holochain && yarn run relink-holochain-macos && yarn run copy-swipl && yarn run relink-swipl-macos && yarn run package-macos"
   },
   "pkg": {
     "scripts": "build/**/*",

@@ -38,7 +38,7 @@ jobs:
         cache: 'yarn'
     - run: yarn install
     - run: yarn run build
-    - run: yarn run test
+    - run: yarn test
 
   test-windows:
     name: Windows Test

@@ -13,7 +13,9 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "test:windows": "turbo run test:windows"
   },
   "devDependencies": {
     "eslint-config-custom": "*",

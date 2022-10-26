@@ -10,6 +10,12 @@
     },
     "dev": {
       "cache": false
+    },
+    "test": {
+      "outputs": []
+    },
+    "test:windows": {
+      "outputs": []
     }
   }
 }
