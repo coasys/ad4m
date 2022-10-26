@@ -52,7 +52,7 @@
     "url": "https://github.com/perspect3vism/ad4m-executor/issues"
   },
   "devDependencies": {
-    "@apollo/client": "^3.6.9",
+    "@apollo/client": "3.6.9",
     "@peculiar/webcrypto": "^1.1.7",
     "@types/faker": "^5.5.7",
     "@types/fs-extra": "^9.0.12",
