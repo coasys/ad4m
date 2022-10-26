@@ -73,6 +73,7 @@ const Perspectives = (props: Props) => {
   useEffect(() => {
     fetchPerspective()
     getLanguages()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const create = async () => {

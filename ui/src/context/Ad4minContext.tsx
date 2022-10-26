@@ -1,4 +1,3 @@
-import { showNotification } from "@mantine/notifications";
 import { Ad4mClient, ExceptionType } from "@perspect3vism/ad4m";
 import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
 import { createContext, useCallback, useEffect, useState } from "react";

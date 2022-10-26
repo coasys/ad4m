@@ -119,6 +119,7 @@ const Language = (props: Props) => {
 
   useEffect(() => {
     getLanguages();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   return (

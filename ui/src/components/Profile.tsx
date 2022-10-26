@@ -2,7 +2,7 @@ import { Avatar, Burger, Button, Card, Container, Group, List, MediaQuery, Modal
 import { Agent, Literal } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useState } from 'react';
 import { CircleCheck } from 'tabler-icons-react';
-import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME, SOURCE_PROFILE } from '../constants/triples';
+import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from '../constants/triples';
 import { MainContainer, MainHeader } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { buildAd4mClient } from '../util';

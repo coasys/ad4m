@@ -1,4 +1,4 @@
-import { ActionIcon, Burger, Button, Center, Container, createStyles, Group, Image, MediaQuery, Modal, PasswordInput, Space, Stack, Text, Title } from '@mantine/core';
+import { ActionIcon, Burger, Button, Center, Container, createStyles, Group, Image, MediaQuery, Modal, PasswordInput, Space, Stack, Text } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import { useContext, useEffect, useState } from 'react';
 import { Copy, Qrcode as QRCodeIcon } from 'tabler-icons-react';

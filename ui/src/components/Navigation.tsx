@@ -1,4 +1,4 @@
-import { Anchor, AppShell, Code, createStyles, Group, Navbar, Text, Image, MediaQuery } from '@mantine/core';
+import { Anchor, AppShell, Code, createStyles, Group, Navbar, Image, MediaQuery } from '@mantine/core';
 import { useContext, useEffect, useState } from 'react';
 import { Grain, Stack2, User, Settings as SettingsIcon } from 'tabler-icons-react';
 import { Link, Outlet, useNavigate } from 'react-router-dom';
