@@ -22,7 +22,7 @@
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
-    "publish-test-languages": "yarn run build && node ./lib/tests/publishTestLangs.js",
+    "publish-test-languages": "yarn run build && ts-node --files ./src/testutils/publishTestLangs.ts",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test-perspective": "jest --forceExit src/core/Perspective.test.ts",
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit --runInBand",
@@ -72,7 +72,8 @@
     "ts-jest": "^27.0.3",
     "typescript": "^4.2.4",
     "unzipper": "^0.10.11",
-    "ws": "^8.8.0"
+    "ws": "^8.8.0",
+    "ts-node": "10.9.1"
   },
   "dependencies": {
     "@graphql-tools/schema": "^8.5.1",
