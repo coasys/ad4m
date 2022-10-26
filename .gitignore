@@ -23,9 +23,9 @@ host/dist
 host/build
 
 
-ad4min/build
-ad4min/src-tauri/bins
-ad4min/.pnp
+ui/build
+ui/src-tauri/bins
+ui/.pnp
 .pnp.js
 
 .env.local
