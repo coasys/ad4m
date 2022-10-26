@@ -26,7 +26,6 @@
     "react-qr-code": "^2.0.7",
     "react-router-dom": "^6.3.0",
     "react-scripts": "4.0.3",
-    "subscriptions-transport-ws": "^0.9.19",
     "tabler-icons-react": "^1.43.0",
     "typescript": "^4.6.2",
     "web-vitals": "^2.1.4"

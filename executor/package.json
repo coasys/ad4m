@@ -103,7 +103,6 @@
     "node-fetch": "^2.6.1",
     "sha256": "^0.2.0",
     "sha3": "^2.1.3",
-    "subscriptions-transport-ws": "^0.11.0",
     "swipl-stdio": "perspect3vism/node-swipl-stdio.git#7094a055a4ec3511530140ca7a4447d6649a9dee",
     "tmp": "^0.2.1"
   }
