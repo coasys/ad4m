@@ -9,6 +9,7 @@ import PerspectivismCore from "../core/PerspectivismCore";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { createClient } from "graphql-ws";
 import { fileURLToPath } from 'url';
+import * as assert from "assert";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -90,16 +91,16 @@ describe("Authentication integration tests", () => {
 
         it("unauthenticated user has all the capabilities", async () => {
             let status = await ad4mClient!.agent.status()
-            expect(status.isUnlocked).toBeTruthy
+            assert.equal(status.isUnlocked, true)
 
             let requestId = await ad4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]')
-            expect(requestId).toMatch(/.+/)
+            assert.match(requestId, /.+/);
 
             let rand = await ad4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
-            expect(rand).toMatch(/\d+/)
+            assert.match(rand, /\d+/);
 
             let jwt = await ad4mClient!.agent.generateJwt(requestId, rand)
-            expect(jwt).toMatch(/.+/)
+            assert.match(jwt, /.+/);
         })
     })
 
