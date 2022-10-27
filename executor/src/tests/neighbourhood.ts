@@ -2,7 +2,7 @@ import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, Language
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
 import fs from "fs";
-import uuid from 'uuid'
+import { v4 as uuidv4 } from 'uuid';
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -17,7 +17,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(create.neighbourhood).toBeNull();
 
                 //Create unique perspective-diff-sync to simulate real scenario
-                const socialContext = await ad4mClient.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuid.v4(), name: "Alice's perspective-diff-sync"}));
+                const socialContext = await ad4mClient.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's perspective-diff-sync"}));
                 expect(socialContext.name).toBe("Alice's perspective-diff-sync");
 
                 let link = new LinkExpression()
@@ -49,7 +49,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuid.v4(), name: "Alice's neighbourhood with Bob"}));
+                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob"}));
                 expect(socialContext.name).toBe("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 

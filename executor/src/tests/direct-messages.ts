@@ -35,7 +35,7 @@ export default function directMessageTests(testContext: TestContext) {
             //@ts-ignore
             let alice, bob, didAlice, didBob
 
-            beforeAll(async () => {
+            before(async () => {
                 alice = testContext.alice!
                 didAlice = (await alice.agent.status()).did
                 bob = testContext.bob!

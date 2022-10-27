@@ -235,7 +235,7 @@ export default function perspectiveTests(testContext: TestContext) {
         describe('PerspectiveProxy', () => {
             let proxy: PerspectiveProxy
             let ad4mClient: Ad4mClient
-            beforeAll(async () => {
+            before(async () => {
                 ad4mClient = testContext.ad4mClient!
                 proxy = await ad4mClient.perspective.add("proxy test");
             })

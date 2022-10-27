@@ -23,6 +23,10 @@ import { Crypto } from "@peculiar/webcrypto"
 import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 //@ts-ignore
 global.crypto = new Crypto();
@@ -30,7 +34,6 @@ Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 const TEST_DIR = `${__dirname}/../test-temp`
 
-jest.setTimeout(200000)
 let core: PerspectivismCore | null = null
 
 function apolloClient(port: number, token?: string): ApolloClient<any> {
@@ -110,7 +113,7 @@ describe("Integration tests", () => {
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
     const ipfsRepoPath = path.join(appDataPath)
 
-    beforeAll(async () => {    
+    before(async () => {    
         if(!fs.existsSync(TEST_DIR)) {
           throw Error("Please ensure that prepare-test is run before running tests!");
         }
@@ -138,7 +141,7 @@ describe("Integration tests", () => {
         testContext.aliceCore = core
     })
 
-    afterAll(async () => {
+    after(async () => {
       expect(await isProcessRunning("holochain")).toBe(true);
       expect(await isProcessRunning("lair-keystore")).toBe(true);
       expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(true);
@@ -159,7 +162,7 @@ describe("Integration tests", () => {
 
     describe('with Alice and Bob', () => {
         let bob: PerspectivismCore | null = null
-        beforeAll(async () => {
+        before(async () => {
             const appDataPath = path.join(TEST_DIR, 'agents', 'bob')
             const ipfsRepoPath = path.join(appDataPath)
             if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
@@ -198,7 +201,7 @@ describe("Integration tests", () => {
           await testContext.makeAllNodesKnown()
         })
 
-        afterAll(async () => {
+        after(async () => {
           await bob!.exit();
           await new Promise((resolve)=>setTimeout(resolve, 500))
         })

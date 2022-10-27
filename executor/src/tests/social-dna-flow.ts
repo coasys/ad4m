@@ -1,9 +1,5 @@
-import { isReference } from "@apollo/client";
-import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, LinkExpression, ExpressionProof, Literal } from "@perspect3vism/ad4m";
+import { Link, LinkQuery, Literal } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
-import sleep from "./sleep";
-import * as fs from 'fs';
-const path = require('path')
 
 export default function socialDNATests(testContext: TestContext) {
     return  () => {

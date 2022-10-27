@@ -14,7 +14,7 @@ export default function languageTests(testContext: TestContext) {
             let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published perspective-diff-sync", "..here for you template");
             sourceLanguageMeta.possibleTemplateParams = ["id", "description", "name"];
 
-            beforeAll(async () => {
+            before(async () => {
                 ad4mClient = testContext.ad4mClient;
                 bobAd4mClient = testContext.bob;
 
@@ -126,7 +126,7 @@ export default function languageTests(testContext: TestContext) {
             describe('with Bob having added Alice to list of trusted agents', () => {
                 let applyTemplateFromSource: LanguageRef = new LanguageRef()
 
-                beforeAll(async () => {
+                before(async () => {
                     //Add alice as trusted agent for bob
                     const aliceDid = await ad4mClient.agent.me();
                     const aliceTrusted = await bobAd4mClient.runtime.addTrustedAgents([aliceDid.did]);
