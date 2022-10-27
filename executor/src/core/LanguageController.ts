@@ -60,7 +60,7 @@ export default class LanguageController {
             await this.loadSystemLanguages()
             if (!this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
         } catch (e) {
-            throw new Error(`Error loading languages ${e}`);
+            throw new Error(`LanguageController.loadLanguages: Error loading languages ${e}`);
         }
     }
 
@@ -68,7 +68,7 @@ export default class LanguageController {
         //Install language language from the bundle file and then update languageAliases to point to language hash
         const { sourcePath, hash: calculatedHash } = await this.saveLanguageBundle(this.#config.languageLanguageBundle);
         if (this.#config.languageLanguageSettings) {
-            console.log("Found settings for languageLanguage, writting settings");
+            console.log("LanguageController.loadSystemLanguages: Found settings for languageLanguage, writting settings");
             this.writeSettings(calculatedHash, this.#config.languageLanguageSettings);
         }
         const { hash, language: languageLanguage } = await this.loadLanguage(sourcePath);
@@ -78,7 +78,7 @@ export default class LanguageController {
         if (!this.#config.languageLanguageOnly) {
             //Install the agent language and set
             if (this.#config.agentLanguageSettings) {
-                console.log("Found settings for agentLanguage, writting settings");
+                console.log("LanguageController.loadSystemLanguages: Found settings for agentLanguage, writting settings");
                 this.writeSettings(this.#config.languageAliases[Config.agentLanguageAlias], this.#config.agentLanguageSettings);
             }
             const agentLanguage = await this.installLanguage(this.#config.languageAliases[Config.agentLanguageAlias], null);
@@ -87,7 +87,7 @@ export default class LanguageController {
 
             //Install the neighbourhood language and set
             if (this.#config.neighbourhoodLanguageSettings) {
-                console.log("Found settings for neighbourhoodLanguage, writting settings");
+                console.log("LanguageController.loadSystemLanguages: Found settings for neighbourhoodLanguage, writting settings");
                 this.writeSettings(this.#config.languageAliases[Config.neighbourhoodLanguageAlias], this.#config.neighbourhoodLanguageSettings);
             }
             const neighbourhoodLanguage = await this.installLanguage(this.#config.languageAliases[Config.neighbourhoodLanguageAlias], null);
@@ -95,7 +95,7 @@ export default class LanguageController {
 
             //Install the perspective language and set
             if (this.#config.perspectiveLanguageSettings) {
-                console.log("Found settings for a perspectiveLanguage, writting settings")
+                console.log("LanguageController.loadSystemLanguages: Found settings for a perspectiveLanguage, writting settings")
                 this.writeSettings(this.#config.languageAliases[Config.perspectiveLanguageAlias], this.#config.perspectiveLanguageSettings);
             }
             const perspectiveLanguage = await this.installLanguage(this.#config.languageAliases[Config.perspectiveLanguageAlias], null);
@@ -161,8 +161,24 @@ export default class LanguageController {
         const bundleBytes = fs.readFileSync(sourceFilePath)
         // @ts-ignore
         const hash = await this.ipfsHash(bundleBytes)
-
-        const languageSource = await import(sourceFilePath);
+        console.debug("LanguageController.loadLanguage: loading language at path", sourceFilePath, "with hash", hash);
+        let languageSource;
+        try {
+            languageSource = await import(sourceFilePath);
+        } catch (e) {
+            const errMsg = `Could not load language ${e}`;
+            console.error(errMsg);
+            this.pubSub.publish(
+                PubSub.EXCEPTION_OCCURRED_TOPIC,
+                {
+                    title: "Failed to load installed language",
+                    message: errMsg,
+                    type: ExceptionType.LanguageIsNotLoaded
+                } as ExceptionInfo
+            );
+            throw new Error(errMsg);
+        }
+        console.warn("loaded");
         let create;
         if (!languageSource.default) {
             create = languageSource;
