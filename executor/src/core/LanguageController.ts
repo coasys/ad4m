@@ -176,24 +176,34 @@ export default class LanguageController {
         try {
             languageSource = await loadModule(sourceFilePath);
         } catch (e) {
-            const errMsg = `Could not load language ${e}`;
-            console.error(errMsg);
-            this.pubSub.publish(
-                PubSub.EXCEPTION_OCCURRED_TOPIC,
-                {
-                    title: "Failed to load installed language",
-                    message: errMsg,
-                    type: ExceptionType.LanguageIsNotLoaded
-                } as ExceptionInfo
-            );
-            throw new Error(errMsg);
+            const cjsPath = sourceFilePath.replace(".js", ".cjs");
+            fs.copyFileSync(sourceFilePath, cjsPath);
+            try {
+                languageSource = await loadModule(cjsPath);
+            } catch (e) {
+                const errMsg = `Could not load language ${e}`;
+                console.error(errMsg);
+                this.pubSub.publish(
+                    PubSub.EXCEPTION_OCCURRED_TOPIC,
+                    {
+                        title: "Failed to load installed language",
+                        message: errMsg,
+                        type: ExceptionType.LanguageIsNotLoaded
+                    } as ExceptionInfo
+                );
+                throw new Error(errMsg);
+            }
         }
-        console.warn("LanguageController.loadLanguage: language loaded!");
+        console.warn("LanguageController.loadLanguage: language loaded!",languageSource);
         let create;
         if (!languageSource.default) {
             create = languageSource;
         } else {
-            create =  languageSource.default;
+            if (languageSource.default.default) {
+                create = languageSource.default.default;
+            } else {
+                create = languageSource.default;
+            }
         }
 
         const customSettings = this.getSettings(hash)
