@@ -10,9 +10,9 @@
 
     /* Basic Options */
     // "incremental": true,                         /* Enable incremental compilation */
-    "target": "es2020",                             /* Specify ECMAScript target version: 'ES3' (default), 'ES5', 'ES2015', 'ES2016', 'ES2017', 'ES2018', 'ES2019', 'es2015', or 'ESNEXT'. */
-    "lib": ["es2020", "esnext.asynciterable", "dom"],
-    "module": "es2020",                           /* Specify module code generation: 'none', 'commonjs', 'amd', 'system', 'umd', 'es2015', 'es2020', or 'ESNext'. */
+    "target": "ESNext",                             /* Specify ECMAScript target version: 'ES3' (default), 'ES5', 'ES2015', 'ES2016', 'ES2017', 'ES2018', 'ES2019', 'es2015', or 'ESNEXT'. */
+    "lib": ["ESNext", "dom"],
+    "module": "ESNext",                           /* Specify module code generation: 'none', 'commonjs', 'amd', 'system', 'umd', 'es2015', 'es2020', or 'ESNext'. */
     // "lib": [],                                   /* Specify library files to be included in the compilation. */
     // "allowJs": true,                             /* Allow javascript files to be compiled. */
     // "checkJs": true,                             /* Report errors in .js files. */
@@ -79,5 +79,8 @@
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true
   },
-  "typedef": [ true, "call-signature", "arrow-call-signature" ]
+  "typedef": [ true, "call-signature", "arrow-call-signature" ],
+  "ts-node": {
+    "files": true
+  },
 }

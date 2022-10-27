@@ -1,7 +1,7 @@
 import Perspective from './Perspective'
 import type PerspectiveContext from './PerspectiveContext'
 import { PerspectivismDb } from './db'
-import uuid from 'uuid'
+import { v4 as uuidv4 } from 'uuid';
 import { Neighbourhood, LinkQuery, PerspectiveHandle, LinkInput } from '@perspect3vism/ad4m'
 import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
@@ -9,8 +9,11 @@ import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
 import { MainConfig } from './Config'
 import path from "path";
-import sleep from '../tests/sleep'
+import {jest, describe, it, expect, beforeEach, afterEach} from '@jest/globals';
+import { fileURLToPath } from 'url';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const did = 'did:local-test-agent'
 const agentService = {
@@ -54,7 +57,7 @@ describe('Perspective', () => {
         const db = new PerspectivismDb(new Memory(""))
         perspective = new Perspective(
             {
-                uuid: uuid.v4(),
+                uuid: uuidv4(),
                 name: "Test Perspective",
                 sharedUrl: undefined
             } as PerspectiveHandle,

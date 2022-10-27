@@ -9,7 +9,7 @@ import Signatures from './Signatures';
 import * as PubSubInstance from '../graphQL-interface/PubSub'
 import type { PubSub } from 'graphql-subscriptions';
 import { resolver } from '@transmute/did-key.js';
-import uuid from 'uuid';
+import { v4 as uuidv4 } from 'uuid';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
 import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, genRequestKey, genRandomDigits, AGENT_AUTH_CAPABILITY, Capability } from './Auth';
 import * as jose from 'jose'
@@ -311,7 +311,7 @@ export default class AgentService {
     }
     
     requestCapability(appName: string, appDesc: string, appUrl: string, capabilities: string) {
-        let requestId = uuid.v4()
+        let requestId = uuidv4()
         let authExtended = {
             requestId,
             auth: {

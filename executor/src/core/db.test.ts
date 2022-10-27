@@ -1,6 +1,6 @@
 import { PerspectivismDb } from './db'
 import Memory from 'lowdb/adapters/Memory'
-import uuid from 'uuid'
+import { v4 as uuidv4 } from 'uuid';
 
 describe('PerspectivismDb', () => {
     let db: PerspectivismDb | undefined
@@ -8,7 +8,7 @@ describe('PerspectivismDb', () => {
 
     beforeEach(() => {
         db = new PerspectivismDb(new Memory(""))
-        pUUID = uuid.v4()
+        pUUID = uuidv4()
     })
 
     it('can store and retrieve objects by name', () => {

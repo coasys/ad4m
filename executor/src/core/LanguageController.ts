@@ -11,7 +11,7 @@ import type HolochainService from './storage-services/Holochain/HolochainService
 import type AgentService from './agent/AgentService'
 import * as PubSub from './graphQL-interface/PubSub'
 import yaml from "js-yaml";
-import uuid from 'uuid'
+import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
@@ -493,7 +493,7 @@ export default class LanguageController {
         let dnaCodeRes: null | string = null;
         if (dnaIndex != -1) {
             if (!sourceLanguageHash) {
-                sourceLanguageHash = uuid.v4();
+                sourceLanguageHash = uuidv4();
             }
             //Create a directory for all of our DNA templating operations
             const tempTemplatingPath = path.join(this.#config.tempLangPath, sourceLanguageHash);
