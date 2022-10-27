@@ -5,7 +5,7 @@ import path from "path";
 
 const languages = {
   "agent-expression-store": {
-    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.0.13/bundle.js",
+    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.0.14/bundle.js",
   },
   languages: {
       bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.2/bundle.js",
