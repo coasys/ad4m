@@ -25,6 +25,16 @@ interface Services {
     db: PerspectivismDb
 }
 
+class ImportError extends Error {}
+
+const loadModule = async (modulePath: string) => {
+  try {
+    return await import(modulePath)
+  } catch (e) {
+    throw new ImportError(`Unable to import module ${modulePath}`)
+  }
+}
+
 export default class LanguageController {
     #languages: Map<string, Language>
     #languageConstructors: Map<string, (context: LanguageContext)=>Language>
@@ -164,7 +174,7 @@ export default class LanguageController {
         console.debug("LanguageController.loadLanguage: loading language at path", sourceFilePath, "with hash", hash);
         let languageSource;
         try {
-            languageSource = await import(sourceFilePath);
+            languageSource = await loadModule(sourceFilePath);
         } catch (e) {
             const errMsg = `Could not load language ${e}`;
             console.error(errMsg);
@@ -178,7 +188,7 @@ export default class LanguageController {
             );
             throw new Error(errMsg);
         }
-        console.warn("loaded");
+        console.warn("LanguageController.loadLanguage: language loaded!");
         let create;
         if (!languageSource.default) {
             create = languageSource;
