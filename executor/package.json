@@ -23,7 +23,7 @@
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
-    "publish-test-languages": "ts-node-esm ./src/testutils/publishTestLangs.ts",
+    "publish-test-languages": "ts-node-esm --experimental-specifier-resolution=node --files ./src/testutils/publishTestLangs.ts",
     "test-integration": "jest --forceExit src/tests/integration.test.ts",
     "test-perspective": "jest --forceExit src/core/Perspective.test.ts",
     "test-all": "PATH=$PATH:./src/test-temp jest --forceExit --runInBand",

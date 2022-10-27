@@ -8,6 +8,10 @@ import { OuterConfig } from "../types";
 import { Ad4mClient, LanguageMetaInput } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import { exit } from "process";
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
 const appDataPath = path.join(TEST_DIR, "agents", "p-agent");
