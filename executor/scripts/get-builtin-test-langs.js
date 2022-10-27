@@ -8,7 +8,7 @@ const languages = {
     bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.0.13/bundle.js",
   },
   languages: {
-      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.1/bundle.js",
+      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.2/bundle.js",
   },
   "neighbourhood-store": {
     bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.1/bundle.js",
