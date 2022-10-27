@@ -1,6 +1,6 @@
 import path from 'path'
 import fs from 'fs'
-import { v4 as uuidv4 } from 'uuid'
+import uuid from 'uuid'
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
 import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, Expression, LanguageRef, PerspectiveDiff } from '@perspect3vism/ad4m'
@@ -109,7 +109,7 @@ export default class PerspectivesController {
 
     add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean): PerspectiveHandle {
         let perspective = {
-            uuid: uuidv4(),
+            uuid: uuid.v4(),
             name,
             sharedUrl: sharedUrl,
             neighbourhood: neighbourhood

@@ -19,7 +19,7 @@ import fs from 'fs'
 import { RequestAgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
-import { v4 as uuidv4 } from 'uuid'
+import uuid from 'uuid'
 import { MainConfig } from './Config'
 import { OuterConfig } from '../main'
 
@@ -314,7 +314,7 @@ export default class PerspectivismCore {
         console.log("Agent doesn't have direct message language set yet. Creating from template...")
 
         const templateParams = {
-            uid: uuidv4(),
+            uid: uuid.v4(),
             recipient_did: this.#agentService.agent?.did,
             recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
         }

@@ -1,7 +1,7 @@
 import Perspective from './Perspective'
 import type PerspectiveContext from './PerspectiveContext'
 import { PerspectivismDb } from './db'
-import { v4 as uuidv4 } from 'uuid'
+import uuid from 'uuid'
 import { Neighbourhood, LinkQuery, PerspectiveHandle, LinkInput } from '@perspect3vism/ad4m'
 import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
@@ -54,7 +54,7 @@ describe('Perspective', () => {
         const db = new PerspectivismDb(new Memory(""))
         perspective = new Perspective(
             {
-                uuid: uuidv4(),
+                uuid: uuid.v4(),
                 name: "Test Perspective",
                 sharedUrl: undefined
             } as PerspectiveHandle,
