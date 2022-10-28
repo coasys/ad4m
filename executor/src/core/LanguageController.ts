@@ -194,7 +194,7 @@ export default class LanguageController {
                 throw new Error(errMsg);
             }
         }
-        console.warn("LanguageController.loadLanguage: language loaded!",languageSource);
+        console.warn("LanguageController.loadLanguage: language loaded!");
         let create;
         if (!languageSource.default) {
             create = languageSource;
