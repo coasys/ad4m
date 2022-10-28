@@ -36,7 +36,6 @@
     "tauri": "tauri",
     "build": "react-scripts build",
     "build-all": "yarn run build && yarn run tauri -- build -v",
-    "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
