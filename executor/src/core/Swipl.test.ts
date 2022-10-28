@@ -15,6 +15,7 @@ describe('swipl', () => {
         try {
             let ret = null;
             while (ret = await query.next()) {
+                //@ts-ignore
                 allMatches.push(ret.X)
             }
         } finally {

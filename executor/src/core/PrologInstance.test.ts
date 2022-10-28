@@ -30,9 +30,9 @@ describe('PrologInstance', () => {
 
         await instance.consult(linksProgram)
 
-        expect(await instance.query('link(1,2).')).to.be.deep.equal(true)
-        expect(await instance.query('link(1,3).')).to.be.deep.equal(true)
-        expect(await instance.query('link(1,4).')).to.be.deep.equal(false)
+        expect(await instance.query('link(1,2).')).to.be.true;
+        expect(await instance.query('link(1,3).')).to.be.true;
+        expect(await instance.query('link(1,4).')).to.be.false;
     })
 
     it('can destructure query results', async () => {
