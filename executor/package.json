@@ -58,7 +58,6 @@
     "@peculiar/webcrypto": "^1.1.7",
     "@types/faker": "^5.5.7",
     "@types/fs-extra": "^9.0.12",
-    "@types/jest": "^26.0.14",
     "@types/js-yaml": "^4.0.2",
     "@types/lowdb": "^1.0.11",
     "@types/node": "^14.14.22",
@@ -68,10 +67,8 @@
     "@types/uuid": "^8.3.1",
     "@types/ws": "^8.5.3",
     "faker": "^5.1.0",
-    "jest": "^27.2.5",
     "node-wget-js": "^1.0.1",
     "react": "^17.0.1",
-    "ts-jest": "^27.0.3",
     "ts-node": "10.9.1",
     "typescript": "^4.2.4",
     "unzipper": "^0.10.11",
@@ -79,7 +76,11 @@
     "mocha": "*",
     "ts-mocha": "*",
     "@types/mocha": "*",
-    "@types/expect": "*"
+    "@types/expect": "*",
+    "chai": "*",
+    "chai-as-promised": "*",
+    "@types/chai-as-promised": "*",
+    "@types/chai": "*"
   },
   "dependencies": {
     "@graphql-tools/schema": "^8.5.1",
