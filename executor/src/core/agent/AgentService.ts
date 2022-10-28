@@ -301,7 +301,8 @@ export default class AgentService {
         }
 
         const key = this.getSigningKey()
-        let keyEncoder = new KeyEncoder('secp256k1')
+        // @ts-ignore
+        let keyEncoder = new KeyEncoder.default('secp256k1')
         const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
 
         const pubKeyObj = crypto.createPublicKey(pemPublicKey)
@@ -358,7 +359,8 @@ export default class AgentService {
         }
         
         const key = this.getSigningKey()
-        let keyEncoder = new KeyEncoder('secp256k1')
+        // @ts-ignore
+        let keyEncoder = new KeyEncoder.default('secp256k1')
         const pemPrivateKey = keyEncoder.encodePrivate(key.privateKey, 'raw', 'pem')
 
         const keyObj = crypto.createPrivateKey(pemPrivateKey)
