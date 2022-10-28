@@ -1,6 +1,6 @@
 import fs from "fs";
 
-const publishingAgentPath = "./src/test-temp/agents/p-agent/ad4m/agent.json";
+const publishingAgentPath = "./src/tst-tmp/agents/p/ad4m/agent.json";
 const bootstrapSeedPath = "./src/tests/bootstrapSeed.json";
 
 async function main() {

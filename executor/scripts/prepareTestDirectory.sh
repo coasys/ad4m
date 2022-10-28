@@ -1,7 +1,7 @@
 #!/bin/bash
-[ -d "src/test-temp" ] && rm -rf src/test-temp
-mkdir src/test-temp
-cd src/test-temp
+[ -d "src/tst-tmp" ] && rm -rf src/tst-tmp
+mkdir src/tst-tmp
+cd src/tst-tmp
 mkdir agents
 mkdir languages
 mkdir languages/test-language

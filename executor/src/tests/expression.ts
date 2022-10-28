@@ -92,7 +92,7 @@ export default function expressionTests(testContext: TestContext) {
             it('can use expression interactions', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 //Publish mocking interactions language so it can be used
-                const publish = await ad4mClient.languages.publish("./src/test-temp/languages/test-language/build/bundle.js", {name: "test-language", description: "A test language for interactions"} as LanguageMetaInput)
+                const publish = await ad4mClient.languages.publish("./src/tst-tmp/languages/test-language/build/bundle.js", {name: "test-language", description: "A test language for interactions"} as LanguageMetaInput)
 
                 //@ts-ignore
                 const testLangAddress = publish.address;

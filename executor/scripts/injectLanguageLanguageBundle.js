@@ -1,6 +1,6 @@
 import fs from "fs";
 
-const languageLanguagePath = "./src/test-temp/languages/languages/build/bundle.js";
+const languageLanguagePath = "./src/tst-tmp/languages/languages/build/bundle.js";
 const bootstrapSeedPath = "./src/tests/bootstrapSeed.json";
 const publishingBootstrapSeedPath = "./src/tests/publishBootstrapSeed.json";
 

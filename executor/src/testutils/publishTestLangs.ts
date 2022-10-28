@@ -13,11 +13,11 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
-const appDataPath = path.join(TEST_DIR, "agents", "p-agent");
+const TEST_DIR = path.join(`${__dirname}/../../src/tst-tmp`);
+const appDataPath = path.join(TEST_DIR, "agents", "p");
 const ipfsRepoPath = path.join(appDataPath);
 const publishLanguagesPath = path.join(TEST_DIR, "languages");
-const publishingAgentPath = path.join(`${__dirname}/../../src/tests/p-agent`);
+const publishingAgentPath = path.join(`${__dirname}/../../src/tests/p`);
 const publishingBootstrapSeedPath = path.join(`${__dirname}/../../src/tests/publishBootstrapSeed.json`);
 const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
 const noteIpfsHashPath = path.join(`${__dirname}/../../scripts/note-ipfs-hash`);

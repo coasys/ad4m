@@ -5,7 +5,7 @@
 build/*
 node_modules
 !executor/src/rollup-plugin-hc-dna.js
-executor/test-temp
+executor/tst-tmp
 executor/scripts/note-ipfs-hash
 executor/scripts/perspective-diff-sync-hash
 executorsrc/tests/publishing-agent/ad4m/data/db.json

@@ -24,9 +24,9 @@ export default function languageTests(testContext: TestContext) {
                 bobAd4mClient = testContext.bob;
 
                 //First edit bundle for perspective-diff-sync so we get a unique hash which does not clash with existing loaded perspective-diff-sync object in LanguageController
-                let socialContextData = fs.readFileSync("./src/test-temp/languages/perspective-diff-sync/build/bundle.js").toString();
+                let socialContextData = fs.readFileSync("./src/tst-tmp/languages/perspective-diff-sync/build/bundle.js").toString();
                 socialContextData = socialContextData + "\n//Test";
-                fs.writeFileSync("./src/test-temp/languages/perspective-diff-sync/build/bundle.js", socialContextData);
+                fs.writeFileSync("./src/tst-tmp/languages/perspective-diff-sync/build/bundle.js", socialContextData);
 
                 //Publish a source language to start working from
                 sourceLanguage = await ad4mClient.languages.publish(
@@ -51,9 +51,9 @@ export default function languageTests(testContext: TestContext) {
 
             it('Alice can install her own non HC published language', async () => {
                 let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published perspective-language", "..here for you template");
-                let socialContextData = fs.readFileSync("./src/test-temp/languages/perspective-language/build/bundle.js").toString();
+                let socialContextData = fs.readFileSync("./src/tst-tmp/languages/perspective-language/build/bundle.js").toString();
                 socialContextData = socialContextData + "\n//Test";
-                fs.writeFileSync("./src/test-temp/languages/perspective-language/build/bundle.js", socialContextData);
+                fs.writeFileSync("./src/tst-tmp/languages/perspective-language/build/bundle.js", socialContextData);
 
                 //Publish a source language to start working from
                 nonHCSourceLanguage = await ad4mClient.languages.publish(

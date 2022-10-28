@@ -47,7 +47,7 @@ function apolloClient(port: number, token?: string): ApolloClient<any> {
 
 describe("Authentication integration tests", () => {
     describe("admin credential is not set", () => {
-        const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
+        const TEST_DIR = path.join(`${__dirname}/../../src/tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "unauth-agent");
         const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
         const ipfsRepoPath = path.join(appDataPath);
@@ -109,7 +109,7 @@ describe("Authentication integration tests", () => {
     })
 
     describe("admin credential is set", () => {
-        const TEST_DIR = path.join(`${__dirname}/../../src/test-temp`);
+        const TEST_DIR = path.join(`${__dirname}/../../src/tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "auth-agent");
         const bootstrapSeedPath = path.join(`${__dirname}/../../src/tests/bootstrapSeed.json`);
         const ipfsRepoPath = path.join(appDataPath);
