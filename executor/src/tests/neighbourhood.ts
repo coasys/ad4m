@@ -3,6 +3,7 @@ import { TestContext } from './integration.test'
 import sleep from "./sleep";
 import fs from "fs";
 import { v4 as uuidv4 } from 'uuid';
+import { expect } from "chai";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -13,12 +14,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const ad4mClient = testContext.alice!;
 
                 const create = await ad4mClient!.perspective.add("publish-test");
-                expect(create.name).toEqual("publish-test");
-                expect(create.neighbourhood).toBeNull();
+                expect(create.name).to.be.equal("publish-test");
+                expect(create.neighbourhood).to.be.null;
 
                 //Create unique perspective-diff-sync to simulate real scenario
                 const socialContext = await ad4mClient.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's perspective-diff-sync"}));
-                expect(socialContext.name).toBe("Alice's perspective-diff-sync");
+                expect(socialContext.name).to.be.equal("Alice's perspective-diff-sync");
 
                 let link = new LinkExpression()
                 link.author = "did:test";
@@ -32,16 +33,16 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 );
 
                 //Check that we got an ad4m url back
-                expect(publishPerspective.split("://").length).toBe(2);
+                expect(publishPerspective.split("://").length).to.be.equal(2);
 
                 const perspective = await ad4mClient.perspective.byUUID(create.uuid);
-                expect(perspective?.neighbourhood).toBeDefined();
+                expect(perspective?.neighbourhood).not.to.be.undefined;
 
                 const join = await ad4mClient.neighbourhood.joinFromUrl(publishPerspective );
-                expect(join.sharedUrl).toBe(publishPerspective);
-                expect(join.neighbourhood).toBeDefined();
-                expect(join.neighbourhood!.linkLanguage).toBe(socialContext.address);
-                expect(join.neighbourhood!.meta.links.length).toBe(1);
+                expect(join.sharedUrl).to.be.equal(publishPerspective);
+                expect(join.neighbourhood).not.to.be.undefined;
+                expect(join.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
+                expect(join.neighbourhood!.meta.links.length).to.be.equal(1);
             })
 
             it('can be created by Alice and joined by Bob', async () => {
@@ -50,19 +51,18 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 const aliceP1 = await alice.perspective.add("friends")
                 const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob"}));
-                expect(socialContext.name).toBe("Alice's neighbourhood with Bob");
+                expect(socialContext.name).to.be.equal("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
                 await testContext.makeAllNodesKnown()
                 
-                expect(bobP1).toBeTruthy()
-                expect(bobP1!.name).toBeDefined()
-                expect(bobP1!.sharedUrl).toEqual(neighbourhoodUrl)
-                expect(bobP1!.neighbourhood).toBeDefined();
-                expect(bobP1!.neighbourhood!.linkLanguage).toBe(socialContext.address);
-                expect(bobP1!.neighbourhood!.meta.links.length).toBe(0);
+                expect(bobP1!.name).not.to.be.undefined;
+                expect(bobP1!.sharedUrl).to.be.equal(neighbourhoodUrl)
+                expect(bobP1!.neighbourhood).not.to.be.undefined;;
+                expect(bobP1!.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
+                expect(bobP1!.neighbourhood!.meta.links.length).to.be.equal(0);
 
                 await sleep(5000)
 
@@ -79,7 +79,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     tries++
                 }
                 
-                expect(bobLinks.length).toBe(1)
+                expect(bobLinks.length).to.be.equal(1)
             })
         })
     }

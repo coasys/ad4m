@@ -3,6 +3,11 @@ import path from "path";
 import fs from "fs";
 import sleep from './sleep';
 import { Ad4mClient, LanguageMetaInput, LanguageRef } from '@perspect3vism/ad4m';
+import { expect } from "chai";
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export default function languageTests(testContext: TestContext) {
     return () => {
@@ -28,20 +33,20 @@ export default function languageTests(testContext: TestContext) {
                     path.join(__dirname, "../test-temp/languages/perspective-diff-sync/build/bundle.js"),
                     sourceLanguageMeta
                 )
-                expect(sourceLanguage.name).toBe(sourceLanguageMeta.name);
+                expect(sourceLanguage.name).to.be.equal(sourceLanguageMeta.name);
             })
 
             it('Alice can get the source of her own templated language', async () => {
                 const sourceFromAd4m = await ad4mClient.languages.source(sourceLanguage.address)
                 const sourceFromFile = fs.readFileSync(path.join(__dirname, "../test-temp/languages/perspective-diff-sync/build/bundle.js")).toString()
-                expect(sourceFromAd4m).toBe(sourceFromFile)
+                expect(sourceFromAd4m).to.be.equal(sourceFromFile)
             })
 
             it('Alice can install her own published language', async () => {
                 const install = await ad4mClient.languages.byAddress(sourceLanguage.address);
-                expect(install.address).toBeDefined();
-                expect(install.constructorIcon).toBeNull();
-                expect(install.settingsIcon).toBeDefined();
+                expect(install.address).not.to.be.undefined;
+                expect(install.constructorIcon).to.be.null;
+                expect(install.settingsIcon).not.to.be.undefined;
             })
 
             it('Alice can install her own non HC published language', async () => {
@@ -55,31 +60,31 @@ export default function languageTests(testContext: TestContext) {
                     path.join(__dirname, "../test-temp/languages/perspective-language/build/bundle.js"),
                     sourceLanguageMeta
                 )
-                expect(nonHCSourceLanguage.name).toBe(nonHCSourceLanguage.name);
+                expect(nonHCSourceLanguage.name).to.be.equal(nonHCSourceLanguage.name);
 
                 const install = await ad4mClient.languages.byAddress(nonHCSourceLanguage.address);
-                expect(install.address).toBeDefined();
-                expect(install.constructorIcon).not.toBeNull();
-                expect(install.icon).not.toBeNull();
-                expect(install.settingsIcon).toBeNull();
+                expect(install.address).not.to.be.undefined;
+                expect(install.constructorIcon).not.to.be.null;
+                expect(install.icon).not.to.be.null;
+                expect(install.settingsIcon).to.be.null;
             })
 
             it('Alice can use language.meta() to get meta info of her Language', async() => {
                 const meta = await ad4mClient.languages.meta(sourceLanguage.address)
-                expect(meta.address).toBe(sourceLanguage.address)
-                expect(meta.name).toBe(sourceLanguageMeta.name)
-                expect(meta.description).toBe(sourceLanguageMeta.description)
-                expect(meta.author).toBe((await ad4mClient.agent.status()).did)
-                expect(meta.templated).toBeFalsy()
+                expect(meta.address).to.be.equal(sourceLanguage.address)
+                expect(meta.name).to.be.equal(sourceLanguageMeta.name)
+                expect(meta.description).to.be.equal(sourceLanguageMeta.description)
+                expect(meta.author).to.be.equal((await ad4mClient.agent.status()).did)
+                expect(meta.templated).to.be.false;
             })
 
             it('Alice can get her own templated perspective-diff-sync and it provides correct meta data', async () => {
                 //Get the meta of the source language and make sure it is correct
                 const foundSourceLanguageMeta = await ad4mClient.expression.get(`lang://${sourceLanguage.address}`);
-                expect(foundSourceLanguageMeta.proof.valid).toBe(true);
+                expect(foundSourceLanguageMeta.proof.valid).to.be.true;
                 const sourceLanguageMetaData = JSON.parse(foundSourceLanguageMeta.data);
-                expect(sourceLanguageMetaData.name).toBe(sourceLanguageMeta.name)
-                expect(sourceLanguageMetaData.description).toBe(sourceLanguageMeta.description)
+                expect(sourceLanguageMetaData.name).to.be.equal(sourceLanguageMeta.name)
+                expect(sourceLanguageMetaData.description).to.be.equal(sourceLanguageMeta.description)
             })
 
             it('can publish and template a non-Holochain language and provide correct meta data', async() => {
@@ -89,17 +94,17 @@ export default function languageTests(testContext: TestContext) {
                     path.join(__dirname, "../test-temp/languages/note-ipfs/build/bundle.js"), 
                     ipfsMetaInfo
                 );
-                expect(canPublishNonHolochainLang.name).toBe(ipfsMetaInfo.name);
+                expect(canPublishNonHolochainLang.name).to.be.equal(ipfsMetaInfo.name);
                 //TODO/NOTE: this will break if the note-ipfs language version is changed
-                expect(canPublishNonHolochainLang.address).toBe("QmbWg5VBFB1Zzce8X33GiGpMDXFPQjFQKS2T2rJtSYt7TJ");
+                expect(canPublishNonHolochainLang.address).to.be.equal("QmbWg5VBFB1Zzce8X33GiGpMDXFPQjFQKS2T2rJtSYt7TJ");
             
                 //Get meta for source language above and make sure it is correct
                 const sourceLanguageMetaNonHC = await ad4mClient.expression.get(`lang://${canPublishNonHolochainLang.address}`);
-                expect(sourceLanguageMetaNonHC.proof.valid).toBe(true);
+                expect(sourceLanguageMetaNonHC.proof.valid).to.be.true;
                 const sourceLanguageMetaNonHCData = JSON.parse(sourceLanguageMetaNonHC.data);
-                expect(sourceLanguageMetaNonHCData.name).toBe(ipfsMetaInfo.name)
-                expect(sourceLanguageMetaNonHCData.description).toBe(ipfsMetaInfo.description)
-                expect(sourceLanguageMetaNonHCData.address).toBe("QmbWg5VBFB1Zzce8X33GiGpMDXFPQjFQKS2T2rJtSYt7TJ")
+                expect(sourceLanguageMetaNonHCData.name).to.be.equal(ipfsMetaInfo.name)
+                expect(sourceLanguageMetaNonHCData.description).to.be.equal(ipfsMetaInfo.description)
+                expect(sourceLanguageMetaNonHCData.address).to.be.equal("QmbWg5VBFB1Zzce8X33GiGpMDXFPQjFQKS2T2rJtSYt7TJ")
             })
 
 
@@ -120,7 +125,7 @@ export default function languageTests(testContext: TestContext) {
                 }
 
                 //@ts-ignore
-                expect(error.toString()).toBe(`Error: Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${sourceLanguageMeta}`)
+                expect(error.toString()).to.be.equal(`Error: Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${sourceLanguageMeta}`)
             })
 
             describe('with Bob having added Alice to list of trusted agents', () => {
@@ -136,49 +141,49 @@ export default function languageTests(testContext: TestContext) {
                 it("Bob can template Alice's perspective-diff-sync, and alice can install", async () => {
                     //Apply template on above holochain language
                     applyTemplateFromSource = await bobAd4mClient.languages.applyTemplateAndPublish(sourceLanguage.address, JSON.stringify({uid: "2eebb82b-9db1-401b-ba04-1e8eb78ac84c", name: "Bob's templated perspective-diff-sync"}))
-                    expect(applyTemplateFromSource.name).toBe("Bob's templated perspective-diff-sync");
-                    expect(applyTemplateFromSource.address).not.toEqual(sourceLanguage.address);
+                    expect(applyTemplateFromSource.name).to.be.equal("Bob's templated perspective-diff-sync");
+                    expect(applyTemplateFromSource.address).not.be.equal(sourceLanguage.address);
                     
                     //Get language meta for above language and make sure it is correct
                     const langExpr = await bobAd4mClient.expression.get(`lang://${applyTemplateFromSource.address}`);
-                    expect(langExpr.proof.valid).toBe(true);
+                    expect(langExpr.proof.valid).to.be.true;
                     const meta = await bobAd4mClient.languages.meta(applyTemplateFromSource.address);
-                    expect(meta.name).toBe("Bob's templated perspective-diff-sync")
-                    expect(meta.description).toBe("..here for you template")
-                    expect(meta.author).toBe((await bobAd4mClient.agent.status()).did)
-                    expect(meta.templateAppliedParams).toBe(JSON.stringify({
+                    expect(meta.name).to.be.equal("Bob's templated perspective-diff-sync")
+                    expect(meta.description).to.be.equal("..here for you template")
+                    expect(meta.author).to.be.equal((await bobAd4mClient.agent.status()).did)
+                    expect(meta.templateAppliedParams).to.be.equal(JSON.stringify({
                         "name": "Bob's templated perspective-diff-sync",
                         "uid":"2eebb82b-9db1-401b-ba04-1e8eb78ac84c"
                     }))
-                    expect(meta.templateSourceLanguageAddress).toBe(sourceLanguage.address)
+                    expect(meta.templateSourceLanguageAddress).to.be.equal(sourceLanguage.address)
 
                     await ad4mClient.runtime.addTrustedAgents([(await bobAd4mClient.agent.me()).did]);
 
                     const installGetLanguage = await ad4mClient.languages.byAddress(applyTemplateFromSource.address);
-                    expect(installGetLanguage.address).toBe(applyTemplateFromSource.address);
-                    expect(installGetLanguage.name).toBe(meta.name);
+                    expect(installGetLanguage.address).to.be.equal(applyTemplateFromSource.address);
+                    expect(installGetLanguage.name).to.be.equal(meta.name);
                 })
 
                 it("Bob can install Alice's perspective-diff-sync", async () => {
                     //Test that bob can install source language when alice is in trusted agents
                     const installSourceTrusted = await bobAd4mClient.languages.byAddress(sourceLanguage.address);
-                    expect(installSourceTrusted.address).toBe(sourceLanguage.address);
-                    expect(installSourceTrusted.constructorIcon).toBeDefined();
-                    expect(installSourceTrusted.settingsIcon).toBeDefined();
+                    expect(installSourceTrusted.address).to.be.equal(sourceLanguage.address);
+                    expect(installSourceTrusted.constructorIcon).not.to.be.undefined;
+                    expect(installSourceTrusted.settingsIcon).not.to.be.undefined;
                 })
 
                 it("Bob can install his own templated language", async () => {
                     //Test that bob can install language which is templated from source since source language was created by alice who is now a trusted agent
                     const installTemplated = await bobAd4mClient.languages.byAddress(applyTemplateFromSource.address);
-                    expect(installTemplated.address).toBe(applyTemplateFromSource.address);
-                    expect(installTemplated.name).toBe("Bob's templated perspective-diff-sync");
-                    expect(installTemplated.constructorIcon).toBeDefined();
-                    expect(installTemplated.settingsIcon).toBeDefined();
+                    expect(installTemplated.address).to.be.equal(applyTemplateFromSource.address);
+                    expect(installTemplated.name).to.be.equal("Bob's templated perspective-diff-sync");
+                    expect(installTemplated.constructorIcon).not.to.be.undefined;
+                    expect(installTemplated.settingsIcon).not.to.be.undefined;
                 })
 
                 it('Bob can delete a language', async () => {
                     const deleteLanguage = await bobAd4mClient.languages.remove(sourceLanguage.address);
-                    expect(deleteLanguage).toBe(true);
+                    expect(deleteLanguage).to.be.true;
                 })
             })
          })

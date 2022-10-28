@@ -1,4 +1,4 @@
-import { ApolloClient, InMemoryCache, HttpLink, split, ApolloLink } from "@apollo/client/core";
+import { ApolloClient, InMemoryCache } from "@apollo/client/core";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { createClient } from "graphql-ws";
 import Websocket from "ws";
@@ -8,6 +8,8 @@ import fs from 'fs-extra'
 import path from 'path'
 import { isProcessRunning } from "./utils";
 import { Ad4mClient } from "@perspect3vism/ad4m";
+import { fileURLToPath } from 'url';
+import { expect } from "chai";
 
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
@@ -23,7 +25,6 @@ import { Crypto } from "@peculiar/webcrypto"
 import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
-import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -142,16 +143,16 @@ describe("Integration tests", () => {
     })
 
     after(async () => {
-      expect(await isProcessRunning("holochain")).toBe(true);
-      expect(await isProcessRunning("lair-keystore")).toBe(true);
-      expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(true);
+      expect(await isProcessRunning("holochain")).to.be.true;
+      expect(await isProcessRunning("lair-keystore")).to.be.true;
+      expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).to.be.true;
 
       await core!.exit();
       await new Promise((resolve)=>setTimeout(resolve, 500))
 
-      expect(await isProcessRunning("holochain")).toBe(false);
-      expect(await isProcessRunning("lair-keystore")).toBe(false);
-      expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).toBe(false);
+      expect(await isProcessRunning("holochain")).to.be.false;
+      expect(await isProcessRunning("lair-keystore")).to.be.false;
+      expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).to.be.false;
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
@@ -196,8 +197,8 @@ describe("Integration tests", () => {
 
           const status = await testContext.bob.agent.status()
 
-          expect(status.isInitialized).toBe(true);
-          expect(status.isUnlocked).toBe(true);
+          expect(status.isInitialized).to.be.true;
+          expect(status.isUnlocked).to.be.true;
           await testContext.makeAllNodesKnown()
         })
 

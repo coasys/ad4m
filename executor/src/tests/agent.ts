@@ -1,6 +1,8 @@
 import { Perspective, LinkExpression, Link, ExpressionProof } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import sleep from './sleep'
+import { expect } from "chai";
+import * as sinon from "sinon";
 
 export default function agentTests(testContext: TestContext) {
     return () => {
@@ -8,53 +10,53 @@ export default function agentTests(testContext: TestContext) {
             it('can get and create agent store', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
-                const agentUpdated = jest.fn()
+                const agentUpdated = sinon.fake()
                 ad4mClient.agent.addAgentStatusChangedListener(agentUpdated)
                 
                 const generate = await ad4mClient.agent.generate("passphrase")
-                expect(generate.isInitialized).toBe(true);
-                expect(generate.isUnlocked).toBe(true);
+                expect(generate.isInitialized).to.be.true;
+                expect(generate.isUnlocked).to.be.true;
 
-                expect(agentUpdated.mock.calls.length).toBe(1)
+                expect(agentUpdated.calledOnce).to.be.true;
     
                 // //Should be able to create a perspective
                 // const create = await ad4mClient.perspective.add("test");
-                // expect(create.name).toBe("test");
+                // expect(create.name).to.equal("test");
     
                 const lockAgent = await ad4mClient.agent.lock("passphrase");
-                expect(lockAgent.isInitialized).toBe(true);
-                expect(lockAgent.isUnlocked).toBe(false);
+                expect(lockAgent.isInitialized).to.be.true;
+                expect(lockAgent.isUnlocked).to.be.false;
 
-                expect(agentUpdated.mock.calls.length).toBe(2)
+                expect(agentUpdated.calledTwice).to.be.true;
     
                 // //Should not be able to create a perspective
                 // const createLocked = await ad4mClient.perspective.add("test2");
                 // console.log(createLocked);
     
                 const unlockAgent = await ad4mClient.agent.unlock("passphrase");
-                expect(unlockAgent.isInitialized).toBe(true);
-                expect(unlockAgent.isUnlocked).toBe(true);
+                expect(unlockAgent.isInitialized).to.be.true;
+                expect(unlockAgent.isUnlocked).to.be.true;
 
-                expect(agentUpdated.mock.calls.length).toBe(3)
+                expect(agentUpdated.calledThrice).to.be.true;
     
                 // //Should be able to create a perspective
                 // const create = await ad4mClient.perspective.add("test3");
-                // expect(create.name).toBe("test3");
+                // expect(create.name).to.equal("test3");
     
                 const agentDump = await ad4mClient.agent.status();
-                expect(agentDump.isInitialized).toBe(true);
-                expect(agentDump.isUnlocked).toBe(true);
+                expect(agentDump.isInitialized).to.be.true;
+                expect(agentDump.isUnlocked).to.be.true;
             }),
             it('can get and create agent expression profile', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
-                const agentUpdated = jest.fn()
+                const agentUpdated = sinon.fake()
                 ad4mClient.agent.addUpdatedListener(agentUpdated)
 
                 const currentAgent = await ad4mClient.agent.me();
-                expect(currentAgent.perspective).toBeDefined()
-                expect(currentAgent.perspective!.links.length).toBe(0);
-                expect(currentAgent.directMessageLanguage).toBeDefined();
+                expect(currentAgent.perspective).not.to.be.undefined;
+                expect(currentAgent.perspective!.links.length).to.equal(0);
+                expect(currentAgent.directMessageLanguage).not.to.be.undefined;
                 const oldDmLang = currentAgent.directMessageLanguage!
 
                 let link = new LinkExpression();
@@ -63,43 +65,45 @@ export default function agentTests(testContext: TestContext) {
                 link.data = new Link({source: "src", target: "target", predicate: "pred"});
                 link.proof = new ExpressionProof("sig", "key")
                 const updatePerspective = await ad4mClient.agent.updatePublicPerspective(new Perspective([link]))
-                expect(currentAgent.perspective).toBeDefined()
-                expect(updatePerspective.perspective!.links.length).toBe(1);
+                expect(currentAgent.perspective).not.to.be.undefined
+                expect(updatePerspective.perspective!.links.length).to.equal(1);
+
                 await sleep(500)
-                expect(agentUpdated.mock.calls.length).toBe(1)
-                expect(agentUpdated.mock.calls[0][0]).toEqual(updatePerspective)
+                expect(agentUpdated.calledOnce).to.be.true;
+                expect(agentUpdated.getCall(0).args[0]).to.deep.equal(updatePerspective)
 
                 const updatePublicLanguage = await ad4mClient.agent.updateDirectMessageLanguage("newlang");
-                expect(currentAgent.perspective).toBeDefined()
-                expect(updatePublicLanguage.perspective!.links.length).toBe(1);
-                expect(updatePublicLanguage.directMessageLanguage).toBe("newlang");
+                expect(currentAgent.perspective).not.to.be.undefined
+                expect(updatePublicLanguage.perspective!.links.length).to.equal(1);
+                expect(updatePublicLanguage.directMessageLanguage).to.equal("newlang");
+
                 await sleep(500)
-                expect(agentUpdated.mock.calls.length).toBe(2)
-                expect(agentUpdated.mock.calls[1][0]).toEqual(updatePublicLanguage)
+                expect(agentUpdated.calledTwice).to.be.true;
+                expect(agentUpdated.getCall(1).args[0]).to.deep.equal(updatePublicLanguage)
 
                 const currentAgentPostUpdate = await ad4mClient.agent.me();
-                expect(currentAgent.perspective).toBeDefined()
-                expect(currentAgentPostUpdate.perspective!.links.length).toBe(1);
-                expect(currentAgentPostUpdate.directMessageLanguage).toBe("newlang");
+                expect(currentAgent.perspective).not.to.be.undefined;
+                expect(currentAgentPostUpdate.perspective!.links.length).to.equal(1);
+                expect(currentAgentPostUpdate.directMessageLanguage).to.equal("newlang");
 
                 const getByDid = await ad4mClient.agent.byDID(currentAgent.did);
-                expect(getByDid.did).toBe(currentAgent.did);
-                expect(currentAgent.perspective).toBeDefined()
-                expect(getByDid.perspective!.links.length).toBe(1);
-                expect(getByDid.directMessageLanguage).toBe("newlang");
+                expect(getByDid.did).to.equal(currentAgent.did);
+                expect(currentAgent.perspective).not.to.be.undefined;
+                expect(getByDid.perspective!.links.length).to.equal(1);
+                expect(getByDid.directMessageLanguage).to.equal("newlang");
 
                 await ad4mClient.agent.updateDirectMessageLanguage(oldDmLang);
 
                 const getInvalidDid = await ad4mClient.agent.byDID("na");
-                expect(getInvalidDid).toBe(null);
+                expect(getInvalidDid).to.equal(null);
             })
             it('can mutate agent public profile', async () => {
                 const ad4mClient = testContext.ad4mClient!;
 
                 const currentAgent = await ad4mClient.agent.me();
-                expect(currentAgent.perspective).toBeDefined()
-                expect(currentAgent.perspective!.links.length).toBe(1);
-                expect(currentAgent.directMessageLanguage).toBeDefined();
+                expect(currentAgent.perspective).not.to.be.undefined;
+                expect(currentAgent.perspective!.links.length).to.equal(1);
+                expect(currentAgent.directMessageLanguage).not.to.be.undefined;;
 
                 await ad4mClient.agent.mutatePublicPerspective({
                     additions: [new Link({
@@ -111,8 +115,8 @@ export default function agentTests(testContext: TestContext) {
                 });
 
                 const currentAgentPostMutation = await ad4mClient.agent.me();
-                expect(currentAgentPostMutation.perspective).toBeDefined()
-                expect(currentAgentPostMutation.perspective!.links.length).toBe(2);
+                expect(currentAgentPostMutation.perspective).not.to.be.undefined;
+                expect(currentAgentPostMutation.perspective!.links.length).to.equal(2);
                 const link = currentAgentPostMutation.perspective!.links[0];
 
                 await ad4mClient.agent.mutatePublicPerspective({
@@ -121,8 +125,8 @@ export default function agentTests(testContext: TestContext) {
                 });
 
                 const currentAgentPostDeletion = await ad4mClient.agent.me();
-                expect(currentAgentPostDeletion.perspective).toBeDefined()
-                expect(currentAgentPostDeletion.perspective!.links.length).toBe(1);
+                expect(currentAgentPostDeletion.perspective).not.to.be.undefined;
+                expect(currentAgentPostDeletion.perspective!.links.length).to.equal(1);
             })
         })
     }

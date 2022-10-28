@@ -1,5 +1,6 @@
 import { TestContext } from './integration.test'
 import sleep from './sleep'
+import { expect } from "chai";
 
 export default function agentLanguageTests(testContext: TestContext) {
     return () => {
@@ -16,12 +17,12 @@ export default function agentLanguageTests(testContext: TestContext) {
             await sleep(5000)
 
             const bobSeenFromAlice = await alice.agent.byDID(didBob)
-            expect(bobSeenFromAlice).toBeDefined()
-            expect(bobSeenFromAlice).toEqual(bobHimself)
+            expect(bobSeenFromAlice).not.to.be.undefined
+            expect(bobSeenFromAlice).to.be.eql(bobHimself)
 
             const aliceSeenFromBob = await bob.agent.byDID(didAlice)
-            expect(aliceSeenFromBob).toBeDefined()
-            expect(aliceSeenFromBob).toEqual(aliceHerself)
+            expect(aliceSeenFromBob).not.to.be.undefined
+            expect(aliceSeenFromBob).to.be.eql(aliceHerself)
         })    
     }
 }

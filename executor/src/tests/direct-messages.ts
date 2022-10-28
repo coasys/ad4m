@@ -1,10 +1,11 @@
 import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@perspect3vism/ad4m'
 import { TestContext } from './integration.test'
 import sleep from './sleep'
+import { expect } from "chai";
+import * as sinon from "sinon";
 
 export default function directMessageTests(testContext: TestContext) {
     return () => {
-
         let link = new LinkExpressionInput()
         link.author = "did:test";
         link.timestamp = new Date().toISOString();
@@ -28,7 +29,7 @@ export default function directMessageTests(testContext: TestContext) {
                 hasThrown = true
             }
             
-            expect(hasThrown).toBe(true)
+            expect(hasThrown).to.be.true;
         })    
 
         describe("with Alice and Bob being friends", () => {
@@ -62,14 +63,14 @@ export default function directMessageTests(testContext: TestContext) {
                 await sleep(1000)    
                 //@ts-ignore
                 const statusAlice = await alice.runtime.friendStatus(didBob)
-                expect(statusAlice).toBeDefined()
+                expect(statusAlice).not.to.be.undefined;
                 delete statusAlice.data.links[0].proof.invalid
                 delete statusAlice.data.links[0].proof.valid
-                expect(statusAlice.data).toEqual(statusBob)
+                expect(statusAlice.data).to.be.eql(statusBob)
             })
 
             it("Alice can send a message to Bob", async () => {
-                const bobMessageCallback = jest.fn()
+                const bobMessageCallback = sinon.fake()
                 //@ts-ignore
                 await bob.runtime.addMessageCallback(bobMessageCallback)
                 //@ts-ignore
@@ -77,35 +78,35 @@ export default function directMessageTests(testContext: TestContext) {
                 await sleep(1000)
                 //@ts-ignore
                 const bobsInbox = await bob.runtime.messageInbox()
-                expect(bobsInbox.length).toBe(1)
+                expect(bobsInbox.length).to.be.equal(1)
 
-                expect(bobMessageCallback.mock.calls.length).toBe(1)
-                expect(bobMessageCallback.mock.calls[0][0]).toEqual(bobsInbox[0])
+                expect(bobMessageCallback.calledOnce).to.be.true;
+                expect(bobMessageCallback.getCall(0).args[0]).to.be.eql(bobsInbox[0])
 
                 delete bobsInbox[0].data.links[0].proof.invalid
                 delete bobsInbox[0].data.links[0].proof.valid
-                expect(bobsInbox[0].data).toEqual(message)
+                expect(bobsInbox[0].data).to.be.eql(message)
 
                 //@ts-ignore
-                expect((await bob.runtime.messageInbox(didAlice)).length).toBe(1)
+                expect((await bob.runtime.messageInbox(didAlice)).length).to.be.equal(1)
                 //@ts-ignore
-                expect((await bob.runtime.messageInbox("did:test:other")).length).toBe(0)
+                expect((await bob.runtime.messageInbox("did:test:other")).length).to.be.equal(0)
                 
             })
 
             it("Alice finds her sent message in the outbox", async () => {
                 //@ts-ignore
                 const outbox = await alice.runtime.messageOutbox()
-                expect(outbox.length).toBe(1)
+                expect(outbox.length).to.be.equal(1)
                 //@ts-ignore
-                expect(outbox[0].recipient).toBe(didBob)
+                expect(outbox[0].recipient).to.be.equal(didBob)
                 delete outbox[0].message.data.links[0].proof.invalid
                 delete outbox[0].message.data.links[0].proof.valid
-                expect(outbox[0].message.data).toEqual(message)
+                expect(outbox[0].message.data).to.be.eql(message)
 
                 //@ts-ignore
                 const filteredOutbox = await alice.runtime.messageOutbox("did:test:other")
-                expect(filteredOutbox.length).toBe(0)
+                expect(filteredOutbox.length).to.be.equal(0)
             })
         })
     }
