@@ -1,16 +1,18 @@
+import { v4 as uuidv4 } from 'uuid';
+import { Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
+import Memory from 'lowdb/adapters/Memory'
+import path from "path";
+import { fileURLToPath } from 'url';
+import { expect } from "chai";
+import * as sinon from "sinon";
+
 import Perspective from './Perspective'
 import type PerspectiveContext from './PerspectiveContext'
 import { PerspectivismDb } from './db'
-import { v4 as uuidv4 } from 'uuid';
-import { Neighbourhood, LinkQuery, PerspectiveHandle, LinkInput } from '@perspect3vism/ad4m'
-import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
-import Memory from 'lowdb/adapters/Memory'
 import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
 import { MainConfig } from './Config'
-import path from "path";
-import {jest, describe, it, expect, beforeEach, afterEach} from '@jest/globals';
-import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,7 +20,7 @@ const __dirname = path.dirname(__filename);
 const did = 'did:local-test-agent'
 const agentService = {
     did,
-    createSignedExpression: jest.fn(createMockExpression.bind(null, did)),
+    createSignedExpression: sinon.fake(createMockExpression.bind(null, did)),
     agent: { did }
 }
 
@@ -26,24 +28,24 @@ const sharingLanguage = "sharing-language-address";
 
 function LinksAdapter() {
     //@ts-ignore
-    this.pull = jest.fn(args=>{return []})
+    this.pull = sinon.fake(args=>{return []})
     //@ts-ignore
-    this.commit = jest.fn(args=>{return "string"})
+    this.commit = sinon.fake(args=>{return "string"})
     //@ts-ignore
-    this.render = jest.fn(args=>{return {links: []}})
+    this.render = sinon.fake(args=>{return {links: []}})
 }
 
 //@ts-ignore
 let linksAdapter = new LinksAdapter()
 
 const languageController = {
-    getLinksAdapter: jest.fn(langRef => {
+    getLinksAdapter: sinon.fake(langRef => {
         if(langRef.address === sharingLanguage)
             return linksAdapter
         else
             return null
     }),
-    languageByRef: jest.fn(ref => ref)
+    languageByRef: sinon.fake(ref => ref)
 }
 
 
@@ -78,10 +80,10 @@ describe('Perspective', () => {
     it('wraps links in expressions on addLink', async () => {
         const link = createLink()
         const expression = await perspective!.addLink(link)
-        expect(expression.author).toEqual(agentService.agent.did)
-        expect(expression.data).toEqual(link)
-        expect(agentService.createSignedExpression.mock.calls.length).toBe(1)
-        expect(agentService.createSignedExpression.mock.calls[0][0]).toEqual(link)
+        expect(expression.author).to.be.equal(agentService.agent.did)
+        expect(expression.data).to.be.equal(link)
+        expect(agentService.createSignedExpression.calledOnce).to.be.true;
+        expect(agentService.createSignedExpression.getCall(0).args[0]).to.deep.equal(link)
     })
 
     describe('after adding 5 links', () => {
@@ -97,32 +99,25 @@ describe('Perspective', () => {
             }
         })
 
-        it('has asked agent service for 5 signatures', () => {
-            expect(agentService.createSignedExpression.mock.calls.length).toBe(6)
+        it('has asked agent service for 6 signatures', () => {
+            expect(agentService.createSignedExpression.callCount).to.be.equal(6)
         })
 
         it('can get all links', async () => {
             const result = await perspective!.getLinks({} as LinkQuery)
 
-            expect(result.length).toEqual(5)
-
-            for(let i=0; i<5; i++) {
-                expect(result).toEqual(
-                    expect.arrayContaining(
-                        [expect.objectContaining(allLinks![i])]
-                    )
-                )
-            }
+            expect(result.length).to.be.equal(5)
+            expect(result).to.have.members(allLinks!);
         })
 
         it('can get links by source', async () => {
             const result = await perspective!.getLinks({source: 'ad4m://self'} as LinkQuery)
-            expect(result.length).toEqual(3)
+            expect(result.length).to.be.equal(3)
         })
 
         it('Prolog queries return 5 triples', async () => {
             const result = await perspective!.prologQuery("triple(X,Y,Z).")
-            expect(result.length).toEqual(5)
+            expect(result.length).to.be.equal(5)
         })
 
         it('Prolog gets correctly updated when removing links', async () => {
@@ -130,7 +125,7 @@ describe('Perspective', () => {
             console.log("LINK TO REMOVE", link)
             await perspective!.removeLink(link)
             const result = await perspective!.prologQuery("triple(X,Y,Z)");
-            expect(result.length).toEqual(4)
+            expect(result.length).to.be.equal(4)
         })
     })
 
@@ -141,30 +136,30 @@ describe('Perspective', () => {
             let l1 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test1'})
 
             result = await perspective!.prologQuery("triple(Source,Pred,Target)")
-            expect(result.length).toEqual(1)
-            expect(result[0].Source).toBe('ad4m://self')
-            expect(result[0].Target).toBe('ad4m://test1')
+            expect(result.length).to.be.equal(1)
+            expect(result[0].Source).to.be.equal('ad4m://self')
+            expect(result[0].Target).to.be.equal('ad4m://test1')
 
             linkResult = await perspective!.prologQuery("link(Source,Pred,Target,Timestamp,Author)")
-            expect(linkResult.length).toEqual(1)
-            expect(linkResult[0].Source).toBe('ad4m://self')
-            expect(linkResult[0].Target).toBe('ad4m://test1')
-            expect(linkResult[0].Author).toBe("did:local-test-agent")
-            expect(linkResult[0].Timestamp).not.toBeNaN();
+            expect(linkResult.length).to.be.equal(1)
+            expect(linkResult[0].Source).to.be.equal('ad4m://self')
+            expect(linkResult[0].Target).to.be.equal('ad4m://test1')
+            expect(linkResult[0].Author).to.be.equal("did:local-test-agent")
+            expect(linkResult[0].Timestamp).not.to.be.NaN;
 
             let l2 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test2'})
             result = await perspective!.prologQuery("triple(Source,Pred,Target)")
-            expect(result.length).toEqual(2)
+            expect(result.length).to.be.equal(2)
             linkResult = await perspective!.prologQuery("link(Source,Pred,Target,Timestamp,Author)")
-            expect(linkResult.length).toEqual(2)
+            expect(linkResult.length).to.be.equal(2)
 
             let targetSet = new Set<string>()
             targetSet.add(result[0].Target)
             targetSet.add(result[1].Target)
 
-            expect(result[1].Source).toBe('ad4m://self')
-            expect(targetSet.has('ad4m://test1')).toBeTruthy()
-            expect(targetSet.has('ad4m://test2')).toBeTruthy()
+            expect(result[1].Source).to.be.equal('ad4m://self')
+            expect(targetSet.has('ad4m://test1')).to.be.true;
+            expect(targetSet.has('ad4m://test2')).to.be.true;
 
             //...TBC
         })
@@ -185,14 +180,14 @@ describe('Perspective', () => {
             const link = createLink()
             const linkExpression = await perspective!.addLink(link)
 
-            expect(linksAdapter.commit.mock.calls.length).toBe(1)
-            expect(linksAdapter.commit.mock.calls[0][0]).toEqual({
+            expect(linksAdapter.commit.calledOnce).to.be.true;
+            expect(linksAdapter.commit.getCall(0).args[0]).to.be.eql({
                 additions: [linkExpression],
                 removals: []
             })
 
-            expect(linksAdapter.pull.mock.calls.length).toBe(0)
-            expect(linksAdapter.render.mock.calls.length).toBe(0)
+            expect(linksAdapter.pull.callCount).to.be.equal(0)
+            expect(linksAdapter.render.callCount).to.be.equal(0)
         })
 
         it('calls commit on link language on updateLink() with link expression once', async () => {
@@ -204,17 +199,17 @@ describe('Perspective', () => {
             //@ts-ignore
             await perspective!.updateLink(link1Expression, link2Expression)
 
-            expect(linksAdapter.commit.mock.calls.length).toBe(2)
-            expect(linksAdapter.commit.mock.calls[0][0]).toEqual({
+            expect(linksAdapter.commit.calledTwice).to.be.true;
+            expect(linksAdapter.commit.getCall(0).args[0]).to.be.eql({
                 additions: [link1Expression],
                 removals: []
             })
-            expect(linksAdapter.commit.mock.calls[1][0]).toEqual({
+            expect(linksAdapter.commit.getCall(1).args[0]).to.be.eql({
                 additions: [link2Expression],
                 removals: [link1Expression]
             })
 
-            expect(linksAdapter.pull.mock.calls.length).toBe(0)
+            expect(linksAdapter.pull.callCount).to.be.equal(0)
         })
 
         it('calls commit on link language on removeLink() with link expression once', async () => {
@@ -223,17 +218,17 @@ describe('Perspective', () => {
             const linkExpression = await perspective!.addLink(link)
             await perspective!.removeLink(linkExpression)
 
-            expect(linksAdapter.commit.mock.calls.length).toBe(2)
-            expect(linksAdapter.commit.mock.calls[0][0]).toEqual({
+            expect(linksAdapter.commit.calledTwice).to.be.true;
+            expect(linksAdapter.commit.getCall(0).args[0]).to.be.eql({
                 additions: [linkExpression],
                 removals: []
             })
-            expect(linksAdapter.commit.mock.calls[1][0]).toEqual({
+            expect(linksAdapter.commit.getCall(1).args[0]).to.be.eql({
                 additions: [],
                 removals: [linkExpression]
             })
 
-            expect(linksAdapter.pull.mock.calls.length).toBe(0)
+            expect(linksAdapter.pull.callCount).to.be.equal(0)
         })
 
         describe('syncWithSharingAdpater', () => {
@@ -251,12 +246,12 @@ describe('Perspective', () => {
 
                 await perspective!.syncWithSharingAdapter()
 
-                expect(linksAdapter.commit.mock.calls.length).toBe(1)
-                expect(linksAdapter.commit.mock.calls[0][0]).toEqual({
+                expect(linksAdapter.commit.calledOnce).to.be.true;
+                expect(linksAdapter.commit.getCall(0).args[0]).to.be.eql({
                     additions: [linkExpression],
                     removals: []
                 })
-                expect(linksAdapter.render.mock.calls.length).toBe(1)
+                expect(linksAdapter.render.calledOnce).to.be.true;
             })
         })
         
