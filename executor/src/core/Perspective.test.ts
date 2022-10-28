@@ -54,7 +54,7 @@ describe('Perspective', () => {
     let allLinks: LinkExpression[] | undefined
 
     beforeEach(() => {
-        const TEST_DIR = `${__dirname}/../test-temp`
+        const TEST_DIR = `${__dirname}/../tst-tmp`
         const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
         const db = new PerspectivismDb(new Memory(""))
         perspective = new Perspective(

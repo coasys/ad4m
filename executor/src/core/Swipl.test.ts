@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 
 describe('swipl', () => {
     it('can call Prolog predicate', async () => {
-        const engine = new swipl.Engine(path.join(__dirname, '../test-temp', 'swipl'));
+        const engine = new swipl.Engine(path.join(__dirname, '../tst-tmp', 'swipl'));
         const query = await engine.createQuery('member(X, [1,2,3,4])');
         let allMatches = []
         try {

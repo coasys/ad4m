@@ -30,7 +30,7 @@ export default function languageTests(testContext: TestContext) {
 
                 //Publish a source language to start working from
                 sourceLanguage = await ad4mClient.languages.publish(
-                    path.join(__dirname, "../test-temp/languages/perspective-diff-sync/build/bundle.js"),
+                    path.join(__dirname, "../tst-tmp/languages/perspective-diff-sync/build/bundle.js"),
                     sourceLanguageMeta
                 )
                 expect(sourceLanguage.name).to.be.equal(sourceLanguageMeta.name);
@@ -38,7 +38,7 @@ export default function languageTests(testContext: TestContext) {
 
             it('Alice can get the source of her own templated language', async () => {
                 const sourceFromAd4m = await ad4mClient.languages.source(sourceLanguage.address)
-                const sourceFromFile = fs.readFileSync(path.join(__dirname, "../test-temp/languages/perspective-diff-sync/build/bundle.js")).toString()
+                const sourceFromFile = fs.readFileSync(path.join(__dirname, "../tst-tmp/languages/perspective-diff-sync/build/bundle.js")).toString()
                 expect(sourceFromAd4m).to.be.equal(sourceFromFile)
             })
 
@@ -57,7 +57,7 @@ export default function languageTests(testContext: TestContext) {
 
                 //Publish a source language to start working from
                 nonHCSourceLanguage = await ad4mClient.languages.publish(
-                    path.join(__dirname, "../test-temp/languages/perspective-language/build/bundle.js"),
+                    path.join(__dirname, "../tst-tmp/languages/perspective-language/build/bundle.js"),
                     sourceLanguageMeta
                 )
                 expect(nonHCSourceLanguage.name).to.be.equal(nonHCSourceLanguage.name);
@@ -91,7 +91,7 @@ export default function languageTests(testContext: TestContext) {
                 const ipfsMetaInfo = new LanguageMetaInput("Newly published note language", "Just to test non-HC language work as well");
                 //Publish a source language without a holochain DNA
                 const canPublishNonHolochainLang = await ad4mClient.languages.publish(
-                    path.join(__dirname, "../test-temp/languages/note-ipfs/build/bundle.js"), 
+                    path.join(__dirname, "../tst-tmp/languages/note-ipfs/build/bundle.js"), 
                     ipfsMetaInfo
                 );
                 expect(canPublishNonHolochainLang.name).to.be.equal(ipfsMetaInfo.name);

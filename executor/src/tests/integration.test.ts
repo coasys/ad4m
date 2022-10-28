@@ -33,7 +33,7 @@ const __dirname = path.dirname(__filename);
 global.crypto = new Crypto();
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
-const TEST_DIR = `${__dirname}/../test-temp`
+const TEST_DIR = `${__dirname}/../tst-tmp`
 
 let core: PerspectivismCore | null = null
 

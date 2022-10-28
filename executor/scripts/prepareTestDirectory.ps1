@@ -1,5 +1,5 @@
-mkdir src\test-temp
-cd src\test-temp
+mkdir src\tst-tmp
+cd src\tst-tmp
 mkdir agents
 mkdir languages
 mkdir languages\test-language

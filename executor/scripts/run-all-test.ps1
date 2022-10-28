@@ -1,1 +1,1 @@
-$env:PATH = '.\src\test-temp;'+ $env:PATH
+$env:PATH = '.\src\tst-tmp;'+ $env:PATH
