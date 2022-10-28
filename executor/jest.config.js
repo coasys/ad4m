@@ -4,9 +4,6 @@ const jestConfig = {
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
-  transform: {
-    "^.+\\.(t)sx?$": ["@swc/jest"],
-  },
   "testMatch": [
       "**/?(*.)+(spec|test).[t]s?(x)"
   ]
