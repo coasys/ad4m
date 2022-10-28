@@ -1,5 +1,6 @@
 //@ts-ignore
 import swipl from 'swipl-stdio'
+import { expect } from "chai";
 
 describe('swipl', () => {
     it('can call Prolog predicate', async () => {
@@ -9,12 +10,13 @@ describe('swipl', () => {
         try {
             let ret = null;
             while (ret = await query.next()) {
+                //@ts-ignore
                 allMatches.push(ret.X)
             }
         } finally {
             await query.close()
         }
         
-        expect(allMatches).toEqual([1,2,3,4])
+        expect(allMatches).to.be.eql([1,2,3,4])
     })
 })
