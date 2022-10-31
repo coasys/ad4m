@@ -25,8 +25,8 @@
     "email": "nicolas@perspect3vism.org"
   },
   "devDependencies": {
-    "@apollo/client": "^3.6.9",
-    "@perspect3vism/ad4m": "0.1.40",
+    "@apollo/client": "3.6.9",
+    "@perspect3vism/ad4m": "*",
     "@rollup/plugin-commonjs": "^14.0.0",
     "@rollup/plugin-node-resolve": "^8.0.0",
     "@rollup/plugin-typescript": "^4.0.0",

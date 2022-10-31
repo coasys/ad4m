@@ -7,13 +7,14 @@
     "target": "es6",
     "moduleResolution": "Node",
     "allowSyntheticDefaultImports": true,
-    "types": ["node", "jest"]
+    "types": ["node", "jest"],
+    "skipLibCheck": true,
   },
   "include": [
     "**/*",
   ],
   "exclude": [
-    "node_modules",
+    "node_modules/*",
     "**/*.spec.ts",
     "dist",
     "node_modules/ipfs-core-types"
