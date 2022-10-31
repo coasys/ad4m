@@ -260,6 +260,7 @@ class Client {
       },
     });
 
+    // @ts-ignore
     this.ad4mClient = new Ad4mClient(this.apolloClient);
   }
 

@@ -6,7 +6,8 @@
     "outDir": "dist",
     "target": "es6",
     "moduleResolution": "Node",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "types": ["node", "jest"]
   },
   "include": [
     "**/*",
