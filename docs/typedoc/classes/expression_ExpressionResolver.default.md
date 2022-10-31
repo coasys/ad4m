@@ -43,7 +43,7 @@
 
 #### Defined in
 
-[expression/ExpressionResolver.ts:16](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/expression/ExpressionResolver.ts#L16)
+[expression/ExpressionResolver.ts:16](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionResolver.ts#L16)
 
 ___
 
@@ -64,7 +64,7 @@ ___
 
 #### Defined in
 
-[expression/ExpressionResolver.ts:39](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/expression/ExpressionResolver.ts#L39)
+[expression/ExpressionResolver.ts:39](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionResolver.ts#L39)
 
 ___
 
@@ -85,7 +85,7 @@ ___
 
 #### Defined in
 
-[expression/ExpressionResolver.ts:57](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/expression/ExpressionResolver.ts#L57)
+[expression/ExpressionResolver.ts:57](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionResolver.ts#L57)
 
 ___
 
@@ -105,7 +105,7 @@ ___
 
 #### Defined in
 
-[expression/ExpressionResolver.ts:47](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/expression/ExpressionResolver.ts#L47)
+[expression/ExpressionResolver.ts:47](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionResolver.ts#L47)
 
 ___
 
@@ -125,7 +125,7 @@ ___
 
 #### Defined in
 
-[expression/ExpressionResolver.ts:25](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/expression/ExpressionResolver.ts#L25)
+[expression/ExpressionResolver.ts:25](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionResolver.ts#L25)
 
 ___
 
@@ -145,4 +145,4 @@ ___
 
 #### Defined in
 
-[expression/ExpressionResolver.ts:30](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/expression/ExpressionResolver.ts#L30)
+[expression/ExpressionResolver.ts:30](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionResolver.ts#L30)

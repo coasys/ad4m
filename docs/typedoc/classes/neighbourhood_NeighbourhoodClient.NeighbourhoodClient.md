@@ -33,7 +33,7 @@
 
 #### Defined in
 
-[neighbourhood/NeighbourhoodClient.ts:10](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/neighbourhood/NeighbourhoodClient.ts#L10)
+[neighbourhood/NeighbourhoodClient.ts:10](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/neighbourhood/NeighbourhoodClient.ts#L10)
 
 ## Properties
 
@@ -43,7 +43,7 @@
 
 #### Defined in
 
-[neighbourhood/NeighbourhoodClient.ts:8](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/neighbourhood/NeighbourhoodClient.ts#L8)
+[neighbourhood/NeighbourhoodClient.ts:8](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/neighbourhood/NeighbourhoodClient.ts#L8)
 
 ## Methods
 
@@ -63,7 +63,7 @@
 
 #### Defined in
 
-[neighbourhood/NeighbourhoodClient.ts:36](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/neighbourhood/NeighbourhoodClient.ts#L36)
+[neighbourhood/NeighbourhoodClient.ts:36](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/neighbourhood/NeighbourhoodClient.ts#L36)
 
 ___
 
@@ -85,4 +85,4 @@ ___
 
 #### Defined in
 
-[neighbourhood/NeighbourhoodClient.ts:14](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/neighbourhood/NeighbourhoodClient.ts#L14)
+[neighbourhood/NeighbourhoodClient.ts:14](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/neighbourhood/NeighbourhoodClient.ts#L14)

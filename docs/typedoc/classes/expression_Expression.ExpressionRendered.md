@@ -39,7 +39,7 @@ ExpressionGeneric(String).constructor
 
 #### Defined in
 
-[expression/Expression.ts:94](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/expression/Expression.ts#L94)
+[expression/Expression.ts:94](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/Expression.ts#L94)
 
 ___
 
@@ -49,4 +49,4 @@ ___
 
 #### Defined in
 
-[expression/Expression.ts:91](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/expression/Expression.ts#L91)
+[expression/Expression.ts:91](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/Expression.ts#L91)

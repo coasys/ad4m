@@ -50,7 +50,7 @@ For the latter, they return test fixtures.
 
 #### Defined in
 
-[language/LanguageResolver.ts:16](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageResolver.ts#L16)
+[language/LanguageResolver.ts:16](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageResolver.ts#L16)
 
 ___
 
@@ -71,7 +71,7 @@ ___
 
 #### Defined in
 
-[language/LanguageResolver.ts:49](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageResolver.ts#L49)
+[language/LanguageResolver.ts:49](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageResolver.ts#L49)
 
 ___
 
@@ -91,7 +91,7 @@ ___
 
 #### Defined in
 
-[language/LanguageResolver.ts:75](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageResolver.ts#L75)
+[language/LanguageResolver.ts:75](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageResolver.ts#L75)
 
 ___
 
@@ -112,7 +112,7 @@ ___
 
 #### Defined in
 
-[language/LanguageResolver.ts:57](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageResolver.ts#L57)
+[language/LanguageResolver.ts:57](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageResolver.ts#L57)
 
 ___
 
@@ -132,7 +132,7 @@ ___
 
 #### Defined in
 
-[language/LanguageResolver.ts:95](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageResolver.ts#L95)
+[language/LanguageResolver.ts:95](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageResolver.ts#L95)
 
 ___
 
@@ -152,7 +152,7 @@ ___
 
 #### Defined in
 
-[language/LanguageResolver.ts:90](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageResolver.ts#L90)
+[language/LanguageResolver.ts:90](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageResolver.ts#L90)
 
 ___
 
@@ -173,7 +173,7 @@ ___
 
 #### Defined in
 
-[language/LanguageResolver.ts:41](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageResolver.ts#L41)
+[language/LanguageResolver.ts:41](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageResolver.ts#L41)
 
 ___
 
@@ -193,4 +193,4 @@ ___
 
 #### Defined in
 
-[language/LanguageResolver.ts:29](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageResolver.ts#L29)
+[language/LanguageResolver.ts:29](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageResolver.ts#L29)

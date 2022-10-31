@@ -47,7 +47,7 @@ Thus, this is how agents see (other) agents.
 
 #### Defined in
 
-[agent/Agent.ts:42](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/agent/Agent.ts#L42)
+[agent/Agent.ts:42](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/agent/Agent.ts#L42)
 
 ## Properties
 
@@ -61,7 +61,7 @@ in the DID document behind this DID URI.
 
 #### Defined in
 
-[agent/Agent.ts:28](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/agent/Agent.ts#L28)
+[agent/Agent.ts:28](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/agent/Agent.ts#L28)
 
 ___
 
@@ -73,7 +73,7 @@ Address of the Language by which the Agent will receive DMs
 
 #### Defined in
 
-[agent/Agent.ts:40](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/agent/Agent.ts#L40)
+[agent/Agent.ts:40](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/agent/Agent.ts#L40)
 
 ___
 
@@ -88,4 +88,4 @@ This should be used for any kind of user profile information.
 
 #### Defined in
 
-[agent/Agent.ts:36](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/agent/Agent.ts#L36)
+[agent/Agent.ts:36](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/agent/Agent.ts#L36)

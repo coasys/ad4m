@@ -30,7 +30,7 @@
 
 #### Defined in
 
-[neighbourhood/Neighbourhood.ts:15](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/neighbourhood/Neighbourhood.ts#L15)
+[neighbourhood/Neighbourhood.ts:15](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/neighbourhood/Neighbourhood.ts#L15)
 
 ## Properties
 
@@ -40,7 +40,7 @@
 
 #### Defined in
 
-[neighbourhood/Neighbourhood.ts:10](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/neighbourhood/Neighbourhood.ts#L10)
+[neighbourhood/Neighbourhood.ts:10](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/neighbourhood/Neighbourhood.ts#L10)
 
 ___
 
@@ -50,4 +50,4 @@ ___
 
 #### Defined in
 
-[neighbourhood/Neighbourhood.ts:13](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/neighbourhood/Neighbourhood.ts#L13)
+[neighbourhood/Neighbourhood.ts:13](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/neighbourhood/Neighbourhood.ts#L13)

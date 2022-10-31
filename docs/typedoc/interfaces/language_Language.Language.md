@@ -34,6 +34,7 @@ For that, implement the linksAdapter interface.
 - [linksAdapter](language_Language.Language.md#linksadapter)
 - [name](language_Language.Language.md#name)
 - [settingsUI](language_Language.Language.md#settingsui)
+- [teardown](language_Language.Language.md#teardown)
 
 ### Methods
 
@@ -50,7 +51,7 @@ Optional adapter for direct messaging between agents
 
 #### Defined in
 
-[language/Language.ts:55](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L55)
+[language/Language.ts:55](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L55)
 
 ___
 
@@ -63,7 +64,7 @@ by address and putting an expression
 
 #### Defined in
 
-[language/Language.ts:38](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L38)
+[language/Language.ts:38](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L38)
 
 ___
 
@@ -75,7 +76,7 @@ Interface for getting UI/web components for rendering Expressions of this Langua
 
 #### Defined in
 
-[language/Language.ts:41](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L41)
+[language/Language.ts:41](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L41)
 
 ___
 
@@ -87,7 +88,7 @@ Optional adapter for getting all Expressions
 
 #### Defined in
 
-[language/Language.ts:52](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L52)
+[language/Language.ts:52](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L52)
 
 ___
 
@@ -99,7 +100,7 @@ Optional adapter for getting Expressions by author
 
 #### Defined in
 
-[language/Language.ts:50](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L50)
+[language/Language.ts:50](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L50)
 
 ___
 
@@ -111,7 +112,7 @@ Implementation of a Language that defines and stores Languages
 
 #### Defined in
 
-[language/Language.ts:47](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L47)
+[language/Language.ts:47](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L47)
 
 ___
 
@@ -123,7 +124,7 @@ Interface of LinkLanguages for the core implementation of Neighbourhoods
 
 #### Defined in
 
-[language/Language.ts:44](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L44)
+[language/Language.ts:44](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L44)
 
 ___
 
@@ -133,7 +134,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:26](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L26)
+[language/Language.ts:26](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L26)
 
 ___
 
@@ -145,7 +146,27 @@ Interface for providing UI components for the settings of this Language
 
 #### Defined in
 
-[language/Language.ts:58](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L58)
+[language/Language.ts:58](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L58)
+
+___
+
+### teardown
+
+• `Optional` `Readonly` **teardown**: () => `void`
+
+#### Type declaration
+
+▸ (): `void`
+
+Optional function to make any cleanup/teardown if your language gets deleting in the ad4m-executor
+
+##### Returns
+
+`void`
+
+#### Defined in
+
+[language/Language.ts:61](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L61)
 
 ## Methods
 
@@ -167,7 +188,7 @@ All available interactions this agent could execute on given expression
 
 #### Defined in
 
-[language/Language.ts:61](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L61)
+[language/Language.ts:64](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L64)
 
 ___
 
@@ -190,4 +211,4 @@ expression caching in the ad4m-executor
 
 #### Defined in
 
-[language/Language.ts:31](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L31)
+[language/Language.ts:31](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L31)

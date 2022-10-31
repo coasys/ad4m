@@ -33,4 +33,4 @@ This just calculates the address of an object
 
 #### Defined in
 
-[language/Language.ts:115](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L115)
+[language/Language.ts:118](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L118)

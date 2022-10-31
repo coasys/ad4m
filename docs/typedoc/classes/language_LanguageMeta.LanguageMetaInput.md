@@ -32,7 +32,7 @@
 
 #### Defined in
 
-[language/LanguageMeta.ts:48](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageMeta.ts#L48)
+[language/LanguageMeta.ts:48](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageMeta.ts#L48)
 
 ## Properties
 
@@ -42,7 +42,7 @@
 
 #### Defined in
 
-[language/LanguageMeta.ts:40](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageMeta.ts#L40)
+[language/LanguageMeta.ts:40](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageMeta.ts#L40)
 
 ___
 
@@ -52,7 +52,7 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:37](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageMeta.ts#L37)
+[language/LanguageMeta.ts:37](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageMeta.ts#L37)
 
 ___
 
@@ -62,7 +62,7 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:43](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageMeta.ts#L43)
+[language/LanguageMeta.ts:43](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageMeta.ts#L43)
 
 ___
 
@@ -72,4 +72,4 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:46](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageMeta.ts#L46)
+[language/LanguageMeta.ts:46](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageMeta.ts#L46)

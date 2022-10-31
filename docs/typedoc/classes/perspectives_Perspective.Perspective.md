@@ -45,7 +45,7 @@ the GraphQL mutations.
 
 #### Defined in
 
-[perspectives/Perspective.ts:24](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/perspectives/Perspective.ts#L24)
+[perspectives/Perspective.ts:24](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/Perspective.ts#L24)
 
 ## Properties
 
@@ -57,7 +57,7 @@ The content of the perspective, a list/graph of links
 
 #### Defined in
 
-[perspectives/Perspective.ts:22](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/perspectives/Perspective.ts#L22)
+[perspectives/Perspective.ts:22](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/Perspective.ts#L22)
 
 ## Methods
 
@@ -79,7 +79,7 @@ Convenience function for filtering links just like with PerspectiveProxy
 
 #### Defined in
 
-[perspectives/Perspective.ts:33](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/perspectives/Perspective.ts#L33)
+[perspectives/Perspective.ts:33](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/Perspective.ts#L33)
 
 ___
 
@@ -103,4 +103,4 @@ and the target of that link is what you are looking for.
 
 #### Defined in
 
-[perspectives/Perspective.ts:81](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/perspectives/Perspective.ts#L81)
+[perspectives/Perspective.ts:81](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/Perspective.ts#L81)

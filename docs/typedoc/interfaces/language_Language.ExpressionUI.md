@@ -27,7 +27,7 @@ Returns JS code of a web component used to create new expressions
 
 #### Defined in
 
-[language/Language.ts:69](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L69)
+[language/Language.ts:72](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L72)
 
 ___
 
@@ -43,4 +43,4 @@ Returns JS code of a web component that renders the given expression
 
 #### Defined in
 
-[language/Language.ts:67](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Language.ts#L67)
+[language/Language.ts:70](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L70)

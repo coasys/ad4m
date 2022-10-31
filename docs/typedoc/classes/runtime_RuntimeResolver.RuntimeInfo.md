@@ -13,6 +13,8 @@
 ### Properties
 
 - [ad4mExecutorVersion](runtime_RuntimeResolver.RuntimeInfo.md#ad4mexecutorversion)
+- [isInitialized](runtime_RuntimeResolver.RuntimeInfo.md#isinitialized)
+- [isUnlocked](runtime_RuntimeResolver.RuntimeInfo.md#isunlocked)
 
 ## Constructors
 
@@ -28,4 +30,24 @@
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:39](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L39)
+[runtime/RuntimeResolver.ts:38](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L38)
+
+___
+
+### isInitialized
+
+• **isInitialized**: `Boolean`
+
+#### Defined in
+
+[runtime/RuntimeResolver.ts:40](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L40)
+
+___
+
+### isUnlocked
+
+• **isUnlocked**: `Boolean`
+
+#### Defined in
+
+[runtime/RuntimeResolver.ts:42](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L42)

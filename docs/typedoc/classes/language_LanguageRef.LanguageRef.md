@@ -30,7 +30,7 @@
 
 #### Defined in
 
-[language/LanguageRef.ts:14](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageRef.ts#L14)
+[language/LanguageRef.ts:14](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageRef.ts#L14)
 
 ## Properties
 
@@ -40,7 +40,7 @@
 
 #### Defined in
 
-[language/LanguageRef.ts:9](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageRef.ts#L9)
+[language/LanguageRef.ts:9](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageRef.ts#L9)
 
 ___
 
@@ -50,4 +50,4 @@ ___
 
 #### Defined in
 
-[language/LanguageRef.ts:12](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/LanguageRef.ts#L12)
+[language/LanguageRef.ts:12](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageRef.ts#L12)

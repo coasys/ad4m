@@ -28,7 +28,7 @@
 
 #### Defined in
 
-[language/Icon.ts:8](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Icon.ts#L8)
+[language/Icon.ts:8](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Icon.ts#L8)
 
 ## Properties
 
@@ -38,4 +38,4 @@
 
 #### Defined in
 
-[language/Icon.ts:6](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/language/Icon.ts#L6)
+[language/Icon.ts:6](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Icon.ts#L6)

@@ -64,7 +64,7 @@ For the latter, they return test fixtures.
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:79](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L79)
+[runtime/RuntimeResolver.ts:84](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L84)
 
 ___
 
@@ -84,7 +84,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:84](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L84)
+[runtime/RuntimeResolver.ts:89](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L89)
 
 ___
 
@@ -98,7 +98,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:180](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L180)
+[runtime/RuntimeResolver.ts:185](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L185)
 
 ___
 
@@ -112,7 +112,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:89](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L89)
+[runtime/RuntimeResolver.ts:94](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L94)
 
 ___
 
@@ -132,7 +132,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:114](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L114)
+[runtime/RuntimeResolver.ts:119](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L119)
 
 ___
 
@@ -152,7 +152,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:99](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L99)
+[runtime/RuntimeResolver.ts:104](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L104)
 
 ___
 
@@ -173,7 +173,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:153](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L153)
+[runtime/RuntimeResolver.ts:158](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L158)
 
 ___
 
@@ -193,7 +193,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:148](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L148)
+[runtime/RuntimeResolver.ts:153](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L153)
 
 ___
 
@@ -207,7 +207,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:109](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L109)
+[runtime/RuntimeResolver.ts:114](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L114)
 
 ___
 
@@ -227,7 +227,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:129](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L129)
+[runtime/RuntimeResolver.ts:134](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L134)
 
 ___
 
@@ -241,7 +241,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:124](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L124)
+[runtime/RuntimeResolver.ts:129](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L129)
 
 ___
 
@@ -255,7 +255,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:72](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L72)
+[runtime/RuntimeResolver.ts:75](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L75)
 
 ___
 
@@ -269,7 +269,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:94](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L94)
+[runtime/RuntimeResolver.ts:99](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L99)
 
 ___
 
@@ -289,7 +289,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:161](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L161)
+[runtime/RuntimeResolver.ts:166](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L166)
 
 ___
 
@@ -309,7 +309,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:166](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L166)
+[runtime/RuntimeResolver.ts:171](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L171)
 
 ___
 
@@ -323,7 +323,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:175](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L175)
+[runtime/RuntimeResolver.ts:180](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L180)
 
 ___
 
@@ -343,7 +343,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:67](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L67)
+[runtime/RuntimeResolver.ts:70](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L70)
 
 ___
 
@@ -357,7 +357,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:62](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L62)
+[runtime/RuntimeResolver.ts:65](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L65)
 
 ___
 
@@ -377,7 +377,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:119](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L119)
+[runtime/RuntimeResolver.ts:124](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L124)
 
 ___
 
@@ -397,7 +397,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:104](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L104)
+[runtime/RuntimeResolver.ts:109](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L109)
 
 ___
 
@@ -417,7 +417,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:143](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L143)
+[runtime/RuntimeResolver.ts:148](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L148)
 
 ___
 
@@ -440,4 +440,4 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:134](https://github.com/perspect3vism/ad4m/blob/6c5aaad/src/runtime/RuntimeResolver.ts#L134)
+[runtime/RuntimeResolver.ts:139](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L139)
