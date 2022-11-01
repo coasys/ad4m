@@ -1,0 +1,186 @@
+name: Publish AD4MIN as a release on GitHub
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-ad4m-host-binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, ubuntu-latest, windows-latest]
+        node-version: [16.x]
+
+    runs-on: ${{ matrix.platform }}
+    
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v2
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
+    - name: Install Rust stable
+      uses: actions-rs/toolchain@v1
+      with:
+        override: true
+        toolchain: 1.63.0
+
+    - name: Install dependencies
+      run: yarn install
+
+    - name: Get Binaries (MacOS)
+      if: matrix.platform == 'macos-latest'
+      run: |
+        [ ! -d "./temp/binary" ] && mkdir -p "./temp/binary"
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/hc-darwin-0.0.56
+        mv hc-darwin-0.0.56 temp/binary/hc
+        chmod +x temp/binary/hc
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/holochain-darwin-0.0.161
+        mv holochain-darwin-0.0.161 temp/binary/holochain
+        chmod +x temp/binary/holochain
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/lair-keystore-darwin-0.2.0
+        mv lair-keystore-darwin-0.2.0 temp/binary/lair-keystore
+        chmod +x temp/binary/lair-keystore
+
+    - name: Get Binaries (Ubuntu)
+      if: matrix.platform == 'ubuntu-latest'
+      run: |
+        [ ! -d "./temp/binary" ] && mkdir -p "./temp/binary"
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/hc-linux-0.0.56
+        mv hc-linux-0.0.56 temp/binary/hc
+        chmod +x temp/binary/hc
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/holochain-linux-0.0.161
+        mv holochain-linux-0.0.161 temp/binary/holochain
+        chmod +x temp/binary/holochain
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/lair-keystore-linux-0.2.0
+        mv lair-keystore-linux-0.2.0 temp/binary/lair-keystore
+        chmod +x temp/binary/lair-keystore
+
+    - name: Get Binaries (Windows)
+      if: matrix.platform == 'windows-latest'
+      run: |
+        choco install wget --no-progress
+        
+        mkdir temp/binary
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/hc-windows-0.0.56.exe
+        Copy-Item hc-windows-0.0.56.exe -Destination temp/binary/hc.exe
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/holochain-windows-0.0.161.exe
+        Copy-Item holochain-windows-0.0.161.exe -Destination temp/binary/holochain.exe
+
+        wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/lair-keystore-windows-0.2.0.exe
+        Copy-Item lair-keystore-windows-0.2.0.exe -Destination temp/binary/lair-keystore.exe
+
+    - name: Copy swipl (Ubuntu)
+      env:
+        SQLCIPHER_STATIC: 1
+      if: matrix.platform == 'ubuntu-latest'
+      run: |        
+        sudo apt install unzip
+        ./scripts/unpack-swipl.sh
+
+    - name: Copy swipl (MacOS)
+      env:
+        SQLCIPHER_STATIC: 1
+      if: matrix.platform == 'macos-latest'
+      run: |
+        npm run copy-swipl
+        npm run relink-swipl-macos
+
+    - name: Copy swipl (Windows)
+      env:
+        SQLCIPHER_STATIC: 1
+      if: matrix.platform == 'windows-latest'
+      run: |
+        npm run copy-swipl-windows
+
+    - name: List binaries
+      run: ls temp/binary
+
+    - name: Build the binary (macos-latest)
+      if: matrix.platform == 'macos-latest'
+      run: yarn run package-macos
+
+    - name: Build the binary (windows-latest)
+      if: matrix.platform == 'windows-latest'
+      run: yarn run package-windows
+
+    - name: Build the binary (linux-latest)
+      if: matrix.platform == 'ubuntu-latest'
+      run: yarn run package-linux
+
+    - name: Copy binary to include node version (macOS)
+      if: matrix.platform == 'macos-latest'
+      run: cp host/dist/ad4m-macos-x64 host/dist/ad4m-macos-x64-node-${{ matrix.node-version }}
+    
+    - name: Copy binary to include node version (Linux)
+      if: matrix.platform == 'ubuntu-latest'
+      run: cp host/dist/ad4m-linux-x64 host/dist/ad4m-linux-x64-node-${{ matrix.node-version }}
+
+    - name: Copy binary to include node version (Windows)
+      if: matrix.platform == 'windows-latest'
+      run: Copy-Item host/dist/ad4m-windows-x64.exe host/dist/ad4m-windows-x64-node-${{ matrix.node-version }}.exe
+
+  build-publish-ad4min:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-10.15, ubuntu-latest, windows-2019]
+        node-version: [16.x]
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v2
+      - name: setup node
+        uses: actions/setup-node@v1
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: install Rust stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: install app dependencies and info
+        run: yarn install && yarn run tauri info
+
+      - name: download Linux & MacOS ad4m-host
+        run: ./scripts/setup-binaries.sh
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
+
+      - name: download Windows ad4m-host
+        if: matrix.platform == 'windows-2019'
+        shell: bash
+        run: |
+          mkdir src-tauri/bins
+          cd src-tauri/bins
+          curl -vLJ https://github.com/perspect3vism/ad4m-host/releases/download/v0.0.32-fix6/ad4m-windows-x64-node-16.x.exe --output ad4m-x86_64-pc-windows-gnu.exe
+          curl -vLJ https://github.com/perspect3vism/ad4m-host/releases/download/v0.0.32-fix6/ad4m-windows-x64-node-16.x.exe --output ad4m-x86_64-pc-windows-msvc.exe
+      
+      - name: build the app
+        run: yarn run build-all
+        env:
+         CI: ""
+      
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
+          releaseName: "Ad4min v__VERSION__"
+          releaseBody: "See the assets to download this version and install."
