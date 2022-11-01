@@ -1,0 +1,1 @@
+$env:PATH = '.\src\tst-tmp;'+ $env:PATH

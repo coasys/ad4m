@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mini Chat View</title>
+    <style>
+      body {
+        padding: 0;
+        margin: 0;
+      }
+      html {
+        box-sizing: border-box;
+      }
+      *,
+      *:before,
+      *:after {
+        box-sizing: inherit;
+      }
+    </style>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/@junto-foundation/junto-elements@latest/dist/main.css"
+    />
+    <script src="https://unpkg.com/@junto-foundation/junto-elements@latest"></script>
+  </head>
+  <body>
+    <ad4m-connect 
+      appName="ad4m-react-example"
+      appDesc="ad4m-react-example"
+      appDomain="http://localhost:3000"
+      capabilities='[{"with":{"domain":"*","pointers":["*"]},"can": ["*"]}]'
+      appiconpath="./Ad4mLogo.png"
+      ></ad4m-connect>
+    <script type="module">
+      import {getAd4mClient, isConnected} from './node_modules/@perspect3vism/ad4m-connect/dist/web.js'
+
+      isConnected().then(async () => {
+        const client = await getAd4mClient();
+        const status = await client.agent.status();
+        
+        const ele = document.createElement('div')
+        ele.innerHTML = JSON.stringify(status);
+        document.body.appendChild(ele)
+      })
+    </script>
+  </body>
+</html>

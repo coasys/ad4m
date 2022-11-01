@@ -35,11 +35,10 @@ jobs:
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
-        cache: 'npm'
-    - run: npm install -g npm
-    - run: npm i
-    - run: npm run build --if-present
-    - run: npm test
+        cache: 'yarn'
+    - run: yarn install
+    - run: yarn run build
+    - run: yarn test
 
   test-windows:
     name: Windows Test
@@ -71,24 +70,18 @@ jobs:
       - name: Build Holochain
         env:
           SQLCIPHER_STATIC: 1
-        run: powershell -ExecutionPolicy Bypass -File ./scripts/install-binaries.ps1
+        run: powershell -ExecutionPolicy Bypass -File ./executor/scripts/install-binaries.ps1
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v2
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-      - name: Temp fix for bug https://github.com/npm/cli/issues/4980
-        run: |
-          $WhereNode = Get-Command node | Select-Object -ExpandProperty Definition
-          $NodeDirPath = Split-Path $WhereNode -Parent
-          cd $NodeDirPath
-          npm install npm@8.12.1
-      - run: npm i
+          cache: 'yarn'
+      - run: yarn install
 
       - name: Test
         run: |
           choco install swi-prolog
           $env:path += ";C:\Program Files\swipl\bin"
-          npm run build --if-present
-          npm run test:windows
+          yarn run build
+          yarn run test:windows

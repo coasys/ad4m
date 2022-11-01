@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "outDir": "dist",
+    "target": "es6",
+    "moduleResolution": "Node",
+    "allowSyntheticDefaultImports": true,
+    "types": ["node", "jest"],
+    "skipLibCheck": true,
+  },
+  "include": [
+    "**/*",
+  ],
+  "exclude": [
+    "node_modules/*",
+    "**/*.spec.ts",
+    "dist",
+    "node_modules/ipfs-core-types"
+  ]
+}
