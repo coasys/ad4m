@@ -18,9 +18,31 @@
     "test:windows": {
       "outputs": []
     },
-    "deploy": {
-      "dependsOn": ["build", "test", "lint"],
-      "outputs": []
+
+    "package-macos": {
+      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
+      "outputs": ["dist/**"]
+    },
+    "package-windows": {
+      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
+      "outputs": ["dist/**"]
+    },
+    "package-linux": {
+      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
+      "outputs": ["dist/**"]
+    },
+
+    "release-macos": {
+      "dependsOn": ["package-macos", "ad4min#build-all"],
+      "outputs": ["dist/**"]
+    },
+    "release-windows": {
+      "dependsOn": ["package-windows", "ad4min#build-all"],
+      "outputs": ["dist/**"]
+    },
+    "release-linux": {
+      "dependsOn": ["package-linux", "ad4min#build-all"],
+      "outputs": ["dist/**"]
     }
   }
 }

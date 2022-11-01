@@ -18,12 +18,15 @@
   "scripts": {
     "build": "tsc",
     "run": "node  --experimental-specifier-resolution=node lib/main.js",
+    
     "prepare-test": "./scripts/build-test-language.sh && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "prepare-test-no-nix": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
+    
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
     "publish-test-languages": "ts-node-esm --experimental-specifier-resolution=node --files ./src/testutils/publishTestLangs.ts",
+    
     "test": "node scripts/cleanTestingData.js && yarn run prepare-test && yarn run test-all && node scripts/cleanTestingData.js",
     "test:windows": "yarn run prepare-test:windows && yarn run test-all:windows && node scripts/cleanTestingData.js",
     "test-no-nix": "yarn run prepare-test-no-nix && yarn run test-all && node scripts/cleanTestingData.js",
@@ -39,7 +42,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/perspect3vism/ad4m-executor.git"
+    "url": "git+https://github.com/perspect3vism/ad4m.git"
   },
   "author": {
     "name": "Nicolas Luck",
@@ -53,7 +56,7 @@
   ],
   "license": "CAL-1.0",
   "bugs": {
-    "url": "https://github.com/perspect3vism/ad4m-executor/issues"
+    "url": "https://github.com/perspect3vism/ad4m/issues"
   },
   "devDependencies": {
     "@apollo/client": "3.6.9",
