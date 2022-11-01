@@ -15,3 +15,4 @@ chmod +x temp/binary/lair-keystore
 
 wget https://github.com/perspect3vism/ad4m-host/releases/download/binary-deps-0.0.161/swipl-linux-x86.zip
 unzip swipl-linux-x86.zip -d temp
+rm -rf swipl-linux-x64.zip
