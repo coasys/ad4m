@@ -21,16 +21,9 @@
     "package-windows": "pkg . -o dist/ad4m-windows-x64 -t node16-windows-x64 --public-packages \"*\"",
     "release-macos": "yarn run build && yarn run package-macos",
     "dev": "yarn run build && node build/cli.js",
-    "postinstall": "cross-os cleanup",
+    "postinstall": "node scripts/postinstall.js",
     "build-all-linux": "yarn run build && yarn run build-holochain && yarn run relink-holochain-linux && yarn run copy-swipl && yarn run relink-swipl-linux && yarn run package-linux",
     "build-all-macos": "yarn run build && yarn run build-holochain && yarn run relink-holochain-macos && yarn run copy-swipl && yarn run relink-swipl-macos && yarn run package-macos"
-  },
-  "cross-os": {
-    "cleanup": {
-      "darwin": "rm -rf node_modules/ipfs-core-types/src && ln -sf node_modules/@perspect3vism/ad4m-executor/default.nix default.nix",
-      "win32": "rm -rf node_modules/ipfs-core-types/src",
-      "linux": "echo \"hello\" && rm -rf node_modules/ipfs-core-types/src && ln -sf node_modules/@perspect3vism/ad4m-executor/default.nix default.nix"
-    }
   },
   "pkg": {
     "scripts": "build/**/*",
@@ -81,7 +74,6 @@
     "@types/node": "^17.0.8",
     "@types/yargs": "^17.0.8",
     "@vercel/ncc": "^0.33.1",
-    "cross-os": "^1.5.0",
     "pkg": "^5.5.2",
     "typescript": "^4.6.2"
   }
