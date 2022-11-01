@@ -23,6 +23,10 @@
     "package-windows": "turbo run package-windows",
     "package-linux": "turbo run package-linux",
 
+    "release-macos": "turbo run release-macos",
+    "release-windows": "turbo run release-windows",
+    "release-linux": "turbo run release-linux",
+
     "release": "changeset publish",
 
     "docs": "jsdoc -c jsdoc.json",
