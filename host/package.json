@@ -22,8 +22,11 @@
     "release-macos": "yarn run build && yarn run package-macos",
     "dev": "yarn run build && node build/cli.js",
     "postinstall": "node scripts/postinstall.js",
-    "build-all-linux": "yarn run build && yarn run build-holochain && yarn run relink-holochain-linux && yarn run copy-swipl && yarn run relink-swipl-linux && yarn run package-linux",
-    "build-all-macos": "yarn run build && yarn run build-holochain && yarn run relink-holochain-macos && yarn run copy-swipl && yarn run relink-swipl-macos && yarn run package-macos"
+    "download-binaries-macos": "./scripts/download-binaries-macos.sh",
+    "download-binareis-linux": "./scripts/download-binaries-linux.sh",
+    "download-binaries-windows": "@powershell -NoProfile -ExecutionPolicy Unrestricted -Command scripts\\download-binaries-windows.ps1",
+    "build-all-linux": "yarn run build && yarn run download-binaries-linux && yarn run package-linux",
+    "build-all-macos": "yarn run build && yarn run download-binaries-macos && yarn run package-macos"
   },
   "pkg": {
     "scripts": "build/**/*",
