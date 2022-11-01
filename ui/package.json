@@ -34,9 +34,12 @@
   "scripts": {
     "start": "react-scripts start",
     "tauri": "tauri",
+    "eject": "react-scripts eject",
+  
     "build": "react-scripts build",
     "build-all": "yarn run build && yarn run tauri -- build -v",
-    "eject": "react-scripts eject"
+    "build-unix": "./scripts/copy-ad4m-host.sh && yarn run build-all",
+    "build-windows": "./scripts/copy-ad4m-host.ps1 && yarn run build-all"
   },
   "eslintConfig": {
     "extends": [

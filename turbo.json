@@ -33,15 +33,15 @@
     },
 
     "release-macos": {
-      "dependsOn": ["package-macos", "ad4min#build-all"],
+      "dependsOn": ["package-macos", "ad4min#build-unix"],
       "outputs": ["dist/**"]
     },
     "release-windows": {
-      "dependsOn": ["package-windows", "ad4min#build-all"],
+      "dependsOn": ["package-windows", "ad4min#build-windows"],
       "outputs": ["dist/**"]
     },
     "release-linux": {
-      "dependsOn": ["package-linux", "ad4min#build-all"],
+      "dependsOn": ["package-linux", "ad4min#build-unix"],
       "outputs": ["dist/**"]
     }
   }
