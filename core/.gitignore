@@ -1,8 +1,0 @@
-node_modules
-Links.test.js
-lib/*
-coverage
-.DS_store
-docs-src/api.md
-docs-src/typedoc
-docs-src/_book

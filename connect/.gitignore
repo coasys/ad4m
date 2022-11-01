@@ -1,6 +1,0 @@
-node_modules
-public/Ad4mConnectDialog.js.map
-dist
-.vscode
-
-!scripts/*

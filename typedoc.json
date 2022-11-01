@@ -1,9 +1,0 @@
-{
-    "$schema": "https://typedoc.org/schema.json",
-    "excludeInternal": true,
-    "entryPoints": ["./core/src/index.ts" ],
-    "entryPointStrategy": "expand",
-    "out": "docs-src/typedoc",
-    "excludeExternals": true,
-    "exclude": ["**/*+(index|.spec|.e2e|.test).ts"]
-}
