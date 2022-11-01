@@ -1,5 +1,5 @@
-[![Project](https://img.shields.io/badge/Project-AD4M-brightgreen.svg?style=flat-square)](http://ad4m.dev/)
-[![Docs](https://img.shields.io/badge/Docs-AD4M-blue.svg?style=flat-square)](http://docs.ad4m.dev/)
+[![Project](https://img.shields.io/badge/Project-AD4M-brightgreen.svg)](http://ad4m.dev/)
+[![Docs](https://img.shields.io/badge/Docs-AD4M-blue.svg)](http://docs.ad4m.dev/)
 [![License: CAL 1.0](https://img.shields.io/badge/License-CAL%201.0-blue.svg)](https://github.com/holochain/cryptographic-autonomy-license)
 
 ![Logo](docs-src/ad4mlogo_green_angle2_colouremblem.png)
