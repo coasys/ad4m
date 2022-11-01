@@ -12,9 +12,26 @@
       "cache": false
     },
     "test": {
+      "dependsOn": ["build"],
       "outputs": []
     },
     "test:windows": {
+      "outputs": []
+    },
+    "deploy": {
+      "dependsOn": ["build", "test", "lint"],
+      "outputs": []
+    },
+    "connect#deploy": {
+      "dependsOn": ["core#lint", "core#build", "core#test", "core#deploy", "connect#lint", "connect#build", "connect#test"],
+      "outputs": []
+    },
+    "core#deploy": {
+      "dependsOn": ["core#lint", "core#build", "core#test", "core#deploy"],
+      "outputs": []
+    },
+    "executor#deploy": {
+      "dependsOn": ["core#lint", "core#build", "core#test", "core#deploy", "executor#lint", "executor#build", "executor#test", "executor#deploy"],
       "outputs": []
     }
   }
