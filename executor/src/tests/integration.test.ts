@@ -110,7 +110,9 @@ export class TestContext {
 }
 let testContext: TestContext = new TestContext()
 
-describe("Integration tests", () => {
+describe("Integration tests", function () {
+    //@ts-ignore
+    this.timeout(200000)
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
     const ipfsRepoPath = path.join(appDataPath)
 
