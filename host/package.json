@@ -5,28 +5,18 @@
   "bin": {
     "ad4m": "build/cli.js"
   },
-  "type": "module",
   "scripts": {
-    "prepare-dev": "yarn run build-holochain",
-    "build-holochain": "echo \"\n\n\n\nThis next stage will fail if Nix is not installed!! You can install here: https://nixos.wiki/wiki/Nix_Installation_Guide\" && sleep 5 && nix-shell --run ./scripts/copy-hc.sh",
-    "copy-swipl": "echo \"\n\n\n\nThis next stage will fail if Nix is not installed!! You can install here: https://nixos.wiki/wiki/Nix_Installation_Guide\" && sleep 5 && nix-shell --run ./scripts/copy-swipl.sh",
-    "relink-swipl-macos": "./scripts/relink-swipl-macos.sh",
-    "relink-swipl-linux": "./scripts/relink-swipl-linux.sh",
-    "relink-holochain-macos": "./scripts/relink-holochain-macos.sh",
-    "relink-holochain-linux": "./scripts/relink-holochain-linux.sh",
-    "copy-swipl-windows": "@powershell -NoProfile -ExecutionPolicy Unrestricted -Command scripts\\copy-swipl.ps1",
     "build": "tsc",
-    "package-macos": "pkg . -o dist/ad4m-macos-x64 -t node16-macos-x64 --public-packages \"*\"",
-    "package-linux": "pkg . -o dist/ad4m-linux-x64 -t node16-linux-x64 --public-packages \"*\"",
-    "package-windows": "pkg . -o dist/ad4m-windows-x64 -t node16-windows-x64 --public-packages \"*\"",
-    "release-macos": "yarn run build && yarn run package-macos",
     "dev": "yarn run build && node build/cli.js",
     "postinstall": "node scripts/postinstall.js",
+
     "download-binaries-macos": "./scripts/download-binaries-macos.sh",
     "download-binareis-linux": "./scripts/download-binaries-linux.sh",
     "download-binaries-windows": "@powershell -NoProfile -ExecutionPolicy Unrestricted -Command scripts\\download-binaries-windows.ps1",
-    "build-all-linux": "yarn run build && yarn run download-binaries-linux && yarn run package-linux",
-    "build-all-macos": "yarn run build && yarn run download-binaries-macos && yarn run package-macos"
+
+    "package-windows": "yarn run download-binaries-windows && pkg . -o dist/ad4m-windows-x64 -t node16-windows-x64 --public-packages \"*\"",
+    "package-linux": "yarn run download-binaries-linux && pkg . -o dist/ad4m-linux-x64 -t node16-linux-x64 --public-packages \"*\"",
+    "package-macos": "yarn run download-binaries-macos && pkg . -o dist/ad4m-macos-x64 -t node16-macos-x64 --public-packages \"*\""
   },
   "pkg": {
     "scripts": "build/**/*",
@@ -37,7 +27,8 @@
       "temp/binary/lair-keystore.exe",
       "node_modules/leveldown/**/*",
       "node_modules/ts-invariant/**/*",
-      "node_modules/@apollo/client/node_modules/ts-invariant/**/*"
+      "node_modules/@apollo/client/node_modules/ts-invariant/**/*",
+      "..."
     ],
     "outputPath": "dist",
     "patches": {
@@ -46,7 +37,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fluxsocial/ad4m-host.git"
+    "url": "git+https://github.com/perspect3vism/ad4m.git"
   },
   "keywords": [
     "Holochain"
@@ -54,9 +45,9 @@
   "author": "Kaichao Sun",
   "license": "CAL-1.0",
   "bugs": {
-    "url": "https://github.com/fluxsocial/ad4m-host/issues"
+    "url": "https://github.com/perspect3vism/ad4m/issues"
   },
-  "homepage": "https://github.com/fluxsocial/ad4m-host#readme",
+  "homepage": "https://github.com/perspect3vism/ad4m#readme",
   "dependencies": {
     "@apollo/client": "3.6.9",
     "@perspect3vism/ad4m": "*",
