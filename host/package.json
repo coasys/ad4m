@@ -5,6 +5,7 @@
   "bin": {
     "ad4m": "build/cli.js"
   },
+  "type": "module",
   "scripts": {
     "build": "tsc",
     "dev": "yarn run build && node build/cli.js",
