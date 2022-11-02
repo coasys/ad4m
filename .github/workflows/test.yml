@@ -34,10 +34,12 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'yarn'
+
     - name: Install dependencies
-    - run: yarn install
+      run: yarn install
+
     - name: Run the tests
-    - run: yarn test
+      run: yarn test
 
   test-windows:
     name: Windows Test
@@ -71,8 +73,10 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'yarn'
+
       - name: Install dependencies
-      - run: yarn install
+        run: yarn install
+
       - name: Run the tests
         run: |
           choco install swi-prolog

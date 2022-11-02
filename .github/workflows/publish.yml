@@ -35,6 +35,7 @@ jobs:
       uses: actions/setup-node@v1
       with:
         node-version: ${{ matrix.node-version }}
+
     - name: Yarn Install
       run: yarn install
 
@@ -50,8 +51,8 @@ jobs:
       if: matrix.platform == 'ubuntu-latest'
       run: yarn run build-linux
     
-    - uses: tauri-apps/tauri-action@v0
     - name: "Upload built AD4MIN"
+      uses: tauri-apps/tauri-action@v0
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
