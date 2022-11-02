@@ -80,25 +80,25 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
   const hc = platform === 'win32' ? 'hc.exe' : 'hc';
 
   if(!hcOnly) {
-    const holochainSource = path.join(__dirname, `../../temp/binary/${holochain}`);
+    const holochainSource = path.join(__dirname, `../temp/binary/${holochain}`);
     const holochaintarget = path.join(binaryPath, holochain);
     await copy(holochainSource, holochaintarget);
     await chmod(holochaintarget, '755');
   
-    const lairSource = path.join(__dirname, `../../temp/binary/${lair}`);
+    const lairSource = path.join(__dirname, `../temp/binary/${lair}`);
     const lairTarget = path.join(binaryPath, lair);
     await copy(lairSource, lairTarget);
     await chmod(lairTarget, '755');
   }
 
-  const hcSource = path.join(__dirname, `../../temp/binary/${hc}`);
+  const hcSource = path.join(__dirname, `../temp/binary/${hc}`);
   const hcTarget = path.join(binaryPath, hc);
   await copy(hcSource, hcTarget);
   await chmod(hcTarget, '755');
 
   await getSeedConfig(dataPath, networkBootstrapSeed, overrideConfig);
 
-  const swiplSource = path.join(__dirname, `../../temp/swipl`);
+  const swiplSource = path.join(__dirname, `../temp/swipl`);
   const swiplTarget = path.join(appDataPath, 'swipl')
   await copyDir(swiplSource, swiplTarget)
 
