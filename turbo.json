@@ -16,6 +16,7 @@
       "outputs": []
     },
     "test:windows": {
+      "dependsOn": ["build"],
       "outputs": []
     },
 
@@ -32,19 +33,16 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
-    "ad4min#build-unix": {},
-    "ad4min#build-windows": {},
-
-    "ad4min#release-linux": {
-      "dependsOn": ["ad4m-host#package-linux", "ad4min#build-unix"],
+    "ad4min#build-linux": {
+      "dependsOn": ["ad4m-host#package-linux"],
       "outputs": ["dist/**"]
     },
-    "ad4min#release-macos": {
-      "dependsOn": ["ad4m-host#package-macos", "ad4min#build-unix"],
+    "ad4min#build-macos": {
+      "dependsOn": ["ad4m-host#package-macos"],
       "outputs": ["dist/**"]
     },
-    "ad4min#release-windows": {
-      "dependsOn": ["ad4m-host#package-windows", "ad4min#build-windows"],
+    "ad4min#build-windows": {
+      "dependsOn": ["ad4m-host#package-windows"],
       "outputs": ["dist/**"]
     }
   }

@@ -17,13 +17,15 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "test:windows": "turbo run test:windows",
+
     "package-macos": "turbo run package-macos",
     "package-windows": "turbo run package-windows",
     "package-linux": "turbo run package-linux",
-    "release-macos": "turbo run release-macos",
-    "release-windows": "turbo run release-windows",
-    "release-linux": "turbo run release-linux",
+    "build-macos": "turbo run build-macos",
+    "build-windows": "turbo run build-windows",
+    "build-linux": "turbo run build-linux",
     "release": "changeset publish",
+
     "docs": "jsdoc -c jsdoc.json",
     "docs:api:jsdoc2md": "jsdoc2md --configure jsdoc.json --partial docs/header.hbs --global-index-format none --files src/**/* > docs-src/api.md",
     "docs:api:tsconcat": "concat-md --decrease-title-levels --dir-name-as-title docs-src/typedoc > docs-src/api.md",
