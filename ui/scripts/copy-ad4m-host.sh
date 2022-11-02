@@ -13,7 +13,7 @@ case "${unameOut}" in
     Darwin*)    AD4M_HOST_BINARY=../host/dist/ad4m-macos-x64;;
     *)          echo "Machine is not supported: ${unameOut}" && exit 1;;
 esac
-echo ${machine}
+echo "Got ad4m-host binaries for machine type: ${unameOut}"
 
 cp $AD4M_HOST_BINARY src-tauri/bins/ad4m-$TARGET_TRIPLE
 
