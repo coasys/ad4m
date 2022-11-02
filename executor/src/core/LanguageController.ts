@@ -39,13 +39,6 @@ const importModule = async (modulePath: string) => {
 }
 
 const requireModule = async (modulePath: string) => {
-    // To deal with ESM on windows requires absolute path and file protocol
-    if (process.platform === "win32") {
-        const path = `file:\\\\${modulePath}`
-
-        return await require(path)
-    }
-
     return await require(modulePath)
 }
 
