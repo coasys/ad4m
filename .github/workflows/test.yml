@@ -42,7 +42,7 @@ jobs:
       run: yarn test
 
   test-windows:
-    name: Windows Test
+    name: Test
     runs-on: windows-2019
     strategy:
       matrix:
