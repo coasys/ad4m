@@ -64,11 +64,6 @@ jobs:
             ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
             ${{ runner.os }}-cargo
 
-      - name: Build Holochain
-        env:
-          SQLCIPHER_STATIC: 1
-        run: powershell -ExecutionPolicy Bypass -File ./executor/scripts/install-binaries.ps1
-
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v2
         with:
