@@ -1,4 +1,4 @@
-name: Test AD4M components
+name: AD4M components
 
 on:
   push:
@@ -28,13 +28,17 @@ jobs:
         name: perspect3vism
         # If you chose API tokens for write access OR if you have a private cache
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'yarn'
+
+    - name: Install dependencies
     - run: yarn install
-    - run: yarn run build
+
+    - name: Run the tests
     - run: yarn test
 
   test-windows:
@@ -69,11 +73,12 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'yarn'
+      
+      - name: Install dependencies
       - run: yarn install
 
-      - name: Test
+      - name: Run the tests
         run: |
           choco install swi-prolog
           $env:path += ";C:\Program Files\swipl\bin"
-          yarn run build
           yarn run test:windows
