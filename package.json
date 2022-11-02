@@ -15,20 +15,15 @@
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
     "lint": "turbo run lint",
-
     "test": "turbo run test",
     "test:windows": "turbo run test:windows",
-
     "package-macos": "turbo run package-macos",
     "package-windows": "turbo run package-windows",
     "package-linux": "turbo run package-linux",
-
     "release-macos": "turbo run release-macos",
     "release-windows": "turbo run release-windows",
     "release-linux": "turbo run release-linux",
-
     "release": "changeset publish",
-
     "docs": "jsdoc -c jsdoc.json",
     "docs:api:jsdoc2md": "jsdoc2md --configure jsdoc.json --partial docs/header.hbs --global-index-format none --files src/**/* > docs-src/api.md",
     "docs:api:tsconcat": "concat-md --decrease-title-levels --dir-name-as-title docs-src/typedoc > docs-src/api.md",
@@ -38,16 +33,20 @@
     "docs:build": "yarn run docs:api && honkit build docs-src",
     "docs:serve": "honkit serve docs-src",
     "docs:clean": "rimraf docs-src/_book",
-    "docs:cp": "cp -r docs-src/_book/ docs/"
+    "docs:cp": "cp -r docs-src/_book/ docs/",
+    "patchpackage": "patch-package"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.25.2",
     "eslint-config-custom": "*",
     "prettier": "latest",
-    "turbo": "latest",
-    "@changesets/cli": "^2.25.2"
+    "turbo": "latest"
   },
   "engines": {
     "node": ">=16.0.0"
   },
-  "packageManager": "yarn@1.22.19"
+  "packageManager": "yarn@1.22.19",
+  "dependencies": {
+    "patch-package": "^6.5.0"
+  }
 }

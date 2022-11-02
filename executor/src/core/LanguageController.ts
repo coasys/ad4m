@@ -27,9 +27,7 @@ interface Services {
 
 class ImportError extends Error {}
 
-const loadModule = async (modulePath: string) => {
-  try {
-
+const importModule = async (modulePath: string) => {
     // To deal with ESM on windows requires absolute path and file protocol
     if (process.platform === "win32") {
         const path = `file:\\\\${modulePath}`
@@ -38,8 +36,28 @@ const loadModule = async (modulePath: string) => {
     }
 
     return await import(modulePath)
+}
+
+const requireModule = async (modulePath: string) => {
+    // To deal with ESM on windows requires absolute path and file protocol
+    if (process.platform === "win32") {
+        const path = `file:\\\\${modulePath}`
+
+        return await require(path)
+    }
+
+    return await require(modulePath)
+}
+
+const loadModule = async (modulePath: string) => {
+  try {
+    return await importModule(modulePath)
   } catch (e) {
-    throw new ImportError(`Unable to import module ${modulePath}`)
+    try {
+        return await requireModule(modulePath)
+    } catch (e) {
+        throw new ImportError(`Unable to import module ${modulePath}`)
+    }
   }
 }
 
