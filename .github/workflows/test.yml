@@ -1,4 +1,4 @@
-name: Test AD4M components
+name: AD4M components
 
 on:
   push:
@@ -28,14 +28,18 @@ jobs:
         name: perspect3vism
         # If you chose API tokens for write access OR if you have a private cache
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'yarn'
-    - run: yarn install
-    - run: yarn run build
-    - run: yarn test
+
+    - name: Install dependencies
+      run: yarn install
+
+    - name: Run the tests
+      run: yarn test
 
   test-windows:
     name: Windows Test
@@ -64,21 +68,17 @@ jobs:
             ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
             ${{ runner.os }}-cargo
 
-      - name: Build Holochain
-        env:
-          SQLCIPHER_STATIC: 1
-        run: powershell -ExecutionPolicy Bypass -File ./executor/scripts/install-binaries.ps1
-
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v2
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'yarn'
-      - run: yarn install
 
-      - name: Test
+      - name: Install dependencies
+        run: yarn install
+
+      - name: Run the tests
         run: |
           choco install swi-prolog
           $env:path += ";C:\Program Files\swipl\bin"
-          yarn run build
           yarn run test:windows

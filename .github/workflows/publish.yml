@@ -18,10 +18,7 @@ jobs:
     steps:
     - name: Fetch source code
       uses: actions/checkout@v2
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
-      with:
-        node-version: ${{ matrix.node-version }}
+
     - name: Install Rust stable
       uses: actions-rs/toolchain@v1
       with:
@@ -32,24 +29,34 @@ jobs:
       if: matrix.platform == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
+
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
+
+    - name: Yarn Install
+      run: yarn install
 
     - name: Build AD4M-Host & build AD4MIN binary (macos-latest)
       if: matrix.platform == 'macos-latest'
-      run: yarn run release-macos
+      run: yarn run build-macos
 
     - name: Build AD4M-Host & build AD4MIN binary (windows-latest)
       if: matrix.platform == 'windows-latest'
-      run: yarn run release-windows
+      run: yarn run build-windows
 
     - name: Build AD4M-Host & build AD4MIN binary (linux-latest)
       if: matrix.platform == 'ubuntu-latest'
-      run: yarn run release-linux
+      run: yarn run build-linux
     
-    - uses: tauri-apps/tauri-action@v0
+    - name: "Upload built AD4MIN"
+      uses: tauri-apps/tauri-action@v0
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
         releaseName: "Ad4min v__VERSION__"
         releaseBody: "See the assets to download this version and install."
+        projectPath: "./ui"
