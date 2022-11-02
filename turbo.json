@@ -3,7 +3,7 @@
   "pipeline": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "lint": {
       "outputs": []
@@ -21,27 +21,30 @@
 
     "package-macos": {
       "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "package-windows": {
       "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "package-linux": {
       "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
+    "build-unix": {},
+    "build-windows": {},
+
     "release-macos": {
-      "dependsOn": ["package-macos", "ad4min#build-unix"],
+      "dependsOn": ["package-macos", "build-unix"],
       "outputs": ["dist/**"]
     },
     "release-windows": {
-      "dependsOn": ["package-windows", "ad4min#build-windows"],
+      "dependsOn": ["package-windows", "build-windows"],
       "outputs": ["dist/**"]
     },
     "release-linux": {
-      "dependsOn": ["package-linux", "ad4min#build-unix"],
+      "dependsOn": ["package-linux", "build-unix"],
       "outputs": ["dist/**"]
     }
   }
