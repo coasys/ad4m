@@ -37,7 +37,27 @@ In October/November 2022, these componentes were collected into a mono-repo agai
 ```
 yarn install
 yarn build
+```
+
+## Testing
+
+```
+yarn install
 yarn test
+```
+
+## Building ad4m-host
+
+```
+yarn install
+yarn run package-linux/macos/windows (choose version for your OS)
+```
+
+## Building ad4min
+
+```
+yarn install
+yarn run build-linux/macos/windows (choose version for your OS)
 ```
 
 ## Publishing
