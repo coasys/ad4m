@@ -7,7 +7,7 @@
   },
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && yarn run build-commonjs",
     "build-commonjs": "node scripts/esbuild.js",
     "dev": "yarn run build && node --experimental-specifier-resolution=node build/cli.js",
     "postinstall": "node scripts/postinstall.js && patch-package",
