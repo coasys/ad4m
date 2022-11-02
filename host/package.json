@@ -14,8 +14,9 @@
     "download-binaries-macos": "./scripts/download-binaries-macos.sh",
     "download-binaries-linux": "./scripts/download-binaries-linux.sh",
     "download-binaries-windows": "@powershell -NoProfile -ExecutionPolicy Unrestricted -Command scripts\\download-binaries-windows.ps1",
+    "copy-swipl:windows": "@powershell -NoProfile -ExecutionPolicy Unrestricted -Command scripts\\download-binaries-windows.ps1",
 
-    "package-windows": "yarn run download-binaries-windows && pkg . -o dist/ad4m-windows-x64 -t node16-windows-x64 --public-packages \"*\"",
+    "package-windows": "yarn run download-binaries-windows && yarn run copy-swipl:windows && pkg . -o dist/ad4m-windows-x64 -t node16-windows-x64 --public-packages \"*\"",
     "package-linux": "yarn run download-binaries-linux && pkg . -o dist/ad4m-linux-x64 -t node16-linux-x64 --public-packages \"*\"",
     "package-macos": "yarn run download-binaries-macos && pkg . -o dist/ad4m-macos-x64 -t node16-macos-x64 --public-packages \"*\""
   },
