@@ -36,15 +36,15 @@ jobs:
 
     - name: Build AD4M-Host & build AD4MIN binary (macos-latest)
       if: matrix.platform == 'macos-latest'
-      run: yarn run release-macos
+      run: yarn run build-macos
 
     - name: Build AD4M-Host & build AD4MIN binary (windows-latest)
       if: matrix.platform == 'windows-latest'
-      run: yarn run release-windows
+      run: yarn run build-windows
 
     - name: Build AD4M-Host & build AD4MIN binary (linux-latest)
       if: matrix.platform == 'ubuntu-latest'
-      run: yarn run release-linux
+      run: yarn run build-linux
     
     - uses: tauri-apps/tauri-action@v0
       env:
