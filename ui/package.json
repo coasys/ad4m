@@ -40,7 +40,7 @@
     "build-all": "yarn run build && yarn run tauri -- build -v",
     "build-linux": "./scripts/copy-ad4m-host.sh && yarn run build-all",
     "build-macos": "./scripts/copy-ad4m-host.sh && yarn run build-all",
-    "build-windows": "./scripts/copy-ad4m-host.ps1 && yarn run build-all"
+    "build-windows": "powershell -ExecutionPolicy Bypass -File ./scripts/copy-ad4m-host.ps1 && yarn run build-all"
   },
   "eslintConfig": {
     "extends": [
