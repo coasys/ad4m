@@ -18,10 +18,7 @@ jobs:
     steps:
     - name: Fetch source code
       uses: actions/checkout@v2
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
-      with:
-        node-version: ${{ matrix.node-version }}
+
     - name: Install Rust stable
       uses: actions-rs/toolchain@v1
       with:
@@ -34,6 +31,10 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
 
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
     - name: Yarn Install
       run: yarn install
 
