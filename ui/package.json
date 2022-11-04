@@ -35,7 +35,6 @@
     "start": "react-scripts start",
     "tauri": "tauri",
     "eject": "react-scripts eject",
-  
     "build": "react-scripts build",
     "build-all": "yarn run build && yarn run tauri -- build -v",
     "build-linux": "./scripts/copy-ad4m-host.sh && yarn run build-all",
