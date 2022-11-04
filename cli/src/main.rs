@@ -16,6 +16,13 @@ use graphql_client::{GraphQLQuery, Response};
 )]
 pub struct AgentStatus;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "queries/agent.gql",
+    response_derives = "Debug",
+)]
+pub struct RequestCapability;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,8 +31,13 @@ async fn main() -> Result<()> {
     //    .with_context(|| format!("could not read file `{}`", path))?;
     //println!("file content: {}", content);
 
-    let query = AgentStatus::build_query(agent_status::Variables {});
-    let response_body: Response<agent_status::ResponseData> = reqwest::Client::new()
+    let query = RequestCapability::build_query(request_capability::Variables {
+        app_name: "AD4M cli".to_string(),
+        app_desc: "Command line administration tool for AD4M".to_string(),
+        app_url: "org.perspect3vism.ad4m.cli".to_string(),
+        capabilities: "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]".to_string(),
+    });
+    let response_body: Response<request_capability::ResponseData> = reqwest::Client::new()
         .post("http://localhost:12000/graphql")
         .json(&query)
         .send()
