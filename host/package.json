@@ -2,6 +2,7 @@
   "name": "ad4m-host",
   "version": "0.0.32",
   "description": "Self hosting ad4m service",
+  "private": true,
   "bin": {
     "ad4m": "build/cli.cjs"
   },
@@ -72,7 +73,7 @@
     "@vercel/ncc": "^0.33.1",
     "esbuild": "*",
     "patch-package": "^6.5.0",
-    "pkg": "^5.5.2",
+    "pkg": "^5.8.0",
     "typescript": "^4.6.2"
   }
 }
