@@ -3,7 +3,7 @@ name: Release AD4M modules on NPM
 on:
   push:
     branches:
-      - changeset
+      - main
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
