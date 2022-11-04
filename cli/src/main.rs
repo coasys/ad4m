@@ -4,25 +4,11 @@ extern crate graphql_client;
 extern crate reqwest;
 extern crate tokio;
 
+mod agent;
+
 use clap::Parser;
 use anyhow::{Result};
-use graphql_client::{GraphQLQuery, Response};
 
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "../core/lib/src/schema.gql",
-    query_path = "queries/agent.gql",
-    response_derives = "Debug",
-)]
-pub struct AgentStatus;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "../core/lib/src/schema.gql",
-    query_path = "queries/agent.gql",
-    response_derives = "Debug",
-)]
-pub struct RequestCapability;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,20 +17,12 @@ async fn main() -> Result<()> {
     //    .with_context(|| format!("could not read file `{}`", path))?;
     //println!("file content: {}", content);
 
-    let query = RequestCapability::build_query(request_capability::Variables {
-        app_name: "AD4M cli".to_string(),
-        app_desc: "Command line administration tool for AD4M".to_string(),
-        app_url: "org.perspect3vism.ad4m.cli".to_string(),
-        capabilities: "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]".to_string(),
-    });
-    let response_body: Response<request_capability::ResponseData> = reqwest::Client::new()
-        .post("http://localhost:12000/graphql")
-        .json(&query)
-        .send()
-        .await?
-        .json()
-        .await?;
-    println!("{:#?}", response_body);
+    if let Ok(request_id) = agent::run_request_capability().await {
+        println!("Got request id: {:#?}", request_id);
+    } else {
+        println!("Error requesting capability");
+    }
+    
 
     Ok(())
 }
