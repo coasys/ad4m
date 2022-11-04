@@ -10,6 +10,7 @@ extern crate chrono;
 mod agent;
 mod perspectives;
 mod startup;
+mod util;
 
 use clap::{Parser, Subcommand};
 use anyhow::{Result};
