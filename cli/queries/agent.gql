@@ -1,0 +1,9 @@
+query AgentStatus {
+    agentStatus {
+        isInitialized
+        isUnlocked
+        did
+        didDocument
+        error
+    }
+}

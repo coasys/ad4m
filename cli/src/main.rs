@@ -1,14 +1,39 @@
 extern crate clap;
 extern crate anyhow;
+extern crate graphql_client;
+extern crate reqwest;
+extern crate tokio;
 
 use clap::Parser;
-use anyhow::{Context, Result};
+use anyhow::{Result};
+use graphql_client::{GraphQLQuery, Response};
 
-fn main() -> Result<()> {
-    let path = "test.txt";
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("could not read file `{}`", path))?;
-    println!("file content: {}", content);
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "queries/agent.gql",
+    response_derives = "Debug",
+)]
+pub struct AgentStatus;
+
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    //let path = "test.txt";
+    //let content = std::fs::read_to_string(path)
+    //    .with_context(|| format!("could not read file `{}`", path))?;
+    //println!("file content: {}", content);
+
+    let query = AgentStatus::build_query(agent_status::Variables {});
+    let response_body: Response<agent_status::ResponseData> = reqwest::Client::new()
+        .post("http://localhost:12000/graphql")
+        .json(&query)
+        .send()
+        .await?
+        .json()
+        .await?;
+    println!("{:#?}", response_body);
+
     Ok(())
 }
 /// AD4M command line client

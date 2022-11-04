@@ -1,7 +1,13 @@
 [package]
 name = "ad4m"
 version = "0.0.1"
+edition = "2021"
 
 [dependencies]
 anyhow = "1.0.65"
 clap = { version = "4.0.8", features = ["derive"] }
+graphql_client = "0.11.0"
+serde = "1.0.147"
+reqwest = { version = "0.11.12", features = ["blocking", "json"] }
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
