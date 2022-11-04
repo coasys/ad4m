@@ -13,6 +13,6 @@ where Q: Serialize,  R: DeserializeOwned {
         .await?
         .json()
         .await?;
-    let response_data = response_body.data.ok_or(anyhow!("No data in response"))?;
+    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response"))?;
     Ok(response_data)
 }

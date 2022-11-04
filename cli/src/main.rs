@@ -118,8 +118,8 @@ async fn main() -> Result<()> {
     let cap_token = startup::get_cap_token().await?;
 
     match args.domain {
-        Domain::Agent{command} => {},
-        Domain::Languages{command} => {},
+        Domain::Agent{command: _} => {},
+        Domain::Languages{command: _} => {},
         Domain::Perspectives{command} => {
             if command.is_none() {
                 let all_perspectives = perspectives::run_all(cap_token).await?;
@@ -140,8 +140,8 @@ async fn main() -> Result<()> {
                 },
             }
         },
-        Domain::Neighbourhoods{command} => {},
-        Domain::Runtime{command} => {},
+        Domain::Neighbourhoods{command: _} => {},
+        Domain::Runtime{command: _} => {},
     }
 
     Ok(())

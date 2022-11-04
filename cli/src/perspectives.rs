@@ -1,7 +1,7 @@
-use graphql_client::{GraphQLQuery, Response};
-use crate::startup::get_executor_url;
+use graphql_client::{GraphQLQuery};
+
 use crate::util::query;
-use anyhow::{Result, anyhow, Context};
+use anyhow::{Result, Context};
 //use chrono::{DateTime as DT, Utc};
 
 //type DateTime = DT<Utc>;

@@ -43,7 +43,7 @@ pub async fn get_cap_token() -> Result<String> {
         let mut rl = Editor::<()>::new()?;
         let rand = rl.readline("Enter random string: ")?;
         let jwt = agent::run_retrieve_capability(request_id, rand).await
-            .with_context(|| format!("Error generating capability token!"))?;
+            .with_context(|| "Error generating capability token!".to_string())?;
 
         cap_token = jwt.clone();
         std::fs::write(&cap_token_file, jwt).with_context(|| format!("Could not write file `{}`", cap_token_file.display()))?;

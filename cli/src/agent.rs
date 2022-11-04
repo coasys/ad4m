@@ -32,7 +32,7 @@ pub async fn run_request_capability() -> Result<String> {
         .json()
         .await?;
 
-    let response_data = response_body.data.ok_or(anyhow!("No data in response"))?;
+    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response"))?;
     Ok(response_data.agent_request_capability)
 }
 
@@ -46,8 +46,8 @@ pub struct RetrieveCapability;
 
 pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result<String> {
     let query = RetrieveCapability::build_query(retrieve_capability::Variables {
-        request_id: request_id,
-        rand: rand,
+        request_id,
+        rand,
     });
     let response_body: Response<retrieve_capability::ResponseData> = reqwest::Client::new()
         .post(get_executor_url()?)
@@ -57,6 +57,6 @@ pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result
         .json()
         .await?;
 
-    let response_data = response_body.data.ok_or(anyhow!("No data in response"))?;
+    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response"))?;
     Ok(response_data.agent_generate_jwt)
 }
