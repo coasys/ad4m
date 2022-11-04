@@ -5,6 +5,7 @@ extern crate reqwest;
 extern crate tokio;
 extern crate rustyline;
 extern crate dirs;
+extern crate chrono;
 
 mod agent;
 mod perspectives;
@@ -76,7 +77,7 @@ enum LanguageFunctions {
 enum PerspectiveFunctions {
     Add { name: String },
     Remove { id: String },
-    AddLink { source: String, target: String, predicate: Option<String>},
+    AddLink { id: String, source: String, target: String, predicate: Option<String>},
 }
 
 #[derive(Debug, Subcommand)]
@@ -127,14 +128,14 @@ async fn main() -> Result<()> {
 
             match command.unwrap() {
                 PerspectiveFunctions::Add { name } => {
-                    //let new_perspective = perspectives::run_add(cap_token, name).await?;
-                    //println!("{:#?}", new_perspective);
+                    let new_perspective = perspectives::run_add(cap_token, name).await?;
+                    println!("{:#?}", new_perspective);
                 },
                 PerspectiveFunctions::Remove { id } => {
-                    //perspectives::run_remove(cap_token, id).await?;
+                    perspectives::run_remove(cap_token, id).await?;
                 },
-                PerspectiveFunctions::AddLink { source, target, predicate } => {
-                   // perspectives::run_add_link(cap_token, source, target, predicate).await?;
+                PerspectiveFunctions::AddLink { id, source, target, predicate } => {
+                    perspectives::run_add_link(cap_token, id, source, target, predicate).await?;
                 },
             }
         },
