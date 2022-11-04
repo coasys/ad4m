@@ -36,7 +36,7 @@ Run ad4m service with or without connecting to an existing running holochain pro
 
 ```shell
  # connect with existing running holochain process
-./ad4m serve --connectHolochain 
+./ad4m serve --connectHolochain
 
 # start its own holochain process (will use the default environment i.e ad4m)
 ./ad4m serve
@@ -86,7 +86,7 @@ After restart the ad4m service, it's usually necessary to check agent status and
 **Publish a language,**
 
 ```shell
-# publish a template langauge by replacing the path and meta params. 
+# publish a template langauge by replacing the path and meta params.
 # you can also omit the path and meta params, and input them interactively.
 # it should give the address of the language.
 ./ad4m languages publish --path "/Users/kaichaosun/github/holo/ad4m-languages/release/shortform/bundle.js" --meta '{"name":"shortform-expression","description":"Shortform expression for flux application","possibleTemplateParams":["uid","name"],"sourceCodeLink":"https://github.com/juntofoundation/ad4m-languages"}'
@@ -155,7 +155,7 @@ npm install
 Prepare holochain binaries and bootstrap languages,
 
 ```shell
-npm run prepare-dev
+npm run download-binaries-macos/windows/linux (choose your correct OS)
 ```
 
 Local development without installing any binary,
@@ -167,7 +167,7 @@ npm run dev  # start ad4m service
 To build the binary package,
 
 ```shell
-npm run release-macos
+npm run package-macos/windows/linux (choose your correct OS)
 ```
 
 ## Operate with GraphQL
@@ -214,7 +214,10 @@ variables,
 **publish a language**,
 
 ```graphql
-mutation languagePublish($languageMeta: LanguageMetaInput!, $languagePath: String!) {
+mutation languagePublish(
+  $languageMeta: LanguageMetaInput!
+  $languagePath: String!
+) {
   languagePublish(languageMeta: $languageMeta, languagePath: $languagePath) {
     name
     address
@@ -232,7 +235,7 @@ mutation languagePublish($languageMeta: LanguageMetaInput!, $languagePath: Strin
 variables,
 
 ```json
-{ 
+{
   "languageMeta": {
     "name": "shortform-expression",
     "description": "Shortform expression for flux application",

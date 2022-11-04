@@ -1,6 +1,6 @@
 # AD4MIN
 
-A desktop application to handle the running and administration of an AD4M user. 
+A desktop application to handle the running and administration of an AD4M user.
 
 ## Development
 
@@ -21,4 +21,11 @@ In another terminal, run the tauri app,
 
 ```shell
 yarn tauri dev
+```
+
+## Building
+
+```
+yarn install
+yarn run build-macos/windows/linux (choose your correct OS)
 ```

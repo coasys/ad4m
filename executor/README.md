@@ -1,13 +1,14 @@
 # AD4M Executor (= run-time)
 
 ## What's AD4M?
-AD4M (*Agent-Centric Distributed Application Meta-Ontology*) is an abstract interface definition that tries to distill the quintessence of agent-centric software architecture such that applications can choose to become interoprable by building components congruent to this interface. It introduces a simple and powerful ontology consisting of three entities
+
+AD4M (_Agent-Centric Distributed Application Meta-Ontology_) is an abstract interface definition that tries to distill the quintessence of agent-centric software architecture such that applications can choose to become interoprable by building components congruent to this interface. It introduces a simple and powerful ontology consisting of three entities
+
 1. **Agent** (=user/human)
 2. **Language** (=space of expressions / combining storage and UI on an abstract level)
 3. **Perspective** (=what an agent perceives / spaces of links (triplets) between expressions)
 
 See [the AD4M repository](https://github.com/perspect3vism/ad4m/blob/main/README.md) for a more detailed description as well as TypeScript classes and interfaces.
-
 
 ## Why a Node.js Executor For AD4M?
 
@@ -22,6 +23,12 @@ More information about the AD4M ontology and scope can be found [here](https://g
 ## Building
 
 ```
-npm i
-npm run build
+yarn install
+yarn run build
+```
+
+## Testing
+
+```
+yarn run test
 ```
