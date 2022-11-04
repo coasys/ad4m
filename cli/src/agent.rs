@@ -1,5 +1,6 @@
 use graphql_client::{GraphQLQuery, Response};
-
+use crate::startup::get_executor_url;
+use anyhow::{Result, anyhow};
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
@@ -16,7 +17,7 @@ pub struct AgentStatus;
 )]
 pub struct RequestCapability;
 
-pub async fn run_request_capability() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run_request_capability() -> Result<String> {
     let query = RequestCapability::build_query(request_capability::Variables {
         app_name: "AD4M cli".to_string(),
         app_desc: "Command line administration tool for AD4M".to_string(),
@@ -24,14 +25,14 @@ pub async fn run_request_capability() -> Result<String, Box<dyn std::error::Erro
         capabilities: "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]".to_string(),
     });
     let response_body: Response<request_capability::ResponseData> = reqwest::Client::new()
-        .post("http://localhost:12000/graphql")
+        .post(get_executor_url()?)
         .json(&query)
         .send()
         .await?
         .json()
         .await?;
 
-    let response_data = response_body.data.ok_or("No data in response")?;
+    let response_data = response_body.data.ok_or(anyhow!("No data in response"))?;
     Ok(response_data.agent_request_capability)
 }
 
@@ -43,19 +44,19 @@ pub async fn run_request_capability() -> Result<String, Box<dyn std::error::Erro
 )]
 pub struct RetrieveCapability;
 
-pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result<String> {
     let query = RetrieveCapability::build_query(retrieve_capability::Variables {
         request_id: request_id,
         rand: rand,
     });
     let response_body: Response<retrieve_capability::ResponseData> = reqwest::Client::new()
-        .post("http://localhost:12000/graphql")
+        .post(get_executor_url()?)
         .json(&query)
         .send()
         .await?
         .json()
         .await?;
 
-    let response_data = response_body.data.ok_or("No data in response")?;
+    let response_data = response_body.data.ok_or(anyhow!("No data in response"))?;
     Ok(response_data.agent_generate_jwt)
 }
