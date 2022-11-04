@@ -1,0 +1,49 @@
+{
+  "$schema": "https://turborepo.org/schema.json",
+  "pipeline": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+    "lint": {
+      "outputs": []
+    },
+    "dev": {
+      "cache": false
+    },
+    "test": {
+      "dependsOn": ["build"],
+      "outputs": []
+    },
+    "test:windows": {
+      "dependsOn": ["build"],
+      "outputs": []
+    },
+
+    "ad4m-host#package-linux": {
+      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+    "ad4m-host#package-macos": {
+      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+    "ad4m-host#package-windows": {
+      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+
+    "ad4min#build-linux": {
+      "dependsOn": ["ad4m-host#package-linux"],
+      "outputs": ["dist/**"]
+    },
+    "ad4min#build-macos": {
+      "dependsOn": ["ad4m-host#package-macos"],
+      "outputs": ["dist/**"]
+    },
+    "ad4min#build-windows": {
+      "dependsOn": ["ad4m-host#package-windows"],
+      "outputs": ["dist/**"]
+    }
+  }
+}

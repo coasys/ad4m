@@ -1,1 +1,0 @@
-$env:PATH = '.\src\test-temp;'+ $env:PATH

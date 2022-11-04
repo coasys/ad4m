@@ -1,0 +1,135 @@
+[
+  {
+    "name": "ad4m",
+    "v": 1,
+    "requests": [
+      {
+        "v": 1,
+        "headers": [
+          {
+            "active": true,
+            "value": "",
+            "key": ""
+          }
+        ],
+        "variables": "{ \"id\": \"1\" }",
+        "url": "http://127.0.0.1:4000/graphql",
+        "query": "query agentStatus {\n  agentStatus {\n    did\n    didDocument\n    error\n    isInitialized\n    isUnlocked\n  }\n}\n",
+        "name": "ad4m agent status"
+      },
+      {
+        "url": "http://127.0.0.1:4000/graphql",
+        "name": "ad4m agent unlock",
+        "headers": [
+          {
+            "value": "",
+            "key": "",
+            "active": true
+          }
+        ],
+        "v": 1,
+        "query": "mutation agentUnlock($passphrase: String!) {\n  agentUnlock(passphrase: $passphrase) {\n    isInitialized\n    isUnlocked\n    did\n    error\n  }\n}\n",
+        "variables": "{ \"passphrase\": \"123456\" }"
+      },
+      {
+        "query": "mutation languagePublish($languageMeta: LanguageMetaInput!, $languagePath: String!) {\n  languagePublish(languageMeta: $languageMeta, languagePath: $languagePath) {\n    name\n    address\n    author\n    description\n    possibleTemplateParams\n    sourceCodeLink\n    templateAppliedParams\n    templateSourceLanguageAddress\n    templated\n  }\n}\n",
+        "variables": "{ \n  \"languageMeta\": {\n    \"name\": \"shortform-expression\",\n    \"description\": \"Shortform expression for flux application\",\n    \"possibleTemplateParams\": [\"uid\", \"name\"],\n    \"sourceCodeLink\": \"https://github.com/juntofoundation/ad4m-languages\"\n  },\n  \"languagePath\": \"/Users/kaichaosun/github/holo/ad4m-languages/release/shortform/bundle.js\"\n}",
+        "headers": [
+          {
+            "active": true,
+            "key": "",
+            "value": ""
+          }
+        ],
+        "v": 1,
+        "url": "http://127.0.0.1:4000/graphql",
+        "name": "ad4m publish shortform language"
+      },
+      {
+        "url": "http://127.0.0.1:4000/graphql",
+        "headers": [
+          {
+            "value": "",
+            "key": "",
+            "active": true
+          }
+        ],
+        "v": 1,
+        "query": "mutation languagePublish($languageMeta: LanguageMetaInput!, $languagePath: String!) {\n  languagePublish(languageMeta: $languageMeta, languagePath: $languagePath) {\n    name\n    address\n    author\n    description\n    possibleTemplateParams\n    sourceCodeLink\n    templateAppliedParams\n    templateSourceLanguageAddress\n    templated\n  }\n}\n",
+        "variables": "{ \n  \"languageMeta\": {\n    \"name\": \"social-context\",\n    \"description\": \"Link sharing for ad4m neighbourhoods\",\n    \"possibleTemplateParams\": [\"uid\", \"name\"],\n    \"sourceCodeLink\": \"https://github.com/juntofoundation/Social-Context\"\n  },\n  \"languagePath\": \"/Users/kaichaosun/Downloads/bundle.js\"\n}",
+        "name": "ad4m publish social context"
+      },
+      {
+        "v": 1,
+        "name": "ad4m language meta",
+        "variables": "{ \n  \"address\": \"QmeG3xVQEqdXwjR4ceYuVEaL7x51RdUUY8A4hbNpbaVmxY\"\n}",
+        "headers": [
+          {
+            "active": true,
+            "key": "",
+            "value": ""
+          }
+        ],
+        "url": "http://127.0.0.1:4000/graphql",
+        "query": "query languageMeta($address: String!) {\n  languageMeta(address: $address) {\n    name\n    address\n    author\n    description\n    possibleTemplateParams\n    sourceCodeLink\n    templateAppliedParams\n    templateSourceLanguageAddress\n    templated\n  }\n}\n"
+      },
+      {
+        "variables": "{ \n  \"languageMeta\": {\n    \"name\": \"group-expression\",\n    \"description\": \"Group expression for flux application\",\n    \"possibleTemplateParams\": [\"uid\", \"name\"],\n    \"sourceCodeLink\": \"https://github.com/juntofoundation/ad4m-languages\"\n  },\n  \"languagePath\": \"/Users/kaichaosun/github/holo/ad4m-languages/release/group/bundle.js\"\n}",
+        "query": "mutation languagePublish($languageMeta: LanguageMetaInput!, $languagePath: String!) {\n  languagePublish(languageMeta: $languageMeta, languagePath: $languagePath) {\n    name\n    address\n    author\n    description\n    possibleTemplateParams\n    sourceCodeLink\n    templateAppliedParams\n    templateSourceLanguageAddress\n    templated\n  }\n}\n",
+        "url": "http://127.0.0.1:4000/graphql",
+        "name": "ad4m publish group language",
+        "headers": [
+          {
+            "value": "",
+            "key": "",
+            "active": true
+          }
+        ],
+        "v": 1
+      },
+      {
+        "query": "mutation languagePublish($languageMeta: LanguageMetaInput!, $languagePath: String!) {\n  languagePublish(languageMeta: $languageMeta, languagePath: $languagePath) {\n    name\n    address\n    author\n    description\n    possibleTemplateParams\n    sourceCodeLink\n    templateAppliedParams\n    templateSourceLanguageAddress\n    templated\n  }\n}\n",
+        "url": "http://127.0.0.1:4000/graphql",
+        "name": "ad4m publish profile expression",
+        "v": 1,
+        "headers": [
+          {
+            "active": true,
+            "key": "",
+            "value": ""
+          }
+        ],
+        "variables": "{ \n  \"languageMeta\": {\n    \"name\": \"profile-expression\",\n    \"description\": \"Profile expression for flux application\",\n    \"possibleTemplateParams\": [\"uid\", \"name\"],\n    \"sourceCodeLink\": \"https://github.com/jdeepee/profiles\"\n  },\n  \"languagePath\": \"/Users/kaichaosun/github/holo/josh/profiles/build/bundle.js\"\n}"
+      },
+      {
+        "name": "ad4m publish note ipfs expression",
+        "v": 1,
+        "query": "mutation languagePublish($languageMeta: LanguageMetaInput!, $languagePath: String!) {\n  languagePublish(languageMeta: $languageMeta, languagePath: $languagePath) {\n    name\n    address\n    author\n    description\n    possibleTemplateParams\n    sourceCodeLink\n    templateAppliedParams\n    templateSourceLanguageAddress\n    templated\n  }\n}\n",
+        "headers": [
+          {
+            "value": "",
+            "active": true,
+            "key": ""
+          }
+        ],
+        "url": "http://127.0.0.1:4000/graphql",
+        "variables": "{ \n  \"languageMeta\": {\n    \"name\": \"note-ipfs\",\n    \"description\": \"Language for storing data in ipfs\",\n    \"possibleTemplateParams\": [],\n    \"sourceCodeLink\": \"https://github.com/perspect3vism/lang-note-ipfs\"\n  },\n  \"languagePath\": \"/Users/kaichaosun/Downloads/QmYVsrMpiFmV9S7bTWNAkUzSqjRJskQ8g4TWKKwKrHAPqL\"\n}"
+      },
+      {
+        "v": 1,
+        "variables": "{ \n  \"languageMeta\": {\n    \"name\": \"ui-bundle-expression\",\n    \"description\": \"UI bundle expression for flux application\",\n    \"possibleTemplateParams\": [],\n    \"sourceCodeLink\": \"https://github.com/juntofoundation/file-store-languages\"\n  },\n  \"languagePath\": \"/Users/kaichaosun/github/holo/file-store-languages/release/ui-bundle-store.js\"\n}",
+        "url": "http://127.0.0.1:4000/graphql",
+        "headers": [
+          {
+            "active": true,
+            "value": "",
+            "key": ""
+          }
+        ],
+        "query": "mutation languagePublish($languageMeta: LanguageMetaInput!, $languagePath: String!) {\n  languagePublish(languageMeta: $languageMeta, languagePath: $languagePath) {\n    name\n    address\n    author\n    description\n    possibleTemplateParams\n    sourceCodeLink\n    templateAppliedParams\n    templateSourceLanguageAddress\n    templated\n  }\n}\n",
+        "name": "ad4m publish ui bundle language"
+      }
+    ],
+    "folders": []
+  }
+]
