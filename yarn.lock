@@ -17885,7 +17885,7 @@ pkg-up@3.1.0:
   dependencies:
     find-up "^3.0.0"
 
-pkg@^5.5.2:
+pkg@^5.8.0:
   version "5.8.0"
   resolved "https://registry.yarnpkg.com/pkg/-/pkg-5.8.0.tgz#a77644aeff0b94a1656d7f76558837f7c754a4c0"
   integrity sha512-8h9PUDYFi+LOMLbIyGRdP21g08mAtHidSpofSrf8LWhxUWGHymaRzcopEGiynB5EhQmZUKM6PQ9kCImV2TpdjQ==
