@@ -11,3 +11,7 @@ query AgentStatus {
 mutation RequestCapability($appName: String!, $appDesc: String!, $appUrl: String!, $capabilities: String!) {
     agentRequestCapability(appName: $appName, appDesc: $appDesc, appUrl: $appUrl, capabilities: $capabilities)
 }
+
+mutation RetrieveCapability($requestId: String!, $rand: String!) {
+    agentGenerateJwt(requestId: $requestId, rand: $rand)
+}

@@ -3,11 +3,14 @@ extern crate anyhow;
 extern crate graphql_client;
 extern crate reqwest;
 extern crate tokio;
+extern crate rustyline;
 
 mod agent;
 
 use clap::Parser;
 use anyhow::{Result};
+use rustyline::error::ReadlineError;
+use rustyline::{Editor};
 
 
 #[tokio::main]
@@ -19,6 +22,14 @@ async fn main() -> Result<()> {
 
     if let Ok(request_id) = agent::run_request_capability().await {
         println!("Got request id: {:#?}", request_id);
+
+        let mut rl = Editor::<()>::new()?;
+        if let Ok(rand) = rl.readline("Enter random string: ") {
+            if let Ok(jwt) = agent::run_retrieve_capability(request_id, rand).await {
+                println!("Got jwt: {:#?}", jwt);
+            }
+        }
+        
     } else {
         println!("Error requesting capability");
     }
