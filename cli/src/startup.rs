@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use anyhow::{Context, Result};
 use rustyline::{Editor};
-use crate::agent;
+use crate::{agent, perspectives};
 
 pub fn data_path() -> Result<PathBuf> {
     let home_dir = dirs::home_dir().expect("Could not get home directory");
@@ -34,22 +34,26 @@ pub async fn get_cap_token() -> Result<String> {
     if cap_token_file.exists() {
         cap_token = std::fs::read_to_string(&cap_token_file).with_context(|| format!("Could not read file `{}`", cap_token_file.display()))?;
         println!("Found cap token in file.");
-    } else {
-        println!("No cap token found in file. Requesting one...");
+        if let Ok(_) = perspectives::run_all(cap_token.clone()).await {
+            return Ok(cap_token);
+        }
+    } 
 
-        let request_id = agent::run_request_capability().await?;
-        println!("Got request id: {:#?}", request_id);
-    
-        let mut rl = Editor::<()>::new()?;
-        let rand = rl.readline("Enter random string: ")?;
-        let jwt = agent::run_retrieve_capability(request_id, rand).await
-            .with_context(|| "Error generating capability token!".to_string())?;
+    println!("No cap token found in file or token not valid. Requesting one...");
 
-        cap_token = jwt.clone();
-        std::fs::write(&cap_token_file, jwt).with_context(|| format!("Could not write file `{}`", cap_token_file.display()))?;
-        println!("Wrote cap token to file.");
+    let request_id = agent::run_request_capability().await?;
+    println!("Got request id: {:#?}", request_id);
+
+    let mut rl = Editor::<()>::new()?;
+    let rand = rl.readline("Enter random string: ")?;
+    let jwt = agent::run_retrieve_capability(request_id, rand).await
+        .with_context(|| "Error generating capability token!".to_string())?;
+
+    let cap_token = jwt.clone();
+    std::fs::write(&cap_token_file, jwt).with_context(|| format!("Could not write file `{}`", cap_token_file.display()))?;
+    println!("Wrote cap token to file.");
             
-    }
+
 
     Ok(cap_token)
 }
