@@ -77,23 +77,42 @@ enum LanguageFunctions {
 
 #[derive(Debug, Subcommand)]
 enum PerspectiveFunctions {
+    /// Add a perspective with given name
     Add { name: String },
+
+    /// Remove perspective with given uuid
     Remove { id: String },
+
+    /// Add link to perspective with given uuid
     AddLink { id: String, source: String, target: String, predicate: Option<String>},
+
+    /// Query links from perspective with given uuid
     QueryLinks(QueryLinksArgs),
 }
 
 #[derive(Args, Debug)]
 struct QueryLinksArgs {
+    /// Perspective ID
     id: String,
+
+    /// Filter by source
     source: Option<String>,
+
+    /// Filter by target
     target: Option<String>,
+
+    /// Filter by predicate
     predicate: Option<String>,
 
+    /// Get only links after this date (fromat: %Y-%m-%dT%H:%M:%S%.fZ)
     #[arg(short, long)]
     from_date: Option<String>,
+
+    /// Get only links before this date (fromat: %Y-%m-%dT%H:%M:%S%.fZ)
     #[arg(short, long)]
     until_date: Option<String>,
+
+    /// Get only the first n links
     #[arg(short, long)]
     limit: Option<f64>, 
 }
