@@ -116,7 +116,7 @@ pub async fn run_query_links(
         .await
         .with_context(|| "Failed to run perspectives->queryLinks query")?;
 
-    Ok(response_data.perspective_query_links.unwrap_or(vec![]))
+    Ok(response_data.perspective_query_links.unwrap_or_default())
 }
  
 

@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
                                     _ => bail!("Unexpected value in array: {:?}", item),
                                 }
                                 println!("====================");
-                                i = i + 1;
+                                i += 1;
                             }
                         },
                         _ => bail!("Unexpected result value in response of run_infer()"),
