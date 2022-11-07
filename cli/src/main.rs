@@ -13,8 +13,9 @@ mod startup;
 mod util;
 
 use clap::{Args, Parser, Subcommand};
-use anyhow::{Result};
+use anyhow::{Result, bail};
 use util::maybe_parse_datetime;
+use serde_json::Value;
 
 /// AD4M command line interface
 #[derive(Parser, Debug)]
@@ -88,6 +89,9 @@ enum PerspectiveFunctions {
 
     /// Query links from perspective with given uuid
     QueryLinks(QueryLinksArgs),
+
+    /// Run Prolog / SDNA query on perspective with given uuid
+    Infer{ id: String, query: String },
 }
 
 #[derive(Args, Debug)]
@@ -179,6 +183,39 @@ async fn main() -> Result<()> {
                     let until_date = maybe_parse_datetime(args.until_date)?;
                     let result = perspectives::run_query_links(cap_token, args.id, args.source, args.target, args.predicate, from_date, until_date, args.limit).await?;
                     println!("{:#?}", result);
+                },
+                PerspectiveFunctions::Infer { id, query } => {
+                    match perspectives::run_infer(cap_token, id, query).await? {
+                        Value::Bool(true) => println!("true ✅"),
+                        Value::Bool(false) => println!("false ❌"),
+                        Value::String(string) => println!("{}", string),
+                        Value::Array(array) => {
+                            println!("\x1b[90m{} results:", array.len());
+                            let mut i = 1;
+                            for item in array {
+                                println!("\x1b[90m{}:", i);
+                                match item {
+                                    Value::Object(map) => {
+                                        for (key, value) in map {
+                                            let value = match value {
+                                                Value::String(string) => string,
+                                                Value::Number(number) => number.to_string(),
+                                                Value::Bool(boolean) => boolean.to_string(),
+                                                Value::Array(_) => bail!("Unexpected nested object value"),
+                                                Value::Object(_) => bail!("Unexpected nested object value"),
+                                                Value::Null => "null".to_string(),
+                                            };
+                                            println!("\x1b[36m{}:\x1b[97m {}", key, value);
+                                        }
+                                    },
+                                    _ => bail!("Unexpected value in array: {:?}", item),
+                                }
+                                println!("====================");
+                                i = i + 1;
+                            }
+                        },
+                        _ => bail!("Unexpected result value in response of run_infer()"),
+                    }
                 }
             }
         },

@@ -46,3 +46,7 @@ query QueryLinks($uuid: String!, $query: LinkQuery!) {
         proof { valid, invalid, signature, key }
     }
 }
+
+query Infer($uuid: String!, $query: String!) {
+    perspectiveQueryProlog(uuid: $uuid, query: $query)
+}

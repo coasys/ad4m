@@ -1,5 +1,5 @@
 use graphql_client::{GraphQLQuery};
-
+use serde_json::{Value};
 use crate::util::query;
 use anyhow::{Result, Context};
 use chrono::naive::NaiveDateTime;
@@ -119,3 +119,30 @@ pub async fn run_query_links(
     Ok(response_data.perspective_query_links.unwrap_or(vec![]))
 }
  
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/perspectives.gql",
+    response_derives = "Debug",
+)]
+pub struct Infer;
+
+pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
+    let response_data: infer::ResponseData = query(cap_token, Infer::build_query(infer::Variables { uuid, query: prolog_query }))
+        .await
+        .with_context(|| "Failed to run perspectives->infer query")?;
+    let v: Value = serde_json::from_str(&response_data.perspective_query_prolog)?;
+    Ok(match v {
+        Value::String(string) => {
+            if string == "true" {
+                Value::Bool(true)
+            } else if string == "false" {
+                Value::Bool(false)
+            } else {
+                Value::String(string)
+            }
+        },
+        _ => v,
+    })
+}

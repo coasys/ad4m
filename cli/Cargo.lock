@@ -15,6 +15,7 @@ dependencies = [
  "reqwest",
  "rustyline",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
