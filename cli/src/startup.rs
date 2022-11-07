@@ -34,7 +34,7 @@ pub async fn get_cap_token() -> Result<String> {
     if cap_token_file.exists() {
         cap_token = std::fs::read_to_string(&cap_token_file).with_context(|| format!("Could not read file `{}`", cap_token_file.display()))?;
         println!("Found cap token in file.");
-        if let Ok(_) = perspectives::run_all(cap_token.clone()).await {
+        if (perspectives::run_all(cap_token.clone()).await).is_ok() {
             return Ok(cap_token);
         }
     } 
