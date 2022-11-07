@@ -15,7 +15,7 @@ where Q: Serialize,  R: DeserializeOwned {
         .await?
         .json()
         .await?;
-    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response"))?;
+    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response! Errors: {:?}", response_body.errors))?;
     Ok(response_data)
 }
 
