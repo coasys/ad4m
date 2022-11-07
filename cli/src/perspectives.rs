@@ -2,9 +2,9 @@ use graphql_client::{GraphQLQuery};
 
 use crate::util::query;
 use anyhow::{Result, Context};
-//use chrono::{DateTime as DT, Utc};
+use chrono::naive::NaiveDateTime;
 
-//type DateTime = DT<Utc>;
+type DateTime = NaiveDateTime;
 
 use self::all::AllPerspectives;
 use self::add_link::AddLinkPerspectiveAddLink;
@@ -79,7 +79,7 @@ pub async fn run_add_link(cap_token: String, uuid: String, source: String, targe
     
     Ok(response_data.perspective_add_link)
 }
-/*
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
@@ -93,30 +93,29 @@ pub async fn run_query_links(
     uuid: String, 
     source: Option<String>, 
     target: Option<String>, 
-    predicate: Option<String>
+    predicate: Option<String>,
+    from_date: Option<DateTime>,
+    until_date: Option<DateTime>,
+    limit: Option<f64>
 ) -> Result<Vec<query_links::QueryLinksPerspectiveQueryLinks>> {
-    let query = QueryLinks::build_query(query_links::Variables { 
-        uuid, 
-        query: query_links::LinkQuery {
-            source,
-            target,
-            predicate,
-            from_date: None,
-            until_date: None,
-            limit: None,
-        }
-    });
-       
-    let response_body: Response<query_links::ResponseData> = reqwest::Client::new()
-        .post(get_executor_url()?)
-        .header("Authorization", cap_token) 
-        .json(&query)
-        .send()
-        .await?
-        .json()
-        .await?;
-    
-    let response_data = response_body.data.ok_or(anyhow!("No data in response"))?;
+
+    let response_data: query_links::ResponseData = query(
+        cap_token, 
+        QueryLinks::build_query(query_links::Variables { 
+            uuid,
+            query: query_links::LinkQuery {
+                source, 
+                target, 
+                predicate,
+                from_date,
+                until_date,
+                limit,
+            }
+        })
+    )
+        .await
+        .with_context(|| "Failed to run perspectives->queryLinks query")?;
+
     Ok(response_data.perspective_query_links.unwrap_or(vec![]))
 }
- */
+ 

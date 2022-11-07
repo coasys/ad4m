@@ -16,3 +16,14 @@ where Q: Serialize,  R: DeserializeOwned {
     let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response"))?;
     Ok(response_data)
 }
+
+pub fn maybe_parse_datetime(maybe_date: Option<String>) -> Result<Option<chrono::naive::NaiveDateTime>> {
+    let datetime_format = "%Y-%m-%dT%H:%M:%S%.fZ";
+    Ok( match maybe_date.clone().map(|s| chrono::naive::NaiveDateTime::parse_from_str(&s, datetime_format)) {
+        Some(Err(e)) => {
+            return Err(anyhow!(e).context(format!("Couldn't parse datetime '{}' with expected format: {}", maybe_date.unwrap(), datetime_format)));
+        },
+        Some(Ok(x)) => Some(x),
+        None => None,
+    })
+}
