@@ -17,7 +17,7 @@ use clap::{Args, Parser, Subcommand};
 use anyhow::{Result, bail};
 use util::maybe_parse_datetime;
 use serde_json::Value;
-use formatting::print_prolog_result;
+use formatting::{print_prolog_result, print_link};
 
 /// AD4M command line interface
 #[derive(Parser, Debug)]
@@ -184,7 +184,9 @@ async fn main() -> Result<()> {
                     let from_date = maybe_parse_datetime(args.from_date)?;
                     let until_date = maybe_parse_datetime(args.until_date)?;
                     let result = perspectives::run_query_links(cap_token, args.id, args.source, args.target, args.predicate, from_date, until_date, args.limit).await?;
-                    println!("{:#?}", result);
+                    for link in result {
+                        print_link(link);
+                    }
                 },
                 PerspectiveFunctions::Infer { id, query } => {
                     match perspectives::run_infer(cap_token, id, query).await? {
