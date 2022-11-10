@@ -1,13 +1,6 @@
 use graphql_client::{GraphQLQuery, Response};
 use crate::{startup::get_executor_url, util::query};
 use anyhow::{Result, anyhow, Context};
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "../core/lib/src/schema.gql",
-    query_path = "src/agent.gql",
-    response_derives = "Debug",
-)]
-pub struct AgentStatus;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -75,4 +68,19 @@ pub async fn run_me(cap_token: String) -> Result<me::MeAgent> {
         .await
         .with_context(|| "Failed to run agent->me query")?;
     Ok(response_data.agent)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug",
+)]
+pub struct AgentStatus;
+
+pub async fn run_status(cap_token: String) -> Result<agent_status::AgentStatusAgentStatus> {
+    let response_data: agent_status::ResponseData = query(cap_token, AgentStatus::build_query(agent_status::Variables {}))
+        .await
+        .with_context(|| "Failed to run agent->me query")?;
+    Ok(response_data.agent_status)
 }
