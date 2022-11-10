@@ -12,9 +12,14 @@ pub fn data_path() -> Result<PathBuf> {
     Ok(data_path)
 }
 
-pub fn get_executor_port() -> Result<u16> {
+pub fn executor_data_path() -> PathBuf {
     let home_dir = dirs::home_dir().expect("Could not get home directory");
     let executor_data_path = home_dir.join(".ad4m");
+    executor_data_path
+}
+
+pub fn get_executor_port() -> Result<u16> {
+    let executor_data_path = executor_data_path();
     let file_path = executor_data_path.join("executor-port");
     let executor_port = std::fs::read_to_string(file_path.clone())
         .with_context(||format!("Could not executor port file `{}`!\nIs AD4M executor running?", file_path.display()))?;

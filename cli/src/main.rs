@@ -16,7 +16,8 @@ mod types;
 mod util;
 
 use clap::{Args, Parser, Subcommand};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use startup::executor_data_path;
 use util::maybe_parse_datetime;
 use serde_json::Value;
 use formatting::{print_prolog_result, print_link};
@@ -57,6 +58,7 @@ enum Domain {
         #[command(subcommand)]
         command: AgentFunctions,
     },
+    Log
 }
 
 #[derive(Debug, Subcommand)]
@@ -217,6 +219,12 @@ async fn main() -> Result<()> {
         },
         Domain::Neighbourhoods{command: _} => {},
         Domain::Runtime{command: _} => {},
+        Domain::Log => {
+            let file = executor_data_path().join("ad4min.log");
+            let log = std::fs::read_to_string(file.clone())
+                .with_context(||format!("Could not read log file `{}`!\nIs AD4M executor running?", file.display()))?;
+            println!("{}", log);   
+        }
     }
 
     Ok(())
