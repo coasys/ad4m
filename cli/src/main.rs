@@ -1,3 +1,4 @@
+extern crate async_tungstenite;
 extern crate clap;
 extern crate anyhow;
 extern crate graphql_client;
@@ -94,6 +95,8 @@ enum PerspectiveFunctions {
 
     /// Run Prolog / SDNA query on perspective with given uuid
     Infer{ id: String, query: String },
+
+    Watch { id: String }
 }
 
 #[derive(Args, Debug)]
@@ -205,6 +208,9 @@ async fn main() -> Result<()> {
                         },
                         _ => bail!("Unexpected result value in response of run_infer()"),
                     }
+                },
+                PerspectiveFunctions::Watch { id } => {
+                    perspectives::run_watch(cap_token, id).await?;
                 }
             }
         },

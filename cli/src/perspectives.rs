@@ -1,6 +1,7 @@
 use graphql_client::{GraphQLQuery};
-use serde_json::{Value};
-use crate::util::query;
+use graphql_ws_client::graphql::StreamingOperation;
+use serde_json::{json, Value};
+use crate::{util::query, startup::get_executor_url};
 use anyhow::{Result, Context};
 use chrono::naive::NaiveDateTime;
 
@@ -8,6 +9,11 @@ type DateTime = NaiveDateTime;
 
 use self::all::AllPerspectives;
 use self::add_link::AddLinkPerspectiveAddLink;
+//use websocket::{ClientBuilder, Message};
+//use websocket::header::{Headers, Authorization};
+
+//use graphql_ws_client::{GraphQLClientClientBuilder};
+//use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -107,8 +113,8 @@ pub async fn run_query_links(
                 source, 
                 target, 
                 predicate,
-                from_date,
-                until_date,
+                fromDate: from_date,
+                untilDate: until_date,
                 limit,
             }
         })
@@ -145,4 +151,242 @@ pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) ->
         },
         _ => v,
     })
+}
+/*
+mod schema {
+    cynic::use_schema!("../core/lib/src/schema.gql");
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(schema_path = "../core/lib/src/schema.gql", graphql_type = "Link")]
+struct Link {
+    predicate: Option<String>,
+    source: String,
+    target: String,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(schema_path = "../core/lib/src/schema.gql", graphql_type = "ExpressionProof")]
+struct ExpressionProof {
+    invalid: Option<bool>,
+    key: String,
+    signature: String,
+    valid: Option<bool>,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(schema_path = "../core/lib/src/schema.gql", graphql_type = "LinkExpression")]
+struct LinkExpression {
+    author: String,
+    data: Link,
+    proof: ExpressionProof,
+    timestamp: String,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(schema_path = "../core/lib/src/schema.gql", graphql_type = "AgentStatus")]
+struct AgentStatus {
+    did: Option<String>,
+    did_document: Option<String>,
+    error: Option<String>,
+    is_initialized: bool,
+    is_unlocked: bool,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(
+    schema_path = "../core/lib/src/schema.gql",
+    graphql_type = "Subscription"
+)]
+struct AgentStatusChangedSubscription {
+    agent_status_changed: AgentStatus,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(
+    schema_path = "../core/lib/src/schema.gql",
+    graphql_type = "SubscriptionRoot"
+)]
+struct LinkAddedSubscription {
+    #[arguments(uuid = "uuid")]
+    perspective_link_added: Option<LinkExpression>,
+}
+ */
+struct TokioSpawner(tokio::runtime::Handle);
+
+impl TokioSpawner {
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        TokioSpawner(handle)
+    }
+
+    pub fn current() -> Self {
+        TokioSpawner::new(tokio::runtime::Handle::current())
+    }
+}
+
+impl futures::task::Spawn for TokioSpawner {
+    fn spawn_obj(
+        &self,
+        obj: futures::task::FutureObj<'static, ()>,
+    ) -> Result<(), futures::task::SpawnError> {
+        self.0.spawn(obj);
+        Ok(())
+    }
+}
+
+//fn build_query() -> cynic::StreamingOperation<'static, LinkAddedSubscription> {
+//    use cynic::SubscriptionBuilder;
+//    LinkAddedSubscription::build(())
+//}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/perspectives.gql",
+    response_derives = "Debug",
+)]
+pub struct SubscriptionLinkAdded;
+
+pub async fn run_watch(cap_token: String, id: String) -> Result<()> {
+    
+    use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
+    use futures::StreamExt;
+    use graphql_ws_client::GraphQLClientClientBuilder;
+
+    let url = get_executor_url()?.replace("http", "ws");
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_str("graphql-transport-ws").unwrap(),
+    );
+    request.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&cap_token).unwrap(),
+    );
+    let (connection, _) = async_tungstenite::tokio::connect_async(request)
+        .await?;
+
+    println!("Connected");
+
+    let (sink, stream) = connection.split();
+
+
+    let mut client = GraphQLClientClientBuilder::new()
+        .build(stream, sink, TokioSpawner::current())
+        .await
+        .unwrap();
+
+    let op = StreamingOperation::<SubscriptionLinkAdded>::new(subscription_link_added::Variables {
+        uuid: id,
+    });
+
+    //let query_op = StreamingOperation::<QueryLinks>::new(query_links::Variables { 
+    //    uuid: id,
+    //    query: query_links::LinkQuery {
+    //        source: None, 
+    //        target: None, 
+    //        predicate: None,
+    //        fromDate: None,
+    //        untilDate: None,
+    //        limit: None,
+    //    }
+    //});
+
+    let mut stream = client.streaming_operation(op).await.unwrap();
+    println!("Running subscription apparently?");
+    while let Some(item) = stream.next().await {
+        println!("{:?}", item);
+    }
+
+    println!("after loop");
+  
+
+ /*
+    let (connection, _) = async_tungstenite::tokio::connect_async(request)
+        .await
+        .unwrap();
+
+    println!("Connected");
+
+    let (sink, stream) = connection.split();
+
+    let mut client = GraphQLClientClientBuilder::new()
+        .build(stream, sink, TokioSpawner::current())
+        .await
+        .unwrap();
+
+    let mut stream = client.streaming_operation(build_query()).await.unwrap();
+    println!("Running subscription apparently?");
+    while let Some(item) = stream.next().await {
+        println!("{:?}", item);
+    }
+  */
+    /*
+    let mut headers = Headers::new();
+    headers.set(Authorization(cap_token));
+    let executor_url = get_executor_url()?;
+    let mut client = ClientBuilder::new("ws://localhost:12000/graphql")
+        .unwrap()
+        .custom_headers(&headers) 
+        .add_protocol("graphql-transport-ws") 
+        .connect(None)
+        .unwrap();
+
+    client.send_message(&Message::text(serde_json::to_string(&json!({
+        "type": "connection_init"
+    }))?
+    )).unwrap();
+    let init_response = client.recv_message();
+    println!("Init response: {:?}", init_response);
+
+    //while let Ok(message) = client.recv_message() {
+    //    println!("After init: Received message: {:?}", message);
+    //}
+
+    /* 
+    let message = r#"
+    {
+        "id":"dc04f846-fb97-42b0-bfb8-7ddf0540aedf",
+        "type":"subscribe",
+        "payload":{
+            "variables":{
+                "uuid":"da0333e9-275d-4b57-8851-0d1678d75a1c",
+                "query":{
+                    "source":"ad4m://self",
+                    "predicate":"flux://has_channel"
+                }
+            },
+            "extensions":{},
+            "operationName": "perspectiveQueryLinks",
+            "query":"query perspectiveQueryLinks($uuid: String!, $query: LinkQuery!) {\n  perspectiveQueryLinks(query: $query, uuid: $uuid) {\n    author\n    timestamp\n    data {\n      source\n      predicate\n      target\n    }\n    proof {\n      valid\n      invalid\n      signature\n      key\n    }\n  }\n}\n"
+        }
+    }"#;
+    client.send_message(&Message::text(message)).unwrap();
+     
+    */
+    
+    //let gql_query = format!("perspectiveLinkAdded() {{ author timestamp data {{ source, predicate, target }} proof {{ valid, invalid, signature, key }} }}", id);
+    client.send_message(&Message::text(serde_json::to_string(&json!({
+        "type": "subscribe",
+        "id": "1",
+        "payload": {
+            "variables":{
+                "uuid": id,
+                //"query":{
+                //    "source":"ad4m://self"
+                //}
+            },
+            "extensions":{},
+            "operationName": "perspectiveLinkAdded",
+            "query": "query perspectiveLinkAdded($uuid: String!) { author timestamp data { source, predicate, target } proof { valid, invalid, signature, key } }"
+        },
+    }))?
+    )).unwrap(); 
+
+    while let Ok(message) = client.recv_message() {
+        println!("Received message: {:?}", message);
+    }
+        
+ */
+    Ok(())
 }

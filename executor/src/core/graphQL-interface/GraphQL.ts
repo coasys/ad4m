@@ -855,7 +855,7 @@ export async function startServer(params: StartServerParams) {
         typeDefs,
         resolvers,
         context: async (context) => {
-            let headers = context.req.headers;
+            let headers = context.req?.headers;
             let authToken = ''
             
             if(headers) {
@@ -890,7 +890,28 @@ export async function startServer(params: StartServerParams) {
     serverCleanup = useServer({
         schema,
         context: async (context, msg, args) => {
-            let headers: any = context.connectionParams!.headers;
+            let headers: any
+
+            if(context.connectionParams) {
+                headers = context.connectionParams!.headers;
+            //@ts-ignore
+            } else if(context.req) {
+                //@ts-ignore
+                headers = context.req.headers;
+            } else if(context.extra && context.extra.request) {
+                console.log("Looking for headers in context.extra.request")
+                if(context.extra.request.headers) {
+                    headers = context.extra.request.headers;
+                    console.log("Found context.extra.request.headers:", headers)
+                } else if(context.extra.request.rawHeaders) {
+                    headers = context.extra.request.rawHeaders;
+                    console.log("Found context.extra.request.rawHeaders:", headers)
+                } else {
+                    console.error("Coulnd't find headers in context", context)
+                    console.error("rawHeaders", context.extra.request.rawHeaders)
+                }
+            }
+            
             let authToken = ''
             
             if(headers) {
