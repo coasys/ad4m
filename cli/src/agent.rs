@@ -84,3 +84,20 @@ pub async fn run_status(cap_token: String) -> Result<agent_status::AgentStatusAg
         .with_context(|| "Failed to run agent->me query")?;
     Ok(response_data.agent_status)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug",
+)]
+pub struct Lock;
+
+pub async fn run_lock(cap_token: String, passphrase: String) -> Result<lock::LockAgentLock> {
+    let response_data: lock::ResponseData = query(cap_token, Lock::build_query(lock::Variables {
+        passphrase,
+    }))
+        .await
+        .with_context(|| "Failed to run agent->lock")?;
+    Ok(response_data.agent_lock)
+}

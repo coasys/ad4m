@@ -31,3 +31,13 @@ query Me { agent {
         }
     }
 }}
+
+mutation Lock($passphrase: String!) {
+    agentLock(passphrase: $passphrase) {
+        isInitialized
+        isUnlocked
+        did
+        didDocument
+        error
+    }
+}

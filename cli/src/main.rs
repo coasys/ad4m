@@ -18,7 +18,7 @@ mod util;
 use clap::{Args, Parser, Subcommand};
 use anyhow::{Context, Result, bail};
 use startup::executor_data_path;
-use util::maybe_parse_datetime;
+use util::{maybe_parse_datetime, readline_masked};
 use serde_json::Value;
 use formatting::{print_prolog_result, print_link, print_agent};
 
@@ -180,7 +180,12 @@ async fn main() -> Result<()> {
                     println!("\x1b[36mDID Document:\n\x1b[97m{}", status.did_document.unwrap_or("<undefined>".to_string()));
                 },
                 AgentFunctions::Lock => {
-                    //agent::lock(&cap_token).await?;
+                    let result = agent::run_lock(cap_token, readline_masked("Passphrase: ")?).await?;
+                    if let Some(error) = result.error {
+                        bail!(error);
+                    } else {
+                        println!("Agent locked");
+                    }
                 },
                 AgentFunctions::Unlock => {
                     //agent::unlock(&cap_token).await?;

@@ -21,3 +21,4 @@ cynic = { version = "1.0" }
 async-std = { version = "1.9", features = ["attributes"] }
 async_executors = { version = "0.5", features = ["async_std"] }
 urlencoding = "2"
+unicode-width = "*"
