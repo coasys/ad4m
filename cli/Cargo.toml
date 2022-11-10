@@ -20,3 +20,4 @@ async-tungstenite = { version = "0.16.1", features = ["async-std-runtime", "toki
 cynic = { version = "1.0" }
 async-std = { version = "1.9", features = ["attributes"] }
 async_executors = { version = "0.5", features = ["async_std"] }
+urlencoding = "2"

@@ -23,10 +23,46 @@ pub fn print_prolog_result(result: Value) -> Result<()> {
     Ok(())
 }
 
-pub fn print_link(link: LinkExpression) {
-    if let Some(pred) = link.data.predicate {
-        print!("\x1b[90m[{}] \x1b[35m{} \x1b[97m--\x1b[95m{}\x1b[97m--> \x1b[32m{} \x1b[34m({})", link.timestamp, link.data.source, pred, link.data.target, link.author);
+fn maybe_decode_literal(uri: String) -> String {
+    if uri.starts_with("literal://") {
+        let literal = uri.replace("literal://", "");
+        if literal.starts_with("string:") {
+            let string = literal.replace("string:", "");
+            urlencoding::decode(&string).map(|s| s.to_string()).unwrap_or(string)
+        } else if literal.starts_with("number:") {
+            let number = literal.replace("number:", "");
+            number
+        } else if literal.starts_with("json:") {
+            let json = literal.replace("json:", "");
+            if let Ok(decoded_json) = urlencoding::decode(&json) {
+                let decoded_json_string = decoded_json.to_string().replace("\\'", "'");
+                match serde_json::from_str::<serde_json::Value>(&decoded_json_string) {
+                    Ok(expression) => return expression["data"].to_string(),
+                    Err(e) => {
+                        println!("Failed to decode json literal: {}", e);
+                        return decoded_json.to_string();
+                    }
+                }
+            } else {
+                println!("Failed to decode url encoding");
+            }
+            json
+        } else {
+            literal
+        }
     } else {
-        println!("\x1b[90m[{}] \x1b[35m{} \x1b[97m----> \x1b[32m{} \x1b[34m({})", link.timestamp, link.data.source, link.data.target, link.author);
+        uri
+    }
+}
+
+pub fn print_link(link: LinkExpression) {
+    let source = maybe_decode_literal(link.data.source);
+    let target = maybe_decode_literal(link.data.target);
+    
+    if let Some(pred) = link.data.predicate {
+        let predicate = maybe_decode_literal(pred);
+        println!("\x1b[90m[{}] \x1b[35m{} \x1b[97m--\x1b[95m{}\x1b[97m--> \x1b[32m{} \x1b[34m({})", link.timestamp, source, predicate, target, link.author);
+    } else {
+        println!("\x1b[90m[{}] \x1b[35m{} \x1b[97m----> \x1b[32m{} \x1b[34m({})", link.timestamp, source, target, link.author);
     }
 }
