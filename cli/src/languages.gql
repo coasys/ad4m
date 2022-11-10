@@ -1,0 +1,7 @@
+query ByFilter($filter: String!) {
+    languages(filter: $filter) {
+        name
+        address
+        settings
+    }
+}

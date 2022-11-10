@@ -10,6 +10,7 @@ extern crate chrono;
 
 mod agent;
 mod formatting;
+mod languages;
 mod perspectives;
 mod startup;
 mod types;
@@ -75,7 +76,7 @@ enum AgentFunctions {
 #[derive(Debug, Subcommand)]
 enum LanguageFunctions {
     ByAddress,
-    ByFilter,
+    ByFilter { filter: String },
     All,
     WriteSettings,
     ApplyTemplateAndPublish,
@@ -216,7 +217,21 @@ async fn main() -> Result<()> {
                 },
             }
         },
-        Domain::Languages{command: _} => {},
+        Domain::Languages{command} => {
+            if command.is_none() {
+                let all_perspectives = languages::run_by_filter(cap_token, "".to_string()).await?;
+                println!("{:#?}", all_perspectives);
+                return Ok(());
+            }
+
+            match command.unwrap() {
+                LanguageFunctions::ByFilter{filter} => {
+                    let languages = languages::run_by_filter(cap_token, filter).await?;
+                    println!("{:#?}", languages);
+                },
+                _ => unimplemented!()
+            }
+        },
         Domain::Perspectives{command} => {
             if command.is_none() {
                 let all_perspectives = perspectives::run_all(cap_token).await?;
