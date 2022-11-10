@@ -176,9 +176,8 @@ pub async fn run_watch(cap_token: String, id: String) -> Result<()> {
     while let Some(item) = stream.next().await {
         match item {
             Ok(response) => {
-                response.data
-                    .and_then(|data| data.perspective_link_added)
-                    .map(|link| print_link(link.into()));
+                if let Some(link) = response.data
+                    .and_then(|data| data.perspective_link_added) { print_link(link.into()) }
             }
             Err(e) => {
                 println!("Received Error: {:?}", e);

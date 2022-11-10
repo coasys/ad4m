@@ -30,8 +30,8 @@ fn maybe_decode_literal(uri: String) -> String {
             let string = literal.replace("string:", "");
             urlencoding::decode(&string).map(|s| s.to_string()).unwrap_or(string)
         } else if literal.starts_with("number:") {
-            let number = literal.replace("number:", "");
-            number
+            
+            literal.replace("number:", "")
         } else if literal.starts_with("json:") {
             let json = literal.replace("json:", "");
             if let Ok(decoded_json) = urlencoding::decode(&json) {

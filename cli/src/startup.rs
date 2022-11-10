@@ -14,8 +14,8 @@ pub fn data_path() -> Result<PathBuf> {
 
 pub fn executor_data_path() -> PathBuf {
     let home_dir = dirs::home_dir().expect("Could not get home directory");
-    let executor_data_path = home_dir.join(".ad4m");
-    executor_data_path
+    
+    home_dir.join(".ad4m")
 }
 
 pub fn get_executor_port() -> Result<u16> {
