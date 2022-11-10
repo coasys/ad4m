@@ -1,6 +1,7 @@
 use graphql_client::{GraphQLQuery};
 use graphql_ws_client::graphql::StreamingOperation;
 use serde_json::Value;
+use crate::formatting::print_link;
 use crate::util::{create_websocket_client, query};
 use anyhow::{Result, Context};
 use chrono::naive::NaiveDateTime;
@@ -159,16 +160,33 @@ pub struct SubscriptionLinkAdded;
 pub async fn run_watch(cap_token: String, id: String) -> Result<()> {
     use futures::StreamExt;
 
-    let mut client = create_websocket_client(cap_token).await?;
+    let mut client = create_websocket_client(cap_token)
+        .await
+        .with_context(|| "Failed to create websocket client")?;
+
     let mut stream = client.streaming_operation(StreamingOperation::<SubscriptionLinkAdded>::new(subscription_link_added::Variables {
-        uuid: id,
-    })).await?;
-    println!("Running subscription apparently?");
+        uuid: id.clone(),
+    }))
+        .await
+        .with_context(|| "Failed to subscribe to perspectiveLinkAdded")?;
+
+    println!("Successfully subscribed to perspectiveLinkAdded for perspective {}", id);
+    println!("Waiting for events...");
+
     while let Some(item) = stream.next().await {
-        println!("{:?}", item);
+        match item {
+            Ok(response) => {
+                response.data
+                    .and_then(|data| data.perspective_link_added)
+                    .map(|link| print_link(link.into()));
+            }
+            Err(e) => {
+                println!("Received Error: {:?}", e);
+            }
+        }
     }
 
-    println!("after loop");
+    println!("Stream ended. Exiting...");
 
     Ok(())
 }

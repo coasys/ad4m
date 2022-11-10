@@ -12,6 +12,7 @@ mod agent;
 mod formatting;
 mod perspectives;
 mod startup;
+mod types;
 mod util;
 
 use clap::{Args, Parser, Subcommand};
@@ -188,7 +189,7 @@ async fn main() -> Result<()> {
                     let until_date = maybe_parse_datetime(args.until_date)?;
                     let result = perspectives::run_query_links(cap_token, args.id, args.source, args.target, args.predicate, from_date, until_date, args.limit).await?;
                     for link in result {
-                        print_link(link);
+                        print_link(link.into());
                     }
                 },
                 PerspectiveFunctions::Infer { id, query } => {
