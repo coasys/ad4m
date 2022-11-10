@@ -163,7 +163,11 @@ enum RuntimeFunctions {
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
-    let cap_token = startup::get_cap_token().await?;
+    let cap_token = if let Domain::Log = args.domain {
+        "".to_string()
+    } else {
+        startup::get_cap_token().await?
+    };
 
     match args.domain {
         Domain::Agent{command} => {
