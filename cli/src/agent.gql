@@ -15,3 +15,19 @@ mutation RequestCapability($appName: String!, $appDesc: String!, $appUrl: String
 mutation RetrieveCapability($requestId: String!, $rand: String!) {
     agentGenerateJwt(requestId: $requestId, rand: $rand)
 }
+
+query Me { agent { 
+    did
+    directMessageLanguage
+    perspective { 
+        links {
+            author, timestamp, 
+            proof {
+                signature, key, valid, invalid
+            }
+            data {
+                source, predicate, target
+            }
+        }
+    }
+}}

@@ -1,6 +1,6 @@
 use graphql_client::{GraphQLQuery, Response};
-use crate::startup::get_executor_url;
-use anyhow::{Result, anyhow};
+use crate::{startup::get_executor_url, util::query};
+use anyhow::{Result, anyhow, Context};
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
@@ -59,4 +59,20 @@ pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result
 
     let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response"))?;
     Ok(response_data.agent_generate_jwt)
+}
+
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug",
+)]
+pub struct Me;
+
+pub async fn run_me(cap_token: String) -> Result<me::MeAgent> {
+    let response_data: me::ResponseData = query(cap_token, Me::build_query(me::Variables {}))
+        .await
+        .with_context(|| "Failed to run agent->me query")?;
+    Ok(response_data.agent)
 }

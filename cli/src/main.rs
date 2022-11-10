@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use startup::executor_data_path;
 use util::maybe_parse_datetime;
 use serde_json::Value;
-use formatting::{print_prolog_result, print_link};
+use formatting::{print_prolog_result, print_link, print_agent};
 
 /// AD4M command line interface
 #[derive(Parser, Debug)]
@@ -166,7 +166,24 @@ async fn main() -> Result<()> {
     let cap_token = startup::get_cap_token().await?;
 
     match args.domain {
-        Domain::Agent{command: _} => {},
+        Domain::Agent{command} => {
+            match command {
+                AgentFunctions::Me => {
+                    let agent = agent::run_me(cap_token).await?;
+                    print_agent(agent.into());
+                },
+                AgentFunctions::Status => {
+                    //let status = agent::status(&cap_token).await?;
+                    //println!("{}", status);
+                },
+                AgentFunctions::Lock => {
+                    //agent::lock(&cap_token).await?;
+                },
+                AgentFunctions::Unlock => {
+                    //agent::unlock(&cap_token).await?;
+                },
+            }
+        },
         Domain::Languages{command: _} => {},
         Domain::Perspectives{command} => {
             if command.is_none() {

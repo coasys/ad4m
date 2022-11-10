@@ -1,7 +1,7 @@
 use serde_json::Value;
 use anyhow::{bail, Result};
 
-use crate::types::LinkExpression;
+use crate::types::{LinkExpression, Agent};
 
 pub fn print_prolog_result(result: Value) -> Result<()> {
     match result {
@@ -64,5 +64,16 @@ pub fn print_link(link: LinkExpression) {
         println!("\x1b[90m[{}] \x1b[35m{} \x1b[97m--\x1b[95m{}\x1b[97m--> \x1b[32m{} \x1b[34m({})", link.timestamp, source, predicate, target, link.author);
     } else {
         println!("\x1b[90m[{}] \x1b[35m{} \x1b[97m----> \x1b[32m{} \x1b[34m({})", link.timestamp, source, target, link.author);
+    }
+}
+
+pub fn print_agent(agent: Agent) {
+    println!("\x1b[36mDID: \x1b[97m{}", agent.did);
+    println!("\x1b[36mDirect message language: \x1b[97m{}", agent.direct_message_language.unwrap_or("<NOT SET>".to_string()));
+    println!("\x1b[36mPublic Perspective:");
+    if let Some(perspective) = agent.perspective {
+        for link in perspective.links {
+            print_link(link);
+        }
     }
 }
