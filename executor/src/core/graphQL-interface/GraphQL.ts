@@ -892,23 +892,22 @@ export async function startServer(params: StartServerParams) {
         context: async (context, msg, args) => {
             let headers: any
 
+            // Depending on the transport, the context is different
+            // For normal http queries, it's the connection context
             if(context.connectionParams) {
                 headers = context.connectionParams!.headers;
             //@ts-ignore
             } else if(context.req) {
                 //@ts-ignore
                 headers = context.req.headers;
+            // For subscriptions via websocket, it's the request context in `extra`
             } else if(context.extra && context.extra.request) {
-                console.log("Looking for headers in context.extra.request")
                 if(context.extra.request.headers) {
                     headers = context.extra.request.headers;
-                    console.log("Found context.extra.request.headers:", headers)
                 } else if(context.extra.request.rawHeaders) {
                     headers = context.extra.request.rawHeaders;
-                    console.log("Found context.extra.request.rawHeaders:", headers)
                 } else {
                     console.error("Coulnd't find headers in context", context)
-                    console.error("rawHeaders", context.extra.request.rawHeaders)
                 }
             }
             
