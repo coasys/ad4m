@@ -67,6 +67,9 @@ enum AgentFunctions {
     Status,
     Lock,
     Unlock,
+    ByDID {
+        did: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -202,6 +205,13 @@ async fn main() -> Result<()> {
                         bail!(error);
                     } else {
                         println!("Agent unlocked");
+                    }
+                },
+                AgentFunctions::ByDID{did} => {
+                    if let Some(agent) = agent::run_by_did(cap_token, did).await? {
+                        print_agent(agent.into());
+                    } else {
+                        println!("Agent not found");
                     }
                 },
             }

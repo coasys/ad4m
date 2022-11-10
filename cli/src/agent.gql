@@ -51,3 +51,21 @@ mutation Unlock($passphrase: String!) {
         error
     }
 }
+
+query ByDID($did: String!) {
+    agentByDID(did: $did) {
+        did
+        directMessageLanguage
+        perspective { 
+            links {
+                author, timestamp, 
+                proof {
+                    signature, key, valid, invalid
+                }
+                data {
+                    source, predicate, target
+                }
+            }
+        }
+    }
+}

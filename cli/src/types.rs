@@ -1,4 +1,5 @@
 use crate::agent::me::{MeAgent, MeAgentPerspectiveLinks};
+use crate::agent::by_did::{ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks};
 use crate::perspectives::query_links::QueryLinksPerspectiveQueryLinks;
 use crate::perspectives::subscription_link_added::SubscriptionLinkAddedPerspectiveLinkAdded;
 pub struct Link {
@@ -81,6 +82,26 @@ impl From<MeAgentPerspectiveLinks> for LinkExpression {
     }
 }
 
+impl From<ByDidAgentByDidPerspectiveLinks> for LinkExpression {
+    fn from(link: ByDidAgentByDidPerspectiveLinks) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: Link {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: ExpressionProof {
+                invalid: link.proof.invalid,
+                key: link.proof.key,
+                signature: link.proof.signature,
+                valid: link.proof.valid,
+            },
+        }
+    }
+}
+
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
@@ -97,6 +118,18 @@ impl From<MeAgent> for Agent {
             did: me.did,
             direct_message_language: me.direct_message_language,
             perspective: me.perspective.map(|perspective| Perspective {
+                links: perspective.links.into_iter().map(|link| link.into()).collect()
+            })
+        }
+    }
+}
+
+impl From<ByDidAgentByDid> for Agent {
+    fn from(agent: ByDidAgentByDid) -> Self {
+        Self {
+            did: agent.did,
+            direct_message_language: agent.direct_message_language,
+            perspective: agent.perspective.map(|perspective| Perspective {
                 links: perspective.links.into_iter().map(|link| link.into()).collect()
             })
         }

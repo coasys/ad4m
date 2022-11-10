@@ -118,3 +118,18 @@ pub async fn run_unlock(cap_token: String, passphrase: String) -> Result<unlock:
         .with_context(|| "Failed to run agent->unlock")?;
     Ok(response_data.agent_unlock)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug",
+)]
+pub struct ByDID;
+
+pub async fn run_by_did(cap_token: String, did: String) -> Result<Option<by_did::ByDidAgentByDid>> {
+    let response_data: by_did::ResponseData = query(cap_token, ByDID::build_query(by_did::Variables {did}))
+        .await
+        .with_context(|| "Failed to run agent->byDID query")?;
+    Ok(response_data.agent_by_did)
+}
