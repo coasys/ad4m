@@ -25,7 +25,7 @@ pub async fn run_request_capability() -> Result<String> {
         .json()
         .await?;
 
-    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response"))?;
+    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response! Errors: {:?}", response_body.errors))?;
     Ok(response_data.agent_request_capability)
 }
 
@@ -50,7 +50,7 @@ pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result
         .json()
         .await?;
 
-    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response"))?;
+    let response_data = response_body.data.ok_or_else(|| anyhow!("No data in response! Errors: {:?}", response_body.errors))?;
     Ok(response_data.agent_generate_jwt)
 }
 
