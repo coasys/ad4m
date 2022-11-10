@@ -41,3 +41,13 @@ mutation Lock($passphrase: String!) {
         error
     }
 }
+
+mutation Unlock($passphrase: String!) {
+    agentUnlock(passphrase: $passphrase) {
+        isInitialized
+        isUnlocked
+        did
+        didDocument
+        error
+    }
+}

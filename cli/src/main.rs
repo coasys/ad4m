@@ -163,10 +163,15 @@ enum RuntimeFunctions {
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
-    let cap_token = if let Domain::Log = args.domain {
-        "".to_string()
-    } else {
-        startup::get_cap_token().await?
+    let cap_token = match &args.domain {
+        Domain::Log => "".to_string(),
+        Domain::Agent { command } => {
+            match command {
+                AgentFunctions::Lock | AgentFunctions::Unlock => "".to_string(),
+                _ => startup::get_cap_token().await?,
+            }
+        },
+        _ => startup::get_cap_token().await?,
     };
 
     match args.domain {
@@ -192,7 +197,12 @@ async fn main() -> Result<()> {
                     }
                 },
                 AgentFunctions::Unlock => {
-                    //agent::unlock(&cap_token).await?;
+                    let result = agent::run_unlock(cap_token, readline_masked("Passphrase: ")?).await?;
+                    if let Some(error) = result.error {
+                        bail!(error);
+                    } else {
+                        println!("Agent unlocked");
+                    }
                 },
             }
         },

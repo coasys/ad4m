@@ -101,3 +101,20 @@ pub async fn run_lock(cap_token: String, passphrase: String) -> Result<lock::Loc
         .with_context(|| "Failed to run agent->lock")?;
     Ok(response_data.agent_lock)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug",
+)]
+pub struct Unlock;
+
+pub async fn run_unlock(cap_token: String, passphrase: String) -> Result<unlock::UnlockAgentUnlock> {
+    let response_data: unlock::ResponseData = query(cap_token, Unlock::build_query(unlock::Variables {
+        passphrase,
+    }))
+        .await
+        .with_context(|| "Failed to run agent->unlock")?;
+    Ok(response_data.agent_unlock)
+}
