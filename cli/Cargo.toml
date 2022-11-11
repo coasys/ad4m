@@ -2,6 +2,14 @@
 name = "ad4m"
 version = "0.0.1"
 edition = "2021"
+authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]
+description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
+keywords = ["ad4m", "perspect3vism", "cli"]
+license = "CAL-1.0"
+homepage = "https://ad4m.dev"
+repository = "https://github.com/perspect3vism/ad4m"
+documentation = "https://docs.ad4m.dev"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.65"
