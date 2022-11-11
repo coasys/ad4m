@@ -87,7 +87,7 @@ enum LanguageFunctions {
     /// List all languages
     All,
     /// Show information about a language
-    ByAddress,
+    ByAddress { address: String },
     /// List all languages that implement a given interface
     ByFilter { filter: String },
     WriteSettings,
@@ -240,6 +240,15 @@ async fn main() -> Result<()> {
                 LanguageFunctions::ByFilter{filter} => {
                     let languages = languages::run_by_filter(cap_token, filter).await?;
                     println!("{:#?}", languages);
+                },
+                LanguageFunctions::ByAddress{address} => {
+                    let maybe_language = languages::run_by_address(cap_token, address).await?;
+                    if let Some(language) = maybe_language {
+                        println!("{:#?}", language);
+                    } else {
+                        println!("Language not found");
+                    }
+                    
                 },
                 _ => unimplemented!()
             }

@@ -5,3 +5,11 @@ query ByFilter($filter: String!) {
         settings
     }
 }
+
+query ByAddress($address: String!) {
+    language(address: $address) {
+        name
+        address
+        settings
+    }
+}

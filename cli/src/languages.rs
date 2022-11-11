@@ -16,3 +16,19 @@ pub async fn run_by_filter(cap_token: String, filter: String) -> Result<Vec<by_f
         .with_context(|| "Failed to run languages->all query")?;
     Ok(response_data.languages)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/languages.gql",
+    response_derives = "Debug",
+)]
+pub struct ByAddress;
+
+pub async fn run_by_address(cap_token: String, address: String) -> Result<Option<by_address::ByAddressLanguage>> {
+    let response_data: by_address::ResponseData = query(cap_token, ByAddress::build_query(by_address::Variables {address}))
+        .await
+        .with_context(|| "Failed to run languages->all query")?;
+    Ok(response_data.language)
+}
+
