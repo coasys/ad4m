@@ -44,9 +44,7 @@ pub async fn run_join(
 ) -> Result<join_from_url::JoinFromUrlNeighbourhoodJoinFromUrl> {
     let response_data: join_from_url::ResponseData = query(
         cap_token,
-        JoinFromUrl::build_query(join_from_url::Variables {
-            url,
-        }),
+        JoinFromUrl::build_query(join_from_url::Variables { url }),
     )
     .await
     .with_context(|| "Failed to run neighbourhoods->join query")?;

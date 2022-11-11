@@ -87,18 +87,11 @@ enum LanguageFunctions {
     /// List all languages
     All,
     /// Show information about a language
-    ByAddress {
-        address: String,
-    },
+    ByAddress { address: String },
     /// List all languages that implement a given interface
-    ByFilter {
-        filter: String,
-    },
+    ByFilter { filter: String },
     /// Set language settings (JSON) string
-    WriteSettings {
-        address: String,
-        settings: String,
-    },
+    WriteSettings { address: String, settings: String },
     /// Clone a source language, set template parameters and publish the result
     ApplyTemplateAndPublish {
         /// Address of the source language to clone
@@ -107,21 +100,13 @@ enum LanguageFunctions {
         template_data: String,
     },
     /// Publish AD4M Language from local file path
-    Publish {
-        path: String,
-    },
+    Publish { path: String },
     /// Show meta information about a language
-    Meta {
-        address: String,
-    },
+    Meta { address: String },
     /// Show source code of a language
-    Source {
-        address: String,
-    },
+    Source { address: String },
     /// Uninstall given language
-    Remove {
-        address: String,
-    },
+    Remove { address: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -314,7 +299,8 @@ async fn main() -> Result<()> {
 
             match command.unwrap() {
                 LanguageFunctions::All => {
-                    let all_perspectives = languages::run_by_filter(cap_token, "".to_string()).await?;
+                    let all_perspectives =
+                        languages::run_by_filter(cap_token, "".to_string()).await?;
                     println!("{:#?}", all_perspectives);
                 }
                 LanguageFunctions::ByFilter { filter } => {
@@ -394,7 +380,7 @@ async fn main() -> Result<()> {
                         "Language published with address: {}",
                         publish_result.address
                     );
-                },
+                }
                 LanguageFunctions::Source { address } => {
                     let source = languages::run_source(cap_token, address).await?;
                     println!("{}", source);
@@ -469,18 +455,21 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Domain::Neighbourhoods { command } => {
-            match command {
-                NeighbourhoodFunctions::Create { perspective_id, link_language } => {
-                    let neighbourhood = neighbourhoods::run_publish(cap_token, link_language, None, perspective_id).await?;
-                    println!("Neighbourhood shared as: {}", neighbourhood);
-                },
-                NeighbourhoodFunctions::Join { url } => {
-                    let neighbourhood = neighbourhoods::run_join(cap_token, url).await?;
-                    println!("Neighbourhod joined!\n{:#?}", neighbourhood);
-                },
+        Domain::Neighbourhoods { command } => match command {
+            NeighbourhoodFunctions::Create {
+                perspective_id,
+                link_language,
+            } => {
+                let neighbourhood =
+                    neighbourhoods::run_publish(cap_token, link_language, None, perspective_id)
+                        .await?;
+                println!("Neighbourhood shared as: {}", neighbourhood);
             }
-        }
+            NeighbourhoodFunctions::Join { url } => {
+                let neighbourhood = neighbourhoods::run_join(cap_token, url).await?;
+                println!("Neighbourhod joined!\n{:#?}", neighbourhood);
+            }
+        },
         Domain::Runtime { command: _ } => {}
         Domain::Log => {
             let file = executor_data_path().join("ad4min.log");

@@ -151,10 +151,12 @@ pub async fn run_publish(
 pub struct Source;
 
 pub async fn run_source(cap_token: String, address: String) -> Result<String> {
-    let response_data: source::ResponseData =
-        query(cap_token, Source::build_query(source::Variables { address }))
-            .await
-            .with_context(|| "Failed to run languages -> source")?;
+    let response_data: source::ResponseData = query(
+        cap_token,
+        Source::build_query(source::Variables { address }),
+    )
+    .await
+    .with_context(|| "Failed to run languages -> source")?;
     Ok(response_data.language_source)
 }
 
@@ -167,8 +169,11 @@ pub async fn run_source(cap_token: String, address: String) -> Result<String> {
 pub struct Remove;
 
 pub async fn run_remove(cap_token: String, address: String) -> Result<()> {
-    let _ = query(cap_token, Remove::build_query(remove::Variables { address }))
-            .await
-            .with_context(|| "Failed to run languages -> remove")?;
+    let _ = query(
+        cap_token,
+        Remove::build_query(remove::Variables { address }),
+    )
+    .await
+    .with_context(|| "Failed to run languages -> remove")?;
     Ok(())
 }
