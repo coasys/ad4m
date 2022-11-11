@@ -21,7 +21,7 @@ use anyhow::{Context, Result, bail};
 use startup::executor_data_path;
 use util::{maybe_parse_datetime, readline_masked};
 use serde_json::Value;
-use formatting::{print_prolog_result, print_link, print_agent};
+use formatting::{print_prolog_result, print_link, print_agent, print_logo};
 
 /// AD4M command line interface
 #[derive(Parser, Debug)]
@@ -165,8 +165,8 @@ enum RuntimeFunctions {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    print_logo();
     let args = ClapApp::parse();
-
     let cap_token = match &args.domain {
         Domain::Log => "".to_string(),
         Domain::Agent { command } => {
