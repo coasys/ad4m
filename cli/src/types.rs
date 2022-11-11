@@ -1,5 +1,5 @@
-use crate::agent::me::{MeAgent, MeAgentPerspectiveLinks};
 use crate::agent::by_did::{ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks};
+use crate::agent::me::{MeAgent, MeAgentPerspectiveLinks};
 use crate::perspectives::query_links::QueryLinksPerspectiveQueryLinks;
 use crate::perspectives::subscription_link_added::SubscriptionLinkAddedPerspectiveLinkAdded;
 pub struct Link {
@@ -109,7 +109,7 @@ pub struct Perspective {
 pub struct Agent {
     pub did: String,
     pub direct_message_language: Option<String>,
-    pub perspective: Option<Perspective>
+    pub perspective: Option<Perspective>,
 }
 
 impl From<MeAgent> for Agent {
@@ -118,8 +118,12 @@ impl From<MeAgent> for Agent {
             did: me.did,
             direct_message_language: me.direct_message_language,
             perspective: me.perspective.map(|perspective| Perspective {
-                links: perspective.links.into_iter().map(|link| link.into()).collect()
-            })
+                links: perspective
+                    .links
+                    .into_iter()
+                    .map(|link| link.into())
+                    .collect(),
+            }),
         }
     }
 }
@@ -130,8 +134,12 @@ impl From<ByDidAgentByDid> for Agent {
             did: agent.did,
             direct_message_language: agent.direct_message_language,
             perspective: agent.perspective.map(|perspective| Perspective {
-                links: perspective.links.into_iter().map(|link| link.into()).collect()
-            })
+                links: perspective
+                    .links
+                    .into_iter()
+                    .map(|link| link.into())
+                    .collect(),
+            }),
         }
     }
 }

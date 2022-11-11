@@ -1,21 +1,21 @@
-use graphql_client::{GraphQLQuery};
-use graphql_ws_client::graphql::StreamingOperation;
-use serde_json::Value;
 use crate::formatting::print_link;
 use crate::util::{create_websocket_client, query};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use chrono::naive::NaiveDateTime;
+use graphql_client::GraphQLQuery;
+use graphql_ws_client::graphql::StreamingOperation;
+use serde_json::Value;
 
 type DateTime = NaiveDateTime;
 
-use self::all::AllPerspectives;
 use self::add_link::AddLinkPerspectiveAddLink;
+use self::all::AllPerspectives;
 
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
     query_path = "src/perspectives.gql",
-    response_derives = "Debug",
+    response_derives = "Debug"
 )]
 pub struct All;
 
@@ -30,14 +30,15 @@ pub async fn run_all(cap_token: String) -> Result<Vec<AllPerspectives>> {
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
     query_path = "src/perspectives.gql",
-    response_derives = "Debug",
+    response_derives = "Debug"
 )]
 pub struct Add;
 
 pub async fn run_add(cap_token: String, name: String) -> Result<String> {
-    let response_data: add::ResponseData = query(cap_token, Add::build_query(add::Variables { name }))
-        .await
-        .with_context(|| "Failed to run perspectives->add query")?;
+    let response_data: add::ResponseData =
+        query(cap_token, Add::build_query(add::Variables { name }))
+            .await
+            .with_context(|| "Failed to run perspectives->add query")?;
     Ok(response_data.perspective_add.uuid)
 }
 
@@ -45,7 +46,7 @@ pub async fn run_add(cap_token: String, name: String) -> Result<String> {
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
     query_path = "src/perspectives.gql",
-    response_derives = "Debug",
+    response_derives = "Debug"
 )]
 pub struct Remove;
 
@@ -60,25 +61,31 @@ pub async fn run_remove(cap_token: String, uuid: String) -> Result<()> {
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
     query_path = "src/perspectives.gql",
-    response_derives = "Debug",
+    response_derives = "Debug"
 )]
 pub struct AddLink;
 
-pub async fn run_add_link(cap_token: String, uuid: String, source: String, target: String, predicate: Option<String>) -> Result<AddLinkPerspectiveAddLink> {
+pub async fn run_add_link(
+    cap_token: String,
+    uuid: String,
+    source: String,
+    target: String,
+    predicate: Option<String>,
+) -> Result<AddLinkPerspectiveAddLink> {
     let response_data: add_link::ResponseData = query(
-        cap_token, 
-        AddLink::build_query(add_link::Variables { 
-            uuid, 
+        cap_token,
+        AddLink::build_query(add_link::Variables {
+            uuid,
             link: add_link::LinkInput {
                 source,
                 target,
                 predicate,
-            }
-        })
+            },
+        }),
     )
-        .await
-        .with_context(|| "Failed to run perspectives->addLink query")?;
-    
+    .await
+    .with_context(|| "Failed to run perspectives->addLink query")?;
+
     Ok(response_data.perspective_add_link)
 }
 
@@ -86,54 +93,58 @@ pub async fn run_add_link(cap_token: String, uuid: String, source: String, targe
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
     query_path = "src/perspectives.gql",
-    response_derives = "Debug",
+    response_derives = "Debug"
 )]
 pub struct QueryLinks;
 
 pub async fn run_query_links(
-    cap_token: String, 
-    uuid: String, 
-    source: Option<String>, 
-    target: Option<String>, 
+    cap_token: String,
+    uuid: String,
+    source: Option<String>,
+    target: Option<String>,
     predicate: Option<String>,
     from_date: Option<DateTime>,
     until_date: Option<DateTime>,
-    limit: Option<f64>
+    limit: Option<f64>,
 ) -> Result<Vec<query_links::QueryLinksPerspectiveQueryLinks>> {
-
     let response_data: query_links::ResponseData = query(
-        cap_token, 
-        QueryLinks::build_query(query_links::Variables { 
+        cap_token,
+        QueryLinks::build_query(query_links::Variables {
             uuid,
             query: query_links::LinkQuery {
-                source, 
-                target, 
+                source,
+                target,
                 predicate,
                 fromDate: from_date,
                 untilDate: until_date,
                 limit,
-            }
-        })
+            },
+        }),
     )
-        .await
-        .with_context(|| "Failed to run perspectives->queryLinks query")?;
+    .await
+    .with_context(|| "Failed to run perspectives->queryLinks query")?;
 
     Ok(response_data.perspective_query_links.unwrap_or_default())
 }
- 
 
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
     query_path = "src/perspectives.gql",
-    response_derives = "Debug",
+    response_derives = "Debug"
 )]
 pub struct Infer;
 
 pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
-    let response_data: infer::ResponseData = query(cap_token, Infer::build_query(infer::Variables { uuid, query: prolog_query }))
-        .await
-        .with_context(|| "Failed to run perspectives->infer query")?;
+    let response_data: infer::ResponseData = query(
+        cap_token,
+        Infer::build_query(infer::Variables {
+            uuid,
+            query: prolog_query,
+        }),
+    )
+    .await
+    .with_context(|| "Failed to run perspectives->infer query")?;
     let v: Value = serde_json::from_str(&response_data.perspective_query_prolog)?;
     Ok(match v {
         Value::String(string) => {
@@ -144,7 +155,7 @@ pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) ->
             } else {
                 Value::String(string)
             }
-        },
+        }
         _ => v,
     })
 }
@@ -153,7 +164,7 @@ pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) ->
 #[graphql(
     schema_path = "../core/lib/src/schema.gql",
     query_path = "src/perspectives.gql",
-    response_derives = "Debug",
+    response_derives = "Debug"
 )]
 pub struct SubscriptionLinkAdded;
 
@@ -164,20 +175,25 @@ pub async fn run_watch(cap_token: String, id: String) -> Result<()> {
         .await
         .with_context(|| "Failed to create websocket client")?;
 
-    let mut stream = client.streaming_operation(StreamingOperation::<SubscriptionLinkAdded>::new(subscription_link_added::Variables {
-        uuid: id.clone(),
-    }))
+    let mut stream = client
+        .streaming_operation(StreamingOperation::<SubscriptionLinkAdded>::new(
+            subscription_link_added::Variables { uuid: id.clone() },
+        ))
         .await
         .with_context(|| "Failed to subscribe to perspectiveLinkAdded")?;
 
-    println!("Successfully subscribed to perspectiveLinkAdded for perspective {}", id);
+    println!(
+        "Successfully subscribed to perspectiveLinkAdded for perspective {}",
+        id
+    );
     println!("Waiting for events...");
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(response) => {
-                if let Some(link) = response.data
-                    .and_then(|data| data.perspective_link_added) { print_link(link.into()) }
+                if let Some(link) = response.data.and_then(|data| data.perspective_link_added) {
+                    print_link(link.into())
+                }
             }
             Err(e) => {
                 println!("Received Error: {:?}", e);
