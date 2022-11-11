@@ -2,11 +2,11 @@ import { html } from "lit";
 
 function downloadAd4m() {
   const windowsLink =
-    "https://github.com/perspect3vism/ad4m/releases/download/v0.0.11/AD4Min_0.0.11_x64_en-US.msi";
+    "https://github.com/perspect3vism/ad4m/releases/download/v0.2.0/AD4Min_0.2.0_x64_en-US.msi";
   const macLink =
-    "https://github.com/perspect3vism/ad4m/releases/download/v0.0.11/AD4Min_0.0.11_x64.dmg";
+    "https://github.com/perspect3vism/ad4m/releases/download/v0.2.0/AD4Min_0.2.0_x64.dmg";
   const linuxLink =
-    "https://github.com/perspect3vism/ad4m/releases/download/v0.0.11/ad4-min_0.0.11_amd64.deb";
+    "https://github.com/perspect3vism/ad4m/releases/download/v0.2.0/ad4-min_0.2.0_amd64.deb";
   let OSName = "Unkown";
   if (window.navigator.userAgent.indexOf("Windows NT 10.0") !== -1)
     OSName = "Windows";
