@@ -80,7 +80,7 @@ pub fn print_agent(agent: Agent) {
         "\x1b[36mDirect message language: \x1b[97m{}",
         agent
             .direct_message_language
-            .unwrap_or("<NOT SET>".to_string())
+            .unwrap_or_else(|| "<NOT SET>".to_string())
     );
     println!("\x1b[36mPublic Perspective:");
     if let Some(perspective) = agent.perspective {

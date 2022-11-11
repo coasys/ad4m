@@ -257,13 +257,13 @@ async fn main() -> Result<()> {
                 let status = agent::run_status(cap_token).await?;
                 println!(
                     "\x1b[36mDID: \x1b[97m{}",
-                    status.did.unwrap_or("<undefined>".to_string())
+                    status.did.unwrap_or_else(|| "<undefined>".to_string())
                 );
                 println!("\x1b[36mis_initiliazed: \x1b[97m{}", status.is_initialized);
                 println!("\x1b[36mis_unlocked: \x1b[97m{}", status.is_unlocked);
                 println!(
                     "\x1b[36mDID Document:\n\x1b[97m{}",
-                    status.did_document.unwrap_or("<undefined>".to_string())
+                    status.did_document.unwrap_or_else(|| "<undefined>".to_string())
                 );
             }
             AgentFunctions::Lock => {

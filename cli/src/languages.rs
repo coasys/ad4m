@@ -169,7 +169,7 @@ pub async fn run_source(cap_token: String, address: String) -> Result<String> {
 pub struct Remove;
 
 pub async fn run_remove(cap_token: String, address: String) -> Result<()> {
-    let _ = query(
+    query(
         cap_token,
         Remove::build_query(remove::Variables { address }),
     )
