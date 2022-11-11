@@ -42,3 +42,20 @@ query Meta(
         sourceCodeLink
     }
 }
+
+mutation Publish(
+    $languagePath: String!,
+    $languageMeta: LanguageMetaInput!,
+) {
+    languagePublish(languagePath: $languagePath, languageMeta: $languageMeta) {
+        name
+        address
+        description
+        author
+        templated
+        templateSourceLanguageAddress
+        templateAppliedParams
+        possibleTemplateParams
+        sourceCodeLink
+    }
+}

@@ -18,11 +18,11 @@ mod util;
 
 use clap::{Args, Parser, Subcommand};
 use anyhow::{Context, Result, bail};
-use languages::write_settings;
 use startup::executor_data_path;
 use util::{maybe_parse_datetime, readline_masked};
 use serde_json::Value;
 use formatting::{print_prolog_result, print_link, print_agent, print_logo};
+use rustyline::{Editor};
 
 /// AD4M command line interface.
 /// Provides all means of interacting with the AD4M executor / agent.
@@ -100,7 +100,8 @@ enum LanguageFunctions {
         /// JSON string of template parameters
         template_data: String,
     },
-    Publish,
+    /// Publish AD4M Language from local file path
+    Publish { path: String },
     /// Show meta information about a language
     Meta { address: String },
     Source,
@@ -272,6 +273,27 @@ async fn main() -> Result<()> {
                     let meta = languages::run_meta(cap_token, address).await?;
                     println!("{:#?}", meta);
                 },
+                LanguageFunctions::Publish { path } => {
+                    let _ = std::fs::read_to_string(path.clone())
+                        .with_context(||format!("Could not read language file `{}`!", path))?;
+                    
+                    println!("Publishing language found in file `{}`...", path);
+                    println!("Please enter meta-information for this language: ");
+                    let mut rl = Editor::<()>::new()?;
+                    let name = rl.readline("Name (should match name in code): ")?;
+                    let description = rl.readline("Description: ")?;
+                    let possible_template_params_string = rl.readline("Template parameters (comma spearated list): ")?;
+                    let possible_template_params: Vec<String> = possible_template_params_string.split(",").map(|s| s.trim().to_string()).collect();
+                    let source_code_link = rl.readline("Source code link: ")?;
+
+                    let description = if description.is_empty() { None } else { Some(description) };
+                    let possible_template_params = if possible_template_params_string.is_empty() { None } else { Some(possible_template_params) };
+                    let source_code_link = if source_code_link.is_empty() { None } else { Some(source_code_link) };
+
+                    let publish_result = languages::run_publish(cap_token, path, name, description, possible_template_params, source_code_link).await?;
+                    println!("Language published with address: {}", publish_result.address);
+
+                }
                 _ => unimplemented!()
             }
         },

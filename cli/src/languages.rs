@@ -83,3 +83,33 @@ pub async fn run_meta(cap_token: String, address: String) -> Result<meta::MetaLa
         .with_context(|| "Failed to run languages -> meta")?;
     Ok(response_data.language_meta)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/languages.gql",
+    response_derives = "Debug",
+)]
+pub struct Publish;
+
+pub async fn run_publish(
+    cap_token: String, 
+    language_path: String,
+    name: String,
+    description: Option<String>,
+    possible_template_params: Option<Vec<String>>,
+    source_code_link: Option<String>,
+) -> Result<publish::PublishLanguagePublish> {
+    let response_data: publish::ResponseData = query(cap_token, Publish::build_query(publish::Variables {
+        language_path,
+        language_meta: publish::LanguageMetaInput {
+            name,
+            description,
+            possibleTemplateParams: possible_template_params,
+            sourceCodeLink: source_code_link
+        }
+    }))
+        .await
+        .with_context(|| "Failed to run languages -> publish")?;
+    Ok(response_data.language_publish)
+}
