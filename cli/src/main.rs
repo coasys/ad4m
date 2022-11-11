@@ -93,7 +93,13 @@ enum LanguageFunctions {
     ByFilter { filter: String },
     /// Set language settings (JSON) string
     WriteSettings { address: String, settings: String },
-    ApplyTemplateAndPublish,
+    /// Clone a source language, set template parameters and publish the result
+    ApplyTemplateAndPublish{ 
+        /// Address of the source language to clone
+        source: String, 
+        /// JSON string of template parameters
+        template_data: String,
+    },
     Publish,
     Meta,
     Source,
@@ -254,6 +260,12 @@ async fn main() -> Result<()> {
                 LanguageFunctions::WriteSettings { address, settings } => {
                     languages::run_write_settings(cap_token, address, settings).await?;
                     println!("Language settings written");
+                },
+                LanguageFunctions::ApplyTemplateAndPublish { source, template_data } => {
+                    let new_language = languages::run_apply_template_and_publish(cap_token, source, template_data).await?;
+                    println!("Language template applied and published!");
+                    println!("Name: {}", new_language.name);
+                    println!("Address: {}", new_language.address);
                 },
                 _ => unimplemented!()
             }

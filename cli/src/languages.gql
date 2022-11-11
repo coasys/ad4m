@@ -17,3 +17,12 @@ query ByAddress($address: String!) {
 mutation WriteSettings($languageAddress: String!, $settings: String!) {
     languageWriteSettings(languageAddress: $languageAddress, settings: $settings)
 }
+
+mutation ApplyTemplateAndPublish(
+    $sourceLanguageHash: String!,
+    $templateData: String!,
+) {
+    languageApplyTemplateAndPublish(sourceLanguageHash: $sourceLanguageHash, templateData: $templateData) {
+        name, address
+    }
+}

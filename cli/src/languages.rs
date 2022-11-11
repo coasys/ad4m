@@ -28,7 +28,7 @@ pub struct ByAddress;
 pub async fn run_by_address(cap_token: String, address: String) -> Result<Option<by_address::ByAddressLanguage>> {
     let response_data: by_address::ResponseData = query(cap_token, ByAddress::build_query(by_address::Variables {address}))
         .await
-        .with_context(|| "Failed to run languages->all query")?;
+        .with_context(|| "Failed to run languages -> by-address query")?;
     Ok(response_data.language)
 }
 
@@ -46,6 +46,24 @@ pub async fn run_write_settings(cap_token: String, language_address: String, set
         settings
     }))
         .await
-        .with_context(|| "Failed to run languages->all query")?)
+        .with_context(|| "Failed to run languages -> write-settings query")?)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/languages.gql",
+    response_derives = "Debug",
+)]
+pub struct ApplyTemplateAndPublish;
+
+pub async fn run_apply_template_and_publish(cap_token: String, source: String, template_data: String) -> Result<apply_template_and_publish::ApplyTemplateAndPublishLanguageApplyTemplateAndPublish> {
+    let response_data: apply_template_and_publish::ResponseData = query(cap_token, ApplyTemplateAndPublish::build_query(apply_template_and_publish::Variables {
+        source_language_hash: source,
+        template_data,
+    }))
+        .await
+        .with_context(|| "Failed to run languages -> apply-template-and-publish")?;
+    Ok(response_data.language_apply_template_and_publish)
 }
 
