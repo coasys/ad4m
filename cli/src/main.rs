@@ -18,6 +18,7 @@ mod util;
 
 use clap::{Args, Parser, Subcommand};
 use anyhow::{Context, Result, bail};
+use languages::write_settings;
 use startup::executor_data_path;
 use util::{maybe_parse_datetime, readline_masked};
 use serde_json::Value;
@@ -90,7 +91,8 @@ enum LanguageFunctions {
     ByAddress { address: String },
     /// List all languages that implement a given interface
     ByFilter { filter: String },
-    WriteSettings,
+    /// Set language settings (JSON) string
+    WriteSettings { address: String, settings: String },
     ApplyTemplateAndPublish,
     Publish,
     Meta,
@@ -248,7 +250,10 @@ async fn main() -> Result<()> {
                     } else {
                         println!("Language not found");
                     }
-                    
+                },
+                LanguageFunctions::WriteSettings { address, settings } => {
+                    languages::run_write_settings(cap_token, address, settings).await?;
+                    println!("Language settings written");
                 },
                 _ => unimplemented!()
             }

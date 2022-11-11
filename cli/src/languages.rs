@@ -32,3 +32,20 @@ pub async fn run_by_address(cap_token: String, address: String) -> Result<Option
     Ok(response_data.language)
 }
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/languages.gql",
+    response_derives = "Debug",
+)]
+pub struct WriteSettings;
+
+pub async fn run_write_settings(cap_token: String, language_address: String, settings: String) -> Result<write_settings::ResponseData> {
+    Ok(query(cap_token, WriteSettings::build_query(write_settings::Variables {
+        language_address,
+        settings
+    }))
+        .await
+        .with_context(|| "Failed to run languages->all query")?)
+}
+

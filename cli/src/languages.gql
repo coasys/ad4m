@@ -13,3 +13,7 @@ query ByAddress($address: String!) {
         settings
     }
 }
+
+mutation WriteSettings($languageAddress: String!, $settings: String!) {
+    languageWriteSettings(languageAddress: $languageAddress, settings: $settings)
+}
