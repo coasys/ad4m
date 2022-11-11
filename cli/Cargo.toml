@@ -9,7 +9,7 @@ license = "CAL-1.0"
 homepage = "https://ad4m.dev"
 repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
-readme = "cli/README.md"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.65"
