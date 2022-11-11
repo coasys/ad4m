@@ -101,7 +101,8 @@ enum LanguageFunctions {
         template_data: String,
     },
     Publish,
-    Meta,
+    /// Show meta information about a language
+    Meta { address: String },
     Source,
     Remove
 }
@@ -266,6 +267,10 @@ async fn main() -> Result<()> {
                     println!("Language template applied and published!");
                     println!("Name: {}", new_language.name);
                     println!("Address: {}", new_language.address);
+                },
+                LanguageFunctions::Meta { address } => {
+                    let meta = languages::run_meta(cap_token, address).await?;
+                    println!("{:#?}", meta);
                 },
                 _ => unimplemented!()
             }

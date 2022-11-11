@@ -67,3 +67,19 @@ pub async fn run_apply_template_and_publish(cap_token: String, source: String, t
     Ok(response_data.language_apply_template_and_publish)
 }
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/languages.gql",
+    response_derives = "Debug",
+)]
+pub struct Meta;
+
+pub async fn run_meta(cap_token: String, address: String) -> Result<meta::MetaLanguageMeta> {
+    let response_data: meta::ResponseData = query(cap_token, Meta::build_query(meta::Variables {
+        address
+    }))
+        .await
+        .with_context(|| "Failed to run languages -> meta")?;
+    Ok(response_data.language_meta)
+}

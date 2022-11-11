@@ -26,3 +26,19 @@ mutation ApplyTemplateAndPublish(
         name, address
     }
 }
+
+query Meta(
+    $address: String!,
+) {
+    languageMeta(address: $address) {
+        name
+        address
+        description
+        author
+        templated
+        templateSourceLanguageAddress
+        templateAppliedParams
+        possibleTemplateParams
+        sourceCodeLink
+    }
+}
