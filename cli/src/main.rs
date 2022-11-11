@@ -23,11 +23,12 @@ use util::{maybe_parse_datetime, readline_masked};
 use serde_json::Value;
 use formatting::{print_prolog_result, print_link, print_agent, print_logo};
 
-/// AD4M command line interface
+/// AD4M command line interface.
+/// Provides all means of interacting with the AD4M executor / agent.
+/// See help of commands for more information.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct ClapApp {
-   /// Name of the person to greet
    #[command(subcommand)]
    domain: Domain,
 }
@@ -51,23 +52,31 @@ enum Domain {
         #[command(subcommand)]
         command: Option<PerspectiveFunctions>,
     },
+    /// Publish perspectives as Neighbourhoods and join Neighbourhoods
     Neighbourhoods{
         #[command(subcommand)]
         command: AgentFunctions,
     },
+    /// Access various states of the local AD4M executor
     Runtime{
         #[command(subcommand)]
         command: AgentFunctions,
     },
+    /// Print the executor log
     Log
 }
 
 #[derive(Debug, Subcommand)]
 enum AgentFunctions {
+    /// Print the local agent's information (public perspective, direct message language, DID)
     Me,
+    /// Show status of agent keys (locked/unlocked, etc.)
     Status,
+    /// Lock the agent keys
     Lock,
+    /// Unlock the agent keys
     Unlock,
+    /// Lookup agent by DID
     ByDID {
         did: String,
     },
@@ -75,9 +84,12 @@ enum AgentFunctions {
 
 #[derive(Debug, Subcommand)]
 enum LanguageFunctions {
-    ByAddress,
-    ByFilter { filter: String },
+    /// List all languages
     All,
+    /// Show information about a language
+    ByAddress,
+    /// List all languages that implement a given interface
+    ByFilter { filter: String },
     WriteSettings,
     ApplyTemplateAndPublish,
     Publish,
