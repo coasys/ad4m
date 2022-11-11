@@ -4,7 +4,7 @@ use graphql_client::{GraphQLQuery, Response};
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
@@ -34,7 +34,7 @@ pub async fn run_request_capability() -> Result<String> {
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
@@ -59,7 +59,7 @@ pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
@@ -74,7 +74,7 @@ pub async fn run_me(cap_token: String) -> Result<me::MeAgent> {
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
@@ -92,7 +92,7 @@ pub async fn run_status(cap_token: String) -> Result<agent_status::AgentStatusAg
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
@@ -108,7 +108,7 @@ pub async fn run_lock(cap_token: String, passphrase: String) -> Result<lock::Loc
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
@@ -129,7 +129,7 @@ pub async fn run_unlock(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]

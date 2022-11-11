@@ -13,7 +13,7 @@ use self::all::AllPerspectives;
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/perspectives.gql",
     response_derives = "Debug"
 )]
@@ -28,7 +28,7 @@ pub async fn run_all(cap_token: String) -> Result<Vec<AllPerspectives>> {
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/perspectives.gql",
     response_derives = "Debug"
 )]
@@ -44,7 +44,7 @@ pub async fn run_add(cap_token: String, name: String) -> Result<String> {
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/perspectives.gql",
     response_derives = "Debug"
 )]
@@ -59,7 +59,7 @@ pub async fn run_remove(cap_token: String, uuid: String) -> Result<()> {
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/perspectives.gql",
     response_derives = "Debug"
 )]
@@ -91,7 +91,7 @@ pub async fn run_add_link(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/perspectives.gql",
     response_derives = "Debug"
 )]
@@ -129,7 +129,7 @@ pub async fn run_query_links(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/perspectives.gql",
     response_derives = "Debug"
 )]
@@ -162,7 +162,7 @@ pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) ->
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/perspectives.gql",
     response_derives = "Debug"
 )]

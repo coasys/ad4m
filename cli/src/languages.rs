@@ -4,7 +4,7 @@ use graphql_client::GraphQLQuery;
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/languages.gql",
     response_derives = "Debug"
 )]
@@ -25,7 +25,7 @@ pub async fn run_by_filter(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/languages.gql",
     response_derives = "Debug"
 )]
@@ -46,7 +46,7 @@ pub async fn run_by_address(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/languages.gql",
     response_derives = "Debug"
 )]
@@ -70,7 +70,7 @@ pub async fn run_write_settings(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/languages.gql",
     response_derives = "Debug"
 )]
@@ -95,7 +95,7 @@ pub async fn run_apply_template_and_publish(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/languages.gql",
     response_derives = "Debug"
 )]
@@ -111,7 +111,7 @@ pub async fn run_meta(cap_token: String, address: String) -> Result<meta::MetaLa
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/languages.gql",
     response_derives = "Debug"
 )]
@@ -144,7 +144,7 @@ pub async fn run_publish(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/languages.gql",
     response_derives = "Debug"
 )]
@@ -162,7 +162,7 @@ pub async fn run_source(cap_token: String, address: String) -> Result<String> {
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/languages.gql",
     response_derives = "Debug"
 )]

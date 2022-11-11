@@ -4,7 +4,7 @@ use graphql_client::GraphQLQuery;
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/neighbourhoods.gql",
     response_derives = "Debug"
 )]
@@ -32,7 +32,7 @@ pub async fn run_publish(
 
 #[derive(GraphQLQuery)]
 #[graphql(
-    schema_path = "../core/lib/src/schema.gql",
+    schema_path = "schema.gql",
     query_path = "src/neighbourhoods.gql",
     response_derives = "Debug"
 )]
