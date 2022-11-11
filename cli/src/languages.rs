@@ -141,3 +141,19 @@ pub async fn run_publish(
     .with_context(|| "Failed to run languages -> publish")?;
     Ok(response_data.language_publish)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/languages.gql",
+    response_derives = "Debug"
+)]
+pub struct Source;
+
+pub async fn run_source(cap_token: String, address: String) -> Result<String> {
+    let response_data: source::ResponseData =
+        query(cap_token, Source::build_query(source::Variables { address }))
+            .await
+            .with_context(|| "Failed to run languages -> source")?;
+    Ok(response_data.language_source)
+}

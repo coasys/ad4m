@@ -113,7 +113,10 @@ enum LanguageFunctions {
     Meta {
         address: String,
     },
-    Source,
+    /// Show source code of a language
+    Source {
+        address: String,
+    },
     Remove,
 }
 
@@ -383,6 +386,10 @@ async fn main() -> Result<()> {
                         "Language published with address: {}",
                         publish_result.address
                     );
+                },
+                LanguageFunctions::Source { address } => {
+                    let source = languages::run_source(cap_token, address).await?;
+                    println!("{}", source);
                 }
                 _ => unimplemented!(),
             }
