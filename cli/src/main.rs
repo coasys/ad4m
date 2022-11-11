@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
                     let name = rl.readline("Name (should match name in code): ")?;
                     let description = rl.readline("Description: ")?;
                     let possible_template_params_string = rl.readline("Template parameters (comma spearated list): ")?;
-                    let possible_template_params: Vec<String> = possible_template_params_string.split(",").map(|s| s.trim().to_string()).collect();
+                    let possible_template_params: Vec<String> = possible_template_params_string.split(',').map(|s| s.trim().to_string()).collect();
                     let source_code_link = rl.readline("Source code link: ")?;
 
                     let description = if description.is_empty() { None } else { Some(description) };

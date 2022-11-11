@@ -41,12 +41,12 @@ pub async fn run_by_address(cap_token: String, address: String) -> Result<Option
 pub struct WriteSettings;
 
 pub async fn run_write_settings(cap_token: String, language_address: String, settings: String) -> Result<write_settings::ResponseData> {
-    Ok(query(cap_token, WriteSettings::build_query(write_settings::Variables {
+    query(cap_token, WriteSettings::build_query(write_settings::Variables {
         language_address,
         settings
     }))
         .await
-        .with_context(|| "Failed to run languages -> write-settings query")?)
+        .with_context(|| "Failed to run languages -> write-settings query")
 }
 
 #[derive(GraphQLQuery)]
