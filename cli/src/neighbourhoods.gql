@@ -9,3 +9,23 @@ mutation PublishFromPerspective(
         perspectiveUUID: $perspectiveUUID
     )
 }
+
+mutation JoinFromUrl($url: String!) {
+    neighbourhoodJoinFromUrl(url: $url) {
+        uuid
+        name
+        sharedUrl
+        neighbourhood { 
+            linkLanguage 
+            meta { 
+                links
+                    {
+                        author
+                        timestamp
+                        data { source, predicate, target }
+                        proof { valid, invalid, signature, key }
+                    }  
+            } 
+        }
+    }
+}

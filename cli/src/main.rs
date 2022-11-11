@@ -475,9 +475,9 @@ async fn main() -> Result<()> {
                     let neighbourhood = neighbourhoods::run_publish(cap_token, link_language, None, perspective_id).await?;
                     println!("Neighbourhood shared as: {}", neighbourhood);
                 },
-                NeighbourhoodFunctions::Join { url: _ } => {
-                    //let neighbourhood = neighbourhoods::run_join(cap_token, url).await?;
-                    //println!("{:#?}", neighbourhood);
+                NeighbourhoodFunctions::Join { url } => {
+                    let neighbourhood = neighbourhoods::run_join(cap_token, url).await?;
+                    println!("Neighbourhod joined!\n{:#?}", neighbourhood);
                 },
             }
         }

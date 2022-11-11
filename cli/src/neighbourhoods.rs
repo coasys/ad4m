@@ -29,3 +29,26 @@ pub async fn run_publish(
     .with_context(|| "Failed to run neighbourhoods->publish query")?;
     Ok(response_data.neighbourhood_publish_from_perspective)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/neighbourhoods.gql",
+    response_derives = "Debug"
+)]
+pub struct JoinFromUrl;
+
+pub async fn run_join(
+    cap_token: String,
+    url: String,
+) -> Result<join_from_url::JoinFromUrlNeighbourhoodJoinFromUrl> {
+    let response_data: join_from_url::ResponseData = query(
+        cap_token,
+        JoinFromUrl::build_query(join_from_url::Variables {
+            url,
+        }),
+    )
+    .await
+    .with_context(|| "Failed to run neighbourhoods->join query")?;
+    Ok(response_data.neighbourhood_join_from_url)
+}
