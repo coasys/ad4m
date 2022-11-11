@@ -65,3 +65,9 @@ query Source(
 ) {
     languageSource(address: $address)
 }
+
+mutation Remove(
+    $address: String!,
+) {
+    languageRemove(address: $address)
+}

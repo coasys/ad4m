@@ -117,7 +117,10 @@ enum LanguageFunctions {
     Source {
         address: String,
     },
-    Remove,
+    /// Uninstall given language
+    Remove {
+        address: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -309,6 +312,10 @@ async fn main() -> Result<()> {
             }
 
             match command.unwrap() {
+                LanguageFunctions::All => {
+                    let all_perspectives = languages::run_by_filter(cap_token, "".to_string()).await?;
+                    println!("{:#?}", all_perspectives);
+                }
                 LanguageFunctions::ByFilter { filter } => {
                     let languages = languages::run_by_filter(cap_token, filter).await?;
                     println!("{:#?}", languages);
@@ -391,7 +398,10 @@ async fn main() -> Result<()> {
                     let source = languages::run_source(cap_token, address).await?;
                     println!("{}", source);
                 }
-                _ => unimplemented!(),
+                LanguageFunctions::Remove { address } => {
+                    languages::run_remove(cap_token, address).await?;
+                    println!("Language removed");
+                }
             }
         }
         Domain::Perspectives { command } => {

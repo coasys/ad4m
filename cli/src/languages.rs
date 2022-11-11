@@ -157,3 +157,18 @@ pub async fn run_source(cap_token: String, address: String) -> Result<String> {
             .with_context(|| "Failed to run languages -> source")?;
     Ok(response_data.language_source)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "../core/lib/src/schema.gql",
+    query_path = "src/languages.gql",
+    response_derives = "Debug"
+)]
+pub struct Remove;
+
+pub async fn run_remove(cap_token: String, address: String) -> Result<()> {
+    let _ = query(cap_token, Remove::build_query(remove::Variables { address }))
+            .await
+            .with_context(|| "Failed to run languages -> remove")?;
+    Ok(())
+}
