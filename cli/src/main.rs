@@ -11,6 +11,7 @@ extern crate tokio;
 mod agent;
 mod formatting;
 mod languages;
+mod neighbourhoods;
 mod perspectives;
 mod startup;
 mod types;
@@ -56,7 +57,7 @@ enum Domain {
     /// Publish perspectives as Neighbourhoods and join Neighbourhoods
     Neighbourhoods {
         #[command(subcommand)]
-        command: AgentFunctions,
+        command: NeighbourhoodFunctions,
     },
     /// Access various states of the local AD4M executor
     Runtime {
@@ -468,7 +469,18 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Domain::Neighbourhoods { command: _ } => {}
+        Domain::Neighbourhoods { command } => {
+            match command {
+                NeighbourhoodFunctions::Create { perspective_id, link_language } => {
+                    let neighbourhood = neighbourhoods::run_publish(cap_token, link_language, None, perspective_id).await?;
+                    println!("Neighbourhood shared as: {}", neighbourhood);
+                },
+                NeighbourhoodFunctions::Join { url: _ } => {
+                    //let neighbourhood = neighbourhoods::run_join(cap_token, url).await?;
+                    //println!("{:#?}", neighbourhood);
+                },
+            }
+        }
         Domain::Runtime { command: _ } => {}
         Domain::Log => {
             let file = executor_data_path().join("ad4min.log");

@@ -1,0 +1,11 @@
+mutation PublishFromPerspective(
+    $linkLanguage: String!,
+    $meta: PerspectiveInput!,
+    $perspectiveUUID: String!
+) {
+    neighbourhoodPublishFromPerspective(
+        linkLanguage: $linkLanguage,
+        meta: $meta,
+        perspectiveUUID: $perspectiveUUID
+    )
+}
