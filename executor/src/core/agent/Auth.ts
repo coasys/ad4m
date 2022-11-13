@@ -98,6 +98,13 @@ export const AGENT_SUBSCRIBE_CAPABILITY: Capability = {
     },
     can: [SUBSCRIBE]
 }
+export const AGENT_SIGN_CAPABILITY: Capability = {
+    with: {
+        domain: AGENT,
+        pointers: [WILD_CARD],
+    },
+    can: ["SIGN"]
+}
 
 // expression related capabilites
 export const EXPRESSION_READ_CAPABILITY: Capability = {

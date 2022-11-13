@@ -416,6 +416,13 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return jwt;
             },
             //@ts-ignore
+            agentSignMessage: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_SIGN_CAPABILITY)
+                const { message } = args;
+                let sig = await core.agentService.signMessage(message)
+                return sig
+            },
+            //@ts-ignore
             expressionCreate: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_CREATE_CAPABILITY)
                 const { languageAddress, content } = args

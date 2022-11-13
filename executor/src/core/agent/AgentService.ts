@@ -358,6 +358,30 @@ export default class AgentService {
             throw new Error("Can't find permitted request")
         }
         
+        const privateKey = this.getPrivateKey()
+        const jwt = await new jose.SignJWT({...auth})
+            .setProtectedHeader({ alg: "ES256K" })
+            .setIssuedAt()
+            .setIssuer(this.did || "")
+            .setAudience(`${auth.appName}:${this.did || ""}`)
+            .setExpirationTime(`${this.#tokenValidPeriod}s`)
+            .sign(privateKey)
+
+        this.#requests.delete(authKey)
+
+        return jwt
+    }
+
+    async signMessage(msg: string) {
+        const privateKey = this.getPrivateKey()
+        const jws = await new jose.CompactSign(new TextEncoder().encode(msg))
+            .setProtectedHeader({ alg: "ES256K" })
+            .sign(privateKey)
+
+        return jws
+    }
+
+    private getPrivateKey() {
         const key = this.getSigningKey()
         // @ts-ignore
         let keyEncoder = new KeyEncoder.default('secp256k1')
@@ -365,17 +389,7 @@ export default class AgentService {
 
         const keyObj = crypto.createPrivateKey(pemPrivateKey)
 
-        const jwt = await new jose.SignJWT({...auth})
-            .setProtectedHeader({ alg: "ES256K" })
-            .setIssuedAt()
-            .setIssuer(this.did || "")
-            .setAudience(`${auth.appName}:${this.did || ""}`)
-            .setExpirationTime(`${this.#tokenValidPeriod}s`)
-            .sign(keyObj)
-
-        this.#requests.delete(authKey)
-
-        return jwt
+        return keyObj
     }
 }
 
