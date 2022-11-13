@@ -134,4 +134,9 @@ export default class AgentResolver {
     agentIsLocked(): Boolean {
         return false
     }
+
+    @Mutation(returns => String)
+    agentSignMessage(@Arg('message') message: string): String {
+        return "test-message-signature"
+    }
 }

@@ -356,4 +356,14 @@ export class AgentClient {
         }))
         return agentIsLocked
     }
+
+    async signMessage(message: string): Promise<string> {
+        const { agentSignMessage } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation agentSignMessage($message: String!) {
+                agentSignMessage(message: $message)
+            }`,
+            variables: { message }
+        }))
+        return agentSignMessage
+    }
 }

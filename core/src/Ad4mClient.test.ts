@@ -256,6 +256,11 @@ describe('Ad4mClient', () => {
             const status = await ad4mClient.agent.isLocked()
             expect(status).toBe(false)
         })
+
+        it('agentSignMessage() smoke tests', async () => {
+            const sig = await ad4mClient.agent.signMessage("test-message")
+            expect(sig).toBe("test-message-signature")
+        })
     })
 
     describe('.expression', () => {
