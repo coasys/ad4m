@@ -477,6 +477,10 @@ async fn main() -> Result<()> {
                     let info = runtime::run_info(cap_token).await?;
                     println!("{:#?}", info);
                 },
+                RuntimeFunctions::Quit => {
+                    runtime::run_quit(cap_token).await?;
+                    println!("Executor shut down!");
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }

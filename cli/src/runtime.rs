@@ -16,3 +16,18 @@ pub async fn run_info(cap_token: String) -> Result<info::InfoRuntimeInfo> {
         .with_context(|| "Failed to run runtime->info query")?;
     Ok(response_data.runtime_info)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct Quit;
+
+pub async fn run_quit(cap_token: String) -> Result<quit::ResponseData> {
+    query(cap_token, Quit::build_query(quit::Variables {}))
+        .await
+        .with_context(|| "Failed to run runtime->quit query")
+}
+
