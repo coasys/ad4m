@@ -27,3 +27,7 @@ query LinkLanguageTemplates {
 mutation AddLinkLanguageTemplates($addresses: [String!]!) {
     runtimeAddKnownLinkLanguageTemplates(addresses: $addresses)
 }
+
+mutation RemoveLinkLanguageTemplates($addresses: [String!]!) {
+    runtimeRemoveKnownLinkLanguageTemplates(addresses: $addresses)
+}

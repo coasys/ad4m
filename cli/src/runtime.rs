@@ -128,3 +128,23 @@ pub async fn run_add_link_language_templates(
     .await
     .with_context(|| "Failed to run runtime->add-link-language-templates query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct RemoveLinkLanguageTemplates;
+
+pub async fn run_remove_link_language_templates(
+    cap_token: String,
+    addresses: Vec<String>,
+) -> Result<remove_link_language_templates::ResponseData> {
+    query(
+        cap_token,
+        RemoveLinkLanguageTemplates::build_query(remove_link_language_templates::Variables { addresses }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->remove-link-language-templates query")
+}

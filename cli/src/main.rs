@@ -505,6 +505,10 @@ async fn main() -> Result<()> {
                     runtime::run_add_link_language_templates(cap_token, addresses).await?;
                     println!("Link language templates added!");
                 },
+                RuntimeFunctions::RemoveLinkLanguageTemplates { addresses } => {
+                    runtime::run_remove_link_language_templates(cap_token, addresses).await?;
+                    println!("Link language templates removed!");
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }
