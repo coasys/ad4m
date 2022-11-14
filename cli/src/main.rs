@@ -485,6 +485,12 @@ async fn main() -> Result<()> {
                     runtime::run_add_trusted_agents(cap_token, agents).await?;
                     println!("Trusted agents added!");
                 },
+                RuntimeFunctions::TrustedAgents => {
+                    let agents = runtime::run_trusted_agents(cap_token).await?;
+                    for agent in agents {
+                        println!("{}", agent);
+                    }
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }

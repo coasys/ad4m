@@ -11,3 +11,7 @@ mutation Quit { runtimeQuit }
 mutation AddTrustedAgents($agents: [String!]!) {
     addTrustedAgents(agents: $agents)
 }
+
+query TrustedAgents {
+    getTrustedAgents
+}

@@ -51,3 +51,21 @@ pub async fn run_add_trusted_agents(
     .await
     .with_context(|| "Failed to run runtime->add-trusted-agents query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct TrustedAgents;
+
+pub async fn run_trusted_agents(cap_token: String) -> Result<Vec<String>> {
+    let response_data: trusted_agents::ResponseData = query(
+        cap_token,
+        TrustedAgents::build_query(trusted_agents::Variables {}),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->trusted-agents query")?;
+    Ok(response_data.get_trusted_agents)
+}
