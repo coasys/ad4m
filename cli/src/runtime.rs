@@ -31,3 +31,23 @@ pub async fn run_quit(cap_token: String) -> Result<quit::ResponseData> {
         .with_context(|| "Failed to run runtime->quit query")
 }
 
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct AddTrustedAgents;
+
+pub async fn run_add_trusted_agents(
+    cap_token: String,
+    agents: Vec<String>,
+) -> Result<add_trusted_agents::ResponseData> {
+    query(
+        cap_token,
+        AddTrustedAgents::build_query(add_trusted_agents::Variables { agents }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-trusted-agents query")
+}

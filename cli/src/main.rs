@@ -481,6 +481,10 @@ async fn main() -> Result<()> {
                     runtime::run_quit(cap_token).await?;
                     println!("Executor shut down!");
                 },
+                RuntimeFunctions::AddTrustedAgents { agents } => {
+                    runtime::run_add_trusted_agents(cap_token, agents).await?;
+                    println!("Trusted agents added!");
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }
