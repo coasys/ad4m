@@ -1,0 +1,7 @@
+query Info {
+    runtimeInfo {
+        ad4mExecutorVersion,
+        isInitialized,
+        isUnlocked
+    }
+}

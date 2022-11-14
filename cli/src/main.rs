@@ -13,6 +13,7 @@ mod formatting;
 mod languages;
 mod neighbourhoods;
 mod perspectives;
+mod runtime;
 mod startup;
 mod types;
 mod util;
@@ -62,7 +63,7 @@ enum Domain {
     /// Access various states of the local AD4M executor
     Runtime {
         #[command(subcommand)]
-        command: AgentFunctions,
+        command: RuntimeFunctions,
     },
     /// Print the executor log
     Log,
@@ -470,7 +471,15 @@ async fn main() -> Result<()> {
                 println!("Neighbourhod joined!\n{:#?}", neighbourhood);
             }
         },
-        Domain::Runtime { command: _ } => {}
+        Domain::Runtime { command } => {
+            match command {
+                RuntimeFunctions::Info => {
+                    let info = runtime::run_info(cap_token).await?;
+                    println!("{:#?}", info);
+                },
+                _ => unimplemented!("Runtime command not implemented yet"),
+            }
+        }
         Domain::Log => {
             let file = executor_data_path().join("ad4min.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {
