@@ -15,6 +15,7 @@ import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, ge
 import * as jose from 'jose'
 import * as crypto from "crypto"
 import KeyEncoder from 'key-encoder'
+import * as secp from '@noble/secp256k1'
 
 export default class AgentService {
     #did?: string
@@ -300,7 +301,12 @@ export default class AgentService {
             return [AGENT_AUTH_CAPABILITY]
         }
 
-        const pubKeyObj = this.getformattedPublicKey()
+        const key = this.getSigningKey()
+        // @ts-ignore
+        let keyEncoder = new KeyEncoder.default('secp256k1')
+        const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
+        const pubKeyObj = crypto.createPublicKey(pemPublicKey)
+
         const { payload } = await jose.jwtVerify(token, pubKeyObj)
 
         return payload.capabilities
@@ -353,14 +359,19 @@ export default class AgentService {
             throw new Error("Can't find permitted request")
         }
         
-        const privateKey = this.getformattedPrivateKey()
+        const key = this.getSigningKey()
+        // @ts-ignore
+        let keyEncoder = new KeyEncoder.default('secp256k1')
+        const pemPrivateKey = keyEncoder.encodePrivate(key.privateKey, 'raw', 'pem')
+        const keyObj = crypto.createPrivateKey(pemPrivateKey)
+
         const jwt = await new jose.SignJWT({...auth})
             .setProtectedHeader({ alg: "ES256K" })
             .setIssuedAt()
             .setIssuer(this.did || "")
             .setAudience(`${auth.appName}:${this.did || ""}`)
             .setExpirationTime(`${this.#tokenValidPeriod}s`)
-            .sign(privateKey)
+            .sign(keyObj)
 
         this.#requests.delete(authKey)
 
@@ -368,34 +379,11 @@ export default class AgentService {
     }
 
     async signMessage(msg: string) {
-        const privateKey = this.getformattedPrivateKey()
-        const jws = await new jose.CompactSign(new TextEncoder().encode(msg))
-            .setProtectedHeader({ alg: "ES256K" })
-            .sign(privateKey)
-
-        return new AgentSignature(jws, this.getSigningKey().publicKey)
-    }
-
-    private getformattedPrivateKey() {
         const key = this.getSigningKey()
-        // @ts-ignore
-        let keyEncoder = new KeyEncoder.default('secp256k1')
-        const pemPrivateKey = keyEncoder.encodePrivate(key.privateKey, 'raw', 'pem')
-
-        const keyObj = crypto.createPrivateKey(pemPrivateKey)
-
-        return keyObj
-    }
-
-    private getformattedPublicKey() {
-        const key = this.getSigningKey()
-        // @ts-ignore
-        let keyEncoder = new KeyEncoder.default('secp256k1')
-        const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
-
-        const pubKeyObj = crypto.createPublicKey(pemPublicKey)
-
-        return pubKeyObj
+        const msgHash = await secp.utils.sha256(new TextEncoder().encode(msg));
+        const signature = await secp.sign(msgHash, key.privateKey)
+        const sigHex = Buffer.from(signature).toString('hex')
+        return new AgentSignature(sigHex, key.publicKey)
     }
 }
 
