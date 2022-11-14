@@ -166,3 +166,23 @@ pub async fn run_friends(cap_token: String) -> Result<Vec<String>> {
     .with_context(|| "Failed to run runtime->friends query")?;
     Ok(response_data.runtime_friends)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct AddFriends;
+
+pub async fn run_add_friends(
+    cap_token: String,
+    dids: Vec<String>,
+) -> Result<add_friends::ResponseData> {
+    query(
+        cap_token,
+        AddFriends::build_query(add_friends::Variables { dids }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-friends query")
+}

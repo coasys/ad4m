@@ -35,3 +35,7 @@ mutation RemoveLinkLanguageTemplates($addresses: [String!]!) {
 query Friends {
     runtimeFriends
 }
+
+mutation AddFriends($dids: [String!]!) {
+    runtimeAddFriends(dids: $dids)
+}
