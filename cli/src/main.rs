@@ -209,7 +209,7 @@ enum RuntimeFunctions {
     Friends,
     HcAgentInfos,
     HcAddAgentInfos {
-        infos: Vec<String>,
+        infos: String,
     },
     VerifySignature {
         did: String,
@@ -522,6 +522,14 @@ async fn main() -> Result<()> {
                 RuntimeFunctions::RemoveFriends { agents } => {
                     runtime::run_remove_friends(cap_token, agents).await?;
                     println!("Friends removed!");
+                },
+                RuntimeFunctions::HcAgentInfos => {
+                    let infos = runtime::run_hc_agent_infos(cap_token).await?;
+                    println!("{}", infos);
+                },
+                RuntimeFunctions::HcAddAgentInfos { infos } => {
+                    runtime::run_hc_add_agent_infos(cap_token, infos).await?;
+                    println!("Holochain agent infos added!");
                 },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }

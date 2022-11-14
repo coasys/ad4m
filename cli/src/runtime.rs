@@ -206,3 +206,41 @@ pub async fn run_remove_friends(
     .await
     .with_context(|| "Failed to run runtime->remove-friends query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct HcAgentInfos;
+
+pub async fn run_hc_agent_infos(cap_token: String) -> Result<String> {
+    let response_data: hc_agent_infos::ResponseData = query(
+        cap_token,
+        HcAgentInfos::build_query(hc_agent_infos::Variables {}),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->hc-agent-infos query")?;
+    Ok(response_data.runtime_hc_agent_infos)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct HcAddAgentInfos;
+
+pub async fn run_hc_add_agent_infos(
+    cap_token: String,
+    agent_infos: String,
+) -> Result<hc_add_agent_infos::ResponseData> {
+    query(
+        cap_token,
+        HcAddAgentInfos::build_query(hc_add_agent_infos::Variables { agent_infos }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->hc-add-agent-infos query")
+}

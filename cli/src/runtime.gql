@@ -43,3 +43,11 @@ mutation AddFriends($dids: [String!]!) {
 mutation RemoveFriends($dids: [String!]!) {
     runtimeRemoveFriends(dids: $dids)
 }
+
+query HcAgentInfos {
+    runtimeHcAgentInfos
+}
+
+mutation HcAddAgentInfos($agentInfos: String!) {
+    runtimeHcAddAgentInfos(agentInfos: $agentInfos)
+}
