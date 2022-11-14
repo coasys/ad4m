@@ -133,6 +133,11 @@ enum PerspectiveFunctions {
     /// Query links from perspective with given uuid
     QueryLinks(QueryLinksArgs),
 
+    /// Retrieve snapshot of perspective with given uuid
+    Snapshot {
+        id: String,
+    },
+
     /// Run Prolog / SDNA query on perspective with given uuid
     Infer {
         id: String,
@@ -453,6 +458,10 @@ async fn main() -> Result<()> {
                 }
                 PerspectiveFunctions::Watch { id } => {
                     perspectives::run_watch(cap_token, id).await?;
+                }
+                PerspectiveFunctions::Snapshot { id } => {
+                    let result = perspectives::run_snapshot(cap_token, id).await?;
+                    println!("{:#?}", result);
                 }
             }
         }

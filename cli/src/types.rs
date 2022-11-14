@@ -2,12 +2,15 @@ use crate::agent::by_did::{ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks};
 use crate::agent::me::{MeAgent, MeAgentPerspectiveLinks};
 use crate::perspectives::query_links::QueryLinksPerspectiveQueryLinks;
 use crate::perspectives::subscription_link_added::SubscriptionLinkAddedPerspectiveLinkAdded;
+
+#[derive(Debug)]
 pub struct Link {
     pub predicate: Option<String>,
     pub source: String,
     pub target: String,
 }
 
+#[derive(Debug)]
 pub struct ExpressionProof {
     pub invalid: Option<bool>,
     pub key: String,
@@ -15,6 +18,7 @@ pub struct ExpressionProof {
     pub valid: Option<bool>,
 }
 
+#[derive(Debug)]
 pub struct LinkExpression {
     pub author: String,
     pub data: Link,
@@ -102,8 +106,45 @@ impl From<ByDidAgentByDidPerspectiveLinks> for LinkExpression {
     }
 }
 
+use crate::perspectives::snapshot::SnapshotPerspectiveSnapshotLinks;
+
+impl From<SnapshotPerspectiveSnapshotLinks> for LinkExpression {
+    fn from(link: SnapshotPerspectiveSnapshotLinks) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: Link {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: ExpressionProof {
+                invalid: None,
+                key: link.proof.key,
+                signature: link.proof.signature,
+                valid: None,
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
+}
+
+use crate::perspectives::snapshot::SnapshotPerspectiveSnapshot;
+
+impl From<SnapshotPerspectiveSnapshot> for Perspective {
+    fn from(perspective: SnapshotPerspectiveSnapshot) -> Self {
+        Self {
+            links: perspective
+                .links
+                .into_iter()
+                .map(|link| LinkExpression::from(link))
+                .collect(),
+        }
+    }
 }
 
 pub struct Agent {

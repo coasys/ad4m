@@ -1,6 +1,7 @@
 use crate::formatting::print_link;
+use crate::types::Perspective;
 use crate::util::{create_websocket_client, query};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::naive::NaiveDateTime;
 use graphql_client::GraphQLQuery;
 use graphql_ws_client::graphql::StreamingOperation;
@@ -204,4 +205,19 @@ pub async fn run_watch(cap_token: String, id: String) -> Result<()> {
     println!("Stream ended. Exiting...");
 
     Ok(())
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/perspectives.gql",
+    response_derives = "Debug"
+)]
+pub struct Snapshot;
+
+pub async fn run_snapshot(cap_token: String, uuid: String) -> Result<Perspective> {
+    let response: snapshot::ResponseData = query(cap_token, Snapshot::build_query(snapshot::Variables { uuid }))
+        .await
+        .with_context(|| "Failed to run perspectives->snapshot query")?;
+    Ok(response.perspective_snapshot.ok_or_else(|| anyhow!("No perspective found"))?.into())
 }

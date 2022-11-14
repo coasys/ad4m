@@ -59,3 +59,14 @@ subscription SubscriptionLinkAdded($uuid: String!) {
         proof { valid, invalid, signature, key }
     }
 } 
+
+query Snapshot($uuid: String!) {
+    perspectiveSnapshot(uuid: $uuid) {
+        links { 
+            author
+            timestamp
+            data { source, predicate, target }
+            proof { signature, key }
+        }
+    }
+}
