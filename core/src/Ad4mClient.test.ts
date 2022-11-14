@@ -259,7 +259,8 @@ describe('Ad4mClient', () => {
 
         it('agentSignMessage() smoke tests', async () => {
             const sig = await ad4mClient.agent.signMessage("test-message")
-            expect(sig).toBe("test-message-signature")
+            expect(sig.signature).toBe("test-message-signature")
+            expect(sig.publicKey).toBe("test-public-key")
         })
     })
 

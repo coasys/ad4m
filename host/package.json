@@ -11,6 +11,7 @@
     "build": "tsc && yarn run build-commonjs",
     "build-commonjs": "node scripts/esbuild.js",
     "dev": "yarn run build && node --experimental-specifier-resolution=node build/cli.js",
+    "serve": "yarn run build && node --experimental-specifier-resolution=node build/cli.js serve",
     "postinstall": "node scripts/postinstall.js",
     "download-binaries-macos": "./scripts/download-binaries-macos.sh",
     "download-binaries-linux": "./scripts/download-binaries-linux.sh",

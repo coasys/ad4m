@@ -11,6 +11,9 @@
     "dev": {
       "cache": false
     },
+    "serve": {
+      "cache": false
+    },
     "test": {
       "dependsOn": ["build"],
       "outputs": []

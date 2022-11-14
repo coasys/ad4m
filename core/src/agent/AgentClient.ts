@@ -39,6 +39,11 @@ const ENTANGLEMENT_PROOF_FIELDS = `
     didSignedByDeviceKey
 `
 
+const AGENT_SIGNATURE_FIELDS = `
+    signature
+    publicKey
+`
+
 export interface InitializeArgs {
     did: string,
     didDocument: string,
@@ -360,7 +365,9 @@ export class AgentClient {
     async signMessage(message: string): Promise<string> {
         const { agentSignMessage } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation agentSignMessage($message: String!) {
-                agentSignMessage(message: $message)
+                agentSignMessage(message: $message) {
+                    ${AGENT_SIGNATURE_FIELDS}
+                }
             }`,
             variables: { message }
         }))

@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
 import { Language, Expression, PublicSharing, ReadOnlyLanguage, ExceptionType } from '@perspect3vism/ad4m';
-import { Agent, ExpressionProof } from '@perspect3vism/ad4m';
+import { Agent, ExpressionProof, AgentSignature } from '@perspect3vism/ad4m';
 import secp256k1 from 'secp256k1'
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
@@ -300,12 +300,7 @@ export default class AgentService {
             return [AGENT_AUTH_CAPABILITY]
         }
 
-        const key = this.getSigningKey()
-        // @ts-ignore
-        let keyEncoder = new KeyEncoder.default('secp256k1')
-        const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
-
-        const pubKeyObj = crypto.createPublicKey(pemPublicKey)
+        const pubKeyObj = this.getformattedPublicKey()
         const { payload } = await jose.jwtVerify(token, pubKeyObj)
 
         return payload.capabilities
@@ -358,7 +353,7 @@ export default class AgentService {
             throw new Error("Can't find permitted request")
         }
         
-        const privateKey = this.getPrivateKey()
+        const privateKey = this.getformattedPrivateKey()
         const jwt = await new jose.SignJWT({...auth})
             .setProtectedHeader({ alg: "ES256K" })
             .setIssuedAt()
@@ -373,15 +368,15 @@ export default class AgentService {
     }
 
     async signMessage(msg: string) {
-        const privateKey = this.getPrivateKey()
+        const privateKey = this.getformattedPrivateKey()
         const jws = await new jose.CompactSign(new TextEncoder().encode(msg))
             .setProtectedHeader({ alg: "ES256K" })
             .sign(privateKey)
 
-        return jws
+        return new AgentSignature(jws, this.getSigningKey().publicKey)
     }
 
-    private getPrivateKey() {
+    private getformattedPrivateKey() {
         const key = this.getSigningKey()
         // @ts-ignore
         let keyEncoder = new KeyEncoder.default('secp256k1')
@@ -390,6 +385,17 @@ export default class AgentService {
         const keyObj = crypto.createPrivateKey(pemPrivateKey)
 
         return keyObj
+    }
+
+    private getformattedPublicKey() {
+        const key = this.getSigningKey()
+        // @ts-ignore
+        let keyEncoder = new KeyEncoder.default('secp256k1')
+        const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
+
+        const pubKeyObj = crypto.createPublicKey(pemPublicKey)
+
+        return pubKeyObj
     }
 }
 

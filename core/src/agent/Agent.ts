@@ -111,3 +111,17 @@ export class EntanglementProofInput {
         this.didSignedByDeviceKey = didSignedByDeviceKey;
     }
 }
+
+@ObjectType()
+export class AgentSignature {
+    @Field()
+    signature: string;
+
+    @Field()
+    publicKey: string;
+
+    constructor(signature: string, publicKey: string) {
+        this.signature = signature;
+        this.publicKey = publicKey;
+    }
+}
