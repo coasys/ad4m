@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import didWallet from '@transmute/did-wallet'
 import { Language, Expression, PublicSharing, ReadOnlyLanguage, ExceptionType } from '@perspect3vism/ad4m';
-import { Agent, ExpressionProof } from '@perspect3vism/ad4m';
+import { Agent, ExpressionProof, AgentSignature } from '@perspect3vism/ad4m';
 import secp256k1 from 'secp256k1'
 import * as secp256k1DIDKey from '@transmute/did-key-secp256k1';
 import Signatures from './Signatures';
@@ -15,6 +15,7 @@ import { ALL_CAPABILITY, AuthInfo, AuthInfoExtended, DefaultTokenValidPeriod, ge
 import * as jose from 'jose'
 import * as crypto from "crypto"
 import KeyEncoder from 'key-encoder'
+import * as secp from '@noble/secp256k1'
 
 export default class AgentService {
     #did?: string
@@ -304,8 +305,8 @@ export default class AgentService {
         // @ts-ignore
         let keyEncoder = new KeyEncoder.default('secp256k1')
         const pemPublicKey = keyEncoder.encodePublic(key.publicKey, 'raw', 'pem')
-
         const pubKeyObj = crypto.createPublicKey(pemPublicKey)
+
         const { payload } = await jose.jwtVerify(token, pubKeyObj)
 
         return payload.capabilities
@@ -362,7 +363,6 @@ export default class AgentService {
         // @ts-ignore
         let keyEncoder = new KeyEncoder.default('secp256k1')
         const pemPrivateKey = keyEncoder.encodePrivate(key.privateKey, 'raw', 'pem')
-
         const keyObj = crypto.createPrivateKey(pemPrivateKey)
 
         const jwt = await new jose.SignJWT({...auth})
@@ -376,6 +376,14 @@ export default class AgentService {
         this.#requests.delete(authKey)
 
         return jwt
+    }
+
+    async signMessage(msg: string) {
+        const key = this.getSigningKey()
+        const msgHash = await secp.utils.sha256(new TextEncoder().encode(msg));
+        const signature = await secp.sign(msgHash, key.privateKey)
+        const sigHex = Buffer.from(signature).toString('hex')
+        return new AgentSignature(sigHex, key.publicKey)
     }
 }
 
