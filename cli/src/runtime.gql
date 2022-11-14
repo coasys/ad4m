@@ -19,3 +19,7 @@ mutation DeleteTrustedAgents($agents: [String!]!) {
 query TrustedAgents {
     getTrustedAgents
 }
+
+query LinkLanguageTemplates {
+    runtimeKnownLinkLanguageTemplates
+}

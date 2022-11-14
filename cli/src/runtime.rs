@@ -89,3 +89,22 @@ pub async fn run_trusted_agents(cap_token: String) -> Result<Vec<String>> {
     .with_context(|| "Failed to run runtime->trusted-agents query")?;
     Ok(response_data.get_trusted_agents)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct LinkLanguageTemplates;
+
+pub async fn run_link_language_templates(cap_token: String) -> Result<Vec<String>> {
+    let response_data: link_language_templates::ResponseData = query(
+        cap_token,
+        LinkLanguageTemplates::build_query(link_language_templates::Variables { }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->link-language-templates query")?;
+
+    Ok(response_data.runtime_known_link_language_templates)
+}

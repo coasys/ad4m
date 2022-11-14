@@ -495,6 +495,12 @@ async fn main() -> Result<()> {
                         println!("{}", agent);
                     }
                 },
+                RuntimeFunctions::LinkLanguageTemplates => {
+                    let templates = runtime::run_link_language_templates(cap_token).await?;
+                    for template in templates {
+                        println!("{}", template);
+                    }
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }
