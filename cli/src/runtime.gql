@@ -31,3 +31,7 @@ mutation AddLinkLanguageTemplates($addresses: [String!]!) {
 mutation RemoveLinkLanguageTemplates($addresses: [String!]!) {
     runtimeRemoveKnownLinkLanguageTemplates(addresses: $addresses)
 }
+
+query Friends {
+    runtimeFriends
+}

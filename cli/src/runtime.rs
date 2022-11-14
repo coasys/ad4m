@@ -148,3 +148,21 @@ pub async fn run_remove_link_language_templates(
     .await
     .with_context(|| "Failed to run runtime->remove-link-language-templates query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct Friends;
+
+pub async fn run_friends(cap_token: String) -> Result<Vec<String>> {
+    let response_data: friends::ResponseData = query(
+        cap_token,
+        Friends::build_query(friends::Variables {}),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->friends query")?;
+    Ok(response_data.runtime_friends)
+}

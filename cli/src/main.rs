@@ -509,6 +509,12 @@ async fn main() -> Result<()> {
                     runtime::run_remove_link_language_templates(cap_token, addresses).await?;
                     println!("Link language templates removed!");
                 },
+                RuntimeFunctions::Friends => {
+                    let friends = runtime::run_friends(cap_token).await?;
+                    for friend in friends {
+                        println!("{}", friend);
+                    }
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }
