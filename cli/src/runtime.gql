@@ -51,3 +51,7 @@ query HcAgentInfos {
 mutation HcAddAgentInfos($agentInfos: String!) {
     runtimeHcAddAgentInfos(agentInfos: $agentInfos)
 }
+
+query VerifyStringSignedByDid($did: String!, $didSigningKeyId: String!, $data: String!, $signedData: String!) {
+    runtimeVerifyStringSignedByDid(did: $did, didSigningKeyId: $didSigningKeyId, data: $data, signedData: $signedData)
+}

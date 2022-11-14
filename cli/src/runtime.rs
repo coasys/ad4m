@@ -244,3 +244,31 @@ pub async fn run_hc_add_agent_infos(
     .await
     .with_context(|| "Failed to run runtime->hc-add-agent-infos query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct VerifyStringSignedByDid;
+
+pub async fn run_verify_string_signed_by_did(
+    cap_token: String,
+    did: String,
+    did_signing_key_id: String,
+    data: String,
+    signed_data: String,
+) -> Result<verify_string_signed_by_did::ResponseData> {
+    query(
+        cap_token,
+        VerifyStringSignedByDid::build_query(verify_string_signed_by_did::Variables {
+            did,
+            did_signing_key_id,
+            data,
+            signed_data
+        }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->verify-string-signed-by-did query")
+}

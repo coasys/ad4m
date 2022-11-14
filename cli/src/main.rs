@@ -531,6 +531,10 @@ async fn main() -> Result<()> {
                     runtime::run_hc_add_agent_infos(cap_token, infos).await?;
                     println!("Holochain agent infos added!");
                 },
+                RuntimeFunctions::VerifySignature { did, did_signing_key, data, signed_data } => {
+                    let result = runtime::run_verify_string_signed_by_did(cap_token, did, did_signing_key, data, signed_data).await?;
+                    println!("{:?}", result);
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }
