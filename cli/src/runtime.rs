@@ -186,3 +186,23 @@ pub async fn run_add_friends(
     .await
     .with_context(|| "Failed to run runtime->add-friends query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct RemoveFriends;
+
+pub async fn run_remove_friends(
+    cap_token: String,
+    dids: Vec<String>,
+) -> Result<remove_friends::ResponseData> {
+    query(
+        cap_token,
+        RemoveFriends::build_query(remove_friends::Variables { dids }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->remove-friends query")
+}

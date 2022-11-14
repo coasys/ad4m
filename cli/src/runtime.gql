@@ -39,3 +39,7 @@ query Friends {
 mutation AddFriends($dids: [String!]!) {
     runtimeAddFriends(dids: $dids)
 }
+
+mutation RemoveFriends($dids: [String!]!) {
+    runtimeRemoveFriends(dids: $dids)
+}

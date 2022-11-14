@@ -519,6 +519,10 @@ async fn main() -> Result<()> {
                     runtime::run_add_friends(cap_token, agents).await?;
                     println!("Friends added!");
                 },
+                RuntimeFunctions::RemoveFriends { agents } => {
+                    runtime::run_remove_friends(cap_token, agents).await?;
+                    println!("Friends removed!");
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }
