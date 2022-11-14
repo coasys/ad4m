@@ -12,6 +12,10 @@ mutation AddTrustedAgents($agents: [String!]!) {
     addTrustedAgents(agents: $agents)
 }
 
+mutation DeleteTrustedAgents($agents: [String!]!) {
+    deleteTrustedAgents(agents: $agents)
+}
+
 query TrustedAgents {
     getTrustedAgents
 }

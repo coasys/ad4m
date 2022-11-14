@@ -485,6 +485,10 @@ async fn main() -> Result<()> {
                     runtime::run_add_trusted_agents(cap_token, agents).await?;
                     println!("Trusted agents added!");
                 },
+                RuntimeFunctions::DeleteTrustedAgents { agents } => {
+                    runtime::run_delete_trusted_agents(cap_token, agents).await?;
+                    println!("Trusted agents removed!");
+                },
                 RuntimeFunctions::TrustedAgents => {
                     let agents = runtime::run_trusted_agents(cap_token).await?;
                     for agent in agents {

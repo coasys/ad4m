@@ -58,6 +58,26 @@ pub async fn run_add_trusted_agents(
     query_path = "src/runtime.gql",
     response_derives = "Debug"
 )]
+pub struct DeleteTrustedAgents;
+
+pub async fn run_delete_trusted_agents(
+    cap_token: String,
+    agents: Vec<String>,
+) -> Result<delete_trusted_agents::ResponseData> {
+    query(
+        cap_token,
+        DeleteTrustedAgents::build_query(delete_trusted_agents::Variables { agents }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime -> delete-trusted-agents query")
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
 pub struct TrustedAgents;
 
 pub async fn run_trusted_agents(cap_token: String) -> Result<Vec<String>> {
