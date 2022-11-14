@@ -108,3 +108,23 @@ pub async fn run_link_language_templates(cap_token: String) -> Result<Vec<String
 
     Ok(response_data.runtime_known_link_language_templates)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct AddLinkLanguageTemplates;
+
+pub async fn run_add_link_language_templates(
+    cap_token: String,
+    addresses: Vec<String>,
+) -> Result<add_link_language_templates::ResponseData> {
+    query(
+        cap_token,
+        AddLinkLanguageTemplates::build_query(add_link_language_templates::Variables { addresses }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-link-language-templates query")
+}

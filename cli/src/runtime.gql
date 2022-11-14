@@ -23,3 +23,7 @@ query TrustedAgents {
 query LinkLanguageTemplates {
     runtimeKnownLinkLanguageTemplates
 }
+
+mutation AddLinkLanguageTemplates($addresses: [String!]!) {
+    runtimeAddKnownLinkLanguageTemplates(addresses: $addresses)
+}
