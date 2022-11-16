@@ -575,6 +575,10 @@ async fn main() -> Result<()> {
                     println!("Status set!");
                     
                 },
+                RuntimeFunctions::FriendStatus { agent } => {
+                    let status = runtime::run_friend_status(cap_token, agent).await?;
+                    println!("{:?}", status.runtime_friend_status);
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }

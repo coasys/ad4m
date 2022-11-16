@@ -59,3 +59,19 @@ query VerifyStringSignedByDid($did: String!, $didSigningKeyId: String!, $data: S
 mutation SetStatus($status: PerspectiveInput!) {
     runtimeSetStatus(status: $status)
 }
+
+query FriendStatus($did: String!) {
+    runtimeFriendStatus(did: $did) { 
+        author
+        timestamp
+        data { 
+            links {
+                author
+                timestamp
+                data { source, predicate, target }
+                proof { valid, invalid, signature, key }
+            }  
+        }
+        proof { valid, invalid, signature, key }
+    }
+}

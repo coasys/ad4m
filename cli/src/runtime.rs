@@ -292,3 +292,23 @@ pub async fn run_set_status(
     .await
     .with_context(|| "Failed to run runtime->set-status query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct FriendStatus;
+
+pub async fn run_friend_status(
+    cap_token: String,
+    did: String,
+) -> Result<friend_status::ResponseData> {
+    query(
+        cap_token,
+        FriendStatus::build_query(friend_status::Variables { did }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->friend-status query")
+}
