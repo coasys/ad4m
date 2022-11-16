@@ -52,10 +52,14 @@ pub async fn run_add(cap_token: String, name: String) -> Result<String> {
 pub struct Remove;
 
 pub async fn run_remove(cap_token: String, uuid: String) -> Result<()> {
-    query(cap_token, Remove::build_query(remove::Variables { uuid }))
+    let response: remove::ResponseData = query(cap_token, Remove::build_query(remove::Variables { uuid }))
         .await
         .with_context(|| "Failed to run perspectives->remove query")?;
-    Ok(())
+    if response.perspective_remove {
+        Ok(())
+    } else {
+        Err(anyhow!("Failed to remove perspective"))
+    }
 }
 
 #[derive(GraphQLQuery)]
