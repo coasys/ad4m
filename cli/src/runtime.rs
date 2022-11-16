@@ -272,3 +272,23 @@ pub async fn run_verify_string_signed_by_did(
     .await
     .with_context(|| "Failed to run runtime->verify-string-signed-by-did query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct SetStatus;
+
+pub async fn run_set_status(
+    cap_token: String,
+    status: set_status::PerspectiveInput,
+) -> Result<set_status::ResponseData> {
+    query(
+        cap_token,
+        SetStatus::build_query(set_status::Variables { status }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->set-status query")
+}

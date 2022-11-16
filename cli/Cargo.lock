@@ -23,6 +23,7 @@ dependencies = [
  "futures",
  "graphql-ws-client",
  "graphql_client",
+ "rand",
  "reqwest",
  "rustyline",
  "serde",

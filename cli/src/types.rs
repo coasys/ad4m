@@ -107,6 +107,8 @@ impl From<ByDidAgentByDidPerspectiveLinks> for LinkExpression {
 }
 
 use crate::perspectives::snapshot::SnapshotPerspectiveSnapshotLinks;
+use crate::perspectives::snapshot::SnapshotPerspectiveSnapshotLinksData;
+use crate::perspectives::snapshot::SnapshotPerspectiveSnapshotLinksProof;
 
 impl From<SnapshotPerspectiveSnapshotLinks> for LinkExpression {
     fn from(link: SnapshotPerspectiveSnapshotLinks) -> Self {
@@ -128,12 +130,56 @@ impl From<SnapshotPerspectiveSnapshotLinks> for LinkExpression {
     }
 }
 
+impl From<LinkExpression> for SnapshotPerspectiveSnapshotLinks {
+    fn from(link: LinkExpression) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: SnapshotPerspectiveSnapshotLinksData {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: SnapshotPerspectiveSnapshotLinksProof {
+                key: link.proof.key,
+                signature: link.proof.signature,
+            },
+        }
+    }
+}
+
+
+impl From<LinkExpression> for LinkExpressionInput {
+    fn from(link: LinkExpression) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: LinkInput {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: ExpressionProofInput {
+                key: link.proof.key,
+                signature: link.proof.signature,
+                invalid: link.proof.invalid,
+                valid: link.proof.valid,
+            },
+        }
+    }
+}
+
+
 #[derive(Debug)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
 
 use crate::perspectives::snapshot::SnapshotPerspectiveSnapshot;
+use crate::runtime::set_status::PerspectiveInput;
+use crate::runtime::set_status::LinkExpressionInput;
+use crate::runtime::set_status::LinkInput;
+use crate::runtime::set_status::ExpressionProofInput;
 
 impl From<SnapshotPerspectiveSnapshot> for Perspective {
     fn from(perspective: SnapshotPerspectiveSnapshot) -> Self {
@@ -142,6 +188,18 @@ impl From<SnapshotPerspectiveSnapshot> for Perspective {
                 .links
                 .into_iter()
                 .map(|link| LinkExpression::from(link))
+                .collect(),
+        }
+    }
+}
+
+impl From<Perspective> for PerspectiveInput {
+    fn from(perspective: Perspective) -> Self {
+        Self {
+            links: perspective
+                .links
+                .into_iter()
+                .map(|link| LinkExpressionInput::from(link))
                 .collect(),
         }
     }
