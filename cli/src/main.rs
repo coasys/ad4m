@@ -557,6 +557,11 @@ async fn main() -> Result<()> {
                     let status = runtime::run_friend_status(cap_token, agent).await?;
                     println!("{:?}", status.runtime_friend_status);
                 },
+                RuntimeFunctions::FriendSendMessage { agent, message } => {
+                    let message = string_2_perspective_snapshot(cap_token.clone(), message).await?;
+                    runtime::run_friend_send_message(cap_token, agent, message.into()).await?;
+                    println!("Message sent!");
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }

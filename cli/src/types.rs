@@ -169,6 +169,26 @@ impl From<LinkExpression> for LinkExpressionInput {
     }
 }
 
+impl From<LinkExpression> for friend_send_message::LinkExpressionInput {
+    fn from(link: LinkExpression) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: friend_send_message::LinkInput {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: friend_send_message::ExpressionProofInput {
+                key: link.proof.key,
+                signature: link.proof.signature,
+                invalid: link.proof.invalid,
+                valid: link.proof.valid,
+            },
+        }
+    }
+}
+
 
 #[derive(Debug)]
 pub struct Perspective {
@@ -204,6 +224,21 @@ impl From<Perspective> for PerspectiveInput {
         }
     }
 }
+
+use crate::runtime::friend_send_message;
+
+impl From<Perspective> for friend_send_message::PerspectiveInput {
+    fn from(perspective: Perspective) -> Self {
+        Self {
+            links: perspective
+                .links
+                .into_iter()
+                .map(|link| friend_send_message::LinkExpressionInput::from(link))
+                .collect(),
+        }
+    }
+}
+
 
 pub struct Agent {
     pub did: String,

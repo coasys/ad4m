@@ -75,3 +75,7 @@ query FriendStatus($did: String!) {
         proof { valid, invalid, signature, key }
     }
 }
+
+mutation FriendSendMessage($did: String!, $message: PerspectiveInput!) {
+    runtimeFriendSendMessage(did: $did, message: $message)
+}

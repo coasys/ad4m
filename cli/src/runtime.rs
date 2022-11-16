@@ -312,3 +312,24 @@ pub async fn run_friend_status(
     .await
     .with_context(|| "Failed to run runtime->friend-status query")
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct FriendSendMessage;
+
+pub async fn run_friend_send_message(
+    cap_token: String,
+    did: String,
+    message: friend_send_message::PerspectiveInput,
+) -> Result<friend_send_message::ResponseData> {
+    query(
+        cap_token,
+        FriendSendMessage::build_query(friend_send_message::Variables { did, message }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->friend-send-message query")
+}
