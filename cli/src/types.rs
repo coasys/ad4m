@@ -239,6 +239,42 @@ impl From<Perspective> for friend_send_message::PerspectiveInput {
     }
 }
 
+use crate::runtime::message_inbox;
+
+impl From<message_inbox::MessageInboxRuntimeMessageInbox> for Perspective {
+    fn from(perspective_expression: message_inbox::MessageInboxRuntimeMessageInbox) -> Self {
+        Self {
+            links: perspective_expression
+                .data
+                .links
+                .into_iter()
+                .map(|link| LinkExpression::from(link))
+                .collect(),
+        }
+    }
+}
+
+use crate::runtime::message_inbox::MessageInboxRuntimeMessageInboxDataLinks;
+
+impl From<MessageInboxRuntimeMessageInboxDataLinks> for LinkExpression {
+    fn from(link: MessageInboxRuntimeMessageInboxDataLinks) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: Link {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: ExpressionProof {
+                invalid: None,
+                key: link.proof.key,
+                signature: link.proof.signature,
+                valid: None,
+            },
+        }
+    }
+}
 
 pub struct Agent {
     pub did: String,

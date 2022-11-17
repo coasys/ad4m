@@ -562,6 +562,12 @@ async fn main() -> Result<()> {
                     runtime::run_friend_send_message(cap_token, agent, message.into()).await?;
                     println!("Message sent!");
                 },
+                RuntimeFunctions::MessageInbox { filter } => {
+                    let messages = runtime::run_message_inbox(cap_token, filter).await?;
+                    for message in messages {
+                        println!("{:?}", message);
+                    }
+                },
                 _ => unimplemented!("Runtime command not implemented yet"),
             }
         }

@@ -1,4 +1,4 @@
-use crate::util::query;
+use crate::{util::query, types::Perspective};
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
 
@@ -332,4 +332,26 @@ pub async fn run_friend_send_message(
     )
     .await
     .with_context(|| "Failed to run runtime->friend-send-message query")
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct MessageInbox;
+
+pub async fn run_message_inbox(
+    cap_token: String,
+    filter: Option<String>,
+) -> Result<Vec<Perspective>> {
+    let response: message_inbox::ResponseData = query(
+        cap_token,
+        MessageInbox::build_query(message_inbox::Variables { filter }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->message-inbox query")?;
+
+    Ok(response.runtime_message_inbox.into_iter().map(|d| d.into()).collect())
 }

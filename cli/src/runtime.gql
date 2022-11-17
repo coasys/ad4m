@@ -79,3 +79,19 @@ query FriendStatus($did: String!) {
 mutation FriendSendMessage($did: String!, $message: PerspectiveInput!) {
     runtimeFriendSendMessage(did: $did, message: $message)
 }
+
+query MessageInbox($filter: String) {
+    runtimeMessageInbox(filter: $filter) { 
+        author
+        timestamp
+        data { 
+            links {
+                author
+                timestamp
+                data { source, predicate, target }
+                proof { valid, invalid, signature, key }
+            }  
+        }
+        proof { valid, invalid, signature, key }
+    }
+}
