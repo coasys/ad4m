@@ -568,7 +568,12 @@ async fn main() -> Result<()> {
                         println!("{:?}", message);
                     }
                 },
-                _ => unimplemented!("Runtime command not implemented yet"),
+                RuntimeFunctions::MessageOutbox { filter } => {
+                    let messages = runtime::run_message_outbox(cap_token, filter).await?;
+                    for message in messages {
+                        println!("{:?}", message);
+                    }
+                }
             }
         }
         Domain::Log => {

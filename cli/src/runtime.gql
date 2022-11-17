@@ -95,3 +95,22 @@ query MessageInbox($filter: String) {
         proof { valid, invalid, signature, key }
     }
 }
+
+query MessageOutbox($filter: String) {
+    runtimeMessageOutbox(filter: $filter) { 
+        recipient,
+        message {
+            author
+            timestamp
+            data { 
+                links {
+                    author
+                    timestamp
+                    data { source, predicate, target }
+                    proof { valid, invalid, signature, key }
+                }  
+            }
+            proof { valid, invalid, signature, key }
+        }
+    }
+}

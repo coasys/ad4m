@@ -355,3 +355,25 @@ pub async fn run_message_inbox(
 
     Ok(response.runtime_message_inbox.into_iter().map(|d| d.into()).collect())
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/runtime.gql",
+    response_derives = "Debug"
+)]
+pub struct MessageOutbox;
+
+pub async fn run_message_outbox(
+    cap_token: String,
+    filter: Option<String>,
+) -> Result<Vec<message_outbox::MessageOutboxRuntimeMessageOutbox>> {
+    let response: message_outbox::ResponseData = query(
+        cap_token,
+        MessageOutbox::build_query(message_outbox::Variables { filter }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->message-outbox query")?;
+
+    Ok(response.runtime_message_outbox)
+}
