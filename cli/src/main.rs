@@ -21,7 +21,7 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use formatting::{print_agent, print_link, print_logo, print_prolog_result};
+use formatting::{print_agent, print_link, print_logo, print_prolog_result, print_message_perspective, print_sent_message_perspective};
 use rustyline::Editor;
 use serde_json::Value;
 use startup::executor_data_path;
@@ -565,13 +565,15 @@ async fn main() -> Result<()> {
                 RuntimeFunctions::MessageInbox { filter } => {
                     let messages = runtime::run_message_inbox(cap_token, filter).await?;
                     for message in messages {
-                        println!("{:?}", message);
+                        print_message_perspective(message);
+                        println!("");
                     }
                 },
                 RuntimeFunctions::MessageOutbox { filter } => {
                     let messages = runtime::run_message_outbox(cap_token, filter).await?;
                     for message in messages {
-                        println!("{:?}", message);
+                        print_sent_message_perspective(message);
+                        println!("");
                     }
                 }
             }

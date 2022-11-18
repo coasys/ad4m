@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use serde_json::Value;
 
-use crate::types::{Agent, LinkExpression};
+use crate::types::{Agent, LinkExpression, PerspectiveExpression, SentPerspectiveMessage};
 
 pub fn print_prolog_result(result: Value) -> Result<()> {
     match result {
@@ -116,4 +116,20 @@ pub fn print_logo() {
                                                                      
 "#
     );
+}
+
+pub fn print_message_perspective(perspective: PerspectiveExpression) {
+    println!("\x1b[36mFrom: {}", perspective.author);
+    println!("\x1b[36mTimestamp: {}", perspective.timestamp);
+    for link in perspective.data.links {
+        print_link(link);
+    }
+}
+
+pub fn print_sent_message_perspective(sent: SentPerspectiveMessage) {
+    println!("\x1b[36mTo: {}", sent.recipient);
+    println!("\x1b[36mTimestamp: {}", sent.message.timestamp);
+    for link in sent.message.data.links {
+        print_link(link);
+    }
 }

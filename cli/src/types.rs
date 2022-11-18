@@ -26,6 +26,14 @@ pub struct LinkExpression {
     pub timestamp: String,
 }
 
+#[derive(Debug)]
+pub struct PerspectiveExpression {
+    pub author: String,
+    pub data: Perspective,
+    pub proof: ExpressionProof,
+    pub timestamp: String,
+}
+
 impl From<QueryLinksPerspectiveQueryLinks> for LinkExpression {
     fn from(link: QueryLinksPerspectiveQueryLinks) -> Self {
         Self {
@@ -241,15 +249,25 @@ impl From<Perspective> for friend_send_message::PerspectiveInput {
 
 use crate::runtime::message_inbox;
 
-impl From<message_inbox::MessageInboxRuntimeMessageInbox> for Perspective {
+impl From<message_inbox::MessageInboxRuntimeMessageInbox> for PerspectiveExpression {
     fn from(perspective_expression: message_inbox::MessageInboxRuntimeMessageInbox) -> Self {
         Self {
-            links: perspective_expression
-                .data
-                .links
-                .into_iter()
-                .map(|link| LinkExpression::from(link))
-                .collect(),
+            author: perspective_expression.author,
+            timestamp: perspective_expression.timestamp,
+            data: Perspective {
+                links: perspective_expression
+                    .data
+                    .links
+                    .into_iter()
+                    .map(|link| LinkExpression::from(link))
+                    .collect(),
+            },
+            proof: ExpressionProof {
+                invalid: perspective_expression.proof.invalid,
+                key: perspective_expression.proof.key,
+                signature: perspective_expression.proof.signature,
+                valid: perspective_expression.proof.valid,
+            },
         }
     }
 }
@@ -272,6 +290,60 @@ impl From<MessageInboxRuntimeMessageInboxDataLinks> for LinkExpression {
                 signature: link.proof.signature,
                 valid: None,
             },
+        }
+    }
+}
+
+use crate::runtime::message_outbox::MessageOutboxRuntimeMessageOutbox;
+use crate::runtime::message_outbox::MessageOutboxRuntimeMessageOutboxMessageDataLinks;
+
+impl From<MessageOutboxRuntimeMessageOutboxMessageDataLinks> for LinkExpression {
+    fn from(link: MessageOutboxRuntimeMessageOutboxMessageDataLinks) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: Link {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: ExpressionProof {
+                invalid: None,
+                key: link.proof.key,
+                signature: link.proof.signature,
+                valid: None,
+            },
+        }
+    }
+}
+pub struct SentPerspectiveMessage {
+    pub recipient: String,
+    pub message: PerspectiveExpression,
+}
+
+impl From<MessageOutboxRuntimeMessageOutbox> for SentPerspectiveMessage {
+    fn from(message: MessageOutboxRuntimeMessageOutbox) -> Self {
+        Self {
+            recipient: message.recipient,
+            message: PerspectiveExpression {
+                author: message.message.author,
+                timestamp: message.message.timestamp,
+                data: Perspective {
+                    links: message
+                        .message
+                        .data
+                        .links
+                        .into_iter()
+                        .map(|link| LinkExpression::from(link))
+                        .collect(),
+                },
+                proof: ExpressionProof {
+                    invalid: message.message.proof.invalid,
+                    key: message.message.proof.key,
+                    signature: message.message.proof.signature,
+                    valid: message.message.proof.valid,
+                },
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::{util::query, types::Perspective};
+use crate::{util::query, types::{Perspective, PerspectiveExpression, SentPerspectiveMessage}};
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
 
@@ -345,7 +345,7 @@ pub struct MessageInbox;
 pub async fn run_message_inbox(
     cap_token: String,
     filter: Option<String>,
-) -> Result<Vec<Perspective>> {
+) -> Result<Vec<PerspectiveExpression>> {
     let response: message_inbox::ResponseData = query(
         cap_token,
         MessageInbox::build_query(message_inbox::Variables { filter }),
@@ -367,7 +367,7 @@ pub struct MessageOutbox;
 pub async fn run_message_outbox(
     cap_token: String,
     filter: Option<String>,
-) -> Result<Vec<message_outbox::MessageOutboxRuntimeMessageOutbox>> {
+) -> Result<Vec<SentPerspectiveMessage>> {
     let response: message_outbox::ResponseData = query(
         cap_token,
         MessageOutbox::build_query(message_outbox::Variables { filter }),
@@ -375,5 +375,5 @@ pub async fn run_message_outbox(
     .await
     .with_context(|| "Failed to run runtime->message-outbox query")?;
 
-    Ok(response.runtime_message_outbox)
+    Ok(response.runtime_message_outbox.into_iter().map(|d| d.into()).collect())
 }
