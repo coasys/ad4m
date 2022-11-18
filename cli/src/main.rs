@@ -22,9 +22,8 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use formatting::{print_agent, print_link, print_prolog_result, print_message_perspective, print_sent_message_perspective, print_prolog_results};
+use formatting::{print_agent, print_link, print_message_perspective, print_sent_message_perspective, print_prolog_results};
 use rustyline::Editor;
-use serde_json::Value;
 use startup::executor_data_path;
 use util::{maybe_parse_datetime, readline_masked};
 use regex::Regex;
