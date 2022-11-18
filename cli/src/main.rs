@@ -423,7 +423,29 @@ async fn main() -> Result<()> {
         Domain::Perspectives { command } => {
             if command.is_none() {
                 let all_perspectives = perspectives::run_all(cap_token).await?;
-                println!("{:#?}", all_perspectives);
+                for perspective in all_perspectives {
+                    println!("\x1b[36mName: \x1b[97m{}", perspective.name);
+                    println!("\x1b[36mID: \x1b[97m{}", perspective.uuid);
+                    if perspective.shared_url.is_some() {
+                        println!("\x1b[36mShared URL: \x1b[97m{}", perspective.shared_url.unwrap());
+                    } else {
+                        println!("\x1b[36mShared URL: \x1b[90m<not shared as Neighbourhood>");
+                    }
+
+                    if let Some(nh) = perspective.neighbourhood {
+                        println!("\x1b[36mNeighbourhood Link-Language: \x1b[97m{}", nh.link_language);
+                        if nh.meta.links.is_empty() {
+                            println!("\x1b[36mNeughbourhood meta: \x1b[90m<empty>");
+                        } else {
+                            println!("\x1b[36mNeughbourhood meta:");
+                            for link in nh.meta.links {
+                                print_link(link.into());
+                            }
+                        }
+                    }
+                    println!("")
+                }
+                
                 return Ok(());
             }
 

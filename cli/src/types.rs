@@ -197,6 +197,28 @@ impl From<LinkExpression> for friend_send_message::LinkExpressionInput {
     }
 }
 
+use crate::perspectives::all::AllPerspectivesNeighbourhoodMetaLinks;
+
+impl From<AllPerspectivesNeighbourhoodMetaLinks> for LinkExpression {
+    fn from(link: AllPerspectivesNeighbourhoodMetaLinks) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: Link {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: ExpressionProof {
+                invalid: None,
+                key: link.proof.key,
+                signature: link.proof.signature,
+                valid: None,
+            },
+        }
+    }
+}
+
 
 #[derive(Debug)]
 pub struct Perspective {
