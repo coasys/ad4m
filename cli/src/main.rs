@@ -29,7 +29,8 @@ use util::{maybe_parse_datetime, readline_masked};
 
 use crate::util::string_2_perspective_snapshot;
 
-/// .
+/// AD4M command line interface.
+/// https://ad4m.dev
 ///                                                                                                                               .xXKkd:'                         
 ///                                                                                                                              .oNOccx00x;.                      
 ///                                                                                                                              ;KK;  .ck0Oxdolc;..               
@@ -50,7 +51,7 @@ use crate::util::string_2_perspective_snapshot;
 ///                                                                                                                            lXk;';cdO0ko,':lc:,.                
 ///                                                                                                                            'x0Okkdl:'.                         
 ///                                                                                                                             .,'..                               
-/// AD4M command line interface.
+/// This is a full featured AD4M client.
 /// Provides all means of interacting with the AD4M executor / agent.
 /// See help of commands for more information.
 #[derive(Parser, Debug)]
@@ -168,6 +169,7 @@ enum PerspectiveFunctions {
         query: String,
     },
 
+    /// Stay connected and print any changes (links added/removed) to the perspective
     Watch {
         id: String,
     },
