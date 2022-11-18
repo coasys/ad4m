@@ -27,6 +27,21 @@ where
     Ok(response_data)
 }
 
+pub async fn query_raw<Q, R>(cap_token: String, query: QueryBody<Q>) -> Result<Response<R>>
+where
+    Q: Serialize,
+    R: DeserializeOwned,
+{
+    Ok(reqwest::Client::new()
+        .post(get_executor_url()?)
+        .header("Authorization", cap_token)
+        .json(&query)
+        .send()
+        .await?
+        .json()
+        .await?)
+}
+
 struct TokioSpawner(tokio::runtime::Handle);
 
 impl TokioSpawner {

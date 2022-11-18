@@ -1,9 +1,9 @@
 use crate::formatting::print_link;
 use crate::types::Perspective;
-use crate::util::{create_websocket_client, query};
+use crate::util::{create_websocket_client, query, query_raw};
 use anyhow::{anyhow, Context, Result};
 use chrono::naive::NaiveDateTime;
-use graphql_client::GraphQLQuery;
+use graphql_client::{GraphQLQuery, Response};
 use graphql_ws_client::graphql::StreamingOperation;
 use serde_json::Value;
 
@@ -141,28 +141,43 @@ pub async fn run_query_links(
 pub struct Infer;
 
 pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
-    let response_data: infer::ResponseData = query(
+    
+    let response: Response<infer::ResponseData> = query_raw(
         cap_token,
         Infer::build_query(infer::Variables {
             uuid,
             query: prolog_query,
         }),
     )
-    .await
-    .with_context(|| "Failed to run perspectives->infer query")?;
-    let v: Value = serde_json::from_str(&response_data.perspective_query_prolog)?;
-    Ok(match v {
-        Value::String(string) => {
-            if string == "true" {
-                Value::Bool(true)
-            } else if string == "false" {
-                Value::Bool(false)
-            } else {
-                Value::String(string)
+    .await?;
+
+    if let Some(data) = response.data {
+        let v: Value = serde_json::from_str(&data.perspective_query_prolog)?;
+        Ok(match v {
+            Value::String(string) => {
+                if string == "true" {
+                    Value::Bool(true)
+                } else if string == "false" {
+                    Value::Bool(false)
+                } else {
+                    Value::String(string)
+                }
+            }
+            _ => v,
+        })
+    } else {
+        if let Some(errors) = response.errors.clone() {
+            if let Some(error) = errors.first() {
+                if error.message.starts_with("error(") {
+                    return Err(anyhow!(error.message.clone()));
+                }
             }
         }
-        _ => v,
-    })
+        Err(anyhow!("Failed to run perspective->infer query: {:?}", response.errors))
+    }
+
+    
+
 }
 
 #[derive(GraphQLQuery)]

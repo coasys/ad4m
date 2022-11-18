@@ -5,6 +5,7 @@ extern crate clap;
 extern crate dirs;
 extern crate graphql_client;
 extern crate rand;
+extern crate regex;
 extern crate reqwest;
 extern crate rustyline;
 extern crate tokio;
@@ -21,11 +22,12 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use formatting::{print_agent, print_link, print_prolog_result, print_message_perspective, print_sent_message_perspective};
+use formatting::{print_agent, print_link, print_prolog_result, print_message_perspective, print_sent_message_perspective, print_prolog_results};
 use rustyline::Editor;
 use serde_json::Value;
 use startup::executor_data_path;
 use util::{maybe_parse_datetime, readline_masked};
+use regex::Regex;
 
 use crate::util::string_2_perspective_snapshot;
 
@@ -171,6 +173,11 @@ enum PerspectiveFunctions {
 
     /// Stay connected and print any changes (links added/removed) to the perspective
     Watch {
+        id: String,
+    },
+
+    /// Interactive Perspective shell based on Prolog/SDNA runtime
+    Repl {
         id: String,
     },
 }
@@ -500,22 +507,8 @@ async fn main() -> Result<()> {
                     }
                 }
                 PerspectiveFunctions::Infer { id, query } => {
-                    match perspectives::run_infer(cap_token, id, query).await? {
-                        Value::Bool(true) => println!("true ✅"),
-                        Value::Bool(false) => println!("false ❌"),
-                        Value::String(string) => println!("{}", string),
-                        Value::Array(array) => {
-                            println!("\x1b[90m{} results:", array.len());
-                            let mut i = 1;
-                            for item in array {
-                                println!("\x1b[90m{}:", i);
-                                print_prolog_result(item)?;
-                                println!("====================");
-                                i += 1;
-                            }
-                        }
-                        _ => bail!("Unexpected result value in response of run_infer()"),
-                    }
+                    let results = perspectives::run_infer(cap_token, id, query).await?;
+                    print_prolog_results(results)?;
                 }
                 PerspectiveFunctions::Watch { id } => {
                     perspectives::run_watch(cap_token, id).await?;
@@ -523,6 +516,45 @@ async fn main() -> Result<()> {
                 PerspectiveFunctions::Snapshot { id } => {
                     let result = perspectives::run_snapshot(cap_token, id).await?;
                     println!("{:#?}", result);
+                }
+                PerspectiveFunctions::Repl { id } => {
+                    //let _ = perspectives::run_watch(cap_token, id);
+                    let mut rl = Editor::<()>::new()?;
+                    loop {
+                        let line = rl.readline("\x1b[97m> ")?;
+                        rl.add_history_entry(line.as_str());
+                        let line = line.trim().to_string();
+                        if line == "exit" {
+                            break;
+                        }
+
+                        let add_link = Regex::new(r"add-link\s+(?P<source>\S+)\s+(?P<predicate>\S+)\s+(?P<target>\S+)")?;
+                        let caps = add_link.captures(&line);
+                        if let Some(caps) = caps {
+                            let source = caps.name("source").unwrap().as_str().to_string();
+                            let predicate = caps.name("predicate").unwrap().as_str().to_string();
+                            let target = caps.name("target").unwrap().as_str().to_string();
+
+                            let predicate = if predicate == "_" {
+                                None
+                            } else {
+                                Some(predicate)
+                            };
+                            
+                            perspectives::run_add_link(cap_token.clone(), id.clone(), source, target, predicate).await?;
+                            continue;
+                        }
+
+                    
+                        match perspectives::run_infer(cap_token.clone(), id.clone(), line).await {
+                            Ok(results) => {
+                                print_prolog_results(results)?;
+                            }
+                            Err(e) => {
+                                println!("\x1b[91m{}", e.root_cause());
+                            }
+                        }
+                    } 
                 }
             }
         }

@@ -3,6 +3,27 @@ use serde_json::Value;
 
 use crate::types::{Agent, LinkExpression, PerspectiveExpression, SentPerspectiveMessage};
 
+pub fn print_prolog_results(results: Value) -> Result<()> {
+    match results {
+        Value::Bool(true) => println!("true ✅"),
+        Value::Bool(false) => println!("false ❌"),
+        Value::String(string) => println!("{}", string),
+        Value::Array(array) => {
+            println!("\x1b[90m{} results:", array.len());
+            let mut i = 1;
+            for item in array {
+                println!("\x1b[90m{}:", i);
+                print_prolog_result(item)?;
+                println!("====================");
+                i += 1;
+            }
+        }
+        _ => bail!("Unexpected result value in response of run_infer()"),
+    }
+
+    Ok(())
+}
+
 pub fn print_prolog_result(result: Value) -> Result<()> {
     match result {
         Value::Object(map) => {
@@ -105,3 +126,4 @@ pub fn print_sent_message_perspective(sent: SentPerspectiveMessage) {
         print_link(link);
     }
 }
+
