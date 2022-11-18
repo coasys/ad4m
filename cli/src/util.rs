@@ -153,11 +153,13 @@ pub fn readline_masked(prompt: &str) -> Result<String> {
     Ok(passwd)
 }
 
-pub async fn string_2_perspective_snapshot(cap_token: String, string: String) -> Result<Perspective> {
-    use rand::{thread_rng, Rng};
-    use rand::distributions::Alphanumeric;
+pub async fn string_2_perspective_snapshot(
+    cap_token: String,
+    string: String,
+) -> Result<Perspective> {
     use crate::perspectives;
-
+    use rand::distributions::Alphanumeric;
+    use rand::{thread_rng, Rng};
 
     let rand_name: String = thread_rng()
         .sample_iter(&Alphanumeric)
@@ -167,12 +169,13 @@ pub async fn string_2_perspective_snapshot(cap_token: String, string: String) ->
     let temp_perspective = perspectives::run_add(cap_token.clone(), rand_name).await?;
     println!("Created temporary perspective: {}", temp_perspective);
     perspectives::run_add_link(
-        cap_token.clone(), 
-        temp_perspective.clone(), 
-        "ad4m://self".to_string(), 
-        format!("literal://string:{}", urlencoding::encode(&string)), 
-        None
-    ).await?;
+        cap_token.clone(),
+        temp_perspective.clone(),
+        "ad4m://self".to_string(),
+        format!("literal://string:{}", urlencoding::encode(&string)),
+        None,
+    )
+    .await?;
     println!("Added status link to temporary perspective");
 
     let snapshot = perspectives::run_snapshot(cap_token.clone(), temp_perspective.clone()).await?;

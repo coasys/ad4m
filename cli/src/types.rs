@@ -156,7 +156,6 @@ impl From<LinkExpression> for SnapshotPerspectiveSnapshotLinks {
     }
 }
 
-
 impl From<LinkExpression> for LinkExpressionInput {
     fn from(link: LinkExpression) -> Self {
         Self {
@@ -219,17 +218,16 @@ impl From<AllPerspectivesNeighbourhoodMetaLinks> for LinkExpression {
     }
 }
 
-
 #[derive(Debug)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
 
 use crate::perspectives::snapshot::SnapshotPerspectiveSnapshot;
-use crate::runtime::set_status::PerspectiveInput;
+use crate::runtime::set_status::ExpressionProofInput;
 use crate::runtime::set_status::LinkExpressionInput;
 use crate::runtime::set_status::LinkInput;
-use crate::runtime::set_status::ExpressionProofInput;
+use crate::runtime::set_status::PerspectiveInput;
 
 impl From<SnapshotPerspectiveSnapshot> for Perspective {
     fn from(perspective: SnapshotPerspectiveSnapshot) -> Self {
@@ -365,7 +363,7 @@ impl From<MessageOutboxRuntimeMessageOutbox> for SentPerspectiveMessage {
                     signature: message.message.proof.signature,
                     valid: message.message.proof.valid,
                 },
-            }
+            },
         }
     }
 }

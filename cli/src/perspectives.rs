@@ -52,9 +52,10 @@ pub async fn run_add(cap_token: String, name: String) -> Result<String> {
 pub struct Remove;
 
 pub async fn run_remove(cap_token: String, uuid: String) -> Result<()> {
-    let response: remove::ResponseData = query(cap_token, Remove::build_query(remove::Variables { uuid }))
-        .await
-        .with_context(|| "Failed to run perspectives->remove query")?;
+    let response: remove::ResponseData =
+        query(cap_token, Remove::build_query(remove::Variables { uuid }))
+            .await
+            .with_context(|| "Failed to run perspectives->remove query")?;
     if response.perspective_remove {
         Ok(())
     } else {
@@ -141,7 +142,6 @@ pub async fn run_query_links(
 pub struct Infer;
 
 pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
-    
     let response: Response<infer::ResponseData> = query_raw(
         cap_token,
         Infer::build_query(infer::Variables {
@@ -173,11 +173,11 @@ pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) ->
                 }
             }
         }
-        Err(anyhow!("Failed to run perspective->infer query: {:?}", response.errors))
+        Err(anyhow!(
+            "Failed to run perspective->infer query: {:?}",
+            response.errors
+        ))
     }
-
-    
-
 }
 
 #[derive(GraphQLQuery)]
@@ -235,8 +235,14 @@ pub async fn run_watch(cap_token: String, id: String) -> Result<()> {
 pub struct Snapshot;
 
 pub async fn run_snapshot(cap_token: String, uuid: String) -> Result<Perspective> {
-    let response: snapshot::ResponseData = query(cap_token, Snapshot::build_query(snapshot::Variables { uuid }))
-        .await
-        .with_context(|| "Failed to run perspectives->snapshot query")?;
-    Ok(response.perspective_snapshot.ok_or_else(|| anyhow!("No perspective found"))?.into())
+    let response: snapshot::ResponseData = query(
+        cap_token,
+        Snapshot::build_query(snapshot::Variables { uuid }),
+    )
+    .await
+    .with_context(|| "Failed to run perspectives->snapshot query")?;
+    Ok(response
+        .perspective_snapshot
+        .ok_or_else(|| anyhow!("No perspective found"))?
+        .into())
 }

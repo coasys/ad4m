@@ -22,11 +22,14 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use formatting::{print_agent, print_link, print_message_perspective, print_sent_message_perspective, print_prolog_results};
+use formatting::{
+    print_agent, print_link, print_message_perspective, print_prolog_results,
+    print_sent_message_perspective,
+};
+use regex::Regex;
 use rustyline::Editor;
 use startup::executor_data_path;
 use util::{maybe_parse_datetime, readline_masked};
-use regex::Regex;
 
 use crate::util::string_2_perspective_snapshot;
 
@@ -41,10 +44,10 @@ use crate::util::string_2_perspective_snapshot;
 ///      .xNWNKKKKKXWWK:       'OWWX0000000000KNWWKo.          ,0WNd.     dWWd.    .oWMNXNWKc.            :0WWXNMMk.           :dxX0,      .,cllOXo:oooxkd,        
 ///     .xWWk,......lXMK;      ;XMK:. . .  ....':kNWK;        ,0MNo.      oWWd.    .oWMk':0MNo.          cXMXc'dWMx.          ,0KlxNd. .;dO00kd;cK0c:loxkOko:.     
 ///     cNM0'        oNMk.     ;XM0'             .lXM0'      ;0MNo.       oWWd.    .oWMx. ,0MNl         :KMX:  lWMx.         .dWx.'kkcd0Kxc'.   .kK:    .;dkO0d,   
-///    ,KMX:         .kWWo.    ;XM0'              .kMNc     ;KMNo.        oWWd.    .oWWd.  ;KMXl       :KMXc   lWMx.         .ONc  ;kX0o.       .xXc     'kk::kKx, 
+///    ,KMX:         .kWWo.    ;XM0'              .kMNc     ;KMNo.        oWWd.    .oWWd.  ;KMXl       :KMXc   lWMx.         .ONc  ;kX0o.       .xXc     'kk::kKx,
 ///   .kWWo.          ,KMX:    ;XM0'              .OMNc    ;KMNo.         oWWd.    .oWMd.   ;KMXc     ;KMXc    lWMx.         .ONc.cKKddx:.      .OK;     ,00, .c00c
 ///   lNMO.            lNMO'   ;XM0'             .dNMO.   :KMMKocccccccccl0WM0l;.  .oWMx.    :KMXc   ;0MNl     lWMx.         .dNxlKO,.,x0Ol'    :Kk.     cXk'.:d0x;
-///  ;KMK;             .xWWd.  ;XMXc..........';o0WWO,   ;0WWWWWWWWWWWWWWWMMMMW0,  .oWWd.     :XMXl,c0MNl.     lWMx.          ,0Xxc'    'lk0ko:;lx:.    ,OKookko,. 
+///  ;KMK;             .xWWd.  ;XMXc..........';o0WWO,   ;0WWWWWWWWWWWWWWWMMMMW0,  .oWWd.     :XMXl,c0MNl.     lWMx.          ,0Xxc'    'lk0ko:;lx:.    ,OKookko,.
 /// .kMNo               ,0MXc  .kWMWNNNNNXNNNNNWWXk:.    .,;;;;;;;;;;;;;,:OMWO:'   .oWMd.      :0WWWWWKc.      lWMx.           ;0Kc.      .':okOOOkkxdcck0l,:,.    
 /// .co:.                ,ll,   .;lllloolllllllc;.                        'll'      'll,        .;cll;.        'll,            ,dOKx,        ;xd:,,;cox0k;         
 ///                                                                                                                           .d0lck0kc,.  ,xKk;..':dOkc.          
@@ -139,14 +142,10 @@ enum LanguageFunctions {
 #[derive(Debug, Subcommand)]
 enum PerspectiveFunctions {
     /// Add a perspective with given name
-    Add {
-        name: String,
-    },
+    Add { name: String },
 
     /// Remove perspective with given uuid
-    Remove {
-        id: String,
-    },
+    Remove { id: String },
 
     /// Add link to perspective with given uuid
     AddLink {
@@ -160,25 +159,16 @@ enum PerspectiveFunctions {
     QueryLinks(QueryLinksArgs),
 
     /// Retrieve snapshot of perspective with given uuid
-    Snapshot {
-        id: String,
-    },
+    Snapshot { id: String },
 
     /// Run Prolog / SDNA query on perspective with given uuid
-    Infer {
-        id: String,
-        query: String,
-    },
+    Infer { id: String, query: String },
 
     /// Stay connected and print any changes (links added/removed) to the perspective
-    Watch {
-        id: String,
-    },
+    Watch { id: String },
 
     /// Interactive Perspective shell based on Prolog/SDNA runtime
-    Repl {
-        id: String,
-    },
+    Repl { id: String },
 }
 
 #[derive(Args, Debug)]
@@ -300,7 +290,9 @@ async fn main() -> Result<()> {
                 println!("\x1b[36mis_unlocked: \x1b[97m{}", status.is_unlocked);
                 println!(
                     "\x1b[36mDID Document:\n\x1b[97m{}",
-                    status.did_document.unwrap_or_else(|| "<undefined>".to_string())
+                    status
+                        .did_document
+                        .unwrap_or_else(|| "<undefined>".to_string())
                 );
             }
             AgentFunctions::Lock => {
@@ -449,13 +441,19 @@ async fn main() -> Result<()> {
                     println!("\x1b[36mName: \x1b[97m{}", perspective.name);
                     println!("\x1b[36mID: \x1b[97m{}", perspective.uuid);
                     if perspective.shared_url.is_some() {
-                        println!("\x1b[36mShared URL: \x1b[97m{}", perspective.shared_url.unwrap());
+                        println!(
+                            "\x1b[36mShared URL: \x1b[97m{}",
+                            perspective.shared_url.unwrap()
+                        );
                     } else {
                         println!("\x1b[36mShared URL: \x1b[90m<not shared as Neighbourhood>");
                     }
 
                     if let Some(nh) = perspective.neighbourhood {
-                        println!("\x1b[36mNeighbourhood Link-Language: \x1b[97m{}", nh.link_language);
+                        println!(
+                            "\x1b[36mNeighbourhood Link-Language: \x1b[97m{}",
+                            nh.link_language
+                        );
                         if nh.meta.links.is_empty() {
                             println!("\x1b[36mNeughbourhood meta: \x1b[90m<empty>");
                         } else {
@@ -467,7 +465,7 @@ async fn main() -> Result<()> {
                     }
                     println!("")
                 }
-                
+
                 return Ok(());
             }
 
@@ -527,7 +525,9 @@ async fn main() -> Result<()> {
                             break;
                         }
 
-                        let add_link = Regex::new(r"add-link\s+(?P<source>\S+)\s+(?P<predicate>\S+)\s+(?P<target>\S+)")?;
+                        let add_link = Regex::new(
+                            r"add-link\s+(?P<source>\S+)\s+(?P<predicate>\S+)\s+(?P<target>\S+)",
+                        )?;
                         let caps = add_link.captures(&line);
                         if let Some(caps) = caps {
                             let source = caps.name("source").unwrap().as_str().to_string();
@@ -539,12 +539,18 @@ async fn main() -> Result<()> {
                             } else {
                                 Some(predicate)
                             };
-                            
-                            perspectives::run_add_link(cap_token.clone(), id.clone(), source, target, predicate).await?;
+
+                            perspectives::run_add_link(
+                                cap_token.clone(),
+                                id.clone(),
+                                source,
+                                target,
+                                predicate,
+                            )
+                            .await?;
                             continue;
                         }
 
-                    
                         match perspectives::run_infer(cap_token.clone(), id.clone(), line).await {
                             Ok(results) => {
                                 print_prolog_results(results)?;
@@ -553,7 +559,7 @@ async fn main() -> Result<()> {
                                 println!("\x1b[91m{}", e.root_cause());
                             }
                         }
-                    } 
+                    }
                 }
             }
         }
@@ -572,101 +578,110 @@ async fn main() -> Result<()> {
                 println!("Neighbourhod joined!\n{:#?}", neighbourhood);
             }
         },
-        Domain::Runtime { command } => {
-            match command {
-                RuntimeFunctions::Info => {
-                    let info = runtime::run_info(cap_token).await?;
-                    println!("{:#?}", info);
-                },
-                RuntimeFunctions::Quit => {
-                    runtime::run_quit(cap_token).await?;
-                    println!("Executor shut down!");
-                },
-                RuntimeFunctions::AddTrustedAgents { agents } => {
-                    runtime::run_add_trusted_agents(cap_token, agents).await?;
-                    println!("Trusted agents added!");
-                },
-                RuntimeFunctions::DeleteTrustedAgents { agents } => {
-                    runtime::run_delete_trusted_agents(cap_token, agents).await?;
-                    println!("Trusted agents removed!");
-                },
-                RuntimeFunctions::TrustedAgents => {
-                    let agents = runtime::run_trusted_agents(cap_token).await?;
-                    for agent in agents {
-                        println!("{}", agent);
-                    }
-                },
-                RuntimeFunctions::LinkLanguageTemplates => {
-                    let templates = runtime::run_link_language_templates(cap_token).await?;
-                    for template in templates {
-                        println!("{}", template);
-                    }
-                },
-                RuntimeFunctions::AddLinkLanguageTemplates { addresses } => {
-                    runtime::run_add_link_language_templates(cap_token, addresses).await?;
-                    println!("Link language templates added!");
-                },
-                RuntimeFunctions::RemoveLinkLanguageTemplates { addresses } => {
-                    runtime::run_remove_link_language_templates(cap_token, addresses).await?;
-                    println!("Link language templates removed!");
-                },
-                RuntimeFunctions::Friends => {
-                    let friends = runtime::run_friends(cap_token).await?;
-                    for friend in friends {
-                        println!("{}", friend);
-                    }
-                },
-                RuntimeFunctions::AddFriends { agents } => {
-                    runtime::run_add_friends(cap_token, agents).await?;
-                    println!("Friends added!");
-                },
-                RuntimeFunctions::RemoveFriends { agents } => {
-                    runtime::run_remove_friends(cap_token, agents).await?;
-                    println!("Friends removed!");
-                },
-                RuntimeFunctions::HcAgentInfos => {
-                    let infos = runtime::run_hc_agent_infos(cap_token).await?;
-                    println!("{}", infos);
-                },
-                RuntimeFunctions::HcAddAgentInfos { infos } => {
-                    runtime::run_hc_add_agent_infos(cap_token, infos).await?;
-                    println!("Holochain agent infos added!");
-                },
-                RuntimeFunctions::VerifySignature { did, did_signing_key, data, signed_data } => {
-                    let result = runtime::run_verify_string_signed_by_did(cap_token, did, did_signing_key, data, signed_data).await?;
-                    println!("{:?}", result);
-                },
-                RuntimeFunctions::SetStatus { status } => {
-                    let perspective = string_2_perspective_snapshot(cap_token.clone(), status).await?;
-                    runtime::run_set_status(cap_token, perspective.into()).await?;
-                    println!("Status set!");
-                    
-                },
-                RuntimeFunctions::FriendStatus { agent } => {
-                    let status = runtime::run_friend_status(cap_token, agent).await?;
-                    println!("{:?}", status.runtime_friend_status);
-                },
-                RuntimeFunctions::FriendSendMessage { agent, message } => {
-                    let message = string_2_perspective_snapshot(cap_token.clone(), message).await?;
-                    runtime::run_friend_send_message(cap_token, agent, message.into()).await?;
-                    println!("Message sent!");
-                },
-                RuntimeFunctions::MessageInbox { filter } => {
-                    let messages = runtime::run_message_inbox(cap_token, filter).await?;
-                    for message in messages {
-                        print_message_perspective(message);
-                        println!("");
-                    }
-                },
-                RuntimeFunctions::MessageOutbox { filter } => {
-                    let messages = runtime::run_message_outbox(cap_token, filter).await?;
-                    for message in messages {
-                        print_sent_message_perspective(message);
-                        println!("");
-                    }
+        Domain::Runtime { command } => match command {
+            RuntimeFunctions::Info => {
+                let info = runtime::run_info(cap_token).await?;
+                println!("{:#?}", info);
+            }
+            RuntimeFunctions::Quit => {
+                runtime::run_quit(cap_token).await?;
+                println!("Executor shut down!");
+            }
+            RuntimeFunctions::AddTrustedAgents { agents } => {
+                runtime::run_add_trusted_agents(cap_token, agents).await?;
+                println!("Trusted agents added!");
+            }
+            RuntimeFunctions::DeleteTrustedAgents { agents } => {
+                runtime::run_delete_trusted_agents(cap_token, agents).await?;
+                println!("Trusted agents removed!");
+            }
+            RuntimeFunctions::TrustedAgents => {
+                let agents = runtime::run_trusted_agents(cap_token).await?;
+                for agent in agents {
+                    println!("{}", agent);
                 }
             }
-        }
+            RuntimeFunctions::LinkLanguageTemplates => {
+                let templates = runtime::run_link_language_templates(cap_token).await?;
+                for template in templates {
+                    println!("{}", template);
+                }
+            }
+            RuntimeFunctions::AddLinkLanguageTemplates { addresses } => {
+                runtime::run_add_link_language_templates(cap_token, addresses).await?;
+                println!("Link language templates added!");
+            }
+            RuntimeFunctions::RemoveLinkLanguageTemplates { addresses } => {
+                runtime::run_remove_link_language_templates(cap_token, addresses).await?;
+                println!("Link language templates removed!");
+            }
+            RuntimeFunctions::Friends => {
+                let friends = runtime::run_friends(cap_token).await?;
+                for friend in friends {
+                    println!("{}", friend);
+                }
+            }
+            RuntimeFunctions::AddFriends { agents } => {
+                runtime::run_add_friends(cap_token, agents).await?;
+                println!("Friends added!");
+            }
+            RuntimeFunctions::RemoveFriends { agents } => {
+                runtime::run_remove_friends(cap_token, agents).await?;
+                println!("Friends removed!");
+            }
+            RuntimeFunctions::HcAgentInfos => {
+                let infos = runtime::run_hc_agent_infos(cap_token).await?;
+                println!("{}", infos);
+            }
+            RuntimeFunctions::HcAddAgentInfos { infos } => {
+                runtime::run_hc_add_agent_infos(cap_token, infos).await?;
+                println!("Holochain agent infos added!");
+            }
+            RuntimeFunctions::VerifySignature {
+                did,
+                did_signing_key,
+                data,
+                signed_data,
+            } => {
+                let result = runtime::run_verify_string_signed_by_did(
+                    cap_token,
+                    did,
+                    did_signing_key,
+                    data,
+                    signed_data,
+                )
+                .await?;
+                println!("{:?}", result);
+            }
+            RuntimeFunctions::SetStatus { status } => {
+                let perspective = string_2_perspective_snapshot(cap_token.clone(), status).await?;
+                runtime::run_set_status(cap_token, perspective.into()).await?;
+                println!("Status set!");
+            }
+            RuntimeFunctions::FriendStatus { agent } => {
+                let status = runtime::run_friend_status(cap_token, agent).await?;
+                println!("{:?}", status.runtime_friend_status);
+            }
+            RuntimeFunctions::FriendSendMessage { agent, message } => {
+                let message = string_2_perspective_snapshot(cap_token.clone(), message).await?;
+                runtime::run_friend_send_message(cap_token, agent, message.into()).await?;
+                println!("Message sent!");
+            }
+            RuntimeFunctions::MessageInbox { filter } => {
+                let messages = runtime::run_message_inbox(cap_token, filter).await?;
+                for message in messages {
+                    print_message_perspective(message);
+                    println!("");
+                }
+            }
+            RuntimeFunctions::MessageOutbox { filter } => {
+                let messages = runtime::run_message_outbox(cap_token, filter).await?;
+                for message in messages {
+                    print_sent_message_perspective(message);
+                    println!("");
+                }
+            }
+        },
         Domain::Log => {
             let file = executor_data_path().join("ad4min.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {

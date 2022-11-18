@@ -52,7 +52,10 @@ pub async fn get_cap_token() -> Result<String> {
     println!("No cap token found in file or token not valid. Requesting one...");
 
     let request_id = agent::run_request_capability().await?;
-    println!("Successfully started a new Capability Token request with id: {:#?}", request_id);
+    println!(
+        "Successfully started a new Capability Token request with id: {:#?}",
+        request_id
+    );
     println!("Please open the AD4M UI and approve the request. And then...");
 
     let mut rl = Editor::<()>::new()?;

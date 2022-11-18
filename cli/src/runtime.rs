@@ -1,4 +1,7 @@
-use crate::{util::query, types::{PerspectiveExpression, SentPerspectiveMessage}};
+use crate::{
+    types::{PerspectiveExpression, SentPerspectiveMessage},
+    util::query,
+};
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
 
@@ -30,7 +33,6 @@ pub async fn run_quit(cap_token: String) -> Result<quit::ResponseData> {
         .await
         .with_context(|| "Failed to run runtime->quit query")
 }
-
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -101,7 +103,7 @@ pub struct LinkLanguageTemplates;
 pub async fn run_link_language_templates(cap_token: String) -> Result<Vec<String>> {
     let response_data: link_language_templates::ResponseData = query(
         cap_token,
-        LinkLanguageTemplates::build_query(link_language_templates::Variables { }),
+        LinkLanguageTemplates::build_query(link_language_templates::Variables {}),
     )
     .await
     .with_context(|| "Failed to run runtime->link-language-templates query")?;
@@ -143,7 +145,9 @@ pub async fn run_remove_link_language_templates(
 ) -> Result<remove_link_language_templates::ResponseData> {
     query(
         cap_token,
-        RemoveLinkLanguageTemplates::build_query(remove_link_language_templates::Variables { addresses }),
+        RemoveLinkLanguageTemplates::build_query(remove_link_language_templates::Variables {
+            addresses,
+        }),
     )
     .await
     .with_context(|| "Failed to run runtime->remove-link-language-templates query")
@@ -158,12 +162,10 @@ pub async fn run_remove_link_language_templates(
 pub struct Friends;
 
 pub async fn run_friends(cap_token: String) -> Result<Vec<String>> {
-    let response_data: friends::ResponseData = query(
-        cap_token,
-        Friends::build_query(friends::Variables {}),
-    )
-    .await
-    .with_context(|| "Failed to run runtime->friends query")?;
+    let response_data: friends::ResponseData =
+        query(cap_token, Friends::build_query(friends::Variables {}))
+            .await
+            .with_context(|| "Failed to run runtime->friends query")?;
     Ok(response_data.runtime_friends)
 }
 
@@ -266,7 +268,7 @@ pub async fn run_verify_string_signed_by_did(
             did,
             did_signing_key_id,
             data,
-            signed_data
+            signed_data,
         }),
     )
     .await
@@ -353,7 +355,11 @@ pub async fn run_message_inbox(
     .await
     .with_context(|| "Failed to run runtime->message-inbox query")?;
 
-    Ok(response.runtime_message_inbox.into_iter().map(|d| d.into()).collect())
+    Ok(response
+        .runtime_message_inbox
+        .into_iter()
+        .map(|d| d.into())
+        .collect())
 }
 
 #[derive(GraphQLQuery)]
@@ -375,5 +381,9 @@ pub async fn run_message_outbox(
     .await
     .with_context(|| "Failed to run runtime->message-outbox query")?;
 
-    Ok(response.runtime_message_outbox.into_iter().map(|d| d.into()).collect())
+    Ok(response
+        .runtime_message_outbox
+        .into_iter()
+        .map(|d| d.into())
+        .collect())
 }

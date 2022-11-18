@@ -126,4 +126,3 @@ pub fn print_sent_message_perspective(sent: SentPerspectiveMessage) {
         print_link(link);
     }
 }
-
