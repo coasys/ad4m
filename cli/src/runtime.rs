@@ -1,4 +1,4 @@
-use crate::{util::query, types::{Perspective, PerspectiveExpression, SentPerspectiveMessage}};
+use crate::{util::query, types::{PerspectiveExpression, SentPerspectiveMessage}};
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
 

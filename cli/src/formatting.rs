@@ -90,34 +90,6 @@ pub fn print_agent(agent: Agent) {
     }
 }
 
-pub fn print_logo() {
-    println!(
-        r#"                                                                                
-                                                                                                                               .xXKkd:'                         
-                                                                                                                              .oNOccx00x;.                      
-                                                                                                                              ;KK;  .ck0Oxdolc;..               
-                                                                                                                              lWk:oOK0OxdoxOOO0KOd;.            
-                                                                                                                              dWkdkl,.    .o0x;'cxK0l.          
-       .,ldxxxxxxoc.         .cdxxxxxxxxxxxdoc,.             'oxo'     ;dx;     .;dxxxo:.               .;odxxx:             .dWk'         .dNx.  'o0O:         
-      .xNWNKKKKKXWWK:       'OWWX0000000000KNWWKo.          ,0WNd.     dWWd.    .oWMNXNWKc.            :0WWXNMMk.           :dxX0,      .,cllOXo:oooxkd,        
-     .xWWk,......lXMK;      ;XMK:. . .  ....':kNWK;        ,0MNo.      oWWd.    .oWMk':0MNo.          cXMXc'dWMx.          ,0KlxNd. .;dO00kd;cK0c:loxkOko:.     
-     cNM0'        oNMk.     ;XM0'             .lXM0'      ;0MNo.       oWWd.    .oWMx. ,0MNl         :KMX:  lWMx.         .dWx.'kkcd0Kxc'.   .kK:    .;dkO0d,   
-    ,KMX:         .kWWo.    ;XM0'              .kMNc     ;KMNo.        oWWd.    .oWWd.  ;KMXl       :KMXc   lWMx.         .ONc  ;kX0o.       .xXc     'kk::kKx, 
-   .kWWo.          ,KMX:    ;XM0'              .OMNc    ;KMNo.         oWWd.    .oWMd.   ;KMXc     ;KMXc    lWMx.         .ONc.cKKddx:.      .OK;     ,00, .c00c
-   lNMO.            lNMO'   ;XM0'             .dNMO.   :KMMKocccccccccl0WM0l;.  .oWMx.    :KMXc   ;0MNl     lWMx.         .dNxlKO,.,x0Ol'    :Kk.     cXk'.:d0x;
-  ;KMK;             .xWWd.  ;XMXc..........';o0WWO,   ;0WWWWWWWWWWWWWWWMMMMW0,  .oWWd.     :XMXl,c0MNl.     lWMx.          ,0Xxc'    'lk0ko:;lx:.    ,OKookko,. 
- .kMNo               ,0MXc  .kWMWNNNNNXNNNNNWWXk:.    .,;;;;;;;;;;;;;,:OMWO:'   .oWMd.      :0WWWWWKc.      lWMx.           ;0Kc.      .':okOOOkkxdcck0l,:,.    
- .co:.                ,ll,   .;lllloolllllllc;.                        'll'      'll,        .;cll;.        'll,            ,dOKx,        ;xd:,,;cox0k;         
-                                                                                                                           .d0lck0kc,.  ,xKk;..':dOkc.          
-                                                                                                                           .dNo..,lddllk0Oxddxkkxl,.            
-                                                                                                                            lXk;';cdO0ko,':lc:,.                
-                                                                                                                            'x0Okkdl:'.                         
-                                                                                                                             .,'..                              
-                                                                     
-"#
-    );
-}
-
 pub fn print_message_perspective(perspective: PerspectiveExpression) {
     println!("\x1b[36mFrom: {}", perspective.author);
     println!("\x1b[36mTimestamp: {}", perspective.timestamp);

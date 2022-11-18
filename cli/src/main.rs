@@ -21,7 +21,7 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use formatting::{print_agent, print_link, print_logo, print_prolog_result, print_message_perspective, print_sent_message_perspective};
+use formatting::{print_agent, print_link, print_prolog_result, print_message_perspective, print_sent_message_perspective};
 use rustyline::Editor;
 use serde_json::Value;
 use startup::executor_data_path;
@@ -29,11 +29,32 @@ use util::{maybe_parse_datetime, readline_masked};
 
 use crate::util::string_2_perspective_snapshot;
 
+/// .
+///                                                                                                                               .xXKkd:'                         
+///                                                                                                                              .oNOccx00x;.                      
+///                                                                                                                              ;KK;  .ck0Oxdolc;..               
+///                                                                                                                              lWk:oOK0OxdoxOOO0KOd;.            
+///                                                                                                                              dWkdkl,.    .o0x;'cxK0l.          
+///       .,ldxxxxxxoc.         .cdxxxxxxxxxxxdoc,.             'oxo'     ;dx;     .;dxxxo:.               .;odxxx:             .dWk'         .dNx.  'o0O:         
+///      .xNWNKKKKKXWWK:       'OWWX0000000000KNWWKo.          ,0WNd.     dWWd.    .oWMNXNWKc.            :0WWXNMMk.           :dxX0,      .,cllOXo:oooxkd,        
+///     .xWWk,......lXMK;      ;XMK:. . .  ....':kNWK;        ,0MNo.      oWWd.    .oWMk':0MNo.          cXMXc'dWMx.          ,0KlxNd. .;dO00kd;cK0c:loxkOko:.     
+///     cNM0'        oNMk.     ;XM0'             .lXM0'      ;0MNo.       oWWd.    .oWMx. ,0MNl         :KMX:  lWMx.         .dWx.'kkcd0Kxc'.   .kK:    .;dkO0d,   
+///    ,KMX:         .kWWo.    ;XM0'              .kMNc     ;KMNo.        oWWd.    .oWWd.  ;KMXl       :KMXc   lWMx.         .ONc  ;kX0o.       .xXc     'kk::kKx, 
+///   .kWWo.          ,KMX:    ;XM0'              .OMNc    ;KMNo.         oWWd.    .oWMd.   ;KMXc     ;KMXc    lWMx.         .ONc.cKKddx:.      .OK;     ,00, .c00c
+///   lNMO.            lNMO'   ;XM0'             .dNMO.   :KMMKocccccccccl0WM0l;.  .oWMx.    :KMXc   ;0MNl     lWMx.         .dNxlKO,.,x0Ol'    :Kk.     cXk'.:d0x;
+///  ;KMK;             .xWWd.  ;XMXc..........';o0WWO,   ;0WWWWWWWWWWWWWWWMMMMW0,  .oWWd.     :XMXl,c0MNl.     lWMx.          ,0Xxc'    'lk0ko:;lx:.    ,OKookko,. 
+/// .kMNo               ,0MXc  .kWMWNNNNNXNNNNNWWXk:.    .,;;;;;;;;;;;;;,:OMWO:'   .oWMd.      :0WWWWWKc.      lWMx.           ;0Kc.      .':okOOOkkxdcck0l,:,.    
+/// .co:.                ,ll,   .;lllloolllllllc;.                        'll'      'll,        .;cll;.        'll,            ,dOKx,        ;xd:,,;cox0k;         
+///                                                                                                                           .d0lck0kc,.  ,xKk;..':dOkc.          
+///                                                                                                                           .dNo..,lddllk0Oxddxkkxl,.            
+///                                                                                                                            lXk;';cdO0ko,':lc:,.                
+///                                                                                                                            'x0Okkdl:'.                         
+///                                                                                                                             .,'..                               
 /// AD4M command line interface.
 /// Provides all means of interacting with the AD4M executor / agent.
 /// See help of commands for more information.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, verbatim_doc_comment)]
 struct ClapApp {
     #[command(subcommand)]
     domain: Domain,
@@ -245,7 +266,6 @@ enum RuntimeFunctions {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    print_logo();
     let args = ClapApp::parse();
     let cap_token = match &args.domain {
         Domain::Log => "".to_string(),
