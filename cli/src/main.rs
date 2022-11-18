@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
                     } else {
                         println!("\x1b[36mSettings: \x1b[90m<undefined>");
                     }
-                    println!("")
+                    println!()
                 }
                 return Ok(());
             }
@@ -463,7 +463,7 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    println!("")
+                    println!()
                 }
 
                 return Ok(());
@@ -671,14 +671,14 @@ async fn main() -> Result<()> {
                 let messages = runtime::run_message_inbox(cap_token, filter).await?;
                 for message in messages {
                     print_message_perspective(message);
-                    println!("");
+                    println!();
                 }
             }
             RuntimeFunctions::MessageOutbox { filter } => {
                 let messages = runtime::run_message_outbox(cap_token, filter).await?;
                 for message in messages {
                     print_sent_message_perspective(message);
-                    println!("");
+                    println!();
                 }
             }
         },

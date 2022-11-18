@@ -235,7 +235,7 @@ impl From<SnapshotPerspectiveSnapshot> for Perspective {
             links: perspective
                 .links
                 .into_iter()
-                .map(|link| LinkExpression::from(link))
+                .map(LinkExpression::from)
                 .collect(),
         }
     }
@@ -247,7 +247,7 @@ impl From<Perspective> for PerspectiveInput {
             links: perspective
                 .links
                 .into_iter()
-                .map(|link| LinkExpressionInput::from(link))
+                .map(LinkExpressionInput::from)
                 .collect(),
         }
     }
@@ -261,7 +261,7 @@ impl From<Perspective> for friend_send_message::PerspectiveInput {
             links: perspective
                 .links
                 .into_iter()
-                .map(|link| friend_send_message::LinkExpressionInput::from(link))
+                .map(friend_send_message::LinkExpressionInput::from)
                 .collect(),
         }
     }
@@ -279,7 +279,7 @@ impl From<message_inbox::MessageInboxRuntimeMessageInbox> for PerspectiveExpress
                     .data
                     .links
                     .into_iter()
-                    .map(|link| LinkExpression::from(link))
+                    .map(LinkExpression::from)
                     .collect(),
             },
             proof: ExpressionProof {
@@ -354,7 +354,7 @@ impl From<MessageOutboxRuntimeMessageOutbox> for SentPerspectiveMessage {
                         .data
                         .links
                         .into_iter()
-                        .map(|link| LinkExpression::from(link))
+                        .map(LinkExpression::from)
                         .collect(),
                 },
                 proof: ExpressionProof {
