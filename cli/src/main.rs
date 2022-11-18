@@ -321,8 +321,22 @@ async fn main() -> Result<()> {
         },
         Domain::Languages { command } => {
             if command.is_none() {
-                let all_perspectives = languages::run_by_filter(cap_token, "".to_string()).await?;
-                println!("{:#?}", all_perspectives);
+                let all_languages = languages::run_by_filter(cap_token, "".to_string()).await?;
+                for language in all_languages {
+                    println!("\x1b[36mName: \x1b[97m{}", language.name);
+                    println!("\x1b[36mAddress: \x1b[97m{}", language.address);
+
+                    if let Some(settings) = language.settings {
+                        if settings != "{}" {
+                            println!("\x1b[36mSettings: \x1b[97m{}", settings);
+                        } else {
+                            println!("\x1b[36mSettings: \x1b[90m<empty>");
+                        }
+                    } else {
+                        println!("\x1b[36mSettings: \x1b[90m<undefined>");
+                    }
+                    println!("")
+                }
                 return Ok(());
             }
 
