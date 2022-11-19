@@ -15,7 +15,7 @@ import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
 export const fakeCapSecret = (): CapSecret => Buffer.from(Array(64).fill('aa').join(''), 'hex')
 
 export const bootstrapUrl = "https://bootstrap.holo.host"
-export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"
+export const kitsuneProxy = "kitsune-proxy://CIW6PxKxsPPlcuvUCbMcKwUpaMSmB7kLD8xyyj4mqcw/kitsune-quic/h/proxy.holochain.org/p/5778/--"
 
 export interface HolochainConfiguration {
     conductorPath?: string, 
@@ -38,7 +38,6 @@ export default class HolochainService {
     #dataPath: string
     #ready?: Promise<void>
     #hcProcess?: ChildProcess
-    #lairProcess?: ChildProcess
     #resourcePath: string
     #conductorPath?: string
     #didResolveError: boolean
@@ -173,7 +172,7 @@ export default class HolochainService {
             return
         }
         let hcProcesses = await runHolochain(this.#resourcePath, this.#conductorConfigPath, this.#conductorPath, config);
-        [this.#hcProcess, this.#lairProcess] = hcProcesses;
+        this.#hcProcess = hcProcesses;
         console.log("HolochainService: Holochain running... Attempting connection\n\n\n");
 
         await this.connect();
@@ -184,12 +183,12 @@ export default class HolochainService {
 
     async stop() {
         await this.#ready
-        console.log("HolochainService.stop(): Stopping holochain and lair processes");
+        console.log("HolochainService.stop(): Stopping holochain process");
         if (this.#didResolveError) {
             console.error("HolochainService.stop: Warning attempting to close holochain processes when they did not start error free...")
         }
-        if (this.#hcProcess && this.#lairProcess) {
-            stopProcesses(this.#hcProcess, this.#lairProcess)
+        if (this.#hcProcess) {
+            stopProcesses(this.#hcProcess)
         }
     }
 
