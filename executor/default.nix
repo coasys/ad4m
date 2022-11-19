@@ -1,18 +1,14 @@
-# Update windows holochain version in github CI as its not using nix
-
 let
-  holonixPath = (import ./nix/sources.nix).holonix;
+  holonixRev = "5f9565c7de45e8180492a7975269ba9eede0d3f5";
+
+  holonixPath = builtins.fetchTarball "https://github.com/holochain/holonix/archive/${holonixRev}.tar.gz";
   holonix = import (holonixPath) {
-    holochainVersionId = "custom";
-    holochainVersion = import ./holochain_version.nix;
+    holochainVersionId = "v0_0_173";
   };
   nixpkgs = holonix.pkgs;
-in
-nixpkgs.mkShell {
+in nixpkgs.mkShell {
   inputsFrom = [ holonix.main ];
-  packages = [
-  ];
-  buildInputs = with nixpkgs; [
+  packages = with nixpkgs; [
     binaryen
     nodejs-16_x
     swiProlog
