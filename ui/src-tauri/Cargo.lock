@@ -8,7 +8,7 @@ version = "0.0.10"
 dependencies = [
  "directories",
  "libc",
- "localtunnel",
+ "localtunnel-client",
  "log",
  "log4rs",
  "nix",
@@ -16,6 +16,7 @@ dependencies = [
  "opener",
  "portpicker",
  "remove_dir_all 0.7.0",
+ "reqwest",
  "serde",
  "serde_json",
  "sysinfo",
@@ -1661,12 +1662,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
 
 [[package]]
-name = "localtunnel"
-version = "0.0.6"
+name = "localtunnel-client"
+version = "0.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffce7f901437d518bb46497f26c65cd86696e045668867ca0020f79197d3f529"
+checksum = "b7f2964098795466d69923eb0933fb3c4a36321ce176e27a61353077f7ebf8eb"
 dependencies = [
  "anyhow",
+ "log",
  "reqwest",
  "serde",
  "tokio",
