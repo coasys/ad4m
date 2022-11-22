@@ -33,6 +33,7 @@ tokio = { version = "1.19.2", features = ["full"] }
 tauri-plugin-positioner = { version = "1.0", features = ["system-tray"] }
 remove_dir_all = "0.7.0"
 reqwest = { version = "0.11", features = ["json"] }
+graphql_client = "0.11.0"
 
 [features]
 # by default Tauri runs in production mode

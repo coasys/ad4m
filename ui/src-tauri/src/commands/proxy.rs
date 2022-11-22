@@ -1,12 +1,22 @@
 use localtunnel_client::open_tunnel;
 use tauri::State;
 use tokio::sync::broadcast;
+use graphql_client::{GraphQLQuery, Response};
 
 use crate::{AppState, ProxyState, ProxyService};
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "resources/schema.json",
+    query_path = "resources/sign_message.gql",
+    response_derives = "Debug"
+)]
+struct AgentSignMessage;
+
 #[tauri::command]
 pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, proxy: State<'_, ProxyState>) -> Result<String, String> {
-    let local_port = app_state.graphql_port;
+    let graphql_port = app_state.graphql_port;
+    let req_credential = &app_state.req_credential;
     let (notify_shutdown, _) = broadcast::channel(1);
     let subdomain = subdomain.replace(":", "-").to_lowercase();
 
@@ -17,10 +27,22 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
         .await
         .map_err(|err| format!("Error happend when retrieving the content: {:?}", err))?;
 
-    // let {public_key, signature} = ad4m.agent.sign_message(rand)
+    let client = reqwest::Client::new();
+    let query = AgentSignMessage::build_query(agent_sign_message::Variables {message: rand});
+    let response: Response<agent_sign_message::ResponseData> = client.post(format!("http://localhost:{}/graphql", graphql_port))
+        .header("Authorization", req_credential)
+        .json(&query)
+        .send()
+        .await
+        .map_err(|err| format!("Error happend when agent sign message: {:?}", err))?
+        .json()
+        .await
+        .map_err(|err| format!("Error happend when the signing content: {:?}", err))?;
 
-    let public_key = "demo-key";
-    let signature = "demo-signature";
+    let resp_data = response.data.ok_or("No data provided".to_string())?;
+    let signature = resp_data.agent_sign_message.signature;
+    let public_key = resp_data.agent_sign_message.public_key;
+
     let credential = reqwest::get(
             format!(
                 "https://proxy-worker.ad4m.dev/login/verify?did={}&signature={}&publicKey={}",
@@ -36,7 +58,7 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
         Some("http://proxy.ad4m.dev"),
         Some(&subdomain),
         None,
-        local_port,
+        graphql_port,
         notify_shutdown.clone(),
         5,
         Some(credential),
