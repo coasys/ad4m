@@ -1,4 +1,4 @@
-use crate::{agent, perspectives};
+use ad4m_client::{agent, perspectives};
 use anyhow::{Context, Result};
 use rustyline::Editor;
 use std::path::PathBuf;
