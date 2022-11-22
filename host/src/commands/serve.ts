@@ -84,7 +84,7 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
     reqCredential
   } = argv;
 
-  const globalConfig = getConfig();
+  const globalConfig = getConfig(dataPath);
 
   if(!globalConfig[dataPath || '']) {
     throw Error('No config found, please run ad4m-host init with the dataPath & networkBootstrapSeed params')
