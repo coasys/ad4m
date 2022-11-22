@@ -15,6 +15,8 @@ pub enum AgentFunctions {
     Unlock,
     /// Lookup agent by DID
     ByDID { did: String },
+    /// Initialize a new agent
+    Generate,
 }
 
 pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
@@ -59,6 +61,19 @@ pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
                 print_agent(agent.into());
             } else {
                 println!("Agent not found");
+            }
+        }
+        AgentFunctions::Generate => {
+            let passphrase1 = readline_masked("Passphrase: ")?;
+            let passphrase2 = readline_masked("Repeat passphrase: ")?;
+            if passphrase1 != passphrase2 {
+                bail!("Passphrases do not match");
+            }
+            let result = agent::generate(cap_token, passphrase1).await?;
+            if let Some(error) = result.error {
+                bail!(error);
+            } else {
+                println!("Agent locked");
             }
         }
     };

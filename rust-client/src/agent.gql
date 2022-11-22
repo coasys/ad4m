@@ -69,3 +69,15 @@ query ByDID($did: String!) {
         }
     }
 }
+
+mutation Generate(
+    $passphrase: String!
+) {
+    agentGenerate(passphrase: $passphrase) {
+        isInitialized
+        isUnlocked
+        did
+        didDocument
+        error
+    }
+}

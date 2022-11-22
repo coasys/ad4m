@@ -143,3 +143,20 @@ pub async fn by_did(cap_token: String, did: String) -> Result<Option<by_did::ByD
             .with_context(|| "Failed to run agent->byDID query")?;
     Ok(response_data.agent_by_did)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct Generate;
+
+pub async fn generate(cap_token: String, passphrase: String) -> Result<generate::GenerateAgentGenerate> {
+    let response_data: generate::ResponseData =
+        query(cap_token, Generate::build_query(generate::Variables { passphrase }))
+            .await
+            .with_context(|| "Failed to run agent->generate")?;
+    Ok(response_data.agent_generate)
+}
+ 
