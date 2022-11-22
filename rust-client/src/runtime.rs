@@ -13,7 +13,7 @@ use graphql_client::GraphQLQuery;
 )]
 pub struct Info;
 
-pub async fn run_info(cap_token: String) -> Result<info::InfoRuntimeInfo> {
+pub async fn info(cap_token: String) -> Result<info::InfoRuntimeInfo> {
     let response_data: info::ResponseData = query(cap_token, Info::build_query(info::Variables {}))
         .await
         .with_context(|| "Failed to run runtime->info query")?;
@@ -28,7 +28,7 @@ pub async fn run_info(cap_token: String) -> Result<info::InfoRuntimeInfo> {
 )]
 pub struct Quit;
 
-pub async fn run_quit(cap_token: String) -> Result<quit::ResponseData> {
+pub async fn quit(cap_token: String) -> Result<quit::ResponseData> {
     query(cap_token, Quit::build_query(quit::Variables {}))
         .await
         .with_context(|| "Failed to run runtime->quit query")
@@ -42,7 +42,7 @@ pub async fn run_quit(cap_token: String) -> Result<quit::ResponseData> {
 )]
 pub struct AddTrustedAgents;
 
-pub async fn run_add_trusted_agents(
+pub async fn add_trusted_agents(
     cap_token: String,
     agents: Vec<String>,
 ) -> Result<add_trusted_agents::ResponseData> {
@@ -62,7 +62,7 @@ pub async fn run_add_trusted_agents(
 )]
 pub struct DeleteTrustedAgents;
 
-pub async fn run_delete_trusted_agents(
+pub async fn delete_trusted_agents(
     cap_token: String,
     agents: Vec<String>,
 ) -> Result<delete_trusted_agents::ResponseData> {
@@ -82,7 +82,7 @@ pub async fn run_delete_trusted_agents(
 )]
 pub struct TrustedAgents;
 
-pub async fn run_trusted_agents(cap_token: String) -> Result<Vec<String>> {
+pub async fn trusted_agents(cap_token: String) -> Result<Vec<String>> {
     let response_data: trusted_agents::ResponseData = query(
         cap_token,
         TrustedAgents::build_query(trusted_agents::Variables {}),
@@ -100,7 +100,7 @@ pub async fn run_trusted_agents(cap_token: String) -> Result<Vec<String>> {
 )]
 pub struct LinkLanguageTemplates;
 
-pub async fn run_link_language_templates(cap_token: String) -> Result<Vec<String>> {
+pub async fn link_language_templates(cap_token: String) -> Result<Vec<String>> {
     let response_data: link_language_templates::ResponseData = query(
         cap_token,
         LinkLanguageTemplates::build_query(link_language_templates::Variables {}),
@@ -119,7 +119,7 @@ pub async fn run_link_language_templates(cap_token: String) -> Result<Vec<String
 )]
 pub struct AddLinkLanguageTemplates;
 
-pub async fn run_add_link_language_templates(
+pub async fn add_link_language_templates(
     cap_token: String,
     addresses: Vec<String>,
 ) -> Result<add_link_language_templates::ResponseData> {
@@ -139,7 +139,7 @@ pub async fn run_add_link_language_templates(
 )]
 pub struct RemoveLinkLanguageTemplates;
 
-pub async fn run_remove_link_language_templates(
+pub async fn remove_link_language_templates(
     cap_token: String,
     addresses: Vec<String>,
 ) -> Result<remove_link_language_templates::ResponseData> {
@@ -161,7 +161,7 @@ pub async fn run_remove_link_language_templates(
 )]
 pub struct Friends;
 
-pub async fn run_friends(cap_token: String) -> Result<Vec<String>> {
+pub async fn friends(cap_token: String) -> Result<Vec<String>> {
     let response_data: friends::ResponseData =
         query(cap_token, Friends::build_query(friends::Variables {}))
             .await
@@ -177,7 +177,7 @@ pub async fn run_friends(cap_token: String) -> Result<Vec<String>> {
 )]
 pub struct AddFriends;
 
-pub async fn run_add_friends(
+pub async fn add_friends(
     cap_token: String,
     dids: Vec<String>,
 ) -> Result<add_friends::ResponseData> {
@@ -197,7 +197,7 @@ pub async fn run_add_friends(
 )]
 pub struct RemoveFriends;
 
-pub async fn run_remove_friends(
+pub async fn remove_friends(
     cap_token: String,
     dids: Vec<String>,
 ) -> Result<remove_friends::ResponseData> {
@@ -217,7 +217,7 @@ pub async fn run_remove_friends(
 )]
 pub struct HcAgentInfos;
 
-pub async fn run_hc_agent_infos(cap_token: String) -> Result<String> {
+pub async fn hc_agent_infos(cap_token: String) -> Result<String> {
     let response_data: hc_agent_infos::ResponseData = query(
         cap_token,
         HcAgentInfos::build_query(hc_agent_infos::Variables {}),
@@ -235,7 +235,7 @@ pub async fn run_hc_agent_infos(cap_token: String) -> Result<String> {
 )]
 pub struct HcAddAgentInfos;
 
-pub async fn run_hc_add_agent_infos(
+pub async fn hc_add_agent_infos(
     cap_token: String,
     agent_infos: String,
 ) -> Result<hc_add_agent_infos::ResponseData> {
@@ -255,7 +255,7 @@ pub async fn run_hc_add_agent_infos(
 )]
 pub struct VerifyStringSignedByDid;
 
-pub async fn run_verify_string_signed_by_did(
+pub async fn verify_string_signed_by_did(
     cap_token: String,
     did: String,
     did_signing_key_id: String,
@@ -283,7 +283,7 @@ pub async fn run_verify_string_signed_by_did(
 )]
 pub struct SetStatus;
 
-pub async fn run_set_status(
+pub async fn set_status(
     cap_token: String,
     status: set_status::PerspectiveInput,
 ) -> Result<set_status::ResponseData> {
@@ -303,7 +303,7 @@ pub async fn run_set_status(
 )]
 pub struct FriendStatus;
 
-pub async fn run_friend_status(
+pub async fn friend_status(
     cap_token: String,
     did: String,
 ) -> Result<friend_status::ResponseData> {
@@ -323,7 +323,7 @@ pub async fn run_friend_status(
 )]
 pub struct FriendSendMessage;
 
-pub async fn run_friend_send_message(
+pub async fn friend_send_message(
     cap_token: String,
     did: String,
     message: friend_send_message::PerspectiveInput,
@@ -344,7 +344,7 @@ pub async fn run_friend_send_message(
 )]
 pub struct MessageInbox;
 
-pub async fn run_message_inbox(
+pub async fn message_inbox(
     cap_token: String,
     filter: Option<String>,
 ) -> Result<Vec<PerspectiveExpression>> {
@@ -370,7 +370,7 @@ pub async fn run_message_inbox(
 )]
 pub struct MessageOutbox;
 
-pub async fn run_message_outbox(
+pub async fn message_outbox(
     cap_token: String,
     filter: Option<String>,
 ) -> Result<Vec<SentPerspectiveMessage>> {

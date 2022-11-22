@@ -10,7 +10,7 @@ use graphql_client::GraphQLQuery;
 )]
 pub struct PublishFromPerspective;
 
-pub async fn run_publish(
+pub async fn publish(
     cap_token: String,
     link_language: String,
     meta: Option<publish_from_perspective::PerspectiveInput>,
@@ -38,7 +38,7 @@ pub async fn run_publish(
 )]
 pub struct JoinFromUrl;
 
-pub async fn run_join(
+pub async fn join(
     cap_token: String,
     url: String,
 ) -> Result<join_from_url::JoinFromUrlNeighbourhoodJoinFromUrl> {

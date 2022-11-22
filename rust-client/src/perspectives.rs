@@ -19,7 +19,7 @@ use self::all::AllPerspectives;
 )]
 pub struct All;
 
-pub async fn run_all(cap_token: String) -> Result<Vec<AllPerspectives>> {
+pub async fn all(cap_token: String) -> Result<Vec<AllPerspectives>> {
     let response_data: all::ResponseData = query(cap_token, All::build_query(all::Variables {}))
         .await
         .with_context(|| "Failed to run perspectives->all query")?;
@@ -34,7 +34,7 @@ pub async fn run_all(cap_token: String) -> Result<Vec<AllPerspectives>> {
 )]
 pub struct Add;
 
-pub async fn run_add(cap_token: String, name: String) -> Result<String> {
+pub async fn add(cap_token: String, name: String) -> Result<String> {
     let response_data: add::ResponseData =
         query(cap_token, Add::build_query(add::Variables { name }))
             .await
@@ -50,7 +50,7 @@ pub async fn run_add(cap_token: String, name: String) -> Result<String> {
 )]
 pub struct Remove;
 
-pub async fn run_remove(cap_token: String, uuid: String) -> Result<()> {
+pub async fn remove(cap_token: String, uuid: String) -> Result<()> {
     let response: remove::ResponseData =
         query(cap_token, Remove::build_query(remove::Variables { uuid }))
             .await
@@ -70,7 +70,7 @@ pub async fn run_remove(cap_token: String, uuid: String) -> Result<()> {
 )]
 pub struct AddLink;
 
-pub async fn run_add_link(
+pub async fn add_link(
     cap_token: String,
     uuid: String,
     source: String,
@@ -102,7 +102,7 @@ pub async fn run_add_link(
 )]
 pub struct QueryLinks;
 
-pub async fn run_query_links(
+pub async fn query_links(
     cap_token: String,
     uuid: String,
     source: Option<String>,
@@ -140,7 +140,7 @@ pub async fn run_query_links(
 )]
 pub struct Infer;
 
-pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
+pub async fn infer(cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
     let response: Response<infer::ResponseData> = query_raw(
         cap_token,
         Infer::build_query(infer::Variables {
@@ -187,7 +187,7 @@ pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) ->
 )]
 pub struct SubscriptionLinkAdded;
 
-pub async fn run_watch(
+pub async fn watch(
     cap_token: String,
     id: String,
     link_callback: Box<dyn Fn(LinkExpression)>,
@@ -237,7 +237,7 @@ pub async fn run_watch(
 )]
 pub struct Snapshot;
 
-pub async fn run_snapshot(cap_token: String, uuid: String) -> Result<Perspective> {
+pub async fn snapshot(cap_token: String, uuid: String) -> Result<Perspective> {
     let response: snapshot::ResponseData = query(
         cap_token,
         Snapshot::build_query(snapshot::Variables { uuid }),

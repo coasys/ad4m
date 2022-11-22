@@ -66,7 +66,7 @@ pub enum PerspectiveFunctions {
 
 pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Result<()> {
     if command.is_none() {
-        let all_perspectives = perspectives::run_all(cap_token).await?;
+        let all_perspectives = perspectives::all(cap_token).await?;
         for perspective in all_perspectives {
             println!("\x1b[36mName: \x1b[97m{}", perspective.name);
             println!("\x1b[36mID: \x1b[97m{}", perspective.uuid);
@@ -101,11 +101,11 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
 
     match command.unwrap() {
         PerspectiveFunctions::Add { name } => {
-            let new_perspective = perspectives::run_add(cap_token, name).await?;
+            let new_perspective = perspectives::add(cap_token, name).await?;
             println!("{:#?}", new_perspective);
         }
         PerspectiveFunctions::Remove { id } => {
-            perspectives::run_remove(cap_token, id).await?;
+            perspectives::remove(cap_token, id).await?;
         }
         PerspectiveFunctions::AddLink {
             id,
@@ -113,12 +113,12 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
             target,
             predicate,
         } => {
-            perspectives::run_add_link(cap_token, id, source, target, predicate).await?;
+            perspectives::add_link(cap_token, id, source, target, predicate).await?;
         }
         PerspectiveFunctions::QueryLinks(args) => {
             let from_date = maybe_parse_datetime(args.from_date)?;
             let until_date = maybe_parse_datetime(args.until_date)?;
-            let result = perspectives::run_query_links(
+            let result = perspectives::query_links(
                 cap_token,
                 args.id,
                 args.source,
@@ -134,11 +134,11 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
             }
         }
         PerspectiveFunctions::Infer { id, query } => {
-            let results = perspectives::run_infer(cap_token, id, query).await?;
+            let results = perspectives::infer(cap_token, id, query).await?;
             print_prolog_results(results)?;
         }
         PerspectiveFunctions::Watch { id } => {
-            perspectives::run_watch(
+            perspectives::watch(
                 cap_token,
                 id,
                 Box::new(|link| {
@@ -148,7 +148,7 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
             .await?;
         }
         PerspectiveFunctions::Snapshot { id } => {
-            let result = perspectives::run_snapshot(cap_token, id).await?;
+            let result = perspectives::snapshot(cap_token, id).await?;
             println!("{:#?}", result);
         }
         PerspectiveFunctions::Repl { id } => {
@@ -177,7 +177,7 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
                         Some(predicate)
                     };
 
-                    perspectives::run_add_link(
+                    perspectives::add_link(
                         cap_token.clone(),
                         id.clone(),
                         source,
@@ -188,7 +188,7 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
                     continue;
                 }
 
-                match perspectives::run_infer(cap_token.clone(), id.clone(), line).await {
+                match perspectives::infer(cap_token.clone(), id.clone(), line).await {
                     Ok(results) => {
                         print_prolog_results(results)?;
                     }

@@ -32,7 +32,7 @@ pub enum LanguageFunctions {
 
 pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Result<()> {
     if command.is_none() {
-        let all_languages = languages::run_by_filter(cap_token, "".to_string()).await?;
+        let all_languages = languages::by_filter(cap_token, "".to_string()).await?;
         for language in all_languages {
             println!("\x1b[36mName: \x1b[97m{}", language.name);
             println!("\x1b[36mAddress: \x1b[97m{}", language.address);
@@ -53,15 +53,15 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
 
     match command.unwrap() {
         LanguageFunctions::All => {
-            let all_perspectives = languages::run_by_filter(cap_token, "".to_string()).await?;
+            let all_perspectives = languages::by_filter(cap_token, "".to_string()).await?;
             println!("{:#?}", all_perspectives);
         }
         LanguageFunctions::ByFilter { filter } => {
-            let languages = languages::run_by_filter(cap_token, filter).await?;
+            let languages = languages::by_filter(cap_token, filter).await?;
             println!("{:#?}", languages);
         }
         LanguageFunctions::ByAddress { address } => {
-            let maybe_language = languages::run_by_address(cap_token, address).await?;
+            let maybe_language = languages::by_address(cap_token, address).await?;
             if let Some(language) = maybe_language {
                 println!("{:#?}", language);
             } else {
@@ -69,7 +69,7 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
             }
         }
         LanguageFunctions::WriteSettings { address, settings } => {
-            languages::run_write_settings(cap_token, address, settings).await?;
+            languages::write_settings(cap_token, address, settings).await?;
             println!("Language settings written");
         }
         LanguageFunctions::ApplyTemplateAndPublish {
@@ -77,13 +77,13 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
             template_data,
         } => {
             let new_language =
-                languages::run_apply_template_and_publish(cap_token, source, template_data).await?;
+                languages::apply_template_and_publish(cap_token, source, template_data).await?;
             println!("Language template applied and published!");
             println!("Name: {}", new_language.name);
             println!("Address: {}", new_language.address);
         }
         LanguageFunctions::Meta { address } => {
-            let meta = languages::run_meta(cap_token, address).await?;
+            let meta = languages::meta(cap_token, address).await?;
             println!("{:#?}", meta);
         }
         LanguageFunctions::Publish { path } => {
@@ -119,7 +119,7 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
                 Some(source_code_link)
             };
 
-            let publish_result = languages::run_publish(
+            let publish_result = languages::publish(
                 cap_token,
                 path,
                 name,
@@ -134,11 +134,11 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
             );
         }
         LanguageFunctions::Source { address } => {
-            let source = languages::run_source(cap_token, address).await?;
+            let source = languages::source(cap_token, address).await?;
             println!("{}", source);
         }
         LanguageFunctions::Remove { address } => {
-            languages::run_remove(cap_token, address).await?;
+            languages::remove(cap_token, address).await?;
             println!("Language removed");
         }
     };

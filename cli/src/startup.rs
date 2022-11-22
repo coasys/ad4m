@@ -44,7 +44,7 @@ pub async fn get_cap_token() -> Result<String> {
     if cap_token_file.exists() {
         cap_token = std::fs::read_to_string(&cap_token_file)
             .with_context(|| format!("Could not read file `{}`", cap_token_file.display()))?;
-        if (perspectives::run_all(cap_token.clone()).await).is_ok() {
+        if (perspectives::all(cap_token.clone()).await).is_ok() {
             return Ok(cap_token);
         }
     }
@@ -56,7 +56,7 @@ pub async fn get_cap_token() -> Result<String> {
     let app_url = "org.perspect3vism.ad4m.cli".to_string();
     let capabilities = "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]"
             .to_string();
-    let request_id = agent::run_request_capability(
+    let request_id = agent::request_capability(
         app_name,
         app_desc,
         app_url,
@@ -70,7 +70,7 @@ pub async fn get_cap_token() -> Result<String> {
 
     let mut rl = Editor::<()>::new()?;
     let rand = rl.readline("Enter the 6-digit 2FA number from AD4M UI: ")?;
-    let jwt = agent::run_retrieve_capability(request_id, rand)
+    let jwt = agent::retrieve_capability(request_id, rand)
         .await
         .with_context(|| "Error generating capability token!".to_string())?;
 

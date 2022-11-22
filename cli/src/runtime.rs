@@ -61,61 +61,61 @@ pub enum RuntimeFunctions {
 pub async fn run(cap_token: String, command: RuntimeFunctions) -> Result<()> {
     match command {
         RuntimeFunctions::Info => {
-            let info = runtime::run_info(cap_token).await?;
+            let info = runtime::info(cap_token).await?;
             println!("{:#?}", info);
         }
         RuntimeFunctions::Quit => {
-            runtime::run_quit(cap_token).await?;
+            runtime::quit(cap_token).await?;
             println!("Executor shut down!");
         }
         RuntimeFunctions::AddTrustedAgents { agents } => {
-            runtime::run_add_trusted_agents(cap_token, agents).await?;
+            runtime::add_trusted_agents(cap_token, agents).await?;
             println!("Trusted agents added!");
         }
         RuntimeFunctions::DeleteTrustedAgents { agents } => {
-            runtime::run_delete_trusted_agents(cap_token, agents).await?;
+            runtime::delete_trusted_agents(cap_token, agents).await?;
             println!("Trusted agents removed!");
         }
         RuntimeFunctions::TrustedAgents => {
-            let agents = runtime::run_trusted_agents(cap_token).await?;
+            let agents = runtime::trusted_agents(cap_token).await?;
             for agent in agents {
                 println!("{}", agent);
             }
         }
         RuntimeFunctions::LinkLanguageTemplates => {
-            let templates = runtime::run_link_language_templates(cap_token).await?;
+            let templates = runtime::link_language_templates(cap_token).await?;
             for template in templates {
                 println!("{}", template);
             }
         }
         RuntimeFunctions::AddLinkLanguageTemplates { addresses } => {
-            runtime::run_add_link_language_templates(cap_token, addresses).await?;
+            runtime::add_link_language_templates(cap_token, addresses).await?;
             println!("Link language templates added!");
         }
         RuntimeFunctions::RemoveLinkLanguageTemplates { addresses } => {
-            runtime::run_remove_link_language_templates(cap_token, addresses).await?;
+            runtime::remove_link_language_templates(cap_token, addresses).await?;
             println!("Link language templates removed!");
         }
         RuntimeFunctions::Friends => {
-            let friends = runtime::run_friends(cap_token).await?;
+            let friends = runtime::friends(cap_token).await?;
             for friend in friends {
                 println!("{}", friend);
             }
         }
         RuntimeFunctions::AddFriends { agents } => {
-            runtime::run_add_friends(cap_token, agents).await?;
+            runtime::add_friends(cap_token, agents).await?;
             println!("Friends added!");
         }
         RuntimeFunctions::RemoveFriends { agents } => {
-            runtime::run_remove_friends(cap_token, agents).await?;
+            runtime::remove_friends(cap_token, agents).await?;
             println!("Friends removed!");
         }
         RuntimeFunctions::HcAgentInfos => {
-            let infos = runtime::run_hc_agent_infos(cap_token).await?;
+            let infos = runtime::hc_agent_infos(cap_token).await?;
             println!("{}", infos);
         }
         RuntimeFunctions::HcAddAgentInfos { infos } => {
-            runtime::run_hc_add_agent_infos(cap_token, infos).await?;
+            runtime::hc_add_agent_infos(cap_token, infos).await?;
             println!("Holochain agent infos added!");
         }
         RuntimeFunctions::VerifySignature {
@@ -124,7 +124,7 @@ pub async fn run(cap_token: String, command: RuntimeFunctions) -> Result<()> {
             data,
             signed_data,
         } => {
-            let result = runtime::run_verify_string_signed_by_did(
+            let result = runtime::verify_string_signed_by_did(
                 cap_token,
                 did,
                 did_signing_key,
@@ -136,27 +136,27 @@ pub async fn run(cap_token: String, command: RuntimeFunctions) -> Result<()> {
         }
         RuntimeFunctions::SetStatus { status } => {
             let perspective = string_2_perspective_snapshot(cap_token.clone(), status).await?;
-            runtime::run_set_status(cap_token, perspective.into()).await?;
+            runtime::set_status(cap_token, perspective.into()).await?;
             println!("Status set!");
         }
         RuntimeFunctions::FriendStatus { agent } => {
-            let status = runtime::run_friend_status(cap_token, agent).await?;
+            let status = runtime::friend_status(cap_token, agent).await?;
             println!("{:?}", status.runtime_friend_status);
         }
         RuntimeFunctions::FriendSendMessage { agent, message } => {
             let message = string_2_perspective_snapshot(cap_token.clone(), message).await?;
-            runtime::run_friend_send_message(cap_token, agent, message.into()).await?;
+            runtime::friend_send_message(cap_token, agent, message.into()).await?;
             println!("Message sent!");
         }
         RuntimeFunctions::MessageInbox { filter } => {
-            let messages = runtime::run_message_inbox(cap_token, filter).await?;
+            let messages = runtime::message_inbox(cap_token, filter).await?;
             for message in messages {
                 print_message_perspective(message);
                 println!();
             }
         }
         RuntimeFunctions::MessageOutbox { filter } => {
-            let messages = runtime::run_message_outbox(cap_token, filter).await?;
+            let messages = runtime::message_outbox(cap_token, filter).await?;
             for message in messages {
                 print_sent_message_perspective(message);
                 println!();

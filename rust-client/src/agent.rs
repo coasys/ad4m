@@ -10,7 +10,7 @@ use graphql_client::{GraphQLQuery, Response};
 )]
 pub struct RequestCapability;
 
-pub async fn run_request_capability(
+pub async fn request_capability(
     app_name: String,
     app_desc: String,
     app_url: String,
@@ -44,7 +44,7 @@ pub async fn run_request_capability(
 )]
 pub struct RetrieveCapability;
 
-pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result<String> {
+pub async fn retrieve_capability(request_id: String, rand: String) -> Result<String> {
     let query =
         RetrieveCapability::build_query(retrieve_capability::Variables { request_id, rand });
     let response_body: Response<retrieve_capability::ResponseData> = reqwest::Client::new()
@@ -69,7 +69,7 @@ pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result
 )]
 pub struct Me;
 
-pub async fn run_me(cap_token: String) -> Result<me::MeAgent> {
+pub async fn me(cap_token: String) -> Result<me::MeAgent> {
     let response_data: me::ResponseData = query(cap_token, Me::build_query(me::Variables {}))
         .await
         .with_context(|| "Failed to run agent->me query")?;
@@ -84,7 +84,7 @@ pub async fn run_me(cap_token: String) -> Result<me::MeAgent> {
 )]
 pub struct AgentStatus;
 
-pub async fn run_status(cap_token: String) -> Result<agent_status::AgentStatusAgentStatus> {
+pub async fn status(cap_token: String) -> Result<agent_status::AgentStatusAgentStatus> {
     let response_data: agent_status::ResponseData = query(
         cap_token,
         AgentStatus::build_query(agent_status::Variables {}),
@@ -102,7 +102,7 @@ pub async fn run_status(cap_token: String) -> Result<agent_status::AgentStatusAg
 )]
 pub struct Lock;
 
-pub async fn run_lock(cap_token: String, passphrase: String) -> Result<lock::LockAgentLock> {
+pub async fn lock(cap_token: String, passphrase: String) -> Result<lock::LockAgentLock> {
     let response_data: lock::ResponseData =
         query(cap_token, Lock::build_query(lock::Variables { passphrase }))
             .await
@@ -118,7 +118,7 @@ pub async fn run_lock(cap_token: String, passphrase: String) -> Result<lock::Loc
 )]
 pub struct Unlock;
 
-pub async fn run_unlock(
+pub async fn unlock(
     cap_token: String,
     passphrase: String,
 ) -> Result<unlock::UnlockAgentUnlock> {
@@ -139,7 +139,7 @@ pub async fn run_unlock(
 )]
 pub struct ByDID;
 
-pub async fn run_by_did(cap_token: String, did: String) -> Result<Option<by_did::ByDidAgentByDid>> {
+pub async fn by_did(cap_token: String, did: String) -> Result<Option<by_did::ByDidAgentByDid>> {
     let response_data: by_did::ResponseData =
         query(cap_token, ByDID::build_query(by_did::Variables { did }))
             .await

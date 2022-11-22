@@ -10,7 +10,7 @@ use graphql_client::GraphQLQuery;
 )]
 pub struct ByFilter;
 
-pub async fn run_by_filter(
+pub async fn by_filter(
     cap_token: String,
     filter: String,
 ) -> Result<Vec<by_filter::ByFilterLanguages>> {
@@ -31,7 +31,7 @@ pub async fn run_by_filter(
 )]
 pub struct ByAddress;
 
-pub async fn run_by_address(
+pub async fn by_address(
     cap_token: String,
     address: String,
 ) -> Result<Option<by_address::ByAddressLanguage>> {
@@ -52,7 +52,7 @@ pub async fn run_by_address(
 )]
 pub struct WriteSettings;
 
-pub async fn run_write_settings(
+pub async fn write_settings(
     cap_token: String,
     language_address: String,
     settings: String,
@@ -76,7 +76,7 @@ pub async fn run_write_settings(
 )]
 pub struct ApplyTemplateAndPublish;
 
-pub async fn run_apply_template_and_publish(
+pub async fn apply_template_and_publish(
     cap_token: String,
     source: String,
     template_data: String,
@@ -101,7 +101,7 @@ pub async fn run_apply_template_and_publish(
 )]
 pub struct Meta;
 
-pub async fn run_meta(cap_token: String, address: String) -> Result<meta::MetaLanguageMeta> {
+pub async fn meta(cap_token: String, address: String) -> Result<meta::MetaLanguageMeta> {
     let response_data: meta::ResponseData =
         query(cap_token, Meta::build_query(meta::Variables { address }))
             .await
@@ -117,7 +117,7 @@ pub async fn run_meta(cap_token: String, address: String) -> Result<meta::MetaLa
 )]
 pub struct Publish;
 
-pub async fn run_publish(
+pub async fn publish(
     cap_token: String,
     language_path: String,
     name: String,
@@ -150,7 +150,7 @@ pub async fn run_publish(
 )]
 pub struct Source;
 
-pub async fn run_source(cap_token: String, address: String) -> Result<String> {
+pub async fn source(cap_token: String, address: String) -> Result<String> {
     let response_data: source::ResponseData = query(
         cap_token,
         Source::build_query(source::Variables { address }),
@@ -168,7 +168,7 @@ pub async fn run_source(cap_token: String, address: String) -> Result<String> {
 )]
 pub struct Remove;
 
-pub async fn run_remove(cap_token: String, address: String) -> Result<()> {
+pub async fn remove(cap_token: String, address: String) -> Result<()> {
     query(
         cap_token,
         Remove::build_query(remove::Variables { address }),
