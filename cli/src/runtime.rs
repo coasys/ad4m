@@ -1,13 +1,9 @@
+use crate::formatting::{print_message_perspective, print_sent_message_perspective};
 use ad4m_client::runtime;
-use anyhow::{Result};
-use clap::{Subcommand};
-use crate::formatting::{
-    print_message_perspective,
-    print_sent_message_perspective,
-};
+use anyhow::Result;
+use clap::Subcommand;
 
 use crate::util::string_2_perspective_snapshot;
-
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeFunctions {
@@ -62,10 +58,7 @@ pub enum RuntimeFunctions {
     },
 }
 
-pub async fn run(
-    cap_token: String,
-    command: RuntimeFunctions,
-) -> Result<()> {
+pub async fn run(cap_token: String, command: RuntimeFunctions) -> Result<()> {
     match command {
         RuntimeFunctions::Info => {
             let info = runtime::run_info(cap_token).await?;

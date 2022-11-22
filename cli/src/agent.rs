@@ -1,12 +1,7 @@
-use crate::{
-    formatting::*,
-    util::readline_masked,
-};
+use crate::{formatting::*, util::readline_masked};
 use ad4m_client::agent;
 use anyhow::{bail, Result};
-use clap::{Subcommand};
-
-
+use clap::Subcommand;
 
 #[derive(Debug, Subcommand)]
 pub enum AgentFunctions {

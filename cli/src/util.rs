@@ -1,7 +1,6 @@
 use crate::types::Perspective;
 use anyhow::{anyhow, Result};
 
-
 pub const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.fZ";
 
 pub fn maybe_parse_datetime(
@@ -96,7 +95,9 @@ pub async fn string_2_perspective_snapshot(
     .await?;
     println!("Added status link to temporary perspective");
 
-    let snapshot = ad4m_client::perspectives::run_snapshot(cap_token.clone(), temp_perspective.clone()).await?;
+    let snapshot =
+        ad4m_client::perspectives::run_snapshot(cap_token.clone(), temp_perspective.clone())
+            .await?;
     println!("Created snapshot of temporary perspective");
 
     ad4m_client::perspectives::run_remove(cap_token.clone(), temp_perspective).await?;

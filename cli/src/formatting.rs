@@ -109,7 +109,7 @@ pub fn print_link(link: LinkExpression) {
                 "\x1b[90m[{}] \x1b[35m{} \x1b[97m--\x1b[95m{}\x1b[97m--> \x1b[32m{} \x1b[34m({})",
                 link.timestamp, source, predicate, target, link.author
             );
-        },
+        }
         None => {
             println!(
                 "\x1b[90m[{}] \x1b[35m{} \x1b[97m----> \x1b[32m{} \x1b[34m({})",

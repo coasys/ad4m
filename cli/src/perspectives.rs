@@ -1,10 +1,9 @@
-use ad4m_client::perspectives;
-use anyhow::{Result};
-use clap::{Args, Subcommand};
 use crate::{formatting::*, util::maybe_parse_datetime};
-use rustyline::Editor;
+use ad4m_client::perspectives;
+use anyhow::Result;
+use clap::{Args, Subcommand};
 use regex::Regex;
-
+use rustyline::Editor;
 
 #[derive(Args, Debug)]
 pub struct QueryLinksArgs {
@@ -139,9 +138,14 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
             print_prolog_results(results)?;
         }
         PerspectiveFunctions::Watch { id } => {
-            perspectives::run_watch(cap_token, id, Box::new(|link| {
-                print_link(link);
-            })).await?;
+            perspectives::run_watch(
+                cap_token,
+                id,
+                Box::new(|link| {
+                    print_link(link);
+                }),
+            )
+            .await?;
         }
         PerspectiveFunctions::Snapshot { id } => {
             let result = perspectives::run_snapshot(cap_token, id).await?;

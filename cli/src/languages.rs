@@ -1,6 +1,6 @@
 use ad4m_client::languages;
 use anyhow::{Context, Result};
-use clap::{Subcommand};
+use clap::Subcommand;
 use rustyline::Editor;
 
 #[derive(Debug, Subcommand)]
@@ -53,8 +53,7 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
 
     match command.unwrap() {
         LanguageFunctions::All => {
-            let all_perspectives =
-                languages::run_by_filter(cap_token, "".to_string()).await?;
+            let all_perspectives = languages::run_by_filter(cap_token, "".to_string()).await?;
             println!("{:#?}", all_perspectives);
         }
         LanguageFunctions::ByFilter { filter } => {
@@ -78,8 +77,7 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
             template_data,
         } => {
             let new_language =
-                languages::run_apply_template_and_publish(cap_token, source, template_data)
-                    .await?;
+                languages::run_apply_template_and_publish(cap_token, source, template_data).await?;
             println!("Language template applied and published!");
             println!("Name: {}", new_language.name);
             println!("Address: {}", new_language.address);

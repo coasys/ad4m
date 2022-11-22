@@ -14,16 +14,15 @@ mod util;
 
 mod agent;
 mod languages;
-mod perspectives;
 mod neighbourhoods;
+mod perspectives;
 mod runtime;
 
+use crate::{agent::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*};
 use ad4m_client::*;
-use crate::{agent::*, languages::*, perspectives::*, neighbourhoods::*, runtime::*};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use startup::executor_data_path;
-
 
 /// AD4M command line interface.
 /// https://ad4m.dev
@@ -89,7 +88,6 @@ enum Domain {
     /// Print the executor log
     Log,
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
