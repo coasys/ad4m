@@ -1,16 +1,12 @@
 extern crate ad4m_client;
 extern crate anyhow;
-extern crate async_tungstenite;
 extern crate chrono;
 extern crate clap;
 extern crate dirs;
-extern crate graphql_client;
 extern crate rand;
 extern crate regex;
-extern crate reqwest;
 extern crate rustyline;
 extern crate tokio;
-
 
 mod formatting;
 mod startup;
