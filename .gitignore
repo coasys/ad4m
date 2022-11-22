@@ -45,3 +45,5 @@ yarn-error.log*
 !esbuild.js
 
 cli/target
+rust-client/target
+target

@@ -1,4 +1,4 @@
-use crate::{startup::get_executor_url, util::query};
+use crate::{get_executor_url, util::query};
 use anyhow::{anyhow, Context, Result};
 use graphql_client::{GraphQLQuery, Response};
 
@@ -19,7 +19,7 @@ pub async fn run_request_capability() -> Result<String> {
             .to_string(),
     });
     let response_body: Response<request_capability::ResponseData> = reqwest::Client::new()
-        .post(get_executor_url()?)
+        .post(get_executor_url())
         .json(&query)
         .send()
         .await?
@@ -44,7 +44,7 @@ pub async fn run_retrieve_capability(request_id: String, rand: String) -> Result
     let query =
         RetrieveCapability::build_query(retrieve_capability::Variables { request_id, rand });
     let response_body: Response<retrieve_capability::ResponseData> = reqwest::Client::new()
-        .post(get_executor_url()?)
+        .post(get_executor_url())
         .json(&query)
         .send()
         .await?

@@ -1,3 +1,4 @@
+extern crate ad4m_client;
 extern crate anyhow;
 extern crate async_tungstenite;
 extern crate chrono;
@@ -10,16 +11,12 @@ extern crate reqwest;
 extern crate rustyline;
 extern crate tokio;
 
-mod agent;
+
 mod formatting;
-mod languages;
-mod neighbourhoods;
-mod perspectives;
-mod runtime;
 mod startup;
-mod types;
 mod util;
 
+use ad4m_client::*;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use formatting::{
@@ -264,6 +261,7 @@ enum RuntimeFunctions {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    set_executor_url(crate::startup::get_executor_url()?);
     let args = ClapApp::parse();
     let cap_token = match &args.domain {
         Domain::Log => "".to_string(),
@@ -508,7 +506,9 @@ async fn main() -> Result<()> {
                     print_prolog_results(results)?;
                 }
                 PerspectiveFunctions::Watch { id } => {
-                    perspectives::run_watch(cap_token, id).await?;
+                    perspectives::run_watch(cap_token, id, Box::new(|link| {
+                        print_link(link);
+                    })).await?;
                 }
                 PerspectiveFunctions::Snapshot { id } => {
                     let result = perspectives::run_snapshot(cap_token, id).await?;

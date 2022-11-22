@@ -1,6 +1,6 @@
 [package]
-name = "ad4m"
-version = "0.0.2"
+name = "ad4m-client"
+version = "0.0.1"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]
 description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
@@ -32,4 +32,3 @@ urlencoding = "2"
 unicode-width = "0.1"
 rand = "0.8"
 regex = "1"
-ad4m-client = { path = "../rust-client" }

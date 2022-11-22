@@ -1,5 +1,4 @@
-use crate::formatting::print_link;
-use crate::types::Perspective;
+use crate::types::{LinkExpression, Perspective};
 use crate::util::{create_websocket_client, query, query_raw};
 use anyhow::{anyhow, Context, Result};
 use chrono::naive::NaiveDateTime;
@@ -188,7 +187,7 @@ pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) ->
 )]
 pub struct SubscriptionLinkAdded;
 
-pub async fn run_watch(cap_token: String, id: String) -> Result<()> {
+pub async fn run_watch(cap_token: String, id: String, link_callback: Box<dyn Fn(LinkExpression)>) -> Result<()> {
     use futures::StreamExt;
 
     let mut client = create_websocket_client(cap_token)
@@ -212,7 +211,7 @@ pub async fn run_watch(cap_token: String, id: String) -> Result<()> {
         match item {
             Ok(response) => {
                 if let Some(link) = response.data.and_then(|data| data.perspective_link_added) {
-                    print_link(link.into())
+                    link_callback(link.into())
                 }
             }
             Err(e) => {
