@@ -303,10 +303,7 @@ pub async fn set_status(
 )]
 pub struct FriendStatus;
 
-pub async fn friend_status(
-    cap_token: String,
-    did: String,
-) -> Result<friend_status::ResponseData> {
+pub async fn friend_status(cap_token: String, did: String) -> Result<friend_status::ResponseData> {
     query(
         cap_token,
         FriendStatus::build_query(friend_status::Variables { did }),

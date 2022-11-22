@@ -118,10 +118,7 @@ pub async fn lock(cap_token: String, passphrase: String) -> Result<lock::LockAge
 )]
 pub struct Unlock;
 
-pub async fn unlock(
-    cap_token: String,
-    passphrase: String,
-) -> Result<unlock::UnlockAgentUnlock> {
+pub async fn unlock(cap_token: String, passphrase: String) -> Result<unlock::UnlockAgentUnlock> {
     let response_data: unlock::ResponseData = query(
         cap_token,
         Unlock::build_query(unlock::Variables { passphrase }),
