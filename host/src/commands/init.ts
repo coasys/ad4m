@@ -123,9 +123,9 @@ async function getSeedConfig(dataPath?: string, networkBootstrapSeed?: string, o
   let globalConfig;
 
   try {
-    globalConfig = getConfig();
+    globalConfig = getConfig(dataPath);
 
-    if (dataPath || networkBootstrapSeed) {
+    if (networkBootstrapSeed) {
       let decision;
       
       if (override === undefined) {
@@ -157,7 +157,7 @@ async function getSeedConfig(dataPath?: string, networkBootstrapSeed?: string, o
     seedPath
   }
 
-  const dest = path.join(ad4mDataDirectory(), CONFIG);
+  const dest = path.join(ad4mDataDirectory(dataPath), CONFIG);
 
   globalConfig[configDataPath] = config;
 

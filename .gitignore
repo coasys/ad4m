@@ -47,3 +47,5 @@ yarn-error.log*
 cli/target
 rust-client/target
 target
+
+tests/ad4m1
