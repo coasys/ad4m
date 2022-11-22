@@ -57,7 +57,11 @@ struct ClapApp {
 
     /// Don't request/use capability token - provide empty string
     #[arg(short, long, action)]
-    no_capability: bool
+    no_capability: bool,
+
+    /// Override default executor URL look-up and provide custom URL
+    #[arg(short, long)]
+    executor_url: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -95,8 +99,14 @@ enum Domain {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    set_executor_url(crate::startup::get_executor_url()?);
     let args = ClapApp::parse();
+
+    if let Some(custom_url) = args.executor_url {
+        set_executor_url(custom_url);
+    } else {
+        set_executor_url(crate::startup::get_executor_url()?);
+    };
+
     let cap_token = if args.no_capability {
         "".to_string()
     } else {
