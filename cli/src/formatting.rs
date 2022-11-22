@@ -80,17 +80,20 @@ pub fn print_link(link: LinkExpression) {
     let source = maybe_decode_literal(link.data.source);
     let target = maybe_decode_literal(link.data.target);
 
-    if let Some(pred) = link.data.predicate {
-        let predicate = maybe_decode_literal(pred);
-        println!(
-            "\x1b[90m[{}] \x1b[35m{} \x1b[97m--\x1b[95m{}\x1b[97m--> \x1b[32m{} \x1b[34m({})",
-            link.timestamp, source, predicate, target, link.author
-        );
-    } else {
-        println!(
-            "\x1b[90m[{}] \x1b[35m{} \x1b[97m----> \x1b[32m{} \x1b[34m({})",
-            link.timestamp, source, target, link.author
-        );
+    match link.data.predicate {
+        Some(pred) => {
+            let predicate = maybe_decode_literal(pred);
+            println!(
+                "\x1b[90m[{}] \x1b[35m{} \x1b[97m--\x1b[95m{}\x1b[97m--> \x1b[32m{} \x1b[34m({})",
+                link.timestamp, source, predicate, target, link.author
+            );
+        },
+        None => {
+            println!(
+                "\x1b[90m[{}] \x1b[35m{} \x1b[97m----> \x1b[32m{} \x1b[34m({})",
+                link.timestamp, source, target, link.author
+            );
+        }
     }
 }
 
