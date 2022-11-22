@@ -15,9 +15,10 @@ mod util;
 mod agent;
 mod languages;
 mod perspectives;
+mod neighbourhoods;
 
 use ad4m_client::*;
-use crate::{agent::*, languages::*, perspectives::*};
+use crate::{agent::*, languages::*, perspectives::*, neighbourhoods::*};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use formatting::{
@@ -95,17 +96,6 @@ enum Domain {
 
 
 #[derive(Debug, Subcommand)]
-enum NeighbourhoodFunctions {
-    Create {
-        perspective_id: String,
-        link_language: String,
-    },
-    Join {
-        url: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum RuntimeFunctions {
     Info,
     Quit,
@@ -175,21 +165,7 @@ async fn main() -> Result<()> {
         Domain::Agent { command } => agent::run(cap_token, command).await?,
         Domain::Languages { command } => languages::run(cap_token, command).await?,
         Domain::Perspectives { command } => perspectives::run(cap_token, command).await?,
-        Domain::Neighbourhoods { command } => match command {
-            NeighbourhoodFunctions::Create {
-                perspective_id,
-                link_language,
-            } => {
-                let neighbourhood =
-                    neighbourhoods::run_publish(cap_token, link_language, None, perspective_id)
-                        .await?;
-                println!("Neighbourhood shared as: {}", neighbourhood);
-            }
-            NeighbourhoodFunctions::Join { url } => {
-                let neighbourhood = neighbourhoods::run_join(cap_token, url).await?;
-                println!("Neighbourhod joined!\n{:#?}", neighbourhood);
-            }
-        },
+        Domain::Neighbourhoods { command } => neighbourhoods::run(cap_token, command).await?,
         Domain::Runtime { command } => match command {
             RuntimeFunctions::Info => {
                 let info = runtime::run_info(cap_token).await?;
