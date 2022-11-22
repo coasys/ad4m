@@ -13,6 +13,8 @@ use crate::{AppState, ProxyState, ProxyService};
 )]
 struct AgentSignMessage;
 
+const PROXY_SERVER: &str = "https://proxy-worker.ad4m.dev";
+
 #[tauri::command]
 pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, proxy: State<'_, ProxyState>) -> Result<String, String> {
     let graphql_port = app_state.graphql_port;
@@ -20,7 +22,7 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
     let (notify_shutdown, _) = broadcast::channel(1);
     let subdomain = subdomain.replace(":", "-").to_lowercase();
 
-    let rand = reqwest::get(format!("https://proxy-worker.ad4m.dev/login?did={}", subdomain))
+    let rand = reqwest::get(format!("{}/login?did={}", PROXY_SERVER, subdomain))
         .await
         .map_err(|err| format!("Error happend when send login request: {:?}", err))?
         .text()
@@ -45,8 +47,8 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
 
     let credential = reqwest::get(
             format!(
-                "https://proxy-worker.ad4m.dev/login/verify?did={}&signature={}&publicKey={}",
-                subdomain, signature, public_key
+                "{}/login/verify?did={}&signature={}&publicKey={}",
+                PROXY_SERVER, subdomain, signature, public_key
             ))
         .await
         .map_err(|err| format!("Error happend when send login verify request: {:?}", err))?
@@ -55,7 +57,7 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
         .map_err(|err| format!("Error happend when retrieving the login verify content: {:?}", err))?;
 
     let endpoint = open_tunnel(
-        Some("https://proxy-worker.ad4m.dev"),
+        Some(PROXY_SERVER),
         Some(&subdomain),
         None,
         graphql_port,
