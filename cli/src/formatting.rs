@@ -25,6 +25,27 @@ pub fn print_prolog_results(results: Value) -> Result<()> {
     Ok(())
 }
 
+fn deconstruct_value_object(value: Value) -> Result<String> {
+    if let Value::Object(map) = value {
+        let mut collected = vec![];
+        for (key, value) in map {
+            let value = match value {
+                Value::String(string) => string,
+                Value::Number(number) => number.to_string(),
+                Value::Bool(boolean) => boolean.to_string(),
+                Value::Array(_) => bail!("Unexpected nested array value"),
+                Value::Object(_) => deconstruct_value_object(value)?,
+                Value::Null => "null".to_string(),
+            };
+            collected.push(format!("{}: {}", key, value));
+        }
+
+        Ok(collected.join(", "))
+    } else {
+        bail!("Can't deconstruct non-object value")
+    }
+}
+
 pub fn print_prolog_result(result: Value) -> Result<()> {
     match result {
         Value::Object(map) => {
@@ -33,8 +54,8 @@ pub fn print_prolog_result(result: Value) -> Result<()> {
                     Value::String(string) => string,
                     Value::Number(number) => number.to_string(),
                     Value::Bool(boolean) => boolean.to_string(),
-                    Value::Array(_) => bail!("Unexpected nested object value"),
-                    Value::Object(_) => bail!("Unexpected nested object value"),
+                    Value::Array(_) => bail!("Unexpected nested array value"),
+                    Value::Object(_) => deconstruct_value_object(value)?,
                     Value::Null => "null".to_string(),
                 };
                 println!("\x1b[36m{}:\x1b[97m {}", key, value);
