@@ -1,4 +1,4 @@
-use crate::{get_executor_url};
+use crate::get_executor_url;
 use anyhow::{anyhow, Result};
 
 use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};

@@ -18,7 +18,6 @@ pub mod runtime;
 pub mod types;
 mod util;
 
-
 static mut EXECUTOR_URL: String = String::new();
 
 pub fn get_executor_url() -> String {

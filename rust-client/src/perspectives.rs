@@ -187,7 +187,11 @@ pub async fn run_infer(cap_token: String, uuid: String, prolog_query: String) ->
 )]
 pub struct SubscriptionLinkAdded;
 
-pub async fn run_watch(cap_token: String, id: String, link_callback: Box<dyn Fn(LinkExpression)>) -> Result<()> {
+pub async fn run_watch(
+    cap_token: String,
+    id: String,
+    link_callback: Box<dyn Fn(LinkExpression)>,
+) -> Result<()> {
     use futures::StreamExt;
 
     let mut client = create_websocket_client(cap_token)
