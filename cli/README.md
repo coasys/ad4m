@@ -1,6 +1,8 @@
 # AD4M command-line interface
 
-This is a cmd-tool (`ad4m`) that implements a GraphQL client build against the AD4M-executor's GraphQL interface.
+![](screenshots/banner.png)
+
+This is a cmd-tool (`ad4m`) that uses the Rust implementation of the AD4M GraphQL interface wrapper (https://crates.io/crates/ad4m-client).
 As such, it's a command-line based generic UI intended for development and scripting use and remote-controlling
 of AD4M and all it's features.
 
@@ -16,15 +18,20 @@ Show all perspectives:
 ad4m perspectives
 ```
 
+![](screenshots/perspectives.png)
+
 Query links of a perspective:
 ```
 ad4m perspectives query-links 359a0a8f-fecc-43a3-9c18-27ee1e41efe2
 ```
 
+![](screenshots/query-links.png)
+
 Watch changes of a perspective:
 ```
 ad4m perspectives watch 359a0a8f-fecc-43a3-9c18-27ee1e41efe2
 ```
+![](screenshots/watch.png)
 
 Clone and publish a language
 ```
