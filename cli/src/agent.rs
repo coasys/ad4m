@@ -12,11 +12,19 @@ pub enum AgentFunctions {
     /// Lock the agent keys
     Lock,
     /// Unlock the agent keys
-    Unlock,
+    Unlock {
+        /// Agent passphrase
+        #[arg(short, long)]
+        passphrase: Option<String>,
+    },
     /// Lookup agent by DID
     ByDID { did: String },
     /// Initialize a new agent
-    Generate,
+    Generate {
+        /// Agent passphrase
+        #[arg(short, long)]
+        passphrase: Option<String>,
+    },
 }
 
 pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
@@ -48,8 +56,14 @@ pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
                 println!("Agent locked");
             }
         }
-        AgentFunctions::Unlock => {
-            let result = agent::unlock(cap_token, readline_masked("Passphrase: ")?).await?;
+        AgentFunctions::Unlock { passphrase } => {
+            let pp = if passphrase.is_some() {
+                passphrase.unwrap()
+            } else {
+                readline_masked("Passphrase: ")?
+            };
+            
+            let result = agent::unlock(cap_token, pp).await?;
             if let Some(error) = result.error {
                 bail!(error);
             } else {
@@ -63,13 +77,19 @@ pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
                 println!("Agent not found");
             }
         }
-        AgentFunctions::Generate => {
-            let passphrase1 = readline_masked("Passphrase: ")?;
-            let passphrase2 = readline_masked("Repeat passphrase: ")?;
-            if passphrase1 != passphrase2 {
-                bail!("Passphrases do not match");
-            }
-            let result = agent::generate(cap_token, passphrase1).await?;
+        AgentFunctions::Generate { passphrase } => {
+            let pp = if passphrase.is_some() {
+                passphrase.unwrap()
+            } else {
+                let passphrase1 = readline_masked("Passphrase: ")?;
+                let passphrase2 = readline_masked("Repeat passphrase: ")?;
+                if passphrase1 != passphrase2 {
+                    bail!("Passphrases do not match");
+                }
+                passphrase1
+            };
+            
+            let result = agent::generate(cap_token, pp).await?;
             if let Some(error) = result.error {
                 bail!(error);
             } else {
