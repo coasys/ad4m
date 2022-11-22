@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use regex::{Regex, Captures};
 use serde_json::Value;
 
 use crate::types::{Agent, LinkExpression, PerspectiveExpression, SentPerspectiveMessage};
@@ -67,31 +66,33 @@ pub fn print_prolog_result(result: Value) -> Result<()> {
 }
 
 fn maybe_decode_literal(uri: String) -> String {
-    let string_literal = Regex::new(r"literal://string:([^/]+)").unwrap();
-    let number_literal = Regex::new(r"literal://number:([^/]+)").unwrap();
-    let json_literal = Regex::new(r"literal://json:([^/]+)").unwrap();
-
-    if let Some(string_match) = string_literal.captures(&uri).and_then(|caps: Captures| caps.get(1)) {
-        let string: String = string_match.as_str().into();
-        urlencoding::decode(&string)
-            .map(|s| s.to_string())
-            .unwrap_or(string)
-    } else if let Some(number_string) = number_literal.captures(&uri).and_then(|caps: Captures| caps.get(1)) {
-        number_string.as_str().into()
-    } else if let Some(json_string) = json_literal.captures(&uri).and_then(|caps| caps.get(1)) {
-        if let Ok(decoded_json) = urlencoding::decode(json_string.as_str()) {
-            let decoded_json_string = decoded_json.to_string().replace("\\'", "'");
-            match serde_json::from_str::<serde_json::Value>(&decoded_json_string) {
-                Ok(expression) => return expression["data"].to_string(),
-                Err(e) => {
-                    println!("Failed to decode json literal: {}", e);
-                    return decoded_json.to_string();
+    if uri.starts_with("literal://") {
+        let literal = uri.replace("literal://", "");
+        if literal.starts_with("string:") {
+            let string = literal.replace("string:", "");
+            urlencoding::decode(&string)
+                .map(|s| s.to_string())
+                .unwrap_or(string)
+        } else if literal.starts_with("number:") {
+            literal.replace("number:", "")
+        } else if literal.starts_with("json:") {
+            let json = literal.replace("json:", "");
+            if let Ok(decoded_json) = urlencoding::decode(&json) {
+                let decoded_json_string = decoded_json.to_string().replace("\\'", "'");
+                match serde_json::from_str::<serde_json::Value>(&decoded_json_string) {
+                    Ok(expression) => return expression["data"].to_string(),
+                    Err(e) => {
+                        println!("Failed to decode json literal: {}", e);
+                        return decoded_json.to_string();
+                    }
                 }
+            } else {
+                println!("Failed to decode url encoding");
             }
+            json
         } else {
-            println!("Failed to decode url encoding");
+            literal
         }
-        json_string.as_str().into()
     } else {
         uri
     }
