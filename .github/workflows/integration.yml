@@ -1,0 +1,55 @@
+name: Integration
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: AD4M cli <> AD4M host
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        node-version: [16.x]
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v2
+
+    - name: Install Rust stable
+      uses: actions-rs/toolchain@v1
+      with:
+        override: true
+        toolchain: 1.63.0
+
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
+
+    - name: Yarn Install
+      run: yarn install
+
+    - name: Yarn Build
+      run: yarn build
+
+    - name: Build AD4M-Host
+      if: matrix.platform == 'macos-latest'
+      run: yarn run package-macos
+
+    - name: Build AD4M-Host
+      if: matrix.platform == 'windows-latest'
+      run: yarn run package-windows
+
+    - name: Build AD4M-Host
+      if: matrix.platform == 'ubuntu-latest'
+      run: yarn run package-linux
+
+    - name: Build AD4M cli
+      run: cd cli && cargo build --release
+
+    - name: Run test script
+      run: ./tests/bats/bin/bats tests/integration.bats
+    
