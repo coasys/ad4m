@@ -54,6 +54,10 @@ use startup::executor_data_path;
 struct ClapApp {
     #[command(subcommand)]
     domain: Domain,
+
+    /// Don't request/use capability token - provide empty string
+    #[arg(short, long, action)]
+    no_capability: bool
 }
 
 #[derive(Debug, Subcommand)]
@@ -93,13 +97,17 @@ enum Domain {
 async fn main() -> Result<()> {
     set_executor_url(crate::startup::get_executor_url()?);
     let args = ClapApp::parse();
-    let cap_token = match &args.domain {
-        Domain::Log => "".to_string(),
-        Domain::Agent { command } => match command {
-            AgentFunctions::Lock | AgentFunctions::Unlock | AgentFunctions::Generate => "".to_string(),
+    let cap_token = if args.no_capability {
+        "".to_string()
+    } else {
+        match &args.domain {
+            Domain::Log => "".to_string(),
+            Domain::Agent { command } => match command {
+                AgentFunctions::Lock | AgentFunctions::Unlock | AgentFunctions::Generate => "".to_string(),
+                _ => startup::get_cap_token().await?,
+            },
             _ => startup::get_cap_token().await?,
-        },
-        _ => startup::get_cap_token().await?,
+        }
     };
 
     match args.domain {
