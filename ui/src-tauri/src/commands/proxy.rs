@@ -55,7 +55,7 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
         .map_err(|err| format!("Error happend when retrieving the login verify content: {:?}", err))?;
 
     let endpoint = open_tunnel(
-        Some("http://proxy.ad4m.dev"),
+        Some("https://proxy-worker.ad4m.dev"),
         Some(&subdomain),
         None,
         graphql_port,
