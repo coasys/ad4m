@@ -85,6 +85,10 @@ jobs:
 
   integration:
     name: Integration test
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        node-version: [16.x]
 
      steps:
     - name: Fetch source code
@@ -95,12 +99,6 @@ jobs:
       with:
         override: true
         toolchain: 1.63.0
-
-    - name: install dependencies (ubuntu only)
-      if: matrix.platform == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
 
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v1
@@ -126,8 +124,8 @@ jobs:
       run: yarn run package-linux
 
     - name: Build AD4M cli
-      run: cd cli && cargo build
+      run: cd cli && cargo build --release
 
     - name: Run test script
-      run: ./tests/integration.sh
+      run: ./tests/bats/bin/bats tests/integration.bats
     
