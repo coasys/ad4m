@@ -10,13 +10,17 @@ use graphql_client::{GraphQLQuery, Response};
 )]
 pub struct RequestCapability;
 
-pub async fn run_request_capability() -> Result<String> {
+pub async fn run_request_capability(
+    app_name: String,
+    app_desc: String,
+    app_url: String,
+    capabilities: String,
+) -> Result<String> {
     let query = RequestCapability::build_query(request_capability::Variables {
-        app_name: "AD4M cli".to_string(),
-        app_desc: "Command line administration tool for AD4M".to_string(),
-        app_url: "org.perspect3vism.ad4m.cli".to_string(),
-        capabilities: "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]"
-            .to_string(),
+        app_name,
+        app_desc,
+        app_url,
+        capabilities,
     });
     let response_body: Response<request_capability::ResponseData> = reqwest::Client::new()
         .post(get_executor_url())

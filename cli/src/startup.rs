@@ -51,7 +51,17 @@ pub async fn get_cap_token() -> Result<String> {
 
     println!("No cap token found in file or token not valid. Requesting one...");
 
-    let request_id = agent::run_request_capability().await?;
+    let app_name = "AD4M cli".to_string();
+    let app_desc = "Command line administration tool for AD4M".to_string();
+    let app_url = "org.perspect3vism.ad4m.cli".to_string();
+    let capabilities = "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]"
+            .to_string();
+    let request_id = agent::run_request_capability(
+        app_name,
+        app_desc,
+        app_url,
+        capabilities,
+    ).await?;
     println!(
         "Successfully started a new Capability Token request with id: {:#?}",
         request_id
