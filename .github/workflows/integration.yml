@@ -18,6 +18,9 @@ jobs:
     - name: Fetch source code
       uses: actions/checkout@v2
 
+    - name: git init submodule
+      run: git submodule init && git submodule update
+
     - name: Install Rust stable
       uses: actions-rs/toolchain@v1
       with:
