@@ -50,6 +50,9 @@ jobs:
     - name: Build AD4M cli
       run: cd cli && cargo build --release
 
-    - name: Run test script
+    - name: Run binaries test script
+      run: ./tests/bats/bin/bats tests/binaries.bats
+
+    - name: Run integration test script
       run: ./tests/bats/bin/bats tests/integration.bats
     
