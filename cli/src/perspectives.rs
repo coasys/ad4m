@@ -101,8 +101,8 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
 
     match command.unwrap() {
         PerspectiveFunctions::Add { name } => {
-            let new_perspective = perspectives::add(cap_token, name).await?;
-            println!("{:#?}", new_perspective);
+            let new_perspective_id = perspectives::add(cap_token, name).await?;
+            println!("{}", new_perspective_id);
         }
         PerspectiveFunctions::Remove { id } => {
             perspectives::remove(cap_token, id).await?;
