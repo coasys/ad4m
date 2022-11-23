@@ -29,4 +29,8 @@ setup() {
 
     run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives
     assert_output --partial $perspective_id
+
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives add-link $perspective_id "test://source" "test://target" "test://predicate"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives query-links $perspective_id
+    assert_output --partial "test://source"
 }
