@@ -93,7 +93,7 @@ pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
             if let Some(error) = result.error {
                 bail!(error);
             } else {
-                println!("Agent locked");
+                println!("Agent generated");
             }
         }
     };
