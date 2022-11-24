@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::ClientInfo;
 use crate::types::{LinkExpression, Perspective};
 use crate::util::{create_websocket_client, query, query_raw};
 use anyhow::{anyhow, Context, Result};
@@ -255,4 +258,79 @@ pub async fn snapshot(executor_url: String, cap_token: String, uuid: String) -> 
         .perspective_snapshot
         .ok_or_else(|| anyhow!("No perspective found"))?
         .into())
+}
+
+pub struct PerspectivesClient {
+    info: Arc<ClientInfo>,
+}
+
+impl PerspectivesClient {
+    pub fn new(info: Arc<ClientInfo>) -> Self {
+        Self { info }
+    }
+
+    pub async fn all(&self) -> Result<Vec<AllPerspectives>> {
+        all(self.info.executor_url.clone(), self.info.cap_token.clone()).await
+    }
+
+    pub async fn add(&self, name: String) -> Result<String> {
+        add(self.info.executor_url.clone(), self.info.cap_token.clone(), name).await
+    }
+
+    pub async fn remove(&self, uuid: String) -> Result<()> {
+        remove(self.info.executor_url.clone(), self.info.cap_token.clone(), uuid).await
+    }
+
+    pub async fn add_link(&self, uid: String, source: String, target: String, predicate: Option<String>) -> Result<AddLinkPerspectiveAddLink> {
+        add_link(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            uid,
+            source,
+            target,
+            predicate,
+        )
+        .await
+    }
+
+    pub async fn query_links(
+        &self,
+        uuid: String,
+        source: Option<String>,
+        target: Option<String>,
+        predicate: Option<String>,
+        from_date: Option<DateTime>,
+        until_date: Option<DateTime>,
+        limit: Option<f64>,
+    ) -> Result<Vec<query_links::QueryLinksPerspectiveQueryLinks>> {
+        query_links(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            uuid,
+            source,
+            target,
+            predicate,
+            from_date,
+            until_date,
+            limit,
+        )
+        .await
+    }
+
+    pub async fn infer(&self, uuid: String, prolog_query: String) -> Result<Value> {
+        infer(self.info.executor_url.clone(), self.info.cap_token.clone(), uuid, prolog_query).await
+    }
+
+    pub async fn watch(
+        &self,
+        id: String,
+        link_callback: Box<dyn Fn(LinkExpression)>,
+    ) -> Result<()> {
+        watch(self.info.executor_url.clone(), self.info.cap_token.clone(), id, link_callback).await
+    }
+
+    pub async fn snapshot(&self, uuid: String) -> Result<Perspective> {
+        snapshot(self.info.executor_url.clone(), self.info.cap_token.clone(), uuid).await
+    }
+
 }

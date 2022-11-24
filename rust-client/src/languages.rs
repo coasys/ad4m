@@ -1,4 +1,6 @@
-use crate::util::query;
+use std::sync::Arc;
+
+use crate::{util::query, ClientInfo};
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
 
@@ -188,4 +190,82 @@ pub async fn remove(executor_url: String, cap_token: String, address: String) ->
     .await
     .with_context(|| "Failed to run languages -> remove")?;
     Ok(())
+}
+
+pub struct LanguagesClient {
+    info: Arc<ClientInfo>,
+}
+
+impl LanguagesClient {
+    pub fn new(info: Arc<ClientInfo>) -> Self {
+        Self { info }
+    }
+
+    pub async fn by_filter(&self, filter: Option<String>) -> Result<Vec<by_filter::ByFilterLanguages>> {
+        by_filter(self.info.executor_url.clone(), self.info.cap_token.clone(), filter.unwrap_or_else(|| "".to_string())).await
+    }
+
+    pub async fn by_address(&self, address: String) -> Result<Option<by_address::ByAddressLanguage>> {
+        by_address(self.info.executor_url.clone(), self.info.cap_token.clone(), address).await
+    }
+
+    pub async fn write_settings(
+        &self,
+        language_address: String,
+        settings: String,
+    ) -> Result<write_settings::ResponseData> {
+        write_settings(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            language_address,
+            settings,
+        )
+        .await
+    }
+
+    pub async fn apply_template_and_publish(
+        &self,
+        source: String,
+        template_data: String,
+    ) -> Result<apply_template_and_publish::ApplyTemplateAndPublishLanguageApplyTemplateAndPublish> {
+        apply_template_and_publish(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            source,
+            template_data,
+        )
+        .await
+    }
+
+    pub async fn meta(&self, address: String) -> Result<meta::MetaLanguageMeta> {
+        meta(self.info.executor_url.clone(), self.info.cap_token.clone(), address).await
+    }
+
+    pub async fn publish(
+        &self,
+        language_path: String,
+        name: String,
+        description: Option<String>,
+        possible_template_params: Option<Vec<String>>,
+        source_code_link: Option<String>,
+    ) -> Result<publish::PublishLanguagePublish> {
+        publish(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            language_path,
+            name,
+            description,
+            possible_template_params,
+            source_code_link,
+        )
+        .await
+    }
+
+    pub async fn source(&self, address: String) -> Result<String> {
+        source(self.info.executor_url.clone(), self.info.cap_token.clone(), address).await
+    }
+
+    pub async fn remove(&self, address: String) -> Result<()> {
+        remove(self.info.executor_url.clone(), self.info.cap_token.clone(), address).await
+    }
 }

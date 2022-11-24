@@ -1,4 +1,6 @@
-use crate::{util::query};
+use std::sync::Arc;
+
+use crate::{util::query, ClientInfo};
 use anyhow::{anyhow, Context, Result};
 use graphql_client::{GraphQLQuery, Response};
 
@@ -163,3 +165,57 @@ pub async fn generate(executor_url: String, cap_token: String, passphrase: Strin
     Ok(response_data.agent_generate)
 }
  
+pub struct AgentClient {
+    info: Arc<ClientInfo>,
+}
+
+impl AgentClient {
+    pub fn new(info: Arc<ClientInfo>) -> Self {
+        Self { info }
+    }
+
+    pub async fn request_capability(
+        &self,
+        app_name: String,
+        app_desc: String,
+        app_url: String,
+        capabilities: String,
+    ) -> Result<String> {
+        request_capability(
+            self.info.executor_url.clone(),
+            app_name,
+            app_desc,
+            app_url,
+            capabilities,
+        )
+        .await
+    }
+
+    pub async fn retrieve_capability(&self, request_id: String, rand: String) -> Result<String> {
+        retrieve_capability(self.info.executor_url.clone(), request_id, rand).await
+    }
+
+    pub async fn me(&self) -> Result<me::MeAgent> {
+        me(self.info.executor_url.clone(), self.info.cap_token.clone()).await
+    }
+
+    pub async fn status(&self) -> Result<agent_status::AgentStatusAgentStatus> {
+        status(self.info.executor_url.clone(), self.info.cap_token.clone()).await
+    }
+
+    pub async fn lock(&self, passphrase: String) -> Result<lock::LockAgentLock> {
+        lock(self.info.executor_url.clone(), self.info.cap_token.clone(), passphrase).await
+    }
+
+    pub async fn unlock(&self, passphrase: String) -> Result<unlock::UnlockAgentUnlock> {
+        unlock(self.info.executor_url.clone(), self.info.cap_token.clone(), passphrase).await
+    }
+
+    pub async fn by_did(&self, did: String) -> Result<Option<by_did::ByDidAgentByDid>> {
+        by_did(self.info.executor_url.clone(), self.info.cap_token.clone(), did).await
+    }
+
+    pub async fn generate(&self, passphrase: String) -> Result<generate::GenerateAgentGenerate> {
+        generate(self.info.executor_url.clone(), self.info.cap_token.clone(), passphrase).await
+    }
+}

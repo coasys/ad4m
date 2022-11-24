@@ -1,4 +1,6 @@
-use crate::util::query;
+use std::sync::Arc;
+
+use crate::{util::query, ClientInfo};
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
 
@@ -54,3 +56,34 @@ pub async fn join(
     .with_context(|| "Failed to run neighbourhoods->join query")?;
     Ok(response_data.neighbourhood_join_from_url)
 }
+
+pub struct NeighbourhoodsClient {
+    info: Arc<ClientInfo>,
+}
+
+impl NeighbourhoodsClient {
+    pub fn new(info: Arc<ClientInfo>) -> Self {
+        Self { info }
+    }
+
+    pub async fn publish(
+        &self,
+        link_language: String,
+        meta: Option<publish_from_perspective::PerspectiveInput>,
+        perspective_uuid: String,
+    ) -> Result<String> {
+        publish(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            link_language,
+            meta,
+            perspective_uuid,
+        )
+        .await
+    }
+
+    pub async fn join(&self, url: String) -> Result<join_from_url::JoinFromUrlNeighbourhoodJoinFromUrl> {
+        join(self.info.executor_url.clone(), self.info.cap_token.clone(), url).await
+    }
+}
+
