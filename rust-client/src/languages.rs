@@ -11,10 +11,12 @@ use graphql_client::GraphQLQuery;
 pub struct ByFilter;
 
 pub async fn by_filter(
+    executor_url: String,
     cap_token: String,
     filter: String,
 ) -> Result<Vec<by_filter::ByFilterLanguages>> {
     let response_data: by_filter::ResponseData = query(
+        executor_url, 
         cap_token,
         ByFilter::build_query(by_filter::Variables { filter }),
     )
@@ -32,10 +34,12 @@ pub async fn by_filter(
 pub struct ByAddress;
 
 pub async fn by_address(
+    executor_url: String,
     cap_token: String,
     address: String,
 ) -> Result<Option<by_address::ByAddressLanguage>> {
     let response_data: by_address::ResponseData = query(
+        executor_url,
         cap_token,
         ByAddress::build_query(by_address::Variables { address }),
     )
@@ -53,11 +57,13 @@ pub async fn by_address(
 pub struct WriteSettings;
 
 pub async fn write_settings(
+    executor_url: String,
     cap_token: String,
     language_address: String,
     settings: String,
 ) -> Result<write_settings::ResponseData> {
     query(
+        executor_url,
         cap_token,
         WriteSettings::build_query(write_settings::Variables {
             language_address,
@@ -77,11 +83,13 @@ pub async fn write_settings(
 pub struct ApplyTemplateAndPublish;
 
 pub async fn apply_template_and_publish(
+    executor_url: String,
     cap_token: String,
     source: String,
     template_data: String,
 ) -> Result<apply_template_and_publish::ApplyTemplateAndPublishLanguageApplyTemplateAndPublish> {
     let response_data: apply_template_and_publish::ResponseData = query(
+        executor_url,
         cap_token,
         ApplyTemplateAndPublish::build_query(apply_template_and_publish::Variables {
             source_language_hash: source,
@@ -101,9 +109,9 @@ pub async fn apply_template_and_publish(
 )]
 pub struct Meta;
 
-pub async fn meta(cap_token: String, address: String) -> Result<meta::MetaLanguageMeta> {
+pub async fn meta(executor_url: String, cap_token: String, address: String) -> Result<meta::MetaLanguageMeta> {
     let response_data: meta::ResponseData =
-        query(cap_token, Meta::build_query(meta::Variables { address }))
+        query(executor_url, cap_token, Meta::build_query(meta::Variables { address }))
             .await
             .with_context(|| "Failed to run languages -> meta")?;
     Ok(response_data.language_meta)
@@ -118,6 +126,7 @@ pub async fn meta(cap_token: String, address: String) -> Result<meta::MetaLangua
 pub struct Publish;
 
 pub async fn publish(
+    executor_url: String,
     cap_token: String,
     language_path: String,
     name: String,
@@ -126,6 +135,7 @@ pub async fn publish(
     source_code_link: Option<String>,
 ) -> Result<publish::PublishLanguagePublish> {
     let response_data: publish::ResponseData = query(
+        executor_url,
         cap_token,
         Publish::build_query(publish::Variables {
             language_path,
@@ -150,8 +160,9 @@ pub async fn publish(
 )]
 pub struct Source;
 
-pub async fn source(cap_token: String, address: String) -> Result<String> {
+pub async fn source(executor_url: String, cap_token: String, address: String) -> Result<String> {
     let response_data: source::ResponseData = query(
+        executor_url,
         cap_token,
         Source::build_query(source::Variables { address }),
     )
@@ -168,8 +179,9 @@ pub async fn source(cap_token: String, address: String) -> Result<String> {
 )]
 pub struct Remove;
 
-pub async fn remove(cap_token: String, address: String) -> Result<()> {
+pub async fn remove(executor_url: String, cap_token: String, address: String) -> Result<()> {
     query(
+        executor_url,
         cap_token,
         Remove::build_query(remove::Variables { address }),
     )

@@ -19,8 +19,8 @@ use self::all::AllPerspectives;
 )]
 pub struct All;
 
-pub async fn all(cap_token: String) -> Result<Vec<AllPerspectives>> {
-    let response_data: all::ResponseData = query(cap_token, All::build_query(all::Variables {}))
+pub async fn all(executor_url: String, cap_token: String) -> Result<Vec<AllPerspectives>> {
+    let response_data: all::ResponseData = query(executor_url, cap_token, All::build_query(all::Variables {}))
         .await
         .with_context(|| "Failed to run perspectives->all query")?;
     Ok(response_data.perspectives)
@@ -34,9 +34,9 @@ pub async fn all(cap_token: String) -> Result<Vec<AllPerspectives>> {
 )]
 pub struct Add;
 
-pub async fn add(cap_token: String, name: String) -> Result<String> {
+pub async fn add(executor_url: String, cap_token: String, name: String) -> Result<String> {
     let response_data: add::ResponseData =
-        query(cap_token, Add::build_query(add::Variables { name }))
+        query(executor_url, cap_token, Add::build_query(add::Variables { name }))
             .await
             .with_context(|| "Failed to run perspectives->add query")?;
     Ok(response_data.perspective_add.uuid)
@@ -50,9 +50,9 @@ pub async fn add(cap_token: String, name: String) -> Result<String> {
 )]
 pub struct Remove;
 
-pub async fn remove(cap_token: String, uuid: String) -> Result<()> {
+pub async fn remove(executor_url: String, cap_token: String, uuid: String) -> Result<()> {
     let response: remove::ResponseData =
-        query(cap_token, Remove::build_query(remove::Variables { uuid }))
+        query(executor_url, cap_token, Remove::build_query(remove::Variables { uuid }))
             .await
             .with_context(|| "Failed to run perspectives->remove query")?;
     if response.perspective_remove {
@@ -71,6 +71,7 @@ pub async fn remove(cap_token: String, uuid: String) -> Result<()> {
 pub struct AddLink;
 
 pub async fn add_link(
+    executor_url: String,
     cap_token: String,
     uuid: String,
     source: String,
@@ -78,6 +79,7 @@ pub async fn add_link(
     predicate: Option<String>,
 ) -> Result<AddLinkPerspectiveAddLink> {
     let response_data: add_link::ResponseData = query(
+        executor_url,
         cap_token,
         AddLink::build_query(add_link::Variables {
             uuid,
@@ -103,6 +105,7 @@ pub async fn add_link(
 pub struct QueryLinks;
 
 pub async fn query_links(
+    executor_url: String,
     cap_token: String,
     uuid: String,
     source: Option<String>,
@@ -113,6 +116,7 @@ pub async fn query_links(
     limit: Option<f64>,
 ) -> Result<Vec<query_links::QueryLinksPerspectiveQueryLinks>> {
     let response_data: query_links::ResponseData = query(
+        executor_url,
         cap_token,
         QueryLinks::build_query(query_links::Variables {
             uuid,
@@ -140,8 +144,9 @@ pub async fn query_links(
 )]
 pub struct Infer;
 
-pub async fn infer(cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
+pub async fn infer(executor_url: String, cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
     let response: Response<infer::ResponseData> = query_raw(
+        executor_url,
         cap_token,
         Infer::build_query(infer::Variables {
             uuid,
@@ -188,13 +193,14 @@ pub async fn infer(cap_token: String, uuid: String, prolog_query: String) -> Res
 pub struct SubscriptionLinkAdded;
 
 pub async fn watch(
+    executor_url: String,
     cap_token: String,
     id: String,
     link_callback: Box<dyn Fn(LinkExpression)>,
 ) -> Result<()> {
     use futures::StreamExt;
 
-    let mut client = create_websocket_client(cap_token)
+    let mut client = create_websocket_client(executor_url, cap_token)
         .await
         .with_context(|| "Failed to create websocket client")?;
 
@@ -237,8 +243,9 @@ pub async fn watch(
 )]
 pub struct Snapshot;
 
-pub async fn snapshot(cap_token: String, uuid: String) -> Result<Perspective> {
+pub async fn snapshot(executor_url: String, cap_token: String, uuid: String) -> Result<Perspective> {
     let response: snapshot::ResponseData = query(
+        executor_url,
         cap_token,
         Snapshot::build_query(snapshot::Variables { uuid }),
     )

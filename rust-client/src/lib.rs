@@ -17,15 +17,3 @@ pub mod perspectives;
 pub mod runtime;
 pub mod types;
 mod util;
-
-static mut EXECUTOR_URL: String = String::new();
-
-pub fn get_executor_url() -> String {
-    unsafe { EXECUTOR_URL.clone() }
-}
-
-pub fn set_executor_url(url: String) {
-    unsafe {
-        EXECUTOR_URL = url;
-    }
-}

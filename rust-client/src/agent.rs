@@ -1,4 +1,4 @@
-use crate::{get_executor_url, util::query};
+use crate::{util::query};
 use anyhow::{anyhow, Context, Result};
 use graphql_client::{GraphQLQuery, Response};
 
@@ -11,6 +11,7 @@ use graphql_client::{GraphQLQuery, Response};
 pub struct RequestCapability;
 
 pub async fn request_capability(
+    executor_url: String,
     app_name: String,
     app_desc: String,
     app_url: String,
@@ -23,7 +24,7 @@ pub async fn request_capability(
         capabilities,
     });
     let response_body: Response<request_capability::ResponseData> = reqwest::Client::new()
-        .post(get_executor_url())
+        .post(executor_url)
         .json(&query)
         .send()
         .await?
@@ -44,11 +45,11 @@ pub async fn request_capability(
 )]
 pub struct RetrieveCapability;
 
-pub async fn retrieve_capability(request_id: String, rand: String) -> Result<String> {
+pub async fn retrieve_capability(executor_url: String, request_id: String, rand: String) -> Result<String> {
     let query =
         RetrieveCapability::build_query(retrieve_capability::Variables { request_id, rand });
     let response_body: Response<retrieve_capability::ResponseData> = reqwest::Client::new()
-        .post(get_executor_url())
+        .post(executor_url)
         .json(&query)
         .send()
         .await?
@@ -69,8 +70,8 @@ pub async fn retrieve_capability(request_id: String, rand: String) -> Result<Str
 )]
 pub struct Me;
 
-pub async fn me(cap_token: String) -> Result<me::MeAgent> {
-    let response_data: me::ResponseData = query(cap_token, Me::build_query(me::Variables {}))
+pub async fn me(executor_url: String, cap_token: String) -> Result<me::MeAgent> {
+    let response_data: me::ResponseData = query(executor_url, cap_token, Me::build_query(me::Variables {}))
         .await
         .with_context(|| "Failed to run agent->me query")?;
     Ok(response_data.agent)
@@ -84,8 +85,9 @@ pub async fn me(cap_token: String) -> Result<me::MeAgent> {
 )]
 pub struct AgentStatus;
 
-pub async fn status(cap_token: String) -> Result<agent_status::AgentStatusAgentStatus> {
+pub async fn status(executor_url: String, cap_token: String) -> Result<agent_status::AgentStatusAgentStatus> {
     let response_data: agent_status::ResponseData = query(
+        executor_url,
         cap_token,
         AgentStatus::build_query(agent_status::Variables {}),
     )
@@ -102,9 +104,9 @@ pub async fn status(cap_token: String) -> Result<agent_status::AgentStatusAgentS
 )]
 pub struct Lock;
 
-pub async fn lock(cap_token: String, passphrase: String) -> Result<lock::LockAgentLock> {
+pub async fn lock(executor_url: String, cap_token: String, passphrase: String) -> Result<lock::LockAgentLock> {
     let response_data: lock::ResponseData =
-        query(cap_token, Lock::build_query(lock::Variables { passphrase }))
+        query(executor_url, cap_token, Lock::build_query(lock::Variables { passphrase }))
             .await
             .with_context(|| "Failed to run agent->lock")?;
     Ok(response_data.agent_lock)
@@ -118,8 +120,9 @@ pub async fn lock(cap_token: String, passphrase: String) -> Result<lock::LockAge
 )]
 pub struct Unlock;
 
-pub async fn unlock(cap_token: String, passphrase: String) -> Result<unlock::UnlockAgentUnlock> {
+pub async fn unlock(executor_url: String, cap_token: String, passphrase: String) -> Result<unlock::UnlockAgentUnlock> {
     let response_data: unlock::ResponseData = query(
+        executor_url,
         cap_token,
         Unlock::build_query(unlock::Variables { passphrase }),
     )
@@ -136,9 +139,9 @@ pub async fn unlock(cap_token: String, passphrase: String) -> Result<unlock::Unl
 )]
 pub struct ByDID;
 
-pub async fn by_did(cap_token: String, did: String) -> Result<Option<by_did::ByDidAgentByDid>> {
+pub async fn by_did(executor_url: String, cap_token: String, did: String) -> Result<Option<by_did::ByDidAgentByDid>> {
     let response_data: by_did::ResponseData =
-        query(cap_token, ByDID::build_query(by_did::Variables { did }))
+        query(executor_url, cap_token, ByDID::build_query(by_did::Variables { did }))
             .await
             .with_context(|| "Failed to run agent->byDID query")?;
     Ok(response_data.agent_by_did)
@@ -152,9 +155,9 @@ pub async fn by_did(cap_token: String, did: String) -> Result<Option<by_did::ByD
 )]
 pub struct Generate;
 
-pub async fn generate(cap_token: String, passphrase: String) -> Result<generate::GenerateAgentGenerate> {
+pub async fn generate(executor_url: String, cap_token: String, passphrase: String) -> Result<generate::GenerateAgentGenerate> {
     let response_data: generate::ResponseData =
-        query(cap_token, Generate::build_query(generate::Variables { passphrase }))
+        query(executor_url, cap_token, Generate::build_query(generate::Variables { passphrase }))
             .await
             .with_context(|| "Failed to run agent->generate")?;
     Ok(response_data.agent_generate)

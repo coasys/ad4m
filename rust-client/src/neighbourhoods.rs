@@ -11,6 +11,7 @@ use graphql_client::GraphQLQuery;
 pub struct PublishFromPerspective;
 
 pub async fn publish(
+    executor_url: String,
     cap_token: String,
     link_language: String,
     meta: Option<publish_from_perspective::PerspectiveInput>,
@@ -18,6 +19,7 @@ pub async fn publish(
 ) -> Result<String> {
     let meta = meta.unwrap_or(publish_from_perspective::PerspectiveInput { links: vec![] });
     let response_data: publish_from_perspective::ResponseData = query(
+        executor_url,
         cap_token,
         PublishFromPerspective::build_query(publish_from_perspective::Variables {
             link_language,
@@ -39,10 +41,12 @@ pub async fn publish(
 pub struct JoinFromUrl;
 
 pub async fn join(
+    executor_url: String,
     cap_token: String,
     url: String,
 ) -> Result<join_from_url::JoinFromUrlNeighbourhoodJoinFromUrl> {
     let response_data: join_from_url::ResponseData = query(
+        executor_url,
         cap_token,
         JoinFromUrl::build_query(join_from_url::Variables { url }),
     )

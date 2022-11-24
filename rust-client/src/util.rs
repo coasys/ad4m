@@ -1,19 +1,17 @@
-use crate::get_executor_url;
 use anyhow::{anyhow, Result};
-
 use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 use futures::StreamExt;
 use graphql_client::{QueryBody, Response};
 use graphql_ws_client::{graphql::GraphQLClient, AsyncWebsocketClient, GraphQLClientClientBuilder};
 use serde::{de::DeserializeOwned, Serialize};
 
-pub async fn query<Q, R>(cap_token: String, query: QueryBody<Q>) -> Result<R>
+pub async fn query<Q, R>(executor_url: String, cap_token: String, query: QueryBody<Q>) -> Result<R>
 where
     Q: Serialize,
     R: DeserializeOwned,
 {
     let response_body: Response<R> = reqwest::Client::new()
-        .post(get_executor_url())
+        .post(executor_url)
         .header("Authorization", cap_token)
         .json(&query)
         .send()
@@ -26,13 +24,13 @@ where
     Ok(response_data)
 }
 
-pub async fn query_raw<Q, R>(cap_token: String, query: QueryBody<Q>) -> Result<Response<R>>
+pub async fn query_raw<Q, R>(executor_url: String, cap_token: String, query: QueryBody<Q>) -> Result<Response<R>>
 where
     Q: Serialize,
     R: DeserializeOwned,
 {
     Ok(reqwest::Client::new()
-        .post(get_executor_url())
+        .post(executor_url)
         .header("Authorization", cap_token)
         .json(&query)
         .send()
@@ -64,9 +62,10 @@ impl futures::task::Spawn for TokioSpawner {
 }
 
 pub async fn create_websocket_client(
+    executor_url: String,
     cap_token: String,
 ) -> Result<AsyncWebsocketClient<GraphQLClient, Message>> {
-    let url = get_executor_url().replace("http", "ws");
+    let url = executor_url.replace("http", "ws");
     let mut request = url.into_client_request().unwrap();
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
