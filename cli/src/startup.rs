@@ -54,15 +54,16 @@ pub async fn get_cap_token(executor_url: String) -> Result<String> {
     let app_name = "AD4M cli".to_string();
     let app_desc = "Command line administration tool for AD4M".to_string();
     let app_url = "org.perspect3vism.ad4m.cli".to_string();
-    let capabilities = "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]"
-            .to_string();
+    let capabilities =
+        "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]".to_string();
     let request_id = agent::request_capability(
         executor_url.clone(),
         app_name,
         app_desc,
         app_url,
         capabilities,
-    ).await?;
+    )
+    .await?;
     println!(
         "Successfully started a new Capability Token request with id: {:#?}",
         request_id

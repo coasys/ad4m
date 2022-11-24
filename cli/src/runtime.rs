@@ -89,11 +89,17 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
             }
         }
         RuntimeFunctions::AddLinkLanguageTemplates { addresses } => {
-            ad4m_client.runtime.add_link_language_templates(addresses).await?;
+            ad4m_client
+                .runtime
+                .add_link_language_templates(addresses)
+                .await?;
             println!("Link language templates added!");
         }
         RuntimeFunctions::RemoveLinkLanguageTemplates { addresses } => {
-            ad4m_client.runtime.remove_link_language_templates(addresses).await?;
+            ad4m_client
+                .runtime
+                .remove_link_language_templates(addresses)
+                .await?;
             println!("Link language templates removed!");
         }
         RuntimeFunctions::Friends => {
@@ -124,13 +130,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
             data,
             signed_data,
         } => {
-            let result = ad4m_client.runtime.verify_string_signed_by_did(
-                did,
-                did_signing_key,
-                data,
-                signed_data,
-            )
-            .await?;
+            let result = ad4m_client
+                .runtime
+                .verify_string_signed_by_did(did, did_signing_key, data, signed_data)
+                .await?;
             println!("{:?}", result);
         }
         RuntimeFunctions::SetStatus { status } => {
@@ -144,7 +147,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         }
         RuntimeFunctions::FriendSendMessage { agent, message } => {
             let message = string_2_perspective_snapshot(&ad4m_client, message).await?;
-            ad4m_client.runtime.friend_send_message(agent, message.into()).await?;
+            ad4m_client
+                .runtime
+                .friend_send_message(agent, message.into())
+                .await?;
             println!("Message sent!");
         }
         RuntimeFunctions::MessageInbox { filter } => {

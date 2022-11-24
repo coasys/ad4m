@@ -19,8 +19,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: NeighbourhoodFunctions) -> Re
             perspective_id,
             link_language,
         } => {
-            let neighbourhood =
-            ad4m_client.neighbourhoods.publish(link_language, None, perspective_id).await?;
+            let neighbourhood = ad4m_client
+                .neighbourhoods
+                .publish(link_language, None, perspective_id)
+                .await?;
             println!("Neighbourhood shared as: {}", neighbourhood);
         }
         NeighbourhoodFunctions::Join { url } => {

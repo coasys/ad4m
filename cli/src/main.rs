@@ -113,7 +113,9 @@ async fn main() -> Result<()> {
         match &args.domain {
             Domain::Log => "".to_string(),
             Domain::Agent { command } => match command {
-                AgentFunctions::Lock | AgentFunctions::Unlock{ .. } | AgentFunctions::Generate { .. } => "".to_string(),
+                AgentFunctions::Lock
+                | AgentFunctions::Unlock { .. }
+                | AgentFunctions::Generate { .. } => "".to_string(),
                 _ => startup::get_cap_token(executor_url.clone()).await?,
             },
             _ => startup::get_cap_token(executor_url.clone()).await?,

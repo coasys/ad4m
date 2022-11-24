@@ -113,21 +113,26 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             target,
             predicate,
         } => {
-            ad4m_client.perspectives.add_link(id, source, target, predicate).await?;
+            ad4m_client
+                .perspectives
+                .add_link(id, source, target, predicate)
+                .await?;
         }
         PerspectiveFunctions::QueryLinks(args) => {
             let from_date = maybe_parse_datetime(args.from_date)?;
             let until_date = maybe_parse_datetime(args.until_date)?;
-            let result = ad4m_client.perspectives.query_links(
-                args.id,
-                args.source,
-                args.target,
-                args.predicate,
-                from_date,
-                until_date,
-                args.limit,
-            )
-            .await?;
+            let result = ad4m_client
+                .perspectives
+                .query_links(
+                    args.id,
+                    args.source,
+                    args.target,
+                    args.predicate,
+                    from_date,
+                    until_date,
+                    args.limit,
+                )
+                .await?;
             for link in result {
                 print_link(link.into());
             }
@@ -137,13 +142,15 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             print_prolog_results(results)?;
         }
         PerspectiveFunctions::Watch { id } => {
-            ad4m_client.perspectives.watch(
-                id,
-                Box::new(|link| {
-                    print_link(link);
-                }),
-            )
-            .await?;
+            ad4m_client
+                .perspectives
+                .watch(
+                    id,
+                    Box::new(|link| {
+                        print_link(link);
+                    }),
+                )
+                .await?;
         }
         PerspectiveFunctions::Snapshot { id } => {
             let result = ad4m_client.perspectives.snapshot(id).await?;
@@ -175,13 +182,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
                         Some(predicate)
                     };
 
-                    ad4m_client.perspectives.add_link(
-                        id.clone(),
-                        source,
-                        target,
-                        predicate,
-                    )
-                    .await?;
+                    ad4m_client
+                        .perspectives
+                        .add_link(id.clone(), source, target, predicate)
+                        .await?;
                     continue;
                 }
 

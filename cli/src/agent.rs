@@ -49,7 +49,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             );
         }
         AgentFunctions::Lock => {
-            let result = ad4m_client.agent.lock(readline_masked("Passphrase: ")?).await?;
+            let result = ad4m_client
+                .agent
+                .lock(readline_masked("Passphrase: ")?)
+                .await?;
             if let Some(error) = result.error {
                 bail!(error);
             } else {
@@ -62,7 +65,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             } else {
                 readline_masked("Passphrase: ")?
             };
-            
+
             let result = ad4m_client.agent.unlock(pp).await?;
             if let Some(error) = result.error {
                 bail!(error);
@@ -88,7 +91,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
                 }
                 passphrase1
             };
-            
+
             let result = ad4m_client.agent.generate(pp).await?;
             if let Some(error) = result.error {
                 bail!(error);

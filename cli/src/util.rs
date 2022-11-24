@@ -86,18 +86,21 @@ pub async fn string_2_perspective_snapshot(
         .collect();
     let temp_perspective = ad4m_client.perspectives.add(rand_name).await?;
     println!("Created temporary perspective: {}", temp_perspective);
-    ad4m_client.perspectives.add_link(
-        temp_perspective.clone(),
-        "ad4m://self".to_string(),
-        format!("literal://string:{}", urlencoding::encode(&string)),
-        None,
-    )
-    .await?;
+    ad4m_client
+        .perspectives
+        .add_link(
+            temp_perspective.clone(),
+            "ad4m://self".to_string(),
+            format!("literal://string:{}", urlencoding::encode(&string)),
+            None,
+        )
+        .await?;
     println!("Added status link to temporary perspective");
 
-    let snapshot =
-        ad4m_client.perspectives.snapshot(temp_perspective.clone())
-            .await?;
+    let snapshot = ad4m_client
+        .perspectives
+        .snapshot(temp_perspective.clone())
+        .await?;
     println!("Created snapshot of temporary perspective");
 
     ad4m_client.perspectives.remove(temp_perspective).await?;

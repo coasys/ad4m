@@ -69,15 +69,20 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
             }
         }
         LanguageFunctions::WriteSettings { address, settings } => {
-            ad4m_client.languages.write_settings(address, settings).await?;
+            ad4m_client
+                .languages
+                .write_settings(address, settings)
+                .await?;
             println!("Language settings written");
         }
         LanguageFunctions::ApplyTemplateAndPublish {
             source,
             template_data,
         } => {
-            let new_language =
-                ad4m_client.languages.apply_template_and_publish(source, template_data).await?;
+            let new_language = ad4m_client
+                .languages
+                .apply_template_and_publish(source, template_data)
+                .await?;
             println!("Language template applied and published!");
             println!("Name: {}", new_language.name);
             println!("Address: {}", new_language.address);
@@ -119,14 +124,16 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
                 Some(source_code_link)
             };
 
-            let publish_result = ad4m_client.languages.publish(
-                path,
-                name,
-                description,
-                possible_template_params,
-                source_code_link,
-            )
-            .await?;
+            let publish_result = ad4m_client
+                .languages
+                .publish(
+                    path,
+                    name,
+                    description,
+                    possible_template_params,
+                    source_code_link,
+                )
+                .await?;
             println!(
                 "Language published with address: {}",
                 publish_result.address
