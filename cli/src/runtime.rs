@@ -1,5 +1,5 @@
 use crate::formatting::{print_message_perspective, print_sent_message_perspective};
-use ad4m_client::runtime;
+use ad4m_client::Ad4mClient;
 use anyhow::Result;
 use clap::Subcommand;
 
@@ -58,64 +58,64 @@ pub enum RuntimeFunctions {
     },
 }
 
-pub async fn run(cap_token: String, command: RuntimeFunctions) -> Result<()> {
+pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<()> {
     match command {
         RuntimeFunctions::Info => {
-            let info = runtime::info(cap_token).await?;
+            let info = ad4m_client.runtime.info().await?;
             println!("{:#?}", info);
         }
         RuntimeFunctions::Quit => {
-            runtime::quit(cap_token).await?;
+            ad4m_client.runtime.quit().await?;
             println!("Executor shut down!");
         }
         RuntimeFunctions::AddTrustedAgents { agents } => {
-            runtime::add_trusted_agents(cap_token, agents).await?;
+            ad4m_client.runtime.add_trusted_agents(agents).await?;
             println!("Trusted agents added!");
         }
         RuntimeFunctions::DeleteTrustedAgents { agents } => {
-            runtime::delete_trusted_agents(cap_token, agents).await?;
+            ad4m_client.runtime.delete_trusted_agents(agents).await?;
             println!("Trusted agents removed!");
         }
         RuntimeFunctions::TrustedAgents => {
-            let agents = runtime::trusted_agents(cap_token).await?;
+            let agents = ad4m_client.runtime.trusted_agents().await?;
             for agent in agents {
                 println!("{}", agent);
             }
         }
         RuntimeFunctions::LinkLanguageTemplates => {
-            let templates = runtime::link_language_templates(cap_token).await?;
+            let templates = ad4m_client.runtime.link_language_templates().await?;
             for template in templates {
                 println!("{}", template);
             }
         }
         RuntimeFunctions::AddLinkLanguageTemplates { addresses } => {
-            runtime::add_link_language_templates(cap_token, addresses).await?;
+            ad4m_client.runtime.add_link_language_templates(addresses).await?;
             println!("Link language templates added!");
         }
         RuntimeFunctions::RemoveLinkLanguageTemplates { addresses } => {
-            runtime::remove_link_language_templates(cap_token, addresses).await?;
+            ad4m_client.runtime.remove_link_language_templates(addresses).await?;
             println!("Link language templates removed!");
         }
         RuntimeFunctions::Friends => {
-            let friends = runtime::friends(cap_token).await?;
+            let friends = ad4m_client.runtime.friends().await?;
             for friend in friends {
                 println!("{}", friend);
             }
         }
         RuntimeFunctions::AddFriends { agents } => {
-            runtime::add_friends(cap_token, agents).await?;
+            ad4m_client.runtime.add_friends(agents).await?;
             println!("Friends added!");
         }
         RuntimeFunctions::RemoveFriends { agents } => {
-            runtime::remove_friends(cap_token, agents).await?;
+            ad4m_client.runtime.remove_friends(agents).await?;
             println!("Friends removed!");
         }
         RuntimeFunctions::HcAgentInfos => {
-            let infos = runtime::hc_agent_infos(cap_token).await?;
+            let infos = ad4m_client.runtime.hc_agent_infos().await?;
             println!("{}", infos);
         }
         RuntimeFunctions::HcAddAgentInfos { infos } => {
-            runtime::hc_add_agent_infos(cap_token, infos).await?;
+            ad4m_client.runtime.hc_add_agent_infos(infos).await?;
             println!("Holochain agent infos added!");
         }
         RuntimeFunctions::VerifySignature {
@@ -124,8 +124,7 @@ pub async fn run(cap_token: String, command: RuntimeFunctions) -> Result<()> {
             data,
             signed_data,
         } => {
-            let result = runtime::verify_string_signed_by_did(
-                cap_token,
+            let result = ad4m_client.runtime.verify_string_signed_by_did(
                 did,
                 did_signing_key,
                 data,
@@ -135,28 +134,28 @@ pub async fn run(cap_token: String, command: RuntimeFunctions) -> Result<()> {
             println!("{:?}", result);
         }
         RuntimeFunctions::SetStatus { status } => {
-            let perspective = string_2_perspective_snapshot(cap_token.clone(), status).await?;
-            runtime::set_status(cap_token, perspective.into()).await?;
+            let perspective = string_2_perspective_snapshot(&ad4m_client, status).await?;
+            ad4m_client.runtime.set_status(perspective.into()).await?;
             println!("Status set!");
         }
         RuntimeFunctions::FriendStatus { agent } => {
-            let status = runtime::friend_status(cap_token, agent).await?;
+            let status = ad4m_client.runtime.friend_status(agent).await?;
             println!("{:?}", status.runtime_friend_status);
         }
         RuntimeFunctions::FriendSendMessage { agent, message } => {
-            let message = string_2_perspective_snapshot(cap_token.clone(), message).await?;
-            runtime::friend_send_message(cap_token, agent, message.into()).await?;
+            let message = string_2_perspective_snapshot(&ad4m_client, message).await?;
+            ad4m_client.runtime.friend_send_message(agent, message.into()).await?;
             println!("Message sent!");
         }
         RuntimeFunctions::MessageInbox { filter } => {
-            let messages = runtime::message_inbox(cap_token, filter).await?;
+            let messages = ad4m_client.runtime.message_inbox(filter).await?;
             for message in messages {
                 print_message_perspective(message);
                 println!();
             }
         }
         RuntimeFunctions::MessageOutbox { filter } => {
-            let messages = runtime::message_outbox(cap_token, filter).await?;
+            let messages = ad4m_client.runtime.message_outbox(filter).await?;
             for message in messages {
                 print_sent_message_perspective(message);
                 println!();

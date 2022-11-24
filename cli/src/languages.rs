@@ -1,4 +1,4 @@
-use ad4m_client::languages;
+use ad4m_client::Ad4mClient;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use rustyline::Editor;
@@ -30,9 +30,9 @@ pub enum LanguageFunctions {
     Remove { address: String },
 }
 
-pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Result<()> {
+pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) -> Result<()> {
     if command.is_none() {
-        let all_languages = languages::by_filter(cap_token, "".to_string()).await?;
+        let all_languages = ad4m_client.languages.by_filter(None).await?;
         for language in all_languages {
             println!("\x1b[36mName: \x1b[97m{}", language.name);
             println!("\x1b[36mAddress: \x1b[97m{}", language.address);
@@ -53,15 +53,15 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
 
     match command.unwrap() {
         LanguageFunctions::All => {
-            let all_perspectives = languages::by_filter(cap_token, "".to_string()).await?;
+            let all_perspectives = ad4m_client.languages.by_filter(None).await?;
             println!("{:#?}", all_perspectives);
         }
         LanguageFunctions::ByFilter { filter } => {
-            let languages = languages::by_filter(cap_token, filter).await?;
+            let languages = ad4m_client.languages.by_filter(Some(filter)).await?;
             println!("{:#?}", languages);
         }
         LanguageFunctions::ByAddress { address } => {
-            let maybe_language = languages::by_address(cap_token, address).await?;
+            let maybe_language = ad4m_client.languages.by_address(address).await?;
             if let Some(language) = maybe_language {
                 println!("{:#?}", language);
             } else {
@@ -69,7 +69,7 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
             }
         }
         LanguageFunctions::WriteSettings { address, settings } => {
-            languages::write_settings(cap_token, address, settings).await?;
+            ad4m_client.languages.write_settings(address, settings).await?;
             println!("Language settings written");
         }
         LanguageFunctions::ApplyTemplateAndPublish {
@@ -77,13 +77,13 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
             template_data,
         } => {
             let new_language =
-                languages::apply_template_and_publish(cap_token, source, template_data).await?;
+                ad4m_client.languages.apply_template_and_publish(source, template_data).await?;
             println!("Language template applied and published!");
             println!("Name: {}", new_language.name);
             println!("Address: {}", new_language.address);
         }
         LanguageFunctions::Meta { address } => {
-            let meta = languages::meta(cap_token, address).await?;
+            let meta = ad4m_client.languages.meta(address).await?;
             println!("{:#?}", meta);
         }
         LanguageFunctions::Publish { path } => {
@@ -119,8 +119,7 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
                 Some(source_code_link)
             };
 
-            let publish_result = languages::publish(
-                cap_token,
+            let publish_result = ad4m_client.languages.publish(
                 path,
                 name,
                 description,
@@ -134,11 +133,11 @@ pub async fn run(cap_token: String, command: Option<LanguageFunctions>) -> Resul
             );
         }
         LanguageFunctions::Source { address } => {
-            let source = languages::source(cap_token, address).await?;
+            let source = ad4m_client.languages.source(address).await?;
             println!("{}", source);
         }
         LanguageFunctions::Remove { address } => {
-            languages::remove(cap_token, address).await?;
+            ad4m_client.languages.remove(address).await?;
             println!("Language removed");
         }
     };

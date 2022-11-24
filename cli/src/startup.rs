@@ -37,14 +37,14 @@ pub fn get_executor_url() -> Result<String> {
     Ok(format!("http://localhost:{}/graphql", port))
 }
 
-pub async fn get_cap_token() -> Result<String> {
+pub async fn get_cap_token(executor_url: String) -> Result<String> {
     let cap_token;
 
     let cap_token_file = data_path()?.join("cap_token");
     if cap_token_file.exists() {
         cap_token = std::fs::read_to_string(&cap_token_file)
             .with_context(|| format!("Could not read file `{}`", cap_token_file.display()))?;
-        if (perspectives::all(cap_token.clone()).await).is_ok() {
+        if (perspectives::all(executor_url.clone(), cap_token.clone()).await).is_ok() {
             return Ok(cap_token);
         }
     }
@@ -57,6 +57,7 @@ pub async fn get_cap_token() -> Result<String> {
     let capabilities = "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]"
             .to_string();
     let request_id = agent::request_capability(
+        executor_url.clone(),
         app_name,
         app_desc,
         app_url,
@@ -70,7 +71,7 @@ pub async fn get_cap_token() -> Result<String> {
 
     let mut rl = Editor::<()>::new()?;
     let rand = rl.readline("Enter the 6-digit 2FA number from AD4M UI: ")?;
-    let jwt = agent::retrieve_capability(request_id, rand)
+    let jwt = agent::retrieve_capability(executor_url, request_id, rand)
         .await
         .with_context(|| "Error generating capability token!".to_string())?;
 

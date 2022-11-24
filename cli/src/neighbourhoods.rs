@@ -1,4 +1,4 @@
-use ad4m_client::neighbourhoods;
+use ad4m_client::Ad4mClient;
 use anyhow::Result;
 use clap::Subcommand;
 
@@ -13,18 +13,18 @@ pub enum NeighbourhoodFunctions {
     },
 }
 
-pub async fn run(cap_token: String, command: NeighbourhoodFunctions) -> Result<()> {
+pub async fn run(ad4m_client: Ad4mClient, command: NeighbourhoodFunctions) -> Result<()> {
     match command {
         NeighbourhoodFunctions::Create {
             perspective_id,
             link_language,
         } => {
             let neighbourhood =
-                neighbourhoods::publish(cap_token, link_language, None, perspective_id).await?;
+            ad4m_client.neighbourhoods.publish(link_language, None, perspective_id).await?;
             println!("Neighbourhood shared as: {}", neighbourhood);
         }
         NeighbourhoodFunctions::Join { url } => {
-            let neighbourhood = neighbourhoods::join(cap_token, url).await?;
+            let neighbourhood = ad4m_client.neighbourhoods.join(url).await?;
             println!("Neighbourhod joined!\n{:#?}", neighbourhood);
         }
     };

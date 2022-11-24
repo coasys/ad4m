@@ -101,10 +101,10 @@ enum Domain {
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
-    if let Some(custom_url) = args.executor_url {
-        set_executor_url(custom_url);
+    let executor_url = if let Some(custom_url) = args.executor_url {
+        custom_url
     } else {
-        set_executor_url(crate::startup::get_executor_url()?);
+        crate::startup::get_executor_url()?
     };
 
     let cap_token = if args.no_capability {
@@ -114,18 +114,20 @@ async fn main() -> Result<()> {
             Domain::Log => "".to_string(),
             Domain::Agent { command } => match command {
                 AgentFunctions::Lock | AgentFunctions::Unlock{ .. } | AgentFunctions::Generate { .. } => "".to_string(),
-                _ => startup::get_cap_token().await?,
+                _ => startup::get_cap_token(executor_url.clone()).await?,
             },
-            _ => startup::get_cap_token().await?,
+            _ => startup::get_cap_token(executor_url.clone()).await?,
         }
     };
 
+    let ad4m_client = Ad4mClient::new(executor_url, cap_token);
+
     match args.domain {
-        Domain::Agent { command } => agent::run(cap_token, command).await?,
-        Domain::Languages { command } => languages::run(cap_token, command).await?,
-        Domain::Perspectives { command } => perspectives::run(cap_token, command).await?,
-        Domain::Neighbourhoods { command } => neighbourhoods::run(cap_token, command).await?,
-        Domain::Runtime { command } => runtime::run(cap_token, command).await?,
+        Domain::Agent { command } => agent::run(ad4m_client, command).await?,
+        Domain::Languages { command } => languages::run(ad4m_client, command).await?,
+        Domain::Perspectives { command } => perspectives::run(ad4m_client, command).await?,
+        Domain::Neighbourhoods { command } => neighbourhoods::run(ad4m_client, command).await?,
+        Domain::Runtime { command } => runtime::run(ad4m_client, command).await?,
         Domain::Log => {
             let file = executor_data_path().join("ad4min.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {

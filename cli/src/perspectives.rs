@@ -1,5 +1,5 @@
 use crate::{formatting::*, util::maybe_parse_datetime};
-use ad4m_client::perspectives;
+use ad4m_client::Ad4mClient;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use regex::Regex;
@@ -64,9 +64,9 @@ pub enum PerspectiveFunctions {
     Repl { id: String },
 }
 
-pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Result<()> {
+pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>) -> Result<()> {
     if command.is_none() {
-        let all_perspectives = perspectives::all(cap_token).await?;
+        let all_perspectives = ad4m_client.perspectives.all().await?;
         for perspective in all_perspectives {
             println!("\x1b[36mName: \x1b[97m{}", perspective.name);
             println!("\x1b[36mID: \x1b[97m{}", perspective.uuid);
@@ -101,11 +101,11 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
 
     match command.unwrap() {
         PerspectiveFunctions::Add { name } => {
-            let new_perspective_id = perspectives::add(cap_token, name).await?;
+            let new_perspective_id = ad4m_client.perspectives.add(name).await?;
             println!("{}", new_perspective_id);
         }
         PerspectiveFunctions::Remove { id } => {
-            perspectives::remove(cap_token, id).await?;
+            ad4m_client.perspectives.remove(id).await?;
         }
         PerspectiveFunctions::AddLink {
             id,
@@ -113,13 +113,12 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
             target,
             predicate,
         } => {
-            perspectives::add_link(cap_token, id, source, target, predicate).await?;
+            ad4m_client.perspectives.add_link(id, source, target, predicate).await?;
         }
         PerspectiveFunctions::QueryLinks(args) => {
             let from_date = maybe_parse_datetime(args.from_date)?;
             let until_date = maybe_parse_datetime(args.until_date)?;
-            let result = perspectives::query_links(
-                cap_token,
+            let result = ad4m_client.perspectives.query_links(
                 args.id,
                 args.source,
                 args.target,
@@ -134,12 +133,11 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
             }
         }
         PerspectiveFunctions::Infer { id, query } => {
-            let results = perspectives::infer(cap_token, id, query).await?;
+            let results = ad4m_client.perspectives.infer(id, query).await?;
             print_prolog_results(results)?;
         }
         PerspectiveFunctions::Watch { id } => {
-            perspectives::watch(
-                cap_token,
+            ad4m_client.perspectives.watch(
                 id,
                 Box::new(|link| {
                     print_link(link);
@@ -148,7 +146,7 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
             .await?;
         }
         PerspectiveFunctions::Snapshot { id } => {
-            let result = perspectives::snapshot(cap_token, id).await?;
+            let result = ad4m_client.perspectives.snapshot(id).await?;
             println!("{:#?}", result);
         }
         PerspectiveFunctions::Repl { id } => {
@@ -177,8 +175,7 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
                         Some(predicate)
                     };
 
-                    perspectives::add_link(
-                        cap_token.clone(),
+                    ad4m_client.perspectives.add_link(
                         id.clone(),
                         source,
                         target,
@@ -188,7 +185,7 @@ pub async fn run(cap_token: String, command: Option<PerspectiveFunctions>) -> Re
                     continue;
                 }
 
-                match perspectives::infer(cap_token.clone(), id.clone(), line).await {
+                match ad4m_client.perspectives.infer(id.clone(), line).await {
                     Ok(results) => {
                         print_prolog_results(results)?;
                     }

@@ -1,5 +1,5 @@
 use crate::{formatting::*, util::readline_masked};
-use ad4m_client::agent;
+use ad4m_client::Ad4mClient;
 use anyhow::{bail, Result};
 use clap::Subcommand;
 
@@ -27,14 +27,14 @@ pub enum AgentFunctions {
     },
 }
 
-pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
+pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()> {
     match command {
         AgentFunctions::Me => {
-            let agent = agent::me(cap_token).await?;
+            let agent = ad4m_client.agent.me().await?;
             print_agent(agent.into());
         }
         AgentFunctions::Status => {
-            let status = agent::status(cap_token).await?;
+            let status = ad4m_client.agent.status().await?;
             println!(
                 "\x1b[36mDID: \x1b[97m{}",
                 status.did.unwrap_or_else(|| "<undefined>".to_string())
@@ -49,7 +49,7 @@ pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
             );
         }
         AgentFunctions::Lock => {
-            let result = agent::lock(cap_token, readline_masked("Passphrase: ")?).await?;
+            let result = ad4m_client.agent.lock(readline_masked("Passphrase: ")?).await?;
             if let Some(error) = result.error {
                 bail!(error);
             } else {
@@ -63,7 +63,7 @@ pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
                 readline_masked("Passphrase: ")?
             };
             
-            let result = agent::unlock(cap_token, pp).await?;
+            let result = ad4m_client.agent.unlock(pp).await?;
             if let Some(error) = result.error {
                 bail!(error);
             } else {
@@ -71,7 +71,7 @@ pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
             }
         }
         AgentFunctions::ByDID { did } => {
-            if let Some(agent) = agent::by_did(cap_token, did).await? {
+            if let Some(agent) = ad4m_client.agent.by_did(did).await? {
                 print_agent(agent.into());
             } else {
                 println!("Agent not found");
@@ -89,7 +89,7 @@ pub async fn run(cap_token: String, command: AgentFunctions) -> Result<()> {
                 passphrase1
             };
             
-            let result = agent::generate(cap_token, pp).await?;
+            let result = ad4m_client.agent.generate(pp).await?;
             if let Some(error) = result.error {
                 bail!(error);
             } else {
