@@ -572,7 +572,7 @@ impl RuntimeClient {
         set_status(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
-            status.into(),
+            status,
         )
         .await?;
 
@@ -597,7 +597,7 @@ impl RuntimeClient {
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
             did,
-            message.into(),
+            message,
         )
         .await
     }

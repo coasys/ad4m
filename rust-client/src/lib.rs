@@ -51,7 +51,7 @@ impl Ad4mClient {
             languages: LanguagesClient::new(info.clone()),
             neighbourhoods: NeighbourhoodsClient::new(info.clone()),
             perspectives: PerspectivesClient::new(info.clone()),
-            runtime: RuntimeClient::new(info.clone()),
+            runtime: RuntimeClient::new(info),
         }
     }
 }
