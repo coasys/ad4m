@@ -18,7 +18,7 @@ pub async fn by_filter(
     filter: String,
 ) -> Result<Vec<by_filter::ByFilterLanguages>> {
     let response_data: by_filter::ResponseData = query(
-        executor_url, 
+        executor_url,
         cap_token,
         ByFilter::build_query(by_filter::Variables { filter }),
     )
@@ -111,11 +111,18 @@ pub async fn apply_template_and_publish(
 )]
 pub struct Meta;
 
-pub async fn meta(executor_url: String, cap_token: String, address: String) -> Result<meta::MetaLanguageMeta> {
-    let response_data: meta::ResponseData =
-        query(executor_url, cap_token, Meta::build_query(meta::Variables { address }))
-            .await
-            .with_context(|| "Failed to run languages -> meta")?;
+pub async fn meta(
+    executor_url: String,
+    cap_token: String,
+    address: String,
+) -> Result<meta::MetaLanguageMeta> {
+    let response_data: meta::ResponseData = query(
+        executor_url,
+        cap_token,
+        Meta::build_query(meta::Variables { address }),
+    )
+    .await
+    .with_context(|| "Failed to run languages -> meta")?;
     Ok(response_data.language_meta)
 }
 
@@ -201,12 +208,28 @@ impl LanguagesClient {
         Self { info }
     }
 
-    pub async fn by_filter(&self, filter: Option<String>) -> Result<Vec<by_filter::ByFilterLanguages>> {
-        by_filter(self.info.executor_url.clone(), self.info.cap_token.clone(), filter.unwrap_or_else(|| "".to_string())).await
+    pub async fn by_filter(
+        &self,
+        filter: Option<String>,
+    ) -> Result<Vec<by_filter::ByFilterLanguages>> {
+        by_filter(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            filter.unwrap_or_else(|| "".to_string()),
+        )
+        .await
     }
 
-    pub async fn by_address(&self, address: String) -> Result<Option<by_address::ByAddressLanguage>> {
-        by_address(self.info.executor_url.clone(), self.info.cap_token.clone(), address).await
+    pub async fn by_address(
+        &self,
+        address: String,
+    ) -> Result<Option<by_address::ByAddressLanguage>> {
+        by_address(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            address,
+        )
+        .await
     }
 
     pub async fn write_settings(
@@ -227,7 +250,8 @@ impl LanguagesClient {
         &self,
         source: String,
         template_data: String,
-    ) -> Result<apply_template_and_publish::ApplyTemplateAndPublishLanguageApplyTemplateAndPublish> {
+    ) -> Result<apply_template_and_publish::ApplyTemplateAndPublishLanguageApplyTemplateAndPublish>
+    {
         apply_template_and_publish(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
@@ -238,7 +262,12 @@ impl LanguagesClient {
     }
 
     pub async fn meta(&self, address: String) -> Result<meta::MetaLanguageMeta> {
-        meta(self.info.executor_url.clone(), self.info.cap_token.clone(), address).await
+        meta(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            address,
+        )
+        .await
     }
 
     pub async fn publish(
@@ -262,10 +291,20 @@ impl LanguagesClient {
     }
 
     pub async fn source(&self, address: String) -> Result<String> {
-        source(self.info.executor_url.clone(), self.info.cap_token.clone(), address).await
+        source(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            address,
+        )
+        .await
     }
 
     pub async fn remove(&self, address: String) -> Result<()> {
-        remove(self.info.executor_url.clone(), self.info.cap_token.clone(), address).await
+        remove(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            address,
+        )
+        .await
     }
 }

@@ -24,7 +24,11 @@ where
     Ok(response_data)
 }
 
-pub async fn query_raw<Q, R>(executor_url: String, cap_token: String, query: QueryBody<Q>) -> Result<Response<R>>
+pub async fn query_raw<Q, R>(
+    executor_url: String,
+    cap_token: String,
+    query: QueryBody<Q>,
+) -> Result<Response<R>>
 where
     Q: Serialize,
     R: DeserializeOwned,

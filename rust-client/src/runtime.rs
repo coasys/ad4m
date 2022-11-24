@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     types::{PerspectiveExpression, SentPerspectiveMessage},
-    util::query, ClientInfo,
+    util::query,
+    ClientInfo,
 };
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
@@ -16,9 +17,13 @@ use graphql_client::GraphQLQuery;
 pub struct Info;
 
 pub async fn info(executor_url: String, cap_token: String) -> Result<info::InfoRuntimeInfo> {
-    let response_data: info::ResponseData = query(executor_url, cap_token, Info::build_query(info::Variables {}))
-        .await
-        .with_context(|| "Failed to run runtime->info query")?;
+    let response_data: info::ResponseData = query(
+        executor_url,
+        cap_token,
+        Info::build_query(info::Variables {}),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->info query")?;
     Ok(response_data.runtime_info)
 }
 
@@ -31,9 +36,13 @@ pub async fn info(executor_url: String, cap_token: String) -> Result<info::InfoR
 pub struct Quit;
 
 pub async fn quit(executor_url: String, cap_token: String) -> Result<quit::ResponseData> {
-    query(executor_url, cap_token, Quit::build_query(quit::Variables {}))
-        .await
-        .with_context(|| "Failed to run runtime->quit query")
+    query(
+        executor_url,
+        cap_token,
+        Quit::build_query(quit::Variables {}),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->quit query")
 }
 
 #[derive(GraphQLQuery)]
@@ -107,7 +116,10 @@ pub async fn trusted_agents(executor_url: String, cap_token: String) -> Result<V
 )]
 pub struct LinkLanguageTemplates;
 
-pub async fn link_language_templates(executor_url: String, cap_token: String) -> Result<Vec<String>> {
+pub async fn link_language_templates(
+    executor_url: String,
+    cap_token: String,
+) -> Result<Vec<String>> {
     let response_data: link_language_templates::ResponseData = query(
         executor_url,
         cap_token,
@@ -174,10 +186,13 @@ pub async fn remove_link_language_templates(
 pub struct Friends;
 
 pub async fn friends(executor_url: String, cap_token: String) -> Result<Vec<String>> {
-    let response_data: friends::ResponseData =
-        query(executor_url, cap_token, Friends::build_query(friends::Variables {}))
-            .await
-            .with_context(|| "Failed to run runtime->friends query")?;
+    let response_data: friends::ResponseData = query(
+        executor_url,
+        cap_token,
+        Friends::build_query(friends::Variables {}),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->friends query")?;
     Ok(response_data.runtime_friends)
 }
 
@@ -326,7 +341,11 @@ pub async fn set_status(
 )]
 pub struct FriendStatus;
 
-pub async fn friend_status(executor_url: String, cap_token: String, did: String) -> Result<friend_status::ResponseData> {
+pub async fn friend_status(
+    executor_url: String,
+    cap_token: String,
+    did: String,
+) -> Result<friend_status::ResponseData> {
     query(
         executor_url,
         cap_token,
@@ -432,14 +451,28 @@ impl RuntimeClient {
         quit(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
-    pub async fn add_trusted_agents(&self, agents: Vec<String>) -> Result<add_trusted_agents::ResponseData> {
-        add_trusted_agents(self.info.executor_url.clone(), self.info.cap_token.clone(), agents)
-            .await
+    pub async fn add_trusted_agents(
+        &self,
+        agents: Vec<String>,
+    ) -> Result<add_trusted_agents::ResponseData> {
+        add_trusted_agents(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            agents,
+        )
+        .await
     }
 
-    pub async fn delete_trusted_agents(&self, agents: Vec<String>) -> Result<delete_trusted_agents::ResponseData> {
-        delete_trusted_agents(self.info.executor_url.clone(), self.info.cap_token.clone(), agents)
-            .await
+    pub async fn delete_trusted_agents(
+        &self,
+        agents: Vec<String>,
+    ) -> Result<delete_trusted_agents::ResponseData> {
+        delete_trusted_agents(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            agents,
+        )
+        .await
     }
 
     pub async fn trusted_agents(&self) -> Result<Vec<String>> {
@@ -450,14 +483,28 @@ impl RuntimeClient {
         link_language_templates(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
-    pub async fn add_link_language_templates(&self, addresses: Vec<String>) -> Result<add_link_language_templates::ResponseData> {
-        add_link_language_templates(self.info.executor_url.clone(), self.info.cap_token.clone(), addresses)
-            .await
+    pub async fn add_link_language_templates(
+        &self,
+        addresses: Vec<String>,
+    ) -> Result<add_link_language_templates::ResponseData> {
+        add_link_language_templates(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            addresses,
+        )
+        .await
     }
 
-    pub async fn remove_link_language_templates(&self, addresses: Vec<String>) -> Result<remove_link_language_templates::ResponseData> {
-        remove_link_language_templates(self.info.executor_url.clone(), self.info.cap_token.clone(), addresses)
-            .await
+    pub async fn remove_link_language_templates(
+        &self,
+        addresses: Vec<String>,
+    ) -> Result<remove_link_language_templates::ResponseData> {
+        remove_link_language_templates(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            addresses,
+        )
+        .await
     }
 
     pub async fn friends(&self) -> Result<Vec<String>> {
@@ -465,19 +512,34 @@ impl RuntimeClient {
     }
 
     pub async fn add_friends(&self, friends: Vec<String>) -> Result<add_friends::ResponseData> {
-        add_friends(self.info.executor_url.clone(), self.info.cap_token.clone(), friends).await
+        add_friends(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            friends,
+        )
+        .await
     }
 
-    pub async fn remove_friends(&self, friends: Vec<String>) -> Result<remove_friends::ResponseData> {
-        remove_friends(self.info.executor_url.clone(), self.info.cap_token.clone(), friends).await
+    pub async fn remove_friends(
+        &self,
+        friends: Vec<String>,
+    ) -> Result<remove_friends::ResponseData> {
+        remove_friends(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            friends,
+        )
+        .await
     }
 
     pub async fn hc_agent_infos(&self) -> Result<String> {
-        hc_agent_infos(self.info.executor_url.clone(), self.info.cap_token.clone())
-            .await
+        hc_agent_infos(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
-    pub async fn hc_add_agent_infos(&self, agent_infos: String) -> Result<hc_add_agent_infos::ResponseData> {
+    pub async fn hc_add_agent_infos(
+        &self,
+        agent_infos: String,
+    ) -> Result<hc_add_agent_infos::ResponseData> {
         hc_add_agent_infos(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
@@ -518,11 +580,19 @@ impl RuntimeClient {
     }
 
     pub async fn friend_status(&self, did: String) -> Result<friend_status::ResponseData> {
-        friend_status(self.info.executor_url.clone(), self.info.cap_token.clone(), did)
-            .await
+        friend_status(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            did,
+        )
+        .await
     }
 
-    pub async fn friend_send_message(&self, did: String, message: friend_send_message::PerspectiveInput) -> Result<friend_send_message::ResponseData> {
+    pub async fn friend_send_message(
+        &self,
+        did: String,
+        message: friend_send_message::PerspectiveInput,
+    ) -> Result<friend_send_message::ResponseData> {
         friend_send_message(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
@@ -532,13 +602,27 @@ impl RuntimeClient {
         .await
     }
 
-    pub async fn message_inbox(&self, filter: Option<String>) -> Result<Vec<PerspectiveExpression>> {
-        message_inbox(self.info.executor_url.clone(), self.info.cap_token.clone(), filter)
-            .await
+    pub async fn message_inbox(
+        &self,
+        filter: Option<String>,
+    ) -> Result<Vec<PerspectiveExpression>> {
+        message_inbox(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            filter,
+        )
+        .await
     }
 
-    pub async fn message_outbox(&self, filter: Option<String>) -> Result<Vec<SentPerspectiveMessage>> {
-        message_outbox(self.info.executor_url.clone(), self.info.cap_token.clone(), filter)
-            .await
+    pub async fn message_outbox(
+        &self,
+        filter: Option<String>,
+    ) -> Result<Vec<SentPerspectiveMessage>> {
+        message_outbox(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            filter,
+        )
+        .await
     }
 }

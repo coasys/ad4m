@@ -82,8 +82,15 @@ impl NeighbourhoodsClient {
         .await
     }
 
-    pub async fn join(&self, url: String) -> Result<join_from_url::JoinFromUrlNeighbourhoodJoinFromUrl> {
-        join(self.info.executor_url.clone(), self.info.cap_token.clone(), url).await
+    pub async fn join(
+        &self,
+        url: String,
+    ) -> Result<join_from_url::JoinFromUrlNeighbourhoodJoinFromUrl> {
+        join(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            url,
+        )
+        .await
     }
 }
-

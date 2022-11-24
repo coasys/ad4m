@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crate::ClientInfo;
 use crate::types::{LinkExpression, Perspective};
 use crate::util::{create_websocket_client, query, query_raw};
+use crate::ClientInfo;
 use anyhow::{anyhow, Context, Result};
 use chrono::naive::NaiveDateTime;
 use graphql_client::{GraphQLQuery, Response};
@@ -23,9 +23,10 @@ use self::all::AllPerspectives;
 pub struct All;
 
 pub async fn all(executor_url: String, cap_token: String) -> Result<Vec<AllPerspectives>> {
-    let response_data: all::ResponseData = query(executor_url, cap_token, All::build_query(all::Variables {}))
-        .await
-        .with_context(|| "Failed to run perspectives->all query")?;
+    let response_data: all::ResponseData =
+        query(executor_url, cap_token, All::build_query(all::Variables {}))
+            .await
+            .with_context(|| "Failed to run perspectives->all query")?;
     Ok(response_data.perspectives)
 }
 
@@ -38,10 +39,13 @@ pub async fn all(executor_url: String, cap_token: String) -> Result<Vec<AllPersp
 pub struct Add;
 
 pub async fn add(executor_url: String, cap_token: String, name: String) -> Result<String> {
-    let response_data: add::ResponseData =
-        query(executor_url, cap_token, Add::build_query(add::Variables { name }))
-            .await
-            .with_context(|| "Failed to run perspectives->add query")?;
+    let response_data: add::ResponseData = query(
+        executor_url,
+        cap_token,
+        Add::build_query(add::Variables { name }),
+    )
+    .await
+    .with_context(|| "Failed to run perspectives->add query")?;
     Ok(response_data.perspective_add.uuid)
 }
 
@@ -54,10 +58,13 @@ pub async fn add(executor_url: String, cap_token: String, name: String) -> Resul
 pub struct Remove;
 
 pub async fn remove(executor_url: String, cap_token: String, uuid: String) -> Result<()> {
-    let response: remove::ResponseData =
-        query(executor_url, cap_token, Remove::build_query(remove::Variables { uuid }))
-            .await
-            .with_context(|| "Failed to run perspectives->remove query")?;
+    let response: remove::ResponseData = query(
+        executor_url,
+        cap_token,
+        Remove::build_query(remove::Variables { uuid }),
+    )
+    .await
+    .with_context(|| "Failed to run perspectives->remove query")?;
     if response.perspective_remove {
         Ok(())
     } else {
@@ -147,7 +154,12 @@ pub async fn query_links(
 )]
 pub struct Infer;
 
-pub async fn infer(executor_url: String, cap_token: String, uuid: String, prolog_query: String) -> Result<Value> {
+pub async fn infer(
+    executor_url: String,
+    cap_token: String,
+    uuid: String,
+    prolog_query: String,
+) -> Result<Value> {
     let response: Response<infer::ResponseData> = query_raw(
         executor_url,
         cap_token,
@@ -246,7 +258,11 @@ pub async fn watch(
 )]
 pub struct Snapshot;
 
-pub async fn snapshot(executor_url: String, cap_token: String, uuid: String) -> Result<Perspective> {
+pub async fn snapshot(
+    executor_url: String,
+    cap_token: String,
+    uuid: String,
+) -> Result<Perspective> {
     let response: snapshot::ResponseData = query(
         executor_url,
         cap_token,
@@ -274,14 +290,30 @@ impl PerspectivesClient {
     }
 
     pub async fn add(&self, name: String) -> Result<String> {
-        add(self.info.executor_url.clone(), self.info.cap_token.clone(), name).await
+        add(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            name,
+        )
+        .await
     }
 
     pub async fn remove(&self, uuid: String) -> Result<()> {
-        remove(self.info.executor_url.clone(), self.info.cap_token.clone(), uuid).await
+        remove(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            uuid,
+        )
+        .await
     }
 
-    pub async fn add_link(&self, uid: String, source: String, target: String, predicate: Option<String>) -> Result<AddLinkPerspectiveAddLink> {
+    pub async fn add_link(
+        &self,
+        uid: String,
+        source: String,
+        target: String,
+        predicate: Option<String>,
+    ) -> Result<AddLinkPerspectiveAddLink> {
         add_link(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
@@ -318,7 +350,13 @@ impl PerspectivesClient {
     }
 
     pub async fn infer(&self, uuid: String, prolog_query: String) -> Result<Value> {
-        infer(self.info.executor_url.clone(), self.info.cap_token.clone(), uuid, prolog_query).await
+        infer(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            uuid,
+            prolog_query,
+        )
+        .await
     }
 
     pub async fn watch(
@@ -326,11 +364,21 @@ impl PerspectivesClient {
         id: String,
         link_callback: Box<dyn Fn(LinkExpression)>,
     ) -> Result<()> {
-        watch(self.info.executor_url.clone(), self.info.cap_token.clone(), id, link_callback).await
+        watch(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            id,
+            link_callback,
+        )
+        .await
     }
 
     pub async fn snapshot(&self, uuid: String) -> Result<Perspective> {
-        snapshot(self.info.executor_url.clone(), self.info.cap_token.clone(), uuid).await
+        snapshot(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            uuid,
+        )
+        .await
     }
-
 }

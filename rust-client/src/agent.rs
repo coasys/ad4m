@@ -47,7 +47,11 @@ pub async fn request_capability(
 )]
 pub struct RetrieveCapability;
 
-pub async fn retrieve_capability(executor_url: String, request_id: String, rand: String) -> Result<String> {
+pub async fn retrieve_capability(
+    executor_url: String,
+    request_id: String,
+    rand: String,
+) -> Result<String> {
     let query =
         RetrieveCapability::build_query(retrieve_capability::Variables { request_id, rand });
     let response_body: Response<retrieve_capability::ResponseData> = reqwest::Client::new()
@@ -73,9 +77,10 @@ pub async fn retrieve_capability(executor_url: String, request_id: String, rand:
 pub struct Me;
 
 pub async fn me(executor_url: String, cap_token: String) -> Result<me::MeAgent> {
-    let response_data: me::ResponseData = query(executor_url, cap_token, Me::build_query(me::Variables {}))
-        .await
-        .with_context(|| "Failed to run agent->me query")?;
+    let response_data: me::ResponseData =
+        query(executor_url, cap_token, Me::build_query(me::Variables {}))
+            .await
+            .with_context(|| "Failed to run agent->me query")?;
     Ok(response_data.agent)
 }
 
@@ -87,7 +92,10 @@ pub async fn me(executor_url: String, cap_token: String) -> Result<me::MeAgent> 
 )]
 pub struct AgentStatus;
 
-pub async fn status(executor_url: String, cap_token: String) -> Result<agent_status::AgentStatusAgentStatus> {
+pub async fn status(
+    executor_url: String,
+    cap_token: String,
+) -> Result<agent_status::AgentStatusAgentStatus> {
     let response_data: agent_status::ResponseData = query(
         executor_url,
         cap_token,
@@ -106,11 +114,18 @@ pub async fn status(executor_url: String, cap_token: String) -> Result<agent_sta
 )]
 pub struct Lock;
 
-pub async fn lock(executor_url: String, cap_token: String, passphrase: String) -> Result<lock::LockAgentLock> {
-    let response_data: lock::ResponseData =
-        query(executor_url, cap_token, Lock::build_query(lock::Variables { passphrase }))
-            .await
-            .with_context(|| "Failed to run agent->lock")?;
+pub async fn lock(
+    executor_url: String,
+    cap_token: String,
+    passphrase: String,
+) -> Result<lock::LockAgentLock> {
+    let response_data: lock::ResponseData = query(
+        executor_url,
+        cap_token,
+        Lock::build_query(lock::Variables { passphrase }),
+    )
+    .await
+    .with_context(|| "Failed to run agent->lock")?;
     Ok(response_data.agent_lock)
 }
 
@@ -122,7 +137,11 @@ pub async fn lock(executor_url: String, cap_token: String, passphrase: String) -
 )]
 pub struct Unlock;
 
-pub async fn unlock(executor_url: String, cap_token: String, passphrase: String) -> Result<unlock::UnlockAgentUnlock> {
+pub async fn unlock(
+    executor_url: String,
+    cap_token: String,
+    passphrase: String,
+) -> Result<unlock::UnlockAgentUnlock> {
     let response_data: unlock::ResponseData = query(
         executor_url,
         cap_token,
@@ -141,11 +160,18 @@ pub async fn unlock(executor_url: String, cap_token: String, passphrase: String)
 )]
 pub struct ByDID;
 
-pub async fn by_did(executor_url: String, cap_token: String, did: String) -> Result<Option<by_did::ByDidAgentByDid>> {
-    let response_data: by_did::ResponseData =
-        query(executor_url, cap_token, ByDID::build_query(by_did::Variables { did }))
-            .await
-            .with_context(|| "Failed to run agent->byDID query")?;
+pub async fn by_did(
+    executor_url: String,
+    cap_token: String,
+    did: String,
+) -> Result<Option<by_did::ByDidAgentByDid>> {
+    let response_data: by_did::ResponseData = query(
+        executor_url,
+        cap_token,
+        ByDID::build_query(by_did::Variables { did }),
+    )
+    .await
+    .with_context(|| "Failed to run agent->byDID query")?;
     Ok(response_data.agent_by_did)
 }
 
@@ -157,14 +183,21 @@ pub async fn by_did(executor_url: String, cap_token: String, did: String) -> Res
 )]
 pub struct Generate;
 
-pub async fn generate(executor_url: String, cap_token: String, passphrase: String) -> Result<generate::GenerateAgentGenerate> {
-    let response_data: generate::ResponseData =
-        query(executor_url, cap_token, Generate::build_query(generate::Variables { passphrase }))
-            .await
-            .with_context(|| "Failed to run agent->generate")?;
+pub async fn generate(
+    executor_url: String,
+    cap_token: String,
+    passphrase: String,
+) -> Result<generate::GenerateAgentGenerate> {
+    let response_data: generate::ResponseData = query(
+        executor_url,
+        cap_token,
+        Generate::build_query(generate::Variables { passphrase }),
+    )
+    .await
+    .with_context(|| "Failed to run agent->generate")?;
     Ok(response_data.agent_generate)
 }
- 
+
 pub struct AgentClient {
     info: Arc<ClientInfo>,
 }
@@ -204,18 +237,38 @@ impl AgentClient {
     }
 
     pub async fn lock(&self, passphrase: String) -> Result<lock::LockAgentLock> {
-        lock(self.info.executor_url.clone(), self.info.cap_token.clone(), passphrase).await
+        lock(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            passphrase,
+        )
+        .await
     }
 
     pub async fn unlock(&self, passphrase: String) -> Result<unlock::UnlockAgentUnlock> {
-        unlock(self.info.executor_url.clone(), self.info.cap_token.clone(), passphrase).await
+        unlock(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            passphrase,
+        )
+        .await
     }
 
     pub async fn by_did(&self, did: String) -> Result<Option<by_did::ByDidAgentByDid>> {
-        by_did(self.info.executor_url.clone(), self.info.cap_token.clone(), did).await
+        by_did(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            did,
+        )
+        .await
     }
 
     pub async fn generate(&self, passphrase: String) -> Result<generate::GenerateAgentGenerate> {
-        generate(self.info.executor_url.clone(), self.info.cap_token.clone(), passphrase).await
+        generate(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            passphrase,
+        )
+        .await
     }
 }
