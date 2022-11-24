@@ -49,3 +49,4 @@ rust-client/target
 target
 
 tests/ad4m1
+tests/ad4m2

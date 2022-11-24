@@ -12,6 +12,7 @@ import { homedir } from 'os';
 
 type Options = {
   port?: number;
+  ipfsPort?: number;
   hcAdminPort?: number;
   hcAppPort?: number;
   connectHolochain?: boolean;
@@ -34,6 +35,11 @@ export const builder = (yargs: Argv) =>
         describe: 'Use this port to run ad4m GraphQL service', 
         default: 4000, 
         alias: 'p'
+      },
+      ipfsPort: { 
+        type: 'number', 
+        describe: 'Use this port to bind IPFS to', 
+        default: 14000,
       },
       hcAdminPort: { 
         type: 'number', 
@@ -79,7 +85,7 @@ export const builder = (yargs: Argv) =>
 
 export const handler = async (argv: Arguments<Options>): Promise<void> => {
   const {
-    port, hcAdminPort, hcAppPort, connectHolochain, languageLanguageOnly,
+    port, ipfsPort, hcAdminPort, hcAppPort, connectHolochain, languageLanguageOnly,
     dataPath, bootstrapLanguage, bootstrapPerspective, appLangAliases,
     reqCredential
   } = argv;
@@ -123,6 +129,7 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
     hcPortAdmin: hcAdminPort,
     hcPortApp: hcAppPort,
     ipfsRepoPath,
+    ipfsSwarmPort: ipfsPort,
     connectHolochain,
     reqCredential,
     swiplPath,

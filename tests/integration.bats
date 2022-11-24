@@ -4,7 +4,7 @@ setup_file() {
     rm -rf ./tests/ad4m1
     ./host/dist/ad4m-macos-x64 init --dataPath ./tests/ad4m1
     echo "done." >&3
-    echo "Starting agent..." >&3
+    echo "Starting agent 1..." >&3
     ./host/dist/ad4m-macos-x64 serve --dataPath ./tests/ad4m1 &
     sleep 5
     echo "done." >&3
@@ -19,8 +19,8 @@ setup_file() {
     rm -rf ./tests/ad4m2
     ./host/dist/ad4m-macos-x64 init --dataPath ./tests/ad4m2
     echo "done." >&3
-    echo "Starting agent..." >&3
-    ./host/dist/ad4m-macos-x64 serve --dataPath ./tests/ad4m2 --port 4001 &
+    echo "Starting agent 2..." >&3
+    ./host/dist/ad4m-macos-x64 serve --dataPath ./tests/ad4m2 --port 4001 --ipfsPort 15000 &
     sleep 5
     echo "done." >&3
 
