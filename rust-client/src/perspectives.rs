@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::perspective_proxy::PerspectiveProxy;
 use crate::types::{LinkExpression, Perspective};
 use crate::util::{create_websocket_client, query, query_raw};
 use crate::ClientInfo;
@@ -322,6 +323,7 @@ pub async fn snapshot(
         .into())
 }
 
+#[derive(Clone)]
 pub struct PerspectivesClient {
     info: Arc<ClientInfo>,
 }
@@ -440,5 +442,15 @@ impl PerspectivesClient {
             uuid,
         )
         .await
+    }
+
+    pub async fn get(&self, uuid: String) -> Result<PerspectiveProxy> {
+        self.all()
+            .await?
+            .iter()
+            .find(|p| p.uuid == uuid)
+            .ok_or_else(|| anyhow!("Perspective with ID {} not found!", uuid))?;
+            
+        Ok(PerspectiveProxy::new(self.clone(), uuid.clone()))
     }
 }
