@@ -43,3 +43,10 @@ yarn-error.log*
 !jest.config.js
 !postinstall.js
 !esbuild.js
+
+cli/target
+rust-client/target
+target
+
+tests/ad4m1
+tests/ad4m2

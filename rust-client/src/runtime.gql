@@ -1,0 +1,116 @@
+query Info {
+    runtimeInfo {
+        ad4mExecutorVersion,
+        isInitialized,
+        isUnlocked
+    }
+}
+
+mutation Quit { runtimeQuit }
+
+mutation AddTrustedAgents($agents: [String!]!) {
+    addTrustedAgents(agents: $agents)
+}
+
+mutation DeleteTrustedAgents($agents: [String!]!) {
+    deleteTrustedAgents(agents: $agents)
+}
+
+query TrustedAgents {
+    getTrustedAgents
+}
+
+query LinkLanguageTemplates {
+    runtimeKnownLinkLanguageTemplates
+}
+
+mutation AddLinkLanguageTemplates($addresses: [String!]!) {
+    runtimeAddKnownLinkLanguageTemplates(addresses: $addresses)
+}
+
+mutation RemoveLinkLanguageTemplates($addresses: [String!]!) {
+    runtimeRemoveKnownLinkLanguageTemplates(addresses: $addresses)
+}
+
+query Friends {
+    runtimeFriends
+}
+
+mutation AddFriends($dids: [String!]!) {
+    runtimeAddFriends(dids: $dids)
+}
+
+mutation RemoveFriends($dids: [String!]!) {
+    runtimeRemoveFriends(dids: $dids)
+}
+
+query HcAgentInfos {
+    runtimeHcAgentInfos
+}
+
+mutation HcAddAgentInfos($agentInfos: String!) {
+    runtimeHcAddAgentInfos(agentInfos: $agentInfos)
+}
+
+query VerifyStringSignedByDid($did: String!, $didSigningKeyId: String!, $data: String!, $signedData: String!) {
+    runtimeVerifyStringSignedByDid(did: $did, didSigningKeyId: $didSigningKeyId, data: $data, signedData: $signedData)
+}
+
+mutation SetStatus($status: PerspectiveInput!) {
+    runtimeSetStatus(status: $status)
+}
+
+query FriendStatus($did: String!) {
+    runtimeFriendStatus(did: $did) { 
+        author
+        timestamp
+        data { 
+            links {
+                author
+                timestamp
+                data { source, predicate, target }
+                proof { valid, invalid, signature, key }
+            }  
+        }
+        proof { valid, invalid, signature, key }
+    }
+}
+
+mutation FriendSendMessage($did: String!, $message: PerspectiveInput!) {
+    runtimeFriendSendMessage(did: $did, message: $message)
+}
+
+query MessageInbox($filter: String) {
+    runtimeMessageInbox(filter: $filter) { 
+        author
+        timestamp
+        data { 
+            links {
+                author
+                timestamp
+                data { source, predicate, target }
+                proof { valid, invalid, signature, key }
+            }  
+        }
+        proof { valid, invalid, signature, key }
+    }
+}
+
+query MessageOutbox($filter: String) {
+    runtimeMessageOutbox(filter: $filter) { 
+        recipient,
+        message {
+            author
+            timestamp
+            data { 
+                links {
+                    author
+                    timestamp
+                    data { source, predicate, target }
+                    proof { valid, invalid, signature, key }
+                }  
+            }
+            proof { valid, invalid, signature, key }
+        }
+    }
+}

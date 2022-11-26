@@ -862,7 +862,7 @@ export async function startServer(params: StartServerParams) {
         typeDefs,
         resolvers,
         context: async (context) => {
-            let headers = context.req.headers;
+            let headers = context.req?.headers;
             let authToken = ''
             
             if(headers) {
@@ -897,7 +897,27 @@ export async function startServer(params: StartServerParams) {
     serverCleanup = useServer({
         schema,
         context: async (context, msg, args) => {
-            let headers: any = context.connectionParams!.headers;
+            let headers: any
+
+            // Depending on the transport, the context is different
+            // For normal http queries, it's the connection context
+            if(context.connectionParams) {
+                headers = context.connectionParams!.headers;
+            //@ts-ignore
+            } else if(context.req) {
+                //@ts-ignore
+                headers = context.req.headers;
+            // For subscriptions via websocket, it's the request context in `extra`
+            } else if(context.extra && context.extra.request) {
+                if(context.extra.request.headers) {
+                    headers = context.extra.request.headers;
+                } else if(context.extra.request.rawHeaders) {
+                    headers = context.extra.request.rawHeaders;
+                } else {
+                    console.error("Coulnd't find headers in context", context)
+                }
+            }
+            
             let authToken = ''
             
             if(headers) {
