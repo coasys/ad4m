@@ -1,21 +1,19 @@
 use anyhow::{anyhow, Result};
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
-enum LiteralValue {
+pub enum LiteralValue {
     String(String),
     Number(f64),
     Json(serde_json::Value),
 }
 
-#[allow(dead_code)]
-struct Literal {
+pub struct Literal {
     value: Option<LiteralValue>,
     url: Option<String>
 }
 
 impl Literal {
-    #[allow(dead_code)]
+    
     pub fn from_url(url: String) -> Result<Self> {
         if url.starts_with("literal://")  {
             Ok(Self {
@@ -27,7 +25,6 @@ impl Literal {
         }
     }
 
-    #[allow(dead_code)]
     pub fn from_string(string: String) -> Self {
         Self {
             value: Some(LiteralValue::String(string)),
@@ -35,7 +32,6 @@ impl Literal {
         }
     }
 
-    #[allow(dead_code)]
     pub fn from_number(number: f64) -> Self {
         Self {
             value: Some(LiteralValue::Number(number)),
@@ -43,15 +39,13 @@ impl Literal {
         }
     }
 
-    #[allow(dead_code)]
-    fn from_json(json: serde_json::Value) -> Self {
+    pub fn from_json(json: serde_json::Value) -> Self {
         Self {
             value: Some(LiteralValue::Json(json)),
             url: None
         }
     }
 
-    #[allow(dead_code)]
     pub fn to_url(&self) -> Result<String> {
         if let Some(url) = &self.url {
             Ok(url.clone())
@@ -77,7 +71,6 @@ impl Literal {
         }
     }
 
-    #[allow(dead_code)]
     pub fn parse_url(&self) -> Result<LiteralValue> {
         if let Some(url) = &self.url {
             if url.starts_with("literal://") {
@@ -107,7 +100,6 @@ impl Literal {
         }
     }
 
-    #[allow(dead_code)]
     pub fn get(&self) -> Result<LiteralValue> {
         if let Some(value) = &self.value {
             Ok(value.clone())
@@ -118,7 +110,6 @@ impl Literal {
         }
     }
 
-    #[allow(dead_code)]
     pub fn convert(&mut self) -> Result<()> {
         if self.value.is_some() {
             self.url = Some(self.to_url()?);
@@ -131,7 +122,6 @@ impl Literal {
         }
     }
 
-    
     fn encode_single_quote(string: &str) -> String {
         string.replace("'", "\\'")
     }
