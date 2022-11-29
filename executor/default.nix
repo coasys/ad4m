@@ -1,7 +1,5 @@
 let
-  holonixRev = "5f9565c7de45e8180492a7975269ba9eede0d3f5";
-
-  holonixPath = builtins.fetchTarball "https://github.com/holochain/holonix/archive/${holonixRev}.tar.gz";
+  holonixPath = (import ./nix/sources.nix).holonix; # points to the current state of the Holochain repository
   holonix = import (holonixPath) {
     holochainVersionId = "v0_0_173";
   };
