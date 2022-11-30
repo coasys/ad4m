@@ -1,17 +1,9 @@
 use localtunnel_client::open_tunnel;
 use tauri::State;
 use tokio::sync::broadcast;
-use graphql_client::{GraphQLQuery, Response};
+use ad4m_client::Ad4mClient;
 
 use crate::{AppState, ProxyState, ProxyService};
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "resources/schema.json",
-    query_path = "resources/sign_message.gql",
-    response_derives = "Debug"
-)]
-struct AgentSignMessage;
 
 const PROXY_SERVER: &str = "https://proxy-worker.ad4m.dev";
 
@@ -29,26 +21,15 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
         .await
         .map_err(|err| format!("Error happend when retrieving the content: {:?}", err))?;
 
-    let client = reqwest::Client::new();
-    let query = AgentSignMessage::build_query(agent_sign_message::Variables {message: rand});
-    let response: Response<agent_sign_message::ResponseData> = client.post(format!("http://localhost:{}/graphql", graphql_port))
-        .header("Authorization", req_credential)
-        .json(&query)
-        .send()
+    let ad4m_client = Ad4mClient::new(format!("http://localhost:{}/graphql", graphql_port), req_credential.to_string());
+    let signed_message = ad4m_client.agent.sign_message(rand)
         .await
-        .map_err(|err| format!("Error happend when agent sign message: {:?}", err))?
-        .json()
-        .await
-        .map_err(|err| format!("Error happend when the signing content: {:?}", err))?;
-
-    let resp_data = response.data.ok_or("No data provided".to_string())?;
-    let signature = resp_data.agent_sign_message.signature;
-    let public_key = resp_data.agent_sign_message.public_key;
+        .map_err(|err| format!("Error happend when agent sign message: {:?}", err))?;
 
     let credential = reqwest::get(
             format!(
                 "{}/login/verify?did={}&signature={}&publicKey={}",
-                PROXY_SERVER, subdomain, signature, public_key
+                PROXY_SERVER, subdomain, signed_message.signature, signed_message.public_key
             ))
         .await
         .map_err(|err| format!("Error happend when send login verify request: {:?}", err))?

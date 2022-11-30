@@ -296,7 +296,7 @@ impl AgentClient {
         .await
     }
 
-    pub async fn sign_message(&self, message: String) -> Result<sign_message:SingMessageAgentSignMessage> {
+    pub async fn sign_message(&self, message: String) -> Result<sign_message::SignMessageAgentSignMessage> {
         sign_message(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),

@@ -1,6 +1,0 @@
-mutation AgentSignMessage($message: String!) {
-  agentSignMessage(message: $message) {
-    signature
-    publicKey
-  }
-}
