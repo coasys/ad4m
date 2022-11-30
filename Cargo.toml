@@ -3,5 +3,6 @@
 members = [
     "cli",
     "rust-client",
-    "ui/src-tauri"
+    "ui/src-tauri",
+    "runtime"
 ]
