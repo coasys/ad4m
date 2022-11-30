@@ -64,7 +64,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 const create = await ad4mClient.perspective.add("test-crud");
                 expect(create.name).to.equal("test-crud");
 
-                const linkAdd = await create.addLocalLink(new Link({
+                const linkAdd = await create.addLocal(new Link({
                     source: "test://test-source",
                     predicate: "test://test-predicate",
                     target: "test://test-target"
