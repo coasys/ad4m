@@ -1,7 +1,6 @@
 import path from "path";
 import wget from "wget-improved";
 import fs from 'fs';
-import fetch from 'node-fetch'
 
 const BOOTSTRAP_LINK = "https://github.com/perspect3vism/ad4m-seeds/releases/download/0.0.3/mainnetSeed.json";
 

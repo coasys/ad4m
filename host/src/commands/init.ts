@@ -12,6 +12,7 @@ import { CONFIG, getConfig } from '../utils/config';
 import ReadlineSync from 'readline-sync';
 import os from 'os'
 import { ad4mDataDirectory } from '../ad4mDataDirectory';
+import { fetchLatestDependencies } from '../utils/fetchLatestDependencies';
 
 const copyFile = utils.promisify(fs.copyFile);
 const copyDir = utils.promisify(fs.copy)
@@ -80,20 +81,16 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
   const hc = platform === 'win32' ? 'hc.exe' : 'hc';
 
   if(!hcOnly) {
-    const holochainSource = path.join(__dirname, `../temp/binary/${holochain}`);
-    const holochaintarget = path.join(binaryPath, holochain);
-    await copy(holochainSource, holochaintarget);
-    await chmod(holochaintarget, '755');
-  
-    const lairSource = path.join(__dirname, `../temp/binary/${lair}`);
+    const holochainTarget = path.join(binaryPath, holochain);  
     const lairTarget = path.join(binaryPath, lair);
-    await copy(lairSource, lairTarget);
+
+    await fetchLatestDependencies(holochainTarget, lairTarget);
     await chmod(lairTarget, '755');
+    await chmod(holochainTarget, '755');
   }
 
-  const hcSource = path.join(__dirname, `../temp/binary/${hc}`);
   const hcTarget = path.join(binaryPath, hc);
-  await copy(hcSource, hcTarget);
+  await fetchLatestDependencies(undefined, undefined, hcTarget);
   await chmod(hcTarget, '755');
 
   await getSeedConfig(dataPath, networkBootstrapSeed, overrideConfig);
