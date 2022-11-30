@@ -1,0 +1,31 @@
+mutation PublishFromPerspective(
+    $linkLanguage: String!,
+    $meta: PerspectiveInput!,
+    $perspectiveUUID: String!
+) {
+    neighbourhoodPublishFromPerspective(
+        linkLanguage: $linkLanguage,
+        meta: $meta,
+        perspectiveUUID: $perspectiveUUID
+    )
+}
+
+mutation JoinFromUrl($url: String!) {
+    neighbourhoodJoinFromUrl(url: $url) {
+        uuid
+        name
+        sharedUrl
+        neighbourhood { 
+            linkLanguage 
+            meta { 
+                links
+                    {
+                        author
+                        timestamp
+                        data { source, predicate, target }
+                        proof { valid, invalid, signature, key }
+                    }  
+            } 
+        }
+    }
+}
