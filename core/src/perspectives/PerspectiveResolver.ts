@@ -99,6 +99,18 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => LinkExpression)
+    perspectiveAddLocalLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @PubSub() pubSub: any): LinkExpression {
+        const l = new LinkExpression()
+        l.author = 'did:ad4m:test'
+        l.timestamp = Date.now()
+        l.proof = testLink.proof
+        l.data = link
+
+        pubSub.publish(LINK_ADDED_TOPIC, { link: l })
+        return l
+    }
+
+    @Mutation(returns => LinkExpression)
     perspectiveAddLinkExpression(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @PubSub() pubSub: any): LinkExpression {
         pubSub.publish(LINK_ADDED_TOPIC, { link })
         return link as LinkExpression

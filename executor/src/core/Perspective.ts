@@ -360,6 +360,18 @@ export default class Perspective {
         return linkExpression
     }
 
+    async addLocalLinkHandler(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
+        const linkExpression = this.ensureLinkExpression(link);
+        this.addLocalLink(linkExpression)
+        this.#prologNeedsRebuild = true;
+        this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+            perspective: this.plain(),
+            link: linkExpression
+        })
+
+        return linkExpression
+    }
+
     private findLink(linkToFind: LinkExpressionInput): string | undefined {
         const allLinks = this.#db.getAllLinks(this.uuid)
         for(const {name, link} of allLinks) {

@@ -48,6 +48,14 @@ pub enum PerspectiveFunctions {
         predicate: Option<String>,
     },
 
+    /// Add local link to perspective with given uuid
+    AddLocalLink {
+        id: String,
+        source: String,
+        target: String,
+        predicate: Option<String>,
+    },
+
     /// Query links from perspective with given uuid
     QueryLinks(QueryLinksArgs),
 
@@ -116,6 +124,17 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             ad4m_client
                 .perspectives
                 .add_link(id, source, target, predicate)
+                .await?;
+        }
+        PerspectiveFunctions::AddLocalLink {
+            id,
+            source,
+            target,
+            predicate,
+        } => {
+            ad4m_client
+                .perspectives
+                .add_local_link(id, source, target, predicate)
                 .await?;
         }
         PerspectiveFunctions::QueryLinks(args) => {

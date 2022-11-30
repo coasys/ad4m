@@ -167,6 +167,18 @@ export class PerspectiveClient {
         return perspectiveAddLink
     }
 
+    async addLocalLink(uuid: string, link: Link): Promise<LinkExpression> {
+        const { perspectiveAddLocalLink } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveAddLocalLink($uuid: String!, $link: LinkInput!){
+                perspectiveAddLocalLink(link: $link, uuid: $uuid) {
+                    ${LINK_EXPRESSION_FIELDS}
+                }
+            }`,
+            variables: { uuid, link }
+        }))
+        return perspectiveAddLocalLink
+    }
+
     async addLinkExpression(uuid: string, link: LinkExpressionInput): Promise<LinkExpression> {
         const { perspectiveAddLinkExpression } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveAddLinkExpression($uuid: String!, $link: LinkExpressionInput!){

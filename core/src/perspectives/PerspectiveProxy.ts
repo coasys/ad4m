@@ -96,6 +96,11 @@ export class PerspectiveProxy {
         return await this.#client.addLink(this.#handle.uuid, link)
     }
 
+    /** Adds a link to this perspective */
+    async addLocal(link: Link): Promise<LinkExpression> {
+        return await this.#client.addLocalLink(this.#handle.uuid, link)
+    }
+
     /** Adds a linkExpression to this perspective */
     async addLinkExpression(link: LinkExpression): Promise<LinkExpression> {
         return await this.#client.addLinkExpression(this.#handle.uuid, link)
