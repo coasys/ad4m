@@ -4,8 +4,14 @@ import { LinkQuery } from "./LinkQuery";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
+import { Literal } from "../Literal";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed"
+
+interface Parameter {
+    name: string
+    value: string
+}
 
 /** Perspective UI proxy object
  * 
@@ -18,7 +24,6 @@ export class PerspectiveProxy {
     #client: PerspectiveClient
     #perspectiveLinkAddedCallbacks: LinkCallback[]
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
-    #executeAction
 
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = []
@@ -27,36 +32,46 @@ export class PerspectiveProxy {
         this.#client = ad4m
         this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
         this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
+    }
 
-        this.#executeAction = async (actions, expression) => {
-            console.log("execute:", actions)
-    
-            const replaceThis = (input: string|undefined) => {
-                if(input)
-                    return input.replace('this', expression)
-                else
-                    return undefined
-            }
-    
-            for(let command of actions) {
-                switch(command.action) {
-                    case 'addLink':
-                        await this.add(new Link({
-                            source: replaceThis(command.source),
-                            predicate: replaceThis(command.predicate),
-                            target: replaceThis(command.target)
-                        }))
-                        break;
-                    case 'removeLink':
-                        const linkExpressions = await this.get(new LinkQuery({
-                            source: replaceThis(command.source), 
-                            predicate: replaceThis(command.predicate), 
-                            target: replaceThis(command.target)}))
-                        for (const linkExpression of linkExpressions) {
-                            await this.remove(linkExpression)
-                        }
-                        break;
+    async executeAction(actions, expression, parameters: Parameter[]) {
+        console.log("execute:", actions)
+
+        const replaceThis = (input: string|undefined) => {
+            if(input)
+                return input.replace('this', expression)
+            else
+                return undefined
+        }
+
+        const replaceParameters = (input: string|undefined) => {
+            if(input && parameters && parameters.length > 0) {
+                let output = input
+                for(const parameter of parameters) {
+                    output = output.replace(parameter.name, parameter.value)
                 }
+                return output
+            } else
+                return undefined
+        }
+
+        for(let command of actions) {
+            let source = replaceThis(replaceParameters(command.source))
+            let predicate = replaceThis(replaceParameters(command.predicate))
+            let target = replaceThis(replaceParameters(command.target))
+            switch(command.action) {
+                case 'addLink':
+                    await this.add(new Link({source, predicate, target}))
+                    break;
+                case 'removeLink':
+                    const linkExpressions = await this.get(new LinkQuery({source, predicate, target}))
+                    for (const linkExpression of linkExpressions) {
+                        await this.remove(linkExpression)
+                    }
+                    break;
+                case 'setSingleTarget':
+                    await this.setSingleTarget(new Link({source, predicate, target}))
+                    break;
             }
         }
     }
@@ -211,7 +226,7 @@ export class PerspectiveProxy {
         let startAction = await this.infer(`start_action(Action, F), register_sdna_flow("${flowName}", F)`)
         // should always return one solution...
         startAction = eval(startAction[0].Action)
-        await this.#executeAction(startAction, exprAddr)
+        await this.executeAction(startAction, exprAddr, undefined)
     }
 
     /** Returns all expressions in the given state of given Social DNA flow */
@@ -237,7 +252,23 @@ export class PerspectiveProxy {
         let action = await this.infer(`register_sdna_flow("${flowName}", Flow), flow_state("${exprAddr}", State, Flow), action(State, "${actionName}", _, Action)`)
         // should find only one
         action = eval(action[0].Action)
-        await this.#executeAction(action, exprAddr)
+        await this.executeAction(action, exprAddr, undefined)
+    }
+
+    async setSdna(sdnaCode: string) {
+        await this.setSingleTarget(new Link({
+            source: "ad4m://self",
+            predicate: "ad4m://has_zome",
+            target: Literal.from(sdnaCode).toUrl()
+        }))
+    }
+
+    async subjectClasses(): Promise<string[]> {
+        return (await this.infer("subject_class(X, _)")).map(x => x.X)
+    }
+
+    async subjectInstance(expression: string, subjectClass: string): Promise<boolean> {
+        return (await this.infer(`subject_instance("${expression}", "${subjectClass}")`)).length > 0
     }
 
 }
