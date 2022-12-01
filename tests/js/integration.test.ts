@@ -130,5 +130,9 @@ describe("Integration", () => {
         //@ts-ignore
         expect(await subject.state).to.equal("todo://ready")
 
+        //@ts-ignore
+        await subject.setState("todo://done")
+        //@ts-ignore
+        expect(await subject.state).to.equal("todo://done")
     })
 })
