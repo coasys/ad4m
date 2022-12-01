@@ -80,5 +80,23 @@ export class Subject {
                 }
             })
         }
+
+        let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), collection_adder(c, Collection, Adder)`)
+
+        for(let adder of adders) {
+            if(adder) {
+                const collection = adder.Collection
+                const actions = eval(adder.Adder)
+                let capitalized = collection.charAt(0).toUpperCase() + collection.slice(1)
+                if(capitalized.endsWith("s")) {
+                    capitalized = capitalized.slice(0, -1)
+                }
+                this[`add${capitalized}`] = async (value: any) => {
+                    //console.log("Setting property: " + property + " to " + value)
+                    //console.log("Actions: " + JSON.stringify(actions))
+                    await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
+                }
+            }
+        }
     }
 }

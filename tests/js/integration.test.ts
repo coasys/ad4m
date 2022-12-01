@@ -5,7 +5,7 @@ import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
 import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
-import { Ad4mClient, Link, Literal, PerspectiveProxy, Subject } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, Subject } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
 
@@ -183,6 +183,32 @@ describe("Integration", () => {
 
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1, c2])
+            })
+
+            it("should be able to add to collections", async () => {
+                let commentLinks = await perspective!.get(new LinkQuery({
+                    source: subject!.baseExpression, 
+                    predicate: "todo://comment"
+                }))
+                for(let link of commentLinks) {
+                    await perspective!.remove(link)
+                }
+
+                //@ts-ignore
+                expect(await subject.comments).to.be.empty
+
+                let c1 = Literal.from("new comment 1").toUrl()
+                let c2 = Literal.from("new comment 2").toUrl()
+
+                //@ts-ignore
+                subject.addComment(c1)
+                //@ts-ignore
+                expect(await subject.comments).to.deep.equal([c1])
+
+                //@ts-ignore
+                subject.addComment(c2)
+                //@ts-ignore
+                expect(await subject.comments).to.deep.equal([c2])
             })
         })
     })

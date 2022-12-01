@@ -12,4 +12,4 @@ property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predic
 
 collection(c, "comments").
 collection_getter(c, X, "comments", Comments) :- findall(C, triple(X, "todo://comment", C), Comments).
-collection_adder(c, X, '[{action: "addLink", source: "this", predicate: "todo://comment", target: "comment"}]').
+collection_adder(c, "comments", '[{action: "addLink", source: "this", predicate: "todo://comment", target: "value"}]').
