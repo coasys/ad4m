@@ -70,6 +70,7 @@ export class PerspectiveProxy {
                     }
                     break;
                 case 'setSingleTarget':
+                    console.log('setSingleTarget', source, predicate, target)
                     await this.setSingleTarget(new Link({source, predicate, target}))
                     break;
             }
@@ -281,7 +282,7 @@ export class PerspectiveProxy {
     }
 
     async constructSubject(className: string, exprAddr: string): Promise<boolean> {
-        let result = await this.infer(`subject_class("${className}", C), instantiate_subject(C, Actions)`)
+        let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
         if(result.length) {
             let actions = result.map(x => eval(x.Actions))
             await this.executeAction(actions[0], exprAddr, undefined)
@@ -292,7 +293,7 @@ export class PerspectiveProxy {
     }
 
     async isSubjectInstance(expression: string, subjectClass: string): Promise<boolean> {
-        return await this.infer(`subject_class("${subjectClass}", c), is_instance(c, "${expression}")`)
+        return await this.infer(`subject_class("${subjectClass}", c), instance(c, "${expression}")`)
     }
 
     async subjectInstance(expression: string, subjectClass: string): Promise<Subject> {

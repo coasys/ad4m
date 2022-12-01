@@ -17,7 +17,7 @@ export class Subject {
             throw `Not a valid subject instance of ${this.#subjectClass} for ${this.#baseExpression}`
         }
 
-        let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), instance_property(c, _, Property, _)`)
+        let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property(c, Property)`)
         let properties = results.map(result => result.Property)
         console.log("Subject properties: " + properties)
         
@@ -25,7 +25,7 @@ export class Subject {
         for(let p of properties) {
             Object.defineProperty(this, p, {
                 get: async () => {
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), instance_property(c, "${this.#baseExpression}", "${p}", Value)`)
+                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_getter(c, "${this.#baseExpression}", "${p}", Value)`)
                     if(results && results.length > 0) {
                         return results[0].Value
                     } else {
@@ -36,7 +36,7 @@ export class Subject {
         }
 
 
-        let setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), instance_property_setter(c, Property, Setter)`)
+        let setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_setter(c, Property, Setter)`)
         console.log("Subject setters: " + setters.map(setter => setter.Property))
         for(let setter of setters) {
             if(setter) {
