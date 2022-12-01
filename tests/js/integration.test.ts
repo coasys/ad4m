@@ -9,22 +9,11 @@ import { Ad4mClient, Link, Literal, PerspectiveProxy, Subject } from "@perspect3
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
 
-function sleep(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 
 function apolloClient(port: number, token?: string): ApolloClient<any> {
     const wsLink = new GraphQLWsLink(createClient({
         url: `ws://localhost:${port}/graphql`,
         webSocketImpl: Websocket,
-        /*connectionParams: () => {
-            return {
-                headers: {
-                    authorization: token
-                }
-            }
-        },*/
     }));
 
     const link = new HttpLink({
