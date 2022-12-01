@@ -264,7 +264,12 @@ export class PerspectiveProxy {
     }
 
     async subjectClasses(): Promise<string[]> {
-        return (await this.infer("subject_class(X, _)")).map(x => x.X)
+        try {
+            return (await this.infer("subject_class(X, _)")).map(x => x.X)
+        }catch(e) {
+            return []
+        }
+        
     }
 
     async subjectInstance(expression: string, subjectClass: string): Promise<boolean> {
