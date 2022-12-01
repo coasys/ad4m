@@ -41,7 +41,7 @@ jobs:
     - name: Build AD4M-Host
       run: yarn run package-macos
 
-    - name: Run binaries test script
+    - name: Run tests/js
       run: |
         cd tests/js
         yarn install
