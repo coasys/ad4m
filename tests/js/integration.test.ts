@@ -103,44 +103,70 @@ describe("Integration", () => {
         expect(result!.isInitialized).to.be.true
     })
 
-    it("should find and instantiate subject classes", async () => {
-        let perspective: PerspectiveProxy = await ad4m!.perspective.add("test")
-        console.log("UUID: " + perspective.uuid)
+    describe("Subjects", () => {
+        let perspective: PerspectiveProxy | null = null
 
-        let classes = await perspective.subjectClasses();
-        expect(classes.length).to.equal(0)
+        before(async () => {
+            perspective = await ad4m!.perspective.add("test")
+            // for test debugging:
+            console.log("UUID: " + perspective.uuid)
 
-        let sdna = readFileSync("./subject.pl").toString()
-        await perspective.setSdna(sdna)
+            let classes = await perspective.subjectClasses();
+            expect(classes.length).to.equal(0)
 
-        let retrievedSdna = await perspective.getSdna()
-        expect(retrievedSdna).to.deep.equal([sdna])
+            let sdna = readFileSync("./subject.pl").toString()
+            await perspective.setSdna(sdna)
 
-        classes = await perspective.subjectClasses();
-        expect(classes.length).to.equal(1)
-        expect(classes[0]).to.equal("TODO")
+            let retrievedSdna = await perspective.getSdna()
+            expect(retrievedSdna).to.deep.equal([sdna])
+        })
 
-        let root = Literal.from("test").toUrl()
-        expect(await perspective.constructSubject("TODO", root)).to.be.true
+        it("should find the TODO subject class from the test SDNA", async () => {
+            let classes = await perspective!.subjectClasses();
 
-        expect(await perspective.isSubjectInstance(root, "TODO")).to.be.true
+            expect(classes.length).to.equal(1)
+            expect(classes[0]).to.equal("TODO")
+        })
 
-        let subject: Subject = await perspective.subjectInstance(root, "TODO")
+        it("should be able to construct a subject instance from a literal", async () => {
+            let root = Literal.from("construct test").toUrl()
+            expect(await perspective!.constructSubject("TODO", root)).to.be.true
+            expect(await perspective!.isSubjectInstance(root, "TODO")).to.be.true
+        })
+    
+        describe("with an instance", () => {
+            let subject: Subject | null = null
 
-        //@ts-ignore
-        expect(await subject.state).to.equal("todo://ready")
+            before(async () => {
+                let root = Literal.from("construct test").toUrl()
+                await perspective!.constructSubject("TODO", root)
+                subject = await perspective!.subjectInstance(root, "TODO")
+            })
 
-        //@ts-ignore
-        await subject.setState("todo://done")
-        //@ts-ignore
-        expect(await subject.state).to.equal("todo://done")
-        //@ts-ignore
-        expect(await subject.title).to.be.undefined
+            it("should be able to read a property as JS property", async () => {
+                //@ts-ignore
+                expect(await subject.state).to.equal("todo://ready")
+            })
 
-        let title = Literal.from("test title").toUrl()
-        //@ts-ignore
-        await subject.setTitle(title)
-        //@ts-ignore
-        expect(await subject.title).to.equal(title)
+            it("should be able to set a property with JS setter method", async () => {
+                //@ts-ignore
+                await subject.setState("todo://done")
+                //@ts-ignore
+                expect(await subject.state).to.equal("todo://done")
+            })
+
+            it("should work with a property that is not set initially", async () => {
+                //@ts-ignore
+                expect(await subject.title).to.be.undefined
+        
+                let title = Literal.from("test title").toUrl()
+                //@ts-ignore
+                await subject.setTitle(title)
+                //@ts-ignore
+                expect(await subject.title).to.equal(title)
+            })
+        })
     })
+
+
 })
