@@ -1,6 +1,6 @@
 subject_class("TODO", c).
 
-instantiate_class(c, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
+instantiate_subject(c, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
 is_instance(c, X) :- triple(X, "todo://state", _).
 
 instance_property(c, X, "state", State) :- triple(X, "todo://state", State).

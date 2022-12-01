@@ -5,6 +5,7 @@ import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
+import { Subject } from "./Subject";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed"
 
@@ -45,15 +46,16 @@ export class PerspectiveProxy {
         }
 
         const replaceParameters = (input: string|undefined) => {
-            if(input && parameters && parameters.length > 0) {
+            if(parameters) {
                 let output = input
                 for(const parameter of parameters) {
                     output = output.replace(parameter.name, parameter.value)
                 }
                 return output
             } else
-                return undefined
+                return input
         }
+
 
         for(let command of actions) {
             let source = replaceThis(replaceParameters(command.source))
@@ -263,17 +265,48 @@ export class PerspectiveProxy {
         }))
     }
 
+    async getSdna(): Promise<string[]> {
+        let links = await this.get(new LinkQuery({
+            source: "ad4m://self",
+            predicate: "ad4m://has_zome"
+        }))
+
+        return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
+    }
+
     async subjectClasses(): Promise<string[]> {
         try {
             return (await this.infer("subject_class(X, _)")).map(x => x.X)
         }catch(e) {
             return []
         }
-        
     }
 
-    async subjectInstance(expression: string, subjectClass: string): Promise<boolean> {
-        return (await this.infer(`subject_instance("${expression}", "${subjectClass}")`)).length > 0
+    async constructSubject(className: string, exprAddr: string): Promise<boolean> {
+        let result = await this.infer(`subject_class("${className}", C), instantiate_subject(C, Actions)`)
+        if(result.length) {
+            let actions = result.map(x => eval(x.Actions))
+            await this.executeAction(actions[0], exprAddr, undefined)
+            return true   
+        } else {
+            return false
+        }
+    }
+
+    async isSubjectInstance(expression: string, subjectClass: string): Promise<boolean> {
+        return await this.infer(`subject_class("${subjectClass}", c), is_instance(c, "${expression}")`)
+    }
+
+    async subjectInstance(expression: string, subjectClass: string): Promise<Subject> {
+        let isInstance = await this.isSubjectInstance(expression, subjectClass)
+        if(!isInstance) {
+            throw "Expression is not a subject instance of given class"
+        }
+            
+        
+        let subject = new Subject(this, expression, subjectClass)
+        await subject.init()
+        return subject
     }
 
 }
