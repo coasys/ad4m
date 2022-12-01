@@ -83,13 +83,27 @@ fn main() {
     find_and_kill_processes("lair-keystore");
     if !holochain_binary_path().exists() {
         log::info!("Init ad4m-host");
-        let status = Command::new_sidecar("ad4m")
+        let (mut rx, _child) = Command::new_sidecar("ad4m")
             .expect("Failed to create ad4m command")
             .args(["init"])
-            .status()
+            .spawn()
             .expect("Failed to run ad4m init");
-        log::info!("Init ad4m-host status: {:?}", status);
-        assert!(status.success());
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event.clone() {
+                    CommandEvent::Stdout(line) => {
+                        log::info!("AD4M-HOST init stdout: {:?}", line);
+                    },
+                    CommandEvent::Stderr(line) => log::error!("AD4M-HOST STDERR: {}", line),
+                    CommandEvent::Terminated(line) => {
+                        log::info!("AD4M-HOST Terminated: {:?}", line);
+                        panic!("AD4M-HOST Terminated: {:?}", line);
+                    },
+                    CommandEvent::Error(line) => log::info!("AD4M-HOST Error: {:?}", line),
+                    _ => log::error!("AD4M-HOST, unknown output: {:?}", event),
+                }
+            }
+        });
     }
 
     let req_credential = Uuid::new_v4().to_string();
