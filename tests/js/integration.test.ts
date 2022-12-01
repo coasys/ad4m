@@ -5,8 +5,8 @@ import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
 import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
-import { Ad4mClient } from "@perspect3vism/ad4m";
-import { rmSync } from "node:fs";
+import { Ad4mClient, PerspectiveProxy } from "@perspect3vism/ad4m";
+import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
 
 function sleep(ms: number) {
@@ -96,5 +96,19 @@ describe("Integration", () => {
         let result = await ad4m!.agent.status()
         expect(result).to.not.be.null
         expect(result!.isInitialized).to.be.true
+    })
+
+    it("should find and instantiate subject classes", async () => {
+        let perspective: PerspectiveProxy = await ad4m!.perspective.add("test")
+
+        let classes = await perspective.subjectClasses();
+        expect(classes.length).to.equal(0)
+
+        let sdna = readFileSync("./subject.pl").toString()
+        await perspective.setSdna(sdna)
+
+        classes = await perspective.subjectClasses();
+        expect(classes.length).to.equal(1)
+        expect(classes[0]).to.equal("TODO")
     })
 })
