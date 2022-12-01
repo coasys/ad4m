@@ -86,6 +86,6 @@ describe("Integration", () => {
     it("should get agent status", async () => {
         let result = await ad4m!.agent.status()
         expect(result).to.not.be.null
-        expect(result!.isInitialized).to.not.be.true
+        expect(result!.isInitialized).to.be.true
     })
 })
