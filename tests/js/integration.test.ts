@@ -78,9 +78,9 @@ describe("Integration", () => {
     })
 
     after(() => {
-        //if (executorProcess) {
-        //    executorProcess.kill()
-        //}
+        if (executorProcess) {
+            executorProcess.kill()
+        }
     })
 
     it("should get agent status", async () => {
