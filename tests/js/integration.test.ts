@@ -60,6 +60,15 @@ describe("Integration", () => {
         console.log("Starting executor")
         //@ts-ignore
         executorProcess = exec('../../host/dist/ad4m-macos-x64 serve --dataPath ../ad4mJS', {})
+
+        let executorReady = new Promise<void>((resolve, reject) => {
+            executorProcess!.stdout!.on('data', (data) => {
+                if (data.includes("GraphQL server started")) {
+                    resolve()
+                }
+            });
+        })
+
         executorProcess!.stdout!.on('data', (data) => {
             console.log(`${data}`);
         });
@@ -69,7 +78,7 @@ describe("Integration", () => {
         });
     
         console.log("Waiting for executor to settle...")
-        await sleep(10000)
+        await executorReady
         console.log("Creating ad4m client")
         ad4m = new Ad4mClient(apolloClient(4000))
         console.log("Generating agent")
