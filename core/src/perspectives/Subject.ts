@@ -19,7 +19,8 @@ export class Subject {
 
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), instance_property(c, _, Property, _)`)
         let properties = results.map(result => result.Property)
-        let setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), instance_property_setter(c, Property, Setter)`)
+        console.log("Subject properties: " + properties)
+        
 
         for(let p of properties) {
             Object.defineProperty(this, p, {
@@ -32,17 +33,25 @@ export class Subject {
                     }
                 }
             })
+        }
 
 
-            let setter = setters.find(s => s.Property === p)
+        let setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), instance_property_setter(c, Property, Setter)`)
+        console.log("Subject setters: " + setters.map(setter => setter.Property))
+        for(let setter of setters) {
             if(setter) {
+                const property = setter.Property
                 const actions = eval(setter.Setter)
-                const capitalized = p.charAt(0).toUpperCase() + p.slice(1)
+                const capitalized = property.charAt(0).toUpperCase() + property.slice(1)
                 this[`set${capitalized}`] = async (value: any) => {
+                    console.log("Setting property: " + property + " to " + value)
+                    console.log("Actions: " + JSON.stringify(actions))
                     await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
                 }
             }
         }
+        
+
 
         
     }

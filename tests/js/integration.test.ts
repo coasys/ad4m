@@ -134,5 +134,13 @@ describe("Integration", () => {
         await subject.setState("todo://done")
         //@ts-ignore
         expect(await subject.state).to.equal("todo://done")
+        //@ts-ignore
+        expect(await subject.title).to.be.undefined
+
+        let title = Literal.from("test title").toUrl()
+        //@ts-ignore
+        await subject.setTitle(title)
+        //@ts-ignore
+        expect(await subject.title).to.equal(title)
     })
 })
