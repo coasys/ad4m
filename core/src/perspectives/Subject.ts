@@ -11,6 +11,10 @@ export class Subject {
         this.#perspective = perspective
     }
 
+    get baseExpression() {
+        return this.#baseExpression
+    }
+
     async init() {
         let isInstance = await this.#perspective.isSubjectInstance(this.#baseExpression, this.#subjectClass)
         if(!isInstance) {
@@ -52,7 +56,29 @@ export class Subject {
         }
         
 
+        const flattenPrologList = (list: object): any[] =>{
+            let result = []
+            while(list && list["head"]) {
+                result.push(list["head"])
+                list = list["tail"]
+            }
+            return result
+        }
 
-        
+        let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), collection(c, Collection)`)
+        let collections = results2.map(result => result.Collection)
+
+        for(let c of collections) {
+            Object.defineProperty(this, c, {
+                get: async () => {
+                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), collection_getter(c, "${this.#baseExpression}", "${c}", Value)`)
+                    if(results && results.length > 0 && results[0].Value) {
+                        return flattenPrologList(eval(results[0].Value))
+                    } else {
+                        return []
+                    }
+                }
+            })
+        }
     }
 }

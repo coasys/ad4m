@@ -10,5 +10,6 @@ property(c, "title").
 property_getter(c, X, "title", T) :- triple(X, "flux://has_title", T).
 property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "flux://has_title", target: "value"}]').
 
-instance_collection(c, X, "comments", Comments) :- findall(C, triple(X, "todo://comment", C), Comments).
-instance_method(c, X, "add_comment", ["comment"], '[{action: "addLink", source: "this", predicate: "todo://comment", target: "comment"}]').
+collection(c, "comments").
+collection_getter(c, X, "comments", Comments) :- findall(C, triple(X, "todo://comment", C), Comments).
+collection_adder(c, X, '[{action: "addLink", source: "this", predicate: "todo://comment", target: "comment"}]').
