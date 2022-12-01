@@ -50,7 +50,12 @@ describe("Integration", () => {
         execSync('../../host/dist/ad4m-macos-x64 init --dataPath ../ad4mJS', {})
         
         console.log("Starting executor")
-        execSync("killall holochain")
+        try {
+            execSync("killall holochain")
+        } catch (e) {
+            console.log("No holochain process running")
+        }
+        
         //@ts-ignore
         executorProcess = exec('../../host/dist/ad4m-macos-x64 serve --dataPath ../ad4mJS', {})
 
