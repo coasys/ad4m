@@ -41,9 +41,9 @@ describe("Integration", () => {
     let executorProcess: ChildProcess | null = null
 
     before(async () => {
-        ad4m = new Ad4mClient(apolloClient(4000))
-        return
-        /*
+        //ad4m = new Ad4mClient(apolloClient(4000))
+        //return
+
         rmSync("../ad4mJS", { recursive: true, force: true })
         console.log("Initialzing executor data directory")
         //@ts-ignore
@@ -65,7 +65,6 @@ describe("Integration", () => {
         executorProcess!.stdout!.on('data', (data) => {
             console.log(`${data}`);
         });
-        //Log holochain process stderr to out
         executorProcess!.stderr!.on('data', (data) => {
             console.log(`${data}`);
         });
@@ -77,7 +76,6 @@ describe("Integration", () => {
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
         console.log("Done")
-        */
     })
 
     after(() => {
