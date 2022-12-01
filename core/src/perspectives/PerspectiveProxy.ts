@@ -70,7 +70,6 @@ export class PerspectiveProxy {
                     }
                     break;
                 case 'setSingleTarget':
-                    console.log('setSingleTarget', source, predicate, target)
                     await this.setSingleTarget(new Link({source, predicate, target}))
                     break;
             }
