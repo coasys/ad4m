@@ -19,13 +19,13 @@ function wgetFile(url: string, dest: string) {
         let download = wget.download(url, dest)
         download.on('end', async () => {
         await fs.chmodSync(dest, '777');
-        console.log('Dep download succesfully')
-        resolve(null);
+          console.log('Dep download succesfully: ', dest)
+          resolve(null);
         })
 
         download.on('error', async (err: any) => {
-        console.log("Something went wrong downloading mainnet seed");
-        reject(err);
+          console.log("Something went wrong downloading from destination: ", dest);
+          reject(err);
         })
     });
 } 
