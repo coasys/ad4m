@@ -301,11 +301,16 @@ export class PerspectiveProxy {
             throw "Expression is not a subject instance of given class"
         }
             
-        
         let subject = new Subject(this, expression, subjectClass)
         await subject.init()
         return subject
     }
+
+    async subjectInstances(subjectClass: string): Promise<Subject[]> {
+        let instances = await this.infer(`subject_class("${subjectClass}", c), instance(c, X)`)
+        return await Promise.all(instances.map(async x => await this.subjectInstance(x.X, subjectClass)))
+    }
+
 
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
         //console.log("subject template", obj)
@@ -366,4 +371,13 @@ export class PerspectiveProxy {
         }
     }
 
+    async subjectInstancesByTemplate<T extends object>(obj: T): Promise<T[]> {
+        let classes = await this.subjectClassesByTemplate(obj)
+        let instances = []
+        for(let className of classes) {
+            let instancesOfClass = await this.subjectInstances(className)
+            instances = instances.concat(instancesOfClass)
+        }
+        return instances
+    }
 }

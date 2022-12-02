@@ -262,6 +262,17 @@ describe("Integration", () => {
                 expect(almostTodoClasses).to.be.empty
             })
 
+            it("can find subject and create instances in a type-safe way", async () => {
+                // PerspectiveProxe.subejctInstancesByTemplate() is a generic that returns
+                // an array of the given type.
+                let todos = await perspective!.subjectInstancesByTemplate(todo)
+
+                // todos is an array of Todo objects
+                // note how we don't need @ts-ignore here:
+                expect(todos.length).to.equal(1)
+                expect(await todos[0].state).to.equal("todo://done")
+            })
+
         })
     })
 
