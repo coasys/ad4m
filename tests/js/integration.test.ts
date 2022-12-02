@@ -211,6 +211,58 @@ describe("Integration", () => {
                 expect(await subject.comments).to.deep.equal([c1, c2])
             })
         })
+
+        describe("TypeScript compatibility", () => {
+
+            // This class mathces the SDNA in ./subject.pl
+            class Todo {
+                state: string = ""
+                title: string = ""
+                comments: string[] = []
+
+                setState(state: string) {}
+                setTitle(title: string) {}
+                addComment(comment: string) {}
+            }
+
+            // This class doesn not match the SDNA in ./subject.pl
+            class UnknownSubject {
+                name: string = ""
+                x: string = ""
+
+                setTop(top: string) {}
+            }
+
+            // This class is like Todo, but has a setter that
+            // is not defined in the SDNA (-> should not match)
+            class AlmostTodo {
+                state: string = ""
+                title: string = ""
+                comments: string[] = []
+
+                setState(state: string) {}
+                setTitle(title: string) {}
+                addComment(comment: string) {}
+                setTop(top: string) {}
+            }
+
+            let todo: Todo = new Todo()
+            let unknown: UnknownSubject = new UnknownSubject()
+            let almostTodo: AlmostTodo = new AlmostTodo()
+
+            it("can find subject classes mapping to JS objects", async () => {
+                let todoClasses = await perspective!.subjectClassesByTemplate(todo)
+                expect(todoClasses).to.include("TODO")
+                expect(todoClasses.length).to.equal(1)
+
+                let unknownClasses = await perspective!.subjectClassesByTemplate(unknown)
+                expect(unknownClasses).to.be.empty
+
+                let almostTodoClasses = await perspective!.subjectClassesByTemplate(almostTodo)
+                expect(almostTodoClasses).to.be.empty
+            })
+
+        })
     })
 
 

@@ -307,4 +307,63 @@ export class PerspectiveProxy {
         return subject
     }
 
+    async subjectClassesByTemplate(obj: object): Promise<string[]> {
+        //console.log("subject template", obj)
+        //console.log(Object.keys(obj))
+        //console.log(Object.getOwnPropertyNames(obj))
+        //@ts-ignore
+        //console.log(Object.keys(Object.getPrototypeOf(obj)))
+        //@ts-ignore
+        //console.log(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)))
+
+        // Collect all string properties of the object in a list
+        let properties = Object.keys(obj).filter(key => typeof obj[key] === "string")
+
+        // Collect all collections of the object in a list
+        let collections = Object.keys(obj).filter(key => Array.isArray(obj[key]))
+
+        // Collect all set functions of the object in a list
+        let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set"))
+        // Add all set functions of the object's prototype to that list
+        setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("set")))
+
+        // Collect all add functions of the object in a list
+        let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("add"))
+        // Add all add functions of the object's prototype to that list
+        addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("add")))
+
+        // Construct query to find all subject classes that have the given properties and collections
+        let query = `subject_class(Class, c)`
+
+        for(let property of properties) {
+            query += `, property(c, "${property}")`
+        }
+        for(let collection of collections) {
+            query += `, collection(c, "${collection}")`
+        }
+
+        for(let setFunction of setFunctions) {
+            // e.g.  "setState" -> "state"
+            let property = setFunction.substring(3)
+            property = property.charAt(0).toLowerCase() + property.slice(1)
+            query += `, property_setter(c, "${property}", _)`
+        }
+        for(let addFunction of addFunctions) {
+            // e.g. "addComment" -> "comments"
+            let property = addFunction.substring(3)
+            property = property.charAt(0).toLowerCase() + property.slice(1) + "s"
+            query += `, collection_adder(c, "${property}", _)`
+        }
+
+        query += "."
+        //console.log(query)
+        let result = await this.infer(query)
+
+        if(!result) {
+            return []
+        } else {
+            return result.map(x => x.Class)
+        }
+    }
+
 }
