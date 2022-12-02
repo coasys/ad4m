@@ -208,7 +208,7 @@ describe("Integration", () => {
                 //@ts-ignore
                 subject.addComment(c2)
                 //@ts-ignore
-                expect(await subject.comments).to.deep.equal([c2])
+                expect(await subject.comments).to.deep.equal([c1, c2])
             })
         })
     })
