@@ -2,6 +2,13 @@ use ad4m_client::Ad4mClient;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use rustyline::Editor;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use tokio::fs::read_dir;
+
+use ad4m_client::languages::Meta;
+
+use crate::{agent, startup::executor_data_path};
 
 #[derive(Debug, Subcommand)]
 pub enum LanguageFunctions {
@@ -28,6 +35,56 @@ pub enum LanguageFunctions {
     Source { address: String },
     /// Uninstall given language
     Remove { address: String },
+    /// Generate bootstrap seed from a local prototype JSON file declaring languages to be published
+    GenerateBootstrap {
+        agent_path: String,
+        ad4m_host_path: String,
+        seed_proto: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SeedProto {
+    #[serde(rename = "languageLanguage")]
+    language_language: String,
+    #[serde(rename = "perspectiveDiffSync")]
+    perspective_diff_sync: LanguageInstance,
+    #[serde(rename = "agentLanguage")]
+    agent_language: LanguageInstance,
+    #[serde(rename = "directMessageLanguage")]
+    direct_message_language: LanguageInstance,
+    #[serde(rename = "neighbourhoodLanguage")]
+    neighbourhood_language: LanguageInstance,
+    #[serde(rename = "perspectiveLanguage")]
+    perspective_language: LanguageInstance,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LanguageInstance {
+    meta: Meta,
+    resource: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BootstrapSeed {
+    #[serde(rename = "trustedAgents")]
+    pub trusted_agents: Vec<String>,
+    #[serde(rename = "knownLinkLanguages")]
+    pub known_link_languages: Vec<String>,
+    #[serde(rename = "directMessageLanguage")]
+    pub direct_message_language: String,
+    #[serde(rename = "agentLanguage")]
+    pub agent_language: String,
+    #[serde(rename = "perspectiveLanguage")]
+    pub perspective_languages: String,
+    #[serde(rename = "neighbourhoodLanguage")]
+    pub neighbourhood_language: String,
+    #[serde(rename = "languageLanguageBundle")]
+    pub language_language_bundle: String,
+}
+
+fn write_bootstrap_seed(name: String, seed_data: BootstrapSeed) -> Result<()> {
+    Ok(())
 }
 
 pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) -> Result<()> {
@@ -146,6 +203,52 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
         LanguageFunctions::Remove { address } => {
             ad4m_client.languages.remove(address).await?;
             println!("Language removed");
+        }
+        LanguageFunctions::GenerateBootstrap {
+            agent_path,
+            ad4m_host_path,
+            seed_proto,
+        } => {
+            println!(
+                "Attempting to generate a new bootstrap seed using ad4m-host path: {:?} and agent path: {:?}",
+                ad4m_host_path,
+                agent_path
+            );
+
+            //Warn the user about deleting ad4m agent during publishing
+            println!("WARNING... THIS WILL DELETE YOUR EXISTING AD4M AGENT AND REPLACE WITH SUPPLIED PUBLISHING AGENT, PLEASE BACKUP BEFORE PROCEEDING");
+            let mut rl = Editor::<()>::new()?;
+            let continue_response = rl.readline("y/n to continue...")?;
+            if continue_response == String::from("n") || continue_response == String::from("N") {
+                return Ok(());
+            };
+
+            //Load the seed proto first so we know that works before making new agent path
+            let seed_proto = fs::read_to_string(seed_proto)?;
+            let seed_proto: SeedProto = serde_json::from_str(&seed_proto)?;
+            println!("Loaded seed prototype file!");
+
+            //Create a new ~/.ad4m path with agent.json file supplied
+            //Backup any existing ad4m agent to ~/.ad4m.old
+            let data_path = executor_data_path();
+            let data_path_files = std::fs::read_dir(&data_path);
+            if data_path_files.is_ok() {
+                fs::remove_dir_all(&data_path)?;
+            }
+
+            //Create the ad4m directory
+            fs::create_dir(&data_path)?;
+            let data_data_path = data_path.join("data");
+            fs::create_dir(&data_data_path)?;
+            //Read the agent file
+            let agent_file = fs::read_to_string(agent_path)?;
+            //Copy the agent file to correct directory
+            fs::write(data_path.join("agent.json"), agent_file)?;
+            fs::write(data_data_path.join("DIDCache.json"), String::from("{}"))?;
+            println!("Publishing agent directory setup");
+
+            println!("Creating temporary bootstrap seed for publishing purposes...");
+            let lang_lang_source = fs::read_to_string(seed_proto.language_language)?;
         }
     };
     Ok(())

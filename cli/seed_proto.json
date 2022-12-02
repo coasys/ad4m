@@ -1,0 +1,48 @@
+{
+    "languageLanguageRef": "/Users/josh/dev/language-persistence/build/bundle.js",
+    "perspectiveDiffSync": {
+        "meta": {
+            "name": "perspectiveDiffSync",
+            "description": "Holochain based Perspective link sharing language",
+            "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
+            "possibleTemplateParams": ["uid", "name", "description"]
+        },
+        "resource": "https://github.com/perspect3vism/perspective-diff-sync/releases/download/0.0.9/bundle.js"
+    },
+    "agentLanguage": {
+        "meta": {
+            "name": "agentLanguage", 
+            "description": "Holochain based expression language for storing ad4m agent expressions", 
+            "sourceCodeLink": "https://github.com/perspect3vism/agent-language",
+            "possibleTemplateParams": ["uid", "name", "description"]
+        },
+        "resource": "https://github.com/perspect3vism/agent-language/releases/download/0.0.12/bundle.js"
+    },
+    "directMessageLanguage": {
+        "meta": {
+            "name": "directMessageLanguage", 
+            "description": "Holochain based language for direct messages on ad4m",
+            "sourceCodeLink": "https://github.com/perspect3vism/direct-message-language", 
+            "possibleTemplateParams": ["recipient_did", "recipient_hc_agent_pubkey"]
+        },
+        "resource": "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.6/bundle.js"
+    },
+    "neighbourhoodLanguage": {
+        "meta": {
+            "name": "neighbourhoodLanguage", 
+            "description": "Language for storing neighbourhood expressions that leverages StorJ",
+            "sourceCodeLink": "https://github.com/fluxsocial/neighbourhood-language", 
+            "possibleTemplateParams": ["uid", "name", "description"]
+        },
+        "resource": "https://github.com/fluxsocial/neighbourhood-language/releases/download/0.0.5/bundle.js"
+    },
+    "perspectiveLanguage": {
+        "meta": {
+            "name": "perspectiveLanguage", 
+            "description": "Holochain based language for storing perspective expressions", 
+            "sourceCodeLink": "https://github.com/perspect3vism/perspective-language",
+            "possibleTemplateParams": ["uid", "name", "description"]
+        },
+        "resource": "https://github.com/perspect3vism/perspective-language/releases/download/0.0.1/bundle.js"
+    }
+}
