@@ -5,7 +5,7 @@ import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
 import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
-import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, Subject } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, Subject, subjectProperty, subjectCollection, sdnaOutput, addLink, hasLink } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
 
@@ -273,6 +273,39 @@ describe("Integration", () => {
                 expect(await todos[0].state).to.equal("todo://done")
             })
 
+        })
+
+        describe("SDNA creation decorators", () => {
+            it("should be able to create an SDNA from a class", async () => {
+
+                class Todo {
+                    subjectConstructor = [addLink("this", "todo://state", "todo://ready")]
+                    isSubjectInstance = [hasLink("todo://state")]
+
+                    //@ts-ignore
+                    @subjectProperty({through: "todo://state", initial:"todo://ready"})
+                    state: string = ""
+
+                    //@ts-ignore
+                    @subjectProperty({through: "todo://title"})
+                    title: string = ""
+
+                    //@ts-ignore
+                    @subjectCollection({through: "todo://comment"})
+                    comments: string[] = []
+    
+                    setState(state: string) {}
+                    setTitle(title: string) {}
+                    addComment(comment: string) {}
+
+
+                    @sdnaOutput
+                    static generateSdna(): string { return "" }
+                }
+
+                let sdna = Todo.generateSdna()
+                console.log(sdna)
+            })
         })
     })
 
