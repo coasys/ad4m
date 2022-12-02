@@ -1,0 +1,83 @@
+query AgentStatus {
+    agentStatus {
+        isInitialized
+        isUnlocked
+        did
+        didDocument
+        error
+    }
+}
+
+mutation RequestCapability($appName: String!, $appDesc: String!, $appUrl: String!, $capabilities: String!) {
+    agentRequestCapability(appName: $appName, appDesc: $appDesc, appUrl: $appUrl, capabilities: $capabilities)
+}
+
+mutation RetrieveCapability($requestId: String!, $rand: String!) {
+    agentGenerateJwt(requestId: $requestId, rand: $rand)
+}
+
+query Me { agent { 
+    did
+    directMessageLanguage
+    perspective { 
+        links {
+            author, timestamp, 
+            proof {
+                signature, key, valid, invalid
+            }
+            data {
+                source, predicate, target
+            }
+        }
+    }
+}}
+
+mutation Lock($passphrase: String!) {
+    agentLock(passphrase: $passphrase) {
+        isInitialized
+        isUnlocked
+        did
+        didDocument
+        error
+    }
+}
+
+mutation Unlock($passphrase: String!) {
+    agentUnlock(passphrase: $passphrase) {
+        isInitialized
+        isUnlocked
+        did
+        didDocument
+        error
+    }
+}
+
+query ByDID($did: String!) {
+    agentByDID(did: $did) {
+        did
+        directMessageLanguage
+        perspective { 
+            links {
+                author, timestamp, 
+                proof {
+                    signature, key, valid, invalid
+                }
+                data {
+                    source, predicate, target
+                }
+            }
+        }
+    }
+}
+
+mutation Generate(
+    $passphrase: String!
+) {
+    agentGenerate(passphrase: $passphrase) {
+        isInitialized
+        isUnlocked
+        did
+        didDocument
+        error
+    }
+}

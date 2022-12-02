@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "cli",
+    "rust-client",
+    "ui/src-tauri"
+]

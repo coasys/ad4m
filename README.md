@@ -16,7 +16,7 @@ or just:
 
 ## Repo Structure / History
 
-This is the new mono-repository with all components making up a whole AD4M implementation merge back into what formerly was only the `ad4m-executor`.
+This is the new mono-repository with all components making up a whole AD4M implementation merged back into what formerly was only the `ad4m-executor`.
 
 - `core`: Former [ad4m repository](https://github.com/perspect3vism/ad4m-core-deprecated). Holds the core ontology types, the `Ad4mClient` and the GraphQL schema build automatically from the core types. This package gets published as https://www.npmjs.com/package/@perspect3vism/ad4m and is thus holding most of the app/UI facing coding.
 - `executor`: All the code running inside an AD4M instance. UI-less GraphQL server, managing Agent keys, Perspectives and running Languages. TypeScript library without runnable main / executable.
@@ -27,6 +27,11 @@ This is the new mono-repository with all components making up a whole AD4M imple
 
 - `connect`: Former [ad4m-connect repository](https://github.com/perspect3vism/ad4m-connect). Convenience library to connect to a (local or via proxy) AD4M-executor, potentially requesting or reusing capability tokens and creating an `Ad4mClient` ready for the app/UI to use.
 - `docs-src` / `docs`: Documentation hosted under https://docs.ad4m.dev
+
+---
+
+ - `cli`: The new Rust based `ad4m` command-line based generic UI. See [it's readme](cli/README.md) for more details. Published to Crates.io as `ad4m`: https://crates.io/crates/ad4m
+ - `rust-client`: Rust based `Ad4mClient`. Wraps GraphQL and provides the same high-level interface to AD4M as the TypeScript based version in core. Published to Crates.io as `ad4m-client`: https://crates.io/crates/ad4m-client.
 
 The project started in August 2020 in https://github.com/lucksus/perspectivism, then got broken down into the `ad4m` (core), `ad4m-executor` and [perspect3ve](https://github.com/perspect3vism/perspect3ve) repositories for simultaneuous use in [Flux](https://github.com/fluxsocial) and Perspect3ve. Other components got added over the years 2021, 2022.
 
