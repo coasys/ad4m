@@ -60,6 +60,8 @@ pub struct SeedProto {
     neighbourhood_language: LanguageInstance,
     #[serde(rename = "perspectiveLanguage")]
     perspective_language: LanguageInstance,
+    #[serde(rename = "alsoPublish")]
+    also_publish: Vec<LanguageInstance>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -429,9 +431,27 @@ async fn start_publishing(
         }
     }
 
+    for language in seed_proto.also_publish {
+        let publish_result = ad4m_client
+            .languages
+            .publish(
+                language.resource,
+                language.meta.name.clone(),
+                Some(language.meta.description),
+                Some(language.meta.possible_template_params),
+                Some(language.meta.source_code_link),
+            )
+            .await
+            .expect("Could not publish language");
+        println!(
+            "Also published language: {} at address: {}",
+            language.meta.name, publish_result.address
+        );
+    }
+
     //Save the bootstrap seed
     let bootstrap_seed_json = serde_json::to_string_pretty(&bootstrap_seed).unwrap();
-    fs::write("bootstrap.json", bootstrap_seed_json).unwrap();
-    println!("Bootstrap seed generated and saved to bootstrap.json.. Finishing...");
+    fs::write("mainnet_seed.json", bootstrap_seed_json).unwrap();
+    println!("Bootstrap seed generated and saved to mainnet_seed.json.. Finishing...");
     exit(0);
 }

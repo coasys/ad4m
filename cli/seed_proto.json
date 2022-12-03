@@ -44,5 +44,16 @@
             "possibleTemplateParams": ["uid", "name", "description"]
         },
         "resource": "/Users/josh/dev/perspective-language/build/bundle.js"
-    }
+    },
+    "alsoPublish": [
+        {
+            "meta": {
+                "name": "note-ipfs", 
+                "description": "IPFS based language for storing metadata", 
+                "sourceCodeLink": "https://github.com/perspect3vism/note-ipfs",
+                "possibleTemplateParams": []
+            },
+            "resource": "/Users/josh/Downloads/bundle.js"
+        }
+    ]
 }
