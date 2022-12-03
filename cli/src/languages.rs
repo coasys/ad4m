@@ -5,6 +5,7 @@ use clap::Subcommand;
 use rustyline::Editor;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
+use std::process::exit;
 use std::sync::mpsc::{channel, Sender};
 use std::{fs, process::Stdio};
 
@@ -96,7 +97,7 @@ pub struct BootstrapSeed {
 }
 
 fn serve_ad4m_host(ad4m_host_path: String, sender: Sender<String>) -> Result<()> {
-    let ad4m_host_publish = std::process::Command::new(ad4m_host_path)
+    let mut ad4m_host_publish = std::process::Command::new(ad4m_host_path)
         .arg("serve")
         .arg("--languageLanguageOnly")
         .arg("true")
@@ -106,7 +107,10 @@ fn serve_ad4m_host(ad4m_host_path: String, sender: Sender<String>) -> Result<()>
     println!("ad4m-host serve started");
     println!("Listening for stdout...");
 
-    let mut f = BufReader::new(ad4m_host_publish.stdout.unwrap());
+    let stdout = ad4m_host_publish.stdout.take().unwrap();
+    let stderr = ad4m_host_publish.stderr.take().unwrap();
+    let mut f = BufReader::new(stdout);
+    let mut f_e = BufReader::new(stderr);
     std::thread::spawn(move || loop {
         let mut buf = String::new();
 
@@ -119,6 +123,19 @@ fn serve_ad4m_host(ad4m_host_path: String, sender: Sender<String>) -> Result<()>
             Err(e) => println!("an error!: {:?}", e),
         }
     });
+
+    std::thread::spawn(move || loop {
+        let mut buf_e = String::new();
+        match f_e.read_line(&mut buf_e) {
+            Ok(_) => {
+                if buf_e != "" {
+                    println!("{}", buf_e);
+                }
+            }
+            Err(e) => println!("an error!: {:?}", e),
+        }
+    });
+
     Ok(())
 }
 
@@ -290,7 +307,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
             let temp_bootstrap_seed = BootstrapSeed {
                 trusted_agents: vec![],
                 known_link_languages: vec![],
-                language_language_bundle: lang_lang_source,
+                language_language_bundle: lang_lang_source.clone(),
                 direct_message_language: String::from(""),
                 agent_language: String::from(""),
                 perspective_language: String::from(""),
@@ -330,7 +347,15 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
                 println!("{}", line);
                 if line.contains("GraphQL server started, Unlock the agent to start holohchain") {
                     println!("AD4M Host ready for publishing\n");
-                    start_publishing(ad4m_client, passphrase.clone(), seed_proto.clone()).await;
+                    //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
+                    tokio::spawn(async move {
+                        start_publishing(
+                            passphrase.clone(),
+                            seed_proto.clone(),
+                            lang_lang_source.clone(),
+                        )
+                        .await;
+                    });
                     break;
                 }
             }
@@ -345,16 +370,21 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
 
 //Generates an ad4m client, unlocks the agent and then publishes the languages found in the seed proto.
 //After that it will generate a new bootstrap seed and save to the current directory
-async fn start_publishing(ad4m_client: Ad4mClient, passphrase: String, seed_proto: SeedProto) {
-    let result = ad4m_client
+async fn start_publishing(
+    passphrase: String,
+    seed_proto: SeedProto,
+    language_language_bundle: String,
+) {
+    let ad4m_client = get_ad4m_client(&ClapApp::parse())
+        .await
+        .expect("Could not get ad4m client");
+    let agent = ad4m_client
         .agent
         .unlock(passphrase)
         .await
         .expect("could not unlock agent");
 
-    println!("Unlocked agent: {:?}", result);
-
-    let me = ad4m_client.agent.me().await.expect("could not get me");
+    println!("Unlocked agent: {:?}", agent);
 
     let mut languages = vec![];
     languages.push(seed_proto.agent_language);
@@ -364,9 +394,9 @@ async fn start_publishing(ad4m_client: Ad4mClient, passphrase: String, seed_prot
     languages.push(seed_proto.neighbourhood_language);
 
     let mut bootstrap_seed = BootstrapSeed {
-        trusted_agents: vec![me.did],
+        trusted_agents: vec![agent.did.unwrap()],
         known_link_languages: vec![],
-        language_language_bundle: String::from(""),
+        language_language_bundle: language_language_bundle,
         direct_message_language: String::from(""),
         agent_language: String::from(""),
         perspective_language: String::from(""),
@@ -402,5 +432,6 @@ async fn start_publishing(ad4m_client: Ad4mClient, passphrase: String, seed_prot
     //Save the bootstrap seed
     let bootstrap_seed_json = serde_json::to_string_pretty(&bootstrap_seed).unwrap();
     fs::write("bootstrap.json", bootstrap_seed_json).unwrap();
-    println!("Bootstrap seed generated and saved to bootstrap.json");
+    println!("Bootstrap seed generated and saved to bootstrap.json.. Finishing...");
+    exit(0);
 }
