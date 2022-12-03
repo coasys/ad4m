@@ -1,6 +1,6 @@
 [package]
 name = "ad4min"
-version = "0.0.10"
+version = "0.2.3"
 description = "Administration of ad4m services"
 authors = ["Kaichao Sun"]
 license = ""
