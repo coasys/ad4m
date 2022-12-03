@@ -13,6 +13,7 @@ mod startup;
 mod util;
 
 mod agent;
+mod bootstrap_publish;
 mod languages;
 mod neighbourhoods;
 mod perspectives;
