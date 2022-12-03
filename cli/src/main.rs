@@ -97,11 +97,8 @@ enum Domain {
     Log,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = ClapApp::parse();
-
-    let executor_url = if let Some(custom_url) = args.executor_url {
+async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
+    let executor_url = if let Some(custom_url) = args.executor_url.clone() {
         custom_url
     } else {
         crate::startup::get_executor_url()?
@@ -123,6 +120,15 @@ async fn main() -> Result<()> {
     };
 
     let ad4m_client = Ad4mClient::new(executor_url, cap_token);
+
+    Ok(ad4m_client)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = ClapApp::parse();
+
+    let ad4m_client = get_ad4m_client(&args).await?;
 
     match args.domain {
         Domain::Agent { command } => agent::run(ad4m_client, command).await?,

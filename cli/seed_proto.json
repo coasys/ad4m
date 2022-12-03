@@ -7,7 +7,7 @@
             "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "https://github.com/perspect3vism/perspective-diff-sync/releases/download/0.0.9/bundle.js"
+        "resource": "/Users/josh/dev/perspective-diff-sync/build/bundle.js"
     },
     "agentLanguage": {
         "meta": {
