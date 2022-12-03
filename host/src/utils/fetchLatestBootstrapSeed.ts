@@ -1,7 +1,7 @@
 import path from "path";
 import { tryDownload } from "./download";
 
-const BOOTSTRAP_LINK = "https://github.com/perspect3vism/ad4m-seeds/releases/download/0.0.4/mainnetSeed.json";
+const BOOTSTRAP_LINK = "https://github.com/perspect3vism/ad4m-seeds/releases/download/0.0.5/mainnetSeed.json";
 
 export const MAINNET_SEED = "mainnet_seed.json";
 
