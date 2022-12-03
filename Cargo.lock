@@ -2296,9 +2296,9 @@ checksum = "bb68f22743a3fb35785f1e7f844ca5a3de2dde5bd0c0ef5b372065814699b121"
 
 [[package]]
 name = "localtunnel-client"
-version = "0.0.10"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f2964098795466d69923eb0933fb3c4a36321ce176e27a61353077f7ebf8eb"
+checksum = "c0cb304513caf9510b14bf1ec0159de2083a311789ab67940767b4ec3990bba2"
 dependencies = [
  "anyhow",
  "log",

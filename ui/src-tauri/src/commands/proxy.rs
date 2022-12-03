@@ -6,6 +6,7 @@ use ad4m_client::Ad4mClient;
 use crate::{AppState, ProxyState, ProxyService};
 
 const PROXY_SERVER: &str = "https://proxy-worker.ad4m.dev";
+const AD4M_SERVER: &str = "http://127.0.0.1";
 
 #[tauri::command]
 pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, proxy: State<'_, ProxyState>) -> Result<String, String> {
@@ -21,7 +22,7 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
         .await
         .map_err(|err| format!("Error happend when retrieving the content: {:?}", err))?;
 
-    let ad4m_client = Ad4mClient::new(format!("http://localhost:{}/graphql", graphql_port), req_credential.to_string());
+    let ad4m_client = Ad4mClient::new(format!("{}:{}/graphql", AD4M_SERVER, graphql_port), req_credential.to_string());
     let signed_message = ad4m_client.agent.sign_message(rand)
         .await
         .map_err(|err| format!("Error happend when agent sign message: {:?}", err))?;
