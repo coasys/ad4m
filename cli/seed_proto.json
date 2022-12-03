@@ -16,7 +16,7 @@
             "sourceCodeLink": "https://github.com/perspect3vism/agent-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "https://github.com/perspect3vism/agent-language/releases/download/0.0.12/bundle.js"
+        "resource": "/Users/josh/dev/agent-language/build//bundle.js"
     },
     "directMessageLanguage": {
         "meta": {
@@ -25,7 +25,7 @@
             "sourceCodeLink": "https://github.com/perspect3vism/direct-message-language", 
             "possibleTemplateParams": ["recipient_did", "recipient_hc_agent_pubkey"]
         },
-        "resource": "https://github.com/perspect3vism/direct-message-language/releases/download/0.0.6/bundle.js"
+        "resource": "/Users/josh/dev/direct-message-language/build/bundle.js"
     },
     "neighbourhoodLanguage": {
         "meta": {
@@ -34,7 +34,7 @@
             "sourceCodeLink": "https://github.com/fluxsocial/neighbourhood-language", 
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "https://github.com/fluxsocial/neighbourhood-language/releases/download/0.0.5/bundle.js"
+        "resource": "/Users/josh/dev/neighbourhood-language/build/bundle.js"
     },
     "perspectiveLanguage": {
         "meta": {
@@ -43,6 +43,6 @@
             "sourceCodeLink": "https://github.com/perspect3vism/perspective-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "https://github.com/perspect3vism/perspective-language/releases/download/0.0.1/bundle.js"
+        "resource": "/Users/josh/dev/perspective-language/build/bundle.js"
     }
 }
