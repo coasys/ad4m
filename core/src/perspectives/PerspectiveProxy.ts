@@ -306,6 +306,11 @@ export class PerspectiveProxy {
         return subject
     }
 
+    async subjectInstanceByTemplate<T>(expression: string, template: T): Promise<T> {
+        let instance = this.subjectInstance(expression, template.constructor.name)
+        return instance as unknown as T
+    }
+
     async subjectInstances(subjectClass: string): Promise<Subject[]> {
         let instances = await this.infer(`subject_class("${subjectClass}", c), instance(c, X)`)
         return await Promise.all(instances.map(async x => await this.subjectInstance(x.X, subjectClass)))

@@ -277,57 +277,73 @@ describe("Integration", () => {
         })
 
         describe("SDNA creation decorators", () => {
-            it("should be able to create an SDNA from a class", async () => {
+            // This class matches the SDNA in ./subject.pl
+            // and this test proves the decorators create the exact same SDNA code
+            class Todo {
+                // Setting this member "subjectConstructer" allows for adding custom
+                // actions that will be run when a subject is constructed.
+                // 
+                // In this test, we don't need to use it, because the used "initial"
+                // parameter on "state" below will have the same effect as the following:
+                // subjectConstructor = [addLink("this", "todo://state", "todo://ready")]
 
-                // This class matches the SDNA in ./subject.pl
-                // and this test proves the decorators create the exact same SDNA code
-                class Todo {
-                    // Setting this member "subjectConstructer" allows for adding custom
-                    // actions that will be run when a subject is constructed.
-                    // 
-                    // In this test, we don't need to use it, because the used "initial"
-                    // parameter on "state" below will have the same effect as the following:
-                    // subjectConstructor = [addLink("this", "todo://state", "todo://ready")]
+                // Setting this member "isSubjectInstance" allows for adding custom clauses
+                // to the instance check.
+                // 
+                // In this test, we don't need to use it, because the used "required"
+                // parameter on "state" below will have the same effect as the following:
+                // isSubjectInstance = [hasLink("todo://state")]
 
-                    // Setting this member "isSubjectInstance" allows for adding custom clauses
-                    // to the instance check.
-                    // 
-                    // In this test, we don't need to use it, because the used "required"
-                    // parameter on "state" below will have the same effect as the following:
-                    // isSubjectInstance = [hasLink("todo://state")]
+                //@ts-ignore
+                @subjectProperty({
+                    through: "todo://state", 
+                    initial:"todo://ready",
+                    required: true,
+                })
+                state: string = ""
 
-                    //@ts-ignore
-                    @subjectProperty({
-                        through: "todo://state", 
-                        initial:"todo://ready",
-                        required: true,
-                    })
-                    state: string = ""
+                // This function need to be present (next to the "through" parameter on the property itself)
+                // in order to trigger the creation of setter code in the SDNA.
+                // It can be left emtpy when used with PerspectiveProxy.subjectInstancesByTemplate()
+                // since an implementation will also be auto-generated there.
+                //
+                // NOTE thate the name must be `set${capitalize(propertyName)}`.
+                setState(state: string) {}
 
-                    // This function need to be present (next to the "through" parameter on the property itself)
-                    // in order to trigger the creation of setter code in the SDNA.
-                    // It can be left emtpy when used with PerspectiveProxy.subjectInstancesByTemplate()
-                    // since an implementation will also be auto-generated there.
-                    //
-                    // NOTE thate the name must be `set${capitalize(propertyName)}`.
-                    setState(state: string) {}
+                //@ts-ignore
+                @subjectProperty({through: "todo://has_title"})
+                title: string = ""
+                setTitle(title: string) {}
 
-                    //@ts-ignore
-                    @subjectProperty({through: "todo://has_title"})
-                    title: string = ""
-                    setTitle(title: string) {}
+                //@ts-ignore
+                @subjectCollection({through: "todo://comment"})
+                comments: string[] = []
+                addComment(comment: string) {}
 
-                    //@ts-ignore
-                    @subjectCollection({through: "todo://comment"})
-                    comments: string[] = []
-                    addComment(comment: string) {}
+                @sdnaOutput
+                static generateSdna(): string { return "" }
+            }
 
-                    @sdnaOutput
-                    static generateSdna(): string { return "" }
-                }
-
+            it("should generate correct SDNA from a JS class", async () => {
                 let sdna = Todo.generateSdna()
                 expect(sdna).to.equal(readFileSync("./subject.pl").toString())
+            })
+
+            it("should be possible to use that class for type-safe interaction with subject instances", async () => {
+                // construct new subject intance
+                let root = Literal.from("Decorated class construction test").toUrl()
+                await perspective!.constructSubject(Todo.name, root)
+
+                // get instance with type information
+                let todo = await perspective!.subjectInstanceByTemplate(root, new Todo())
+
+                await todo.setState("todo://review")
+                expect(await todo.state).to.equal("todo://review")
+                expect(await todo.comments).to.be.empty
+
+                let comment = Literal.from("new comment").toUrl()
+                await todo.addComment(comment)
+                expect(await todo.comments).to.deep.equal([comment])
             })
         })
     })
