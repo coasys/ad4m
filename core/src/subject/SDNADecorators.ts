@@ -1,4 +1,4 @@
-import { propertyNameToSetterName } from "./util";
+import { collectionToAdderName, propertyNameToSetterName } from "./util";
 
 export class PerspectiveAction {
     action: string
@@ -104,16 +104,41 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
             }
         }
 
+        let collectionsCode = []
+        let collections = obj.__collections || {}
+        for(let collection in collections) {
+            let collectionCode = `collection(c, "${collection}").\n`
+
+            let { through } = collections[collection]
+
+            if(through) {
+                collectionCode += `collection_getter(c, Base, "${collection}", List) :- findall(C, triple(X, "${through}", C), List).\n`
+                let adder = obj[collectionToAdderName(collection)]
+                if(typeof adder === "function") {
+                    let action = {
+                        action: "addLink",
+                        source: "this",
+                        predicate: through,
+                        target: "value",
+                    }
+                    collectionCode += `collection_adder(c, "${collection}", '${JSON.stringify(action)}').\n`
+                }
+            }
+
+            collectionsCode.push(collectionCode)
+        }
+
+            
+
 
         let subjectContructorJSONString = JSON.stringify(constructorActions)
         sdna += `constructor(c, '${subjectContructorJSONString}').\n`
         let instanceConditionProlog = instanceConditions.join(", ")
         sdna += `instance :- ${instanceConditionProlog}.\n`
-
         sdna += "\n"
-
         sdna += propertiesCode.join("\n")
-
+        sdna += "\n"
+        sdna += collectionsCode.join("\n")
 
         return sdna
     }
