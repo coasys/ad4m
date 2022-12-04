@@ -29,3 +29,21 @@ export function pluralToSingular(plural: string): string {
 export function collectionToAdderName(collection: string): string {
     return `add${capitalize(pluralToSingular(collection))}`
 }
+
+export function stringifyObjectLiteral(obj) {
+    if(Array.isArray(obj)) {
+        //@ts-ignore
+        return `[${obj.map(stringifyObjectLiteral).join(", ")}]`
+    }
+    
+    const keys = Object.keys(obj);
+    const stringifiedPairs = [];
+  
+    for (const key of keys) {
+      const valueString = JSON.stringify(obj[key]);
+      const keyValuePairString = `${key}: ${valueString}`;
+      stringifiedPairs.push(keyValuePairString);
+    }
+
+    return `{${stringifiedPairs.join(', ')}}`;
+  }

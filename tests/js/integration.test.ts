@@ -311,7 +311,7 @@ describe("Integration", () => {
                     setState(state: string) {}
 
                     //@ts-ignore
-                    @subjectProperty({through: "todo://title"})
+                    @subjectProperty({through: "todo://has_title"})
                     title: string = ""
                     setTitle(title: string) {}
 
@@ -326,6 +326,8 @@ describe("Integration", () => {
 
                 let sdna = Todo.generateSdna()
                 console.log(sdna)
+
+                expect(sdna).to.equal(readFileSync("./subject.pl").toString())
             })
         })
     })

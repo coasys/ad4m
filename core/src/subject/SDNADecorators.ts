@@ -1,4 +1,4 @@
-import { collectionToAdderName, propertyNameToSetterName } from "./util";
+import { collectionToAdderName, propertyNameToSetterName, stringifyObjectLiteral } from "./util";
 
 export class PerspectiveAction {
     action: string
@@ -77,18 +77,18 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
                 propertyCode += `property_getter(c, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
 
                 if(required) {
-                    instanceConditions.push(`triple(this, "${through}", _)`)
+                    instanceConditions.push(`triple(Base, "${through}", _)`)
                 }    
 
                 let setter = obj[propertyNameToSetterName(property)]
                 if(typeof setter === "function") {
-                    let action = {
+                    let action = [{
                         action: "setSingleTarget",
                         source: "this",
                         predicate: through,
                         target: "value",
-                    }
-                    propertyCode += `property_setter(c, "${property}", '${JSON.stringify(action)}').\n`
+                    }]
+                    propertyCode += `property_setter(c, "${property}", '${stringifyObjectLiteral(action)}').\n`
                 }
             }
 
@@ -112,29 +112,26 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
             let { through } = collections[collection]
 
             if(through) {
-                collectionCode += `collection_getter(c, Base, "${collection}", List) :- findall(C, triple(X, "${through}", C), List).\n`
+                collectionCode += `collection_getter(c, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                 let adder = obj[collectionToAdderName(collection)]
                 if(typeof adder === "function") {
-                    let action = {
+                    let action = [{
                         action: "addLink",
                         source: "this",
                         predicate: through,
                         target: "value",
-                    }
-                    collectionCode += `collection_adder(c, "${collection}", '${JSON.stringify(action)}').\n`
+                    }]
+                    collectionCode += `collection_adder(c, "${collection}", '${stringifyObjectLiteral(action)}').\n`
                 }
             }
 
             collectionsCode.push(collectionCode)
         }
 
-            
-
-
-        let subjectContructorJSONString = JSON.stringify(constructorActions)
+        let subjectContructorJSONString = stringifyObjectLiteral(constructorActions)
         sdna += `constructor(c, '${subjectContructorJSONString}').\n`
         let instanceConditionProlog = instanceConditions.join(", ")
-        sdna += `instance :- ${instanceConditionProlog}.\n`
+        sdna += `instance(c, Base) :- ${instanceConditionProlog}.\n`
         sdna += "\n"
         sdna += propertiesCode.join("\n")
         sdna += "\n"
