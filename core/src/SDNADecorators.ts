@@ -15,7 +15,7 @@ export function addLink(source: string, predicate: string, target: string): Pers
 }
 
 export function hasLink(predicate: string): string {
-    return `triple(this, ${predicate}, _)`
+    return `triple(this, "${predicate}", _)`
 }
 
 interface PropertyOptions {
