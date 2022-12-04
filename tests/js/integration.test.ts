@@ -118,13 +118,13 @@ describe("Integration", () => {
             let classes = await perspective!.subjectClasses();
 
             expect(classes.length).to.equal(1)
-            expect(classes[0]).to.equal("TODO")
+            expect(classes[0]).to.equal("Todo")
         })
 
         it("should be able to construct a subject instance from a literal", async () => {
             let root = Literal.from("construct test").toUrl()
-            expect(await perspective!.constructSubject("TODO", root)).to.be.true
-            expect(await perspective!.isSubjectInstance(root, "TODO")).to.be.true
+            expect(await perspective!.constructSubject("Todo", root)).to.be.true
+            expect(await perspective!.isSubjectInstance(root, "Todo")).to.be.true
         })
     
         describe("with an instance", () => {
@@ -132,8 +132,8 @@ describe("Integration", () => {
 
             before(async () => {
                 let root = Literal.from("construct test").toUrl()
-                await perspective!.constructSubject("TODO", root)
-                subject = await perspective!.subjectInstance(root, "TODO")
+                await perspective!.constructSubject("Todo", root)
+                subject = await perspective!.subjectInstance(root, "Todo")
             })
 
             it("should be able to read a property as JS property", async () => {
@@ -253,7 +253,7 @@ describe("Integration", () => {
 
             it("can find subject classes mapping to JS objects", async () => {
                 let todoClasses = await perspective!.subjectClassesByTemplate(todo)
-                expect(todoClasses).to.include("TODO")
+                expect(todoClasses).to.include("Todo")
                 expect(todoClasses.length).to.equal(1)
 
                 let unknownClasses = await perspective!.subjectClassesByTemplate(unknown)

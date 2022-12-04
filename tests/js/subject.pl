@@ -1,4 +1,4 @@
-subject_class("TODO", c).
+subject_class("Todo", c).
 constructor(c, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
 instance(c, Base) :- triple(Base, "todo://state", _).
 
