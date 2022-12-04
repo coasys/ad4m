@@ -1,4 +1,5 @@
-import { PerspectiveProxy } from "./PerspectiveProxy";
+import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { collectionToAdderName, propertyNameToSetterName } from "./util";
 
 export class Subject {
     #baseExpression: string;
@@ -46,8 +47,7 @@ export class Subject {
             if(setter) {
                 const property = setter.Property
                 const actions = eval(setter.Setter)
-                const capitalized = property.charAt(0).toUpperCase() + property.slice(1)
-                this[`set${capitalized}`] = async (value: any) => {
+                this[propertyNameToSetterName(property)] = async (value: any) => {
                     //console.log("Setting property: " + property + " to " + value)
                     //console.log("Actions: " + JSON.stringify(actions))
                     await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
@@ -87,11 +87,7 @@ export class Subject {
             if(adder) {
                 const collection = adder.Collection
                 const actions = eval(adder.Adder)
-                let capitalized = collection.charAt(0).toUpperCase() + collection.slice(1)
-                if(capitalized.endsWith("s")) {
-                    capitalized = capitalized.slice(0, -1)
-                }
-                this[`add${capitalized}`] = async (value: any) => {
+                this[collectionToAdderName(collection)] = async (value: any) => {
                     //console.log("Setting property: " + property + " to " + value)
                     //console.log("Actions: " + JSON.stringify(actions))
                     await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])

@@ -5,7 +5,7 @@ import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
-import { Subject } from "./Subject";
+import { Subject } from "../subject/Subject";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed"
 

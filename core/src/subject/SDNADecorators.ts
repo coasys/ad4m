@@ -1,3 +1,5 @@
+import { propertyNameToSetterName } from "./util";
+
 export class PerspectiveAction {
     action: string
     source: string
@@ -52,14 +54,37 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
 
         sdna += `subject_class("${subjectName}", c).\n`
 
-        //console.log("target:", target, JSON.stringify(target))
         let obj = new target
-        //console.log("obj:", obj, JSON.stringify(obj))
-        
-        sdna += `constructor(c, '${JSON.stringify(obj.subjectConstructor)}}').\n`
+        let subjectContructorJSONString = JSON.stringify(obj.subjectConstructor)
+        sdna += `constructor(c, '${subjectContructorJSONString}').\n`
 
         let instanceCondition = obj.isSubjectInstance.join(", ")
         sdna += `instance :- ${instanceCondition}.\n`
+
+        let properties = obj.__properties || {}
+        for(let property in properties) {
+            sdna += `property(c, "${property}").\n`
+
+            let { through, initial } = properties[property]
+            
+            if(through) {
+                sdna += `property_getter(c, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
+
+                let setter = obj[propertyNameToSetterName(property)]
+                if(typeof setter === "function") {
+                    let action = {
+                        action: "setSingleTarget",
+                        source: "this",
+                        predicate: through,
+                        target: "value",
+                    }
+                    sdna += `property_setter(c, "${property}", '${JSON.stringify(action)}').\n`
+                }
+            }
+        }
+
+
+            
 
         return sdna
     }
