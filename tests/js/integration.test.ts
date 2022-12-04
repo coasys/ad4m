@@ -279,6 +279,8 @@ describe("Integration", () => {
         describe("SDNA creation decorators", () => {
             it("should be able to create an SDNA from a class", async () => {
 
+                // This class matches the SDNA in ./subject.pl
+                // and this test proves the decorators create the exact same SDNA code
                 class Todo {
                     // Setting this member "subjectConstructer" allows for adding custom
                     // actions that will be run when a subject is constructed.
@@ -325,8 +327,6 @@ describe("Integration", () => {
                 }
 
                 let sdna = Todo.generateSdna()
-                console.log(sdna)
-
                 expect(sdna).to.equal(readFileSync("./subject.pl").toString())
             })
         })
