@@ -302,18 +302,23 @@ describe("Integration", () => {
                     })
                     state: string = ""
 
+                    // This function need to be present (next to the "through" parameter on the property itself)
+                    // in order to trigger the creation of setter code in the SDNA.
+                    // It can be left emtpy when used with PerspectiveProxy.subjectInstancesByTemplate()
+                    // since an implementation will also be auto-generated there.
+                    //
+                    // NOTE thate the name must be `set${capitalize(propertyName)}`.
+                    setState(state: string) {}
+
                     //@ts-ignore
                     @subjectProperty({through: "todo://title"})
                     title: string = ""
+                    setTitle(title: string) {}
 
                     //@ts-ignore
                     @subjectCollection({through: "todo://comment"})
                     comments: string[] = []
-    
-                    setState(state: string) {}
-                    setTitle(title: string) {}
                     addComment(comment: string) {}
-
 
                     @sdnaOutput
                     static generateSdna(): string { return "" }
