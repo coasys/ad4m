@@ -51,20 +51,18 @@ setup() {
 }
 
 @test "can create neighbourhood, join and share links" {
-    skip "Can't verify this tests works because of the language language not working currently"
-    
     # Create perspective
     perspective_id=`./target/release/ad4m -n -e http://localhost:4000/graphql perspectives add "neighbourhood test"`
 
     # Create unique link language clone
-    link_language_template=`./target/release/ad4m -n -e http://localhost:4000/graphql languages link-language-templates`
+    link_language_template=`./target/release/ad4m -n -e http://localhost:4000/graphql runtime link-language-templates`
     clone_output=`./target/release/ad4m -n -e http://localhost:4000/graphql languages apply-template-and-publish $link_language_template "{\"uid\":\"test\",\"name\":\"test\",\"description\":\"test\"}"`
 
     run echo $clone_output
-    assert_line "Language template applied and published!"
+    assert_output --partial "Language template applied and published!"
     assert_line --partial "Address:"
     address_line=`echo $clone_output | grep "Address:"`
-    language_address=`echo $address_line | cut -d " " -f 2`
+    language_address=`echo $address_line | cut -d " " -f 9-`
 
     # Publish neighbourhood
     neighbourhood_output=`./target/release/ad4m -n -e http://localhost:4000/graphql neighbourhoods create $perspective_id $language_address`
@@ -76,7 +74,7 @@ setup() {
 
     # Join neighbourhood
     run ./target/release/ad4m -n -e http://localhost:4001/graphql neighbourhoods join $nh_url
-    assert_line "Neighbourhod joined!"
+    assert_line "Neighbourhood joined!"
 
     # Add link
     run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives add-link $perspective_id "nh_test://source" "nh_test://target" "nh_test://predicate"
