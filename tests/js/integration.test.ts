@@ -41,9 +41,9 @@ describe("Integration", () => {
     let executorProcess: ChildProcess | null = null
 
     before(async () => {
-        //ad4m = new Ad4mClient(apolloClient(4000))
-        //return
-
+        ad4m = new Ad4mClient(apolloClient(4000))
+        return
+        /*
         rmSync("../ad4mJS", { recursive: true, force: true })
         console.log("Initialzing executor data directory")
         //@ts-ignore
@@ -81,6 +81,7 @@ describe("Integration", () => {
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
         console.log("Done")
+        */
     })
 
     after(() => {
@@ -279,11 +280,26 @@ describe("Integration", () => {
             it("should be able to create an SDNA from a class", async () => {
 
                 class Todo {
-                    subjectConstructor = [addLink("this", "todo://state", "todo://ready")]
-                    isSubjectInstance = [hasLink("todo://state")]
+                    // Setting this member "subjectConstructer" allows for adding custom
+                    // actions that will be run when a subject is constructed.
+                    // 
+                    // In this test, we don't need to use it, because the used "initial"
+                    // parameter on "state" below will have the same effect as the following:
+                    // subjectConstructor = [addLink("this", "todo://state", "todo://ready")]
+
+                    // Setting this member "isSubjectInstance" allows for adding custom clauses
+                    // to the instance check.
+                    // 
+                    // In this test, we don't need to use it, because the used "required"
+                    // parameter on "state" below will have the same effect as the following:
+                    // isSubjectInstance = [hasLink("todo://state")]
 
                     //@ts-ignore
-                    @subjectProperty({through: "todo://state", initial:"todo://ready"})
+                    @subjectProperty({
+                        through: "todo://state", 
+                        initial:"todo://ready",
+                        required: true,
+                    })
                     state: string = ""
 
                     //@ts-ignore

@@ -23,6 +23,7 @@ export function hasLink(predicate: string): string {
 interface PropertyOptions {
     through: string;
     initial?: string,
+    required?: boolean,
 }
 export function subjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
@@ -51,24 +52,33 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
     descriptor.value = () => {
         let sdna = ""
         let subjectName = target.name
+        let obj = new target
 
         sdna += `subject_class("${subjectName}", c).\n`
 
-        let obj = new target
-        let subjectContructorJSONString = JSON.stringify(obj.subjectConstructor)
-        sdna += `constructor(c, '${subjectContructorJSONString}').\n`
+        let constructorActions = []
+        if(obj.subjectConstructor && obj.subjectConstructor.length) {
+            constructorActions = constructorActions.concat(obj.subjectConstructor)
+        }
 
-        let instanceCondition = obj.isSubjectInstance.join(", ")
-        sdna += `instance :- ${instanceCondition}.\n`
+        let instanceConditions = []
+        if(obj.isSubjectInstance && obj.isSubjectInstance.length) {
+            instanceConditions = instanceConditions.concat(obj.isSubjectInstance)
+        }
 
+        let propertiesCode = []
         let properties = obj.__properties || {}
         for(let property in properties) {
-            sdna += `property(c, "${property}").\n`
+            let propertyCode = `property(c, "${property}").\n`
 
-            let { through, initial } = properties[property]
+            let { through, initial, required } = properties[property]
             
             if(through) {
-                sdna += `property_getter(c, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
+                propertyCode += `property_getter(c, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
+
+                if(required) {
+                    instanceConditions.push(`triple(this, "${through}", _)`)
+                }    
 
                 let setter = obj[propertyNameToSetterName(property)]
                 if(typeof setter === "function") {
@@ -78,13 +88,32 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
                         predicate: through,
                         target: "value",
                     }
-                    sdna += `property_setter(c, "${property}", '${JSON.stringify(action)}').\n`
+                    propertyCode += `property_setter(c, "${property}", '${JSON.stringify(action)}').\n`
                 }
+            }
+
+            propertiesCode.push(propertyCode)
+
+            if(initial) {
+                constructorActions.push({
+                    action: "addLink",
+                    source: "this",
+                    predicate: through,
+                    target: initial,
+                })
             }
         }
 
 
-            
+        let subjectContructorJSONString = JSON.stringify(constructorActions)
+        sdna += `constructor(c, '${subjectContructorJSONString}').\n`
+        let instanceConditionProlog = instanceConditions.join(", ")
+        sdna += `instance :- ${instanceConditionProlog}.\n`
+
+        sdna += "\n"
+
+        sdna += propertiesCode.join("\n")
+
 
         return sdna
     }
