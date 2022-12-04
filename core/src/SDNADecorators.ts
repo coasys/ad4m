@@ -48,14 +48,20 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
 
     descriptor.value = () => {
         let sdna = ""
-        let subjectName = target.constructor.name
+        let subjectName = target.name
 
         sdna += `subject_class("${subjectName}", c).\n`
-        sdna += `constructor(c, '${target.prototype.subjectConstructor}').`
-        let instanceCondition = target.prototype.isSubjectInstance.join(", ")
+
+        //console.log("target:", target, JSON.stringify(target))
+        let obj = new target
+        //console.log("obj:", obj, JSON.stringify(obj))
+        
+        sdna += `constructor(c, '${JSON.stringify(obj.subjectConstructor)}}').\n`
+
+        let instanceCondition = obj.isSubjectInstance.join(", ")
         sdna += `instance :- ${instanceCondition}.\n`
 
-
+        return sdna
     }
 
     return descriptor
