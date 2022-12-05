@@ -115,7 +115,7 @@ const Profile = (props: Props) => {
         <Space h="md" />
                 
         <CardItems 
-          title={'Agent DID'}
+          title={'Agent ID'}
           value={props.did as string}
           titleUnderline
         />
