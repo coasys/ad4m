@@ -35,7 +35,9 @@ const App = () => {
     }).catch(e => console.error(e));
 
     return () => {
-      unlisten();
+      if (unlisten) {
+        unlisten();
+      }
     }
   }, []);
 
