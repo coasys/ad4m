@@ -6,6 +6,7 @@ import { useContext, useEffect, useState } from 'react';
 import { Download, Upload } from 'tabler-icons-react';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { generateLanguageInitials, isSystemLanguage } from '../util';
+import CardItems from './CardItems';
 import { MainContainer, MainHeader } from './styles';
 
 type Props = {
@@ -176,19 +177,19 @@ const Language = (props: Props) => {
             <Group align="flex-start">
               <Avatar radius="xl">{generateLanguageInitials(language!.name)}</Avatar>
               <Group direction='column' style={{marginTop: 4}}>
-                <Group  direction='row'>
-                  <Text weight="bold">Address: </Text>
-                  <Text>{language?.address}</Text>
-                </Group>
-                <Group  direction='row'>
-                  <Text weight="bold">Name: </Text>
-                  <Text>{language?.name}</Text>
-                </Group>
+                <CardItems 
+                  title={'Address'}
+                  value={language?.address}
+                />
+                <CardItems 
+                  title={'Name'}
+                  value={language?.name}
+                />
                 {perspective && (
-                  <Group  direction='row'>
-                    <Text weight="bold">Perspective: </Text>
-                    <Text>{perspective?.name}</Text>
-                  </Group>
+                  <CardItems 
+                    title={'Perspective'}
+                    value={perspective?.name}
+                  />
                 )}
                 {isSystem ? (
                   <div style={{padding: '4px 12px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>

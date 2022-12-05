@@ -1,4 +1,4 @@
-import { Avatar, Button, Card, Container, Group, List, Modal, MultiSelect, Menu, Select, Space, Switch, TextInput, Title, Text, MediaQuery, Burger } from '@mantine/core';
+import { Avatar, Button, Card, Container, Group, List, Modal, MultiSelect, Menu, Select, Space, Switch, TextInput, Title, MediaQuery, Burger } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import { LanguageHandle, Link, Perspective, PerspectiveProxy } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useMemo, useState } from 'react';
@@ -8,6 +8,7 @@ import { Trash } from 'tabler-icons-react';
 import { useDisclosure } from '@mantine/hooks';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { nanoid } from 'nanoid';
+import CardItems from './CardItems';
 
 type Props = {
   opened: boolean,
@@ -195,24 +196,24 @@ const Perspectives = (props: Props) => {
               <Group align="flex-start">
                 <Avatar radius="xl">{generateLanguageInitials(e!.name)}</Avatar>
                 <Group direction='column' style={{marginTop: 4}}>
-                  <Group  direction='row'>
-                    <Text weight="bold">Identifier: </Text>
-                    <Text>{e?.uuid}</Text>
-                  </Group>
-                  <Group  direction='row'>
-                    <Text weight="bold">Name: </Text>
-                    <Text>{e?.name}</Text>
-                  </Group>
+                  <CardItems 
+                    title={'Identifier'}
+                    value={e?.uuid}
+                  />
+                  <CardItems 
+                    title={'Name'}
+                    value={e?.name}
+                  />
                   {e?.sharedUrl && (
                     <>
-                      <Group  direction='row'>
-                        <Text weight="bold">Shared URL: </Text>
-                        <Text>{e?.sharedUrl}</Text>
-                      </Group>
-                      <Group  direction='row'>
-                        <Text weight="bold">Link Language: </Text>
-                        <Text>{e?.neighbourhood!.linkLanguage}</Text>
-                      </Group>
+                      <CardItems 
+                        title={'Shared URL'}
+                        value={e?.sharedUrl}
+                      />
+                      <CardItems 
+                        title={'Link Language'}
+                        value={e?.neighbourhood!.linkLanguage}
+                      />
                     </>
                   )}
                   {e?.neighbourhood ? (

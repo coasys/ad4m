@@ -1,4 +1,4 @@
-import { Avatar, Burger, Button, Card, Container, Group, List, MediaQuery, Modal, Space, Text, ThemeIcon, Title } from '@mantine/core';
+import { Avatar, Burger, Button, Card, Container, Group, List, MediaQuery, Modal, Space, ThemeIcon, Title } from '@mantine/core';
 import { Agent, Literal } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useState } from 'react';
 import { CircleCheck } from 'tabler-icons-react';
@@ -7,6 +7,7 @@ import { MainContainer, MainHeader } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { buildAd4mClient } from '../util';
 import { useCallback } from 'react';
+import CardItems from './CardItems';
 
 type Props = {
   did: String,
@@ -112,14 +113,24 @@ const Profile = (props: Props) => {
         style={{ marginLeft: 10, marginTop: 12 }}
       >
         <Space h="md" />
-        <Text size="md" weight="bold" underline>Agent DID: </Text>
-        <Text size="md">{props.did}</Text>
+                
+        <CardItems 
+          title={'Agent DID'}
+          value={props.did as string}
+          titleUnderline
+        />
         <Space h="md" />
-        <Text size="md" weight="bold" underline>Username: </Text>
-        <Text size="md">{profile?.username}</Text>
+        <CardItems 
+          title={'Username'}
+          value={profile?.username}
+          titleUnderline
+        />
         <Space h="md" />
-        <Text size="md" weight="bold" underline>Name: </Text>
-        <Text size="md">{profile.firstName} {profile.lastName}</Text>
+        <CardItems 
+          title={'Name'}
+          value={`${profile.firstName} ${profile.lastName}`}
+          titleUnderline
+        />
         <Space h="md" />
       </Container>
       <Modal
@@ -143,18 +154,18 @@ const Profile = (props: Props) => {
               <Group align="flex-start">
                 <Avatar radius="xl"></Avatar>
                 <Group direction='column' style={{marginTop: 4}}>
-                  <Group  direction='row'>
-                    <Text weight="bold">DID: </Text>
-                    <Text>{e.did}</Text>
-                  </Group>
-                  {e.username && (<Group  direction='row'>
-                    <Text weight="bold">Username: </Text>
-                    <Text>{e.username}</Text>
-                  </Group>)}
-                  {(e.firstName || e.lastName) && (<Group>
-                    <Text weight="bold">Name: </Text>
-                    <Text>{`${e.firstName || ""} ${e.lastName || ""}`}</Text>
-                  </Group>)}
+                  <CardItems 
+                    title={'DID'}
+                    value={e.did}
+                  />
+                  {e.username && (<CardItems 
+                    title={'Username'}
+                    value={e.username}
+                  />)}
+                  {(e.firstName || e.lastName) && (<CardItems 
+                    title={'Name'}
+                    value={`${e.firstName || ""} ${e.lastName || ""}`}
+                  />)}
                 </Group>
               </Group>
             </Card>
