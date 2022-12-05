@@ -1,7 +1,8 @@
-import { Button, Group, Modal, Space, Stack, Text, TextInput, List, ThemeIcon } from '@mantine/core';
+import { Button, Group, Modal, Space, Stack, Text, TextInput, List, ThemeIcon, ActionIcon } from '@mantine/core';
 import { useContext, useEffect, useState } from 'react';
 import { Ad4minContext } from '../context/Ad4minContext';
-import { CircleCheck } from 'tabler-icons-react';
+import { CircleCheck, Copy } from 'tabler-icons-react';
+import { showNotification } from '@mantine/notifications';
 
 interface Capability {
   with: Resource,
@@ -70,6 +71,14 @@ const Auth = () => {
     )
   }
 
+  const copyCode = () => {
+    navigator.clipboard.writeText(secretCode);
+    showNotification({
+      message: 'Secret code copied to clipboard',
+      autoClose: 1000
+    });
+  }
+
   return (
     <div>
       <Modal
@@ -114,7 +123,12 @@ const Auth = () => {
         onClose={closeSecretCodeModal}
         title="Secret Code"
       >
-        <Text weight={700} size="lg" underline>{secretCode}</Text>
+        <Group direction='row'>
+          <Text weight={700} size="lg" underline>{secretCode}</Text>
+          <ActionIcon onClick={copyCode}>
+            <Copy />
+          </ActionIcon>
+        </Group>
         <Space h="md" />
         <Group position="center">
           <Button onClick={closeSecretCodeModal}>
