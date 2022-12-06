@@ -956,31 +956,35 @@ export default class LanguageController {
         }
         let expr;
 
-        if(ref.language.address == "literal" || ref.language.name == 'literal') {
-            expr = Literal.fromUrl(`literal://${ref.expression}`).get()
-        } else {
-            const lang = this.languageForExpression(ref);
-            if (!lang.expressionAdapter) {
-                throw Error("Language does not have an expresionAdapter!")
-            };
-            
-            const langIsImmutable = await this.isImmutableExpression(ref);
-            if (langIsImmutable) {
-                console.log("Calling cache for expression...");
-                const cachedExpression = this.#db.getExpression(ref.expression);
-                if (cachedExpression) {
-                    console.log("Cache hit...");
-                    expr = JSON.parse(cachedExpression) as Expression
-                } else {
-                    console.log("Cache miss...");
-                    expr = await lang.expressionAdapter.get(ref.expression);
-                    if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
-                };
+        try {
+            if(ref.language.address == "literal" || ref.language.name == 'literal') {
+                expr = Literal.fromUrl(`literal://${ref.expression}`).get()
             } else {
-                expr = await lang.expressionAdapter.get(ref.expression);
+                const lang = this.languageForExpression(ref);
+                if (!lang.expressionAdapter) {
+                    throw Error("Language does not have an expresionAdapter!")
+                };
+                
+                const langIsImmutable = await this.isImmutableExpression(ref);
+                if (langIsImmutable) {
+                    console.log("Calling cache for expression...");
+                    const cachedExpression = this.#db.getExpression(ref.expression);
+                    if (cachedExpression) {
+                        console.log("Cache hit...");
+                        expr = JSON.parse(cachedExpression) as Expression
+                    } else {
+                        console.log("Cache miss...");
+                        expr = await lang.expressionAdapter.get(ref.expression);
+                        if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
+                    };
+                } else {
+                    expr = await lang.expressionAdapter.get(ref.expression);
+                }
             }
+        } catch (e) {
+            console.error("LanguageController.getExpression(): Error getting the expression: ", e);
+            return null
         }
-        
 
         if(expr) {
             try{
