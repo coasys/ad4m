@@ -280,6 +280,15 @@ export class PerspectiveProxy {
         }
     }
 
+    async stringOrTemplateObjectToSubjectClass<T>(subjectClass: T): Promise<string> {
+        if(typeof subjectClass === "string")
+            return subjectClass
+        else { 
+            let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
+            return subjectClasses[0]
+        }
+    }
+
     /** Creates a new subject instance by running its (SDNA defined) constructor,
      * which means adding links around the given expression address so that it
      * conforms to the given subject class.
@@ -290,13 +299,7 @@ export class PerspectiveProxy {
      * @param exprAddr The address of the expression to be turned into a subject instance
      */
     async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
-        let className
-        if(typeof subjectClass !== "string") {
-            let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
-            className = subjectClasses[0]
-        } else {
-            className = subjectClass as string
-        }
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
         if(!result.length) {
             throw "No constructor found for given subject class"
@@ -312,8 +315,15 @@ export class PerspectiveProxy {
         }
     }
 
-    async isSubjectInstance(expression: string, subjectClass: string): Promise<boolean> {
-        return await this.infer(`subject_class("${subjectClass}", c), instance(c, "${expression}")`)
+    /** Checks if the given expression is a subject instance of the given subject class 
+     * @param expression The expression to be checked
+     * @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, the first subject class
+     * that matches the given properties will be used.
+    */
+    async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        return await this.infer(`subject_class("${className}", c), instance(c, "${expression}")`)
     }
 
     async subjectInstance(expression: string, subjectClass: string): Promise<Subject> {

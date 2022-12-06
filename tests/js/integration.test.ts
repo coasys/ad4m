@@ -334,6 +334,8 @@ describe("Integration", () => {
                 // get instance with type information
                 let todo = await perspective!.createSubject(new Todo(), root)
 
+                expect(await perspective!.isSubjectInstance(root, new Todo())).to.be.true
+
                 await todo.setState("todo://review")
                 expect(await todo.state).to.equal("todo://review")
                 expect(await todo.comments).to.be.empty
