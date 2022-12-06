@@ -333,7 +333,7 @@ export class PerspectiveProxy {
      */
     async getSubjectProxy<T>(base: string, subjectClass: T): Promise<T> {
         if(!await this.isSubjectInstance(base, subjectClass)) {
-            throw "Expression is not a subject instance of given class"
+            throw `Expression ${base} is not a subject instance of given class: ${subjectClass}`
         }
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)   
         let subject = new Subject(this, base, className)
@@ -341,11 +341,27 @@ export class PerspectiveProxy {
         return subject as unknown as T
     }
 
-    async subjectInstances(subjectClass: string): Promise<Subject[]> {
-        let instances = await this.infer(`subject_class("${subjectClass}", c), instance(c, X)`)
-        return await Promise.all(instances.map(async x => await this.getSubjectProxy(x.X, subjectClass) as unknown as Subject))
-    }
+    /** Returns all subject instances of the given subject class as proxy objects.
+     *  @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, all subject classes
+     * that match the given properties will be used.
+     */
+    async getAllSubjectInstances<T>(subjectClass: T): Promise<T[]> {
+        let classes = []
+        if(typeof subjectClass === "string") {
+            classes = [subjectClass]
+        } else {
+            classes = await this.subjectClassesByTemplate(subjectClass as object)
+        }
 
+        let instances = []
+        for(let className of classes) {
+            let instanceBaseExpressions = await this.infer(`subject_class("${className}", c), instance(c, X)`)
+            let newInstances = await Promise.all(instanceBaseExpressions.map(async x => await this.getSubjectProxy(x.X, className) as unknown as T))
+            instances = instances.concat(newInstances)
+        }
+        return instances
+    }
 
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
         //console.log("subject template", obj)
@@ -404,15 +420,5 @@ export class PerspectiveProxy {
         } else {
             return result.map(x => x.Class)
         }
-    }
-
-    async subjectInstancesByTemplate<T extends object>(obj: T): Promise<T[]> {
-        let classes = await this.subjectClassesByTemplate(obj)
-        let instances = []
-        for(let className of classes) {
-            let instancesOfClass = await this.subjectInstances(className)
-            instances = instances.concat(instancesOfClass)
-        }
-        return instances
     }
 }
