@@ -280,14 +280,35 @@ export class PerspectiveProxy {
         }
     }
 
-    async constructSubject(className: string, exprAddr: string): Promise<boolean> {
-        let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
-        if(result.length) {
-            let actions = result.map(x => eval(x.Actions))
-            await this.executeAction(actions[0], exprAddr, undefined)
-            return true   
+    /** Creates a new subject instance by running its (SDNA defined) constructor,
+     * which means adding links around the given expression address so that it
+     * conforms to the given subject class.
+     * 
+     * @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, the first subject class
+     * that matches the given properties will be used.
+     * @param exprAddr The address of the expression to be turned into a subject instance
+     */
+    async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
+        let className
+        if(typeof subjectClass !== "string") {
+            let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
+            className = subjectClasses[0]
         } else {
-            return false
+            className = subjectClass as string
+        }
+        let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
+        if(!result.length) {
+            throw "No constructor found for given subject class"
+        }
+
+        let actions = result.map(x => eval(x.Actions))
+        await this.executeAction(actions[0], exprAddr, undefined)
+
+        if(typeof subjectClass !== "string") {
+            return await this.subjectInstanceByTemplate(exprAddr, subjectClass)
+        } else {    
+            return await this.subjectInstance(exprAddr, className) as unknown as T
         }
     }
 

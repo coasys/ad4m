@@ -123,7 +123,7 @@ describe("Integration", () => {
 
         it("should be able to construct a subject instance from a literal", async () => {
             let root = Literal.from("construct test").toUrl()
-            expect(await perspective!.constructSubject("Todo", root)).to.be.true
+            expect(await perspective!.createSubject("Todo", root)).to.not.be.undefined
             expect(await perspective!.isSubjectInstance(root, "Todo")).to.be.true
         })
     
@@ -132,8 +132,7 @@ describe("Integration", () => {
 
             before(async () => {
                 let root = Literal.from("construct test").toUrl()
-                await perspective!.constructSubject("Todo", root)
-                subject = await perspective!.subjectInstance(root, "Todo")
+                subject = await perspective!.createSubject("Todo", root) as unknown as Subject
             })
 
             it("should be able to read a property as JS property", async () => {
@@ -332,10 +331,8 @@ describe("Integration", () => {
             it("should be possible to use that class for type-safe interaction with subject instances", async () => {
                 // construct new subject intance
                 let root = Literal.from("Decorated class construction test").toUrl()
-                await perspective!.constructSubject(Todo.name, root)
-
                 // get instance with type information
-                let todo = await perspective!.subjectInstanceByTemplate(root, new Todo())
+                let todo = await perspective!.createSubject(new Todo(), root)
 
                 await todo.setState("todo://review")
                 expect(await todo.state).to.equal("todo://review")
