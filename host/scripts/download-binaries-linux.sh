@@ -14,7 +14,7 @@ if [ ! -f "./temp/binary/holochain" ]; then
 fi
 
 if [ ! -f "./temp/swipl/bin/swipl" ]; then
-    wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.0.161/swipl-linux-x86.zip
+    wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.0.174/swipl-linux-x86.zip
     unzip swipl-linux-x86.zip -d temp
     rm -rf swipl-linux-x64.zip
 fi
