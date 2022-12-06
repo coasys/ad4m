@@ -255,6 +255,9 @@ export class PerspectiveProxy {
         await this.executeAction(action, exprAddr, undefined)
     }
 
+    /** Set the perspective's Social DNA code to the given string. 
+     * This will replace all previous SDNA code elements with the new one.
+     */
     async setSdna(sdnaCode: string) {
         await this.setSingleTarget(new Link({
             source: "ad4m://self",
@@ -263,6 +266,9 @@ export class PerspectiveProxy {
         }))
     }
 
+    /** Returns the perspective's Social DNA code 
+     * This will return all SDNA code elements in an array.
+     */
     async getSdna(): Promise<string[]> {
         let links = await this.get(new LinkQuery({
             source: "ad4m://self",
@@ -272,6 +278,7 @@ export class PerspectiveProxy {
         return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
     }
 
+    /** Returns all the Subject classes defined in this perspectives SDNA */
     async subjectClasses(): Promise<string[]> {
         try {
             return (await this.infer("subject_class(X, _)")).map(x => x.X)
@@ -363,15 +370,18 @@ export class PerspectiveProxy {
         return instances
     }
 
+    /** Returns all subject classes that match the given template object.
+     * This function looks at the properties of the template object and
+     * its setters and collections to create a Prolog query that finds
+     * all subject classes that would be converted to a proxy object
+     * with exactly the same properties and collections.
+     * 
+     * Since there could be multiple subject classes that match the given
+     * criteria, this function returns a list of class names.
+     * 
+     * @param obj The template object
+     */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
-        //console.log("subject template", obj)
-        //console.log(Object.keys(obj))
-        //console.log(Object.getOwnPropertyNames(obj))
-        //@ts-ignore
-        //console.log(Object.keys(Object.getPrototypeOf(obj)))
-        //@ts-ignore
-        //console.log(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)))
-
         // Collect all string properties of the object in a list
         let properties = Object.keys(obj).filter(key => typeof obj[key] === "string")
 
