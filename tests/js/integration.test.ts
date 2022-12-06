@@ -41,9 +41,9 @@ describe("Integration", () => {
     let executorProcess: ChildProcess | null = null
 
     before(async () => {
-        ad4m = new Ad4mClient(apolloClient(4000))
-        return
-        /*
+        //ad4m = new Ad4mClient(apolloClient(4000))
+        //return
+        
         rmSync("../ad4mJS", { recursive: true, force: true })
         console.log("Initialzing executor data directory")
         //@ts-ignore
@@ -81,7 +81,7 @@ describe("Integration", () => {
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
         console.log("Done")
-        */
+        
     })
 
     after(() => {
