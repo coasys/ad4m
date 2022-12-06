@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-std",
@@ -58,9 +58,10 @@ dependencies = [
 name = "ad4min"
 version = "0.2.4"
 dependencies = [
+ "ad4m-client",
  "directories",
  "libc",
- "localtunnel",
+ "localtunnel-client",
  "log",
  "log4rs",
  "nix 0.23.1",
@@ -68,6 +69,7 @@ dependencies = [
  "opener",
  "portpicker",
  "remove_dir_all 0.7.0",
+ "reqwest",
  "serde",
  "serde_json",
  "sysinfo",
@@ -2294,12 +2296,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb68f22743a3fb35785f1e7f844ca5a3de2dde5bd0c0ef5b372065814699b121"
 
 [[package]]
-name = "localtunnel"
-version = "0.0.6"
+name = "localtunnel-client"
+version = "0.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffce7f901437d518bb46497f26c65cd86696e045668867ca0020f79197d3f529"
+checksum = "50e27b8ea846da5a71f7513edc8de10adc9f8f6856631d255593b8c9a1e28b49"
 dependencies = [
  "anyhow",
+ "log",
  "reqwest",
  "serde",
  "tokio",
