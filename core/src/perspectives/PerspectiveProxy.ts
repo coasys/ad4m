@@ -307,12 +307,7 @@ export class PerspectiveProxy {
 
         let actions = result.map(x => eval(x.Actions))
         await this.executeAction(actions[0], exprAddr, undefined)
-
-        if(typeof subjectClass !== "string") {
-            return await this.subjectInstanceByTemplate(exprAddr, subjectClass)
-        } else {    
-            return await this.subjectInstance(exprAddr, className) as unknown as T
-        }
+        return this.getSubjectProxy(exprAddr, subjectClass)
     }
 
     /** Checks if the given expression is a subject instance of the given subject class 
@@ -326,25 +321,29 @@ export class PerspectiveProxy {
         return await this.infer(`subject_class("${className}", c), instance(c, "${expression}")`)
     }
 
-    async subjectInstance(expression: string, subjectClass: string): Promise<Subject> {
-        let isInstance = await this.isSubjectInstance(expression, subjectClass)
-        if(!isInstance) {
+
+    /** For an existing subject instance (existing in the perspective's links)
+     * this function returns a proxy object that can be used to access the subject's
+     * properties and methods.
+     * 
+     * @param base URI of the subject's root expression
+     * @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, the first subject class
+     * that matches the given properties will be used.
+     */
+    async getSubjectProxy<T>(base: string, subjectClass: T): Promise<T> {
+        if(!await this.isSubjectInstance(base, subjectClass)) {
             throw "Expression is not a subject instance of given class"
         }
-            
-        let subject = new Subject(this, expression, subjectClass)
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)   
+        let subject = new Subject(this, base, className)
         await subject.init()
-        return subject
-    }
-
-    async subjectInstanceByTemplate<T>(expression: string, template: T): Promise<T> {
-        let instance = this.subjectInstance(expression, template.constructor.name)
-        return instance as unknown as T
+        return subject as unknown as T
     }
 
     async subjectInstances(subjectClass: string): Promise<Subject[]> {
         let instances = await this.infer(`subject_class("${subjectClass}", c), instance(c, X)`)
-        return await Promise.all(instances.map(async x => await this.subjectInstance(x.X, subjectClass)))
+        return await Promise.all(instances.map(async x => await this.getSubjectProxy(x.X, subjectClass) as unknown as Subject))
     }
 
 

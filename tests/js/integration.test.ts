@@ -126,6 +126,16 @@ describe("Integration", () => {
             expect(await perspective!.createSubject("Todo", root)).to.not.be.undefined
             expect(await perspective!.isSubjectInstance(root, "Todo")).to.be.true
         })
+
+        it("can get subject instance proxy via class string", async () => {
+            let root = Literal.from("get proxy test").toUrl()
+            await perspective!.createSubject("Todo", root)
+            let subject = await perspective!.getSubjectProxy(root, "Todo") as unknown as Subject
+            expect(subject).to.not.be.undefined
+            expect(subject).to.have.property("state")
+            expect(subject).to.have.property("setState")
+            expect(subject).to.have.property("title")
+        })
     
         describe("with an instance", () => {
             let subject: Subject | null = null
@@ -269,8 +279,8 @@ describe("Integration", () => {
 
                 // todos is an array of Todo objects
                 // note how we don't need @ts-ignore here:
-                expect(todos.length).to.equal(1)
-                expect(await todos[0].state).to.equal("todo://done")
+                expect(todos.length).to.equal(2)
+                expect(await todos[1].state).to.equal("todo://done")
             })
 
         })
@@ -335,6 +345,10 @@ describe("Integration", () => {
                 let todo = await perspective!.createSubject(new Todo(), root)
 
                 expect(await perspective!.isSubjectInstance(root, new Todo())).to.be.true
+                let todo2 = await perspective!.getSubjectProxy(root, new Todo())
+                expect(todo2).to.have.property("state")
+                expect(todo2).to.have.property("title")
+                expect(todo2).to.have.property("comments")
 
                 await todo.setState("todo://review")
                 expect(await todo.state).to.equal("todo://review")
