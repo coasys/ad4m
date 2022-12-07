@@ -1,5 +1,5 @@
 import { LinkCallback, PerspectiveClient } from "./PerspectiveClient";
-import { Link, LinkExpression, LinkExpressionInput } from "../links/Links";
+import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkInput, LinkInputMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle } from './PerspectiveHandle'
@@ -94,6 +94,21 @@ export class PerspectiveProxy {
     /** Adds a link to this perspective */
     async add(link: Link): Promise<LinkExpression> {
         return await this.#client.addLink(this.#handle.uuid, link)
+    }
+
+    /** Adds multiple links to this perspective **/
+    async addLinks(links: Link[]): Promise<LinkExpression[]> {
+        return await this.#client.addLinks(this.#handle.uuid, links)
+    }
+
+    /** Removes multiple links from this perspective **/
+    async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
+        return await this.#client.removeLinks(this.#handle.uuid, links)
+    }
+
+    /** Adds and removes multiple links from this perspective **/
+    async mutateMany(mutations: LinkInputMutations): Promise<LinkExpressionMutations> {
+        return await this.#client.linkMutations(this.#handle.uuid, mutations)
     }
 
     /** Adds a linkExpression to this perspective */

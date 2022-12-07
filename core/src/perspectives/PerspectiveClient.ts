@@ -1,5 +1,5 @@
 import { ApolloClient, gql } from "@apollo/client/core";
-import { Link, LinkExpressionInput, LinkExpression, LinkInput } from "../links/Links";
+import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkInputMutations, LinkMutations, LinkExpressionMutations } from "../links/Links";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
@@ -165,6 +165,47 @@ export class PerspectiveClient {
             variables: { uuid, link }
         }))
         return perspectiveAddLink
+    }
+
+    async addLinks(uuid: string, links: Link[]): Promise<LinkExpression[]> {
+        const { perspectiveAddLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveAddLinks($uuid: String!, $links: [LinkInput!]!){
+                perspectiveAddLinks(links: $links, uuid: $uuid) {
+                    ${LINK_EXPRESSION_FIELDS}
+                }
+            }`,
+            variables: { uuid, links }
+        }))
+        return perspectiveAddLinks
+    }
+
+    async removeLinks(uuid: string, links: LinkInput[]): Promise<LinkExpression[]> {
+        const { perspectiveRemoveLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveRemoveLinks($uuid: String!, $links: [LinkInput!]!){
+                perspectiveRemoveLinks(links: $links, uuid: $uuid) {
+                    ${LINK_EXPRESSION_FIELDS}
+                }
+            }`,
+            variables: { uuid, links }
+        }))
+        return perspectiveRemoveLinks
+    }
+
+    async linkMutations(uuid: string, mutations: LinkInputMutations): Promise<LinkExpressionMutations> {
+        const { perspectiveLinkMutations } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveLinkMutations($uuid: String!, $mutations: LinkInputMutations!){
+                perspectiveLinkMutations(mutations: $mutations, uuid: $uuid) {
+                    additions {
+                        ${LINK_EXPRESSION_FIELDS}
+                    }
+                    removals {
+                        ${LINK_EXPRESSION_FIELDS}
+                    }
+                }
+            }`,
+            variables: { uuid, mutations }
+        }))
+        return perspectiveLinkMutations
     }
 
     async addLinkExpression(uuid: string, link: LinkExpressionInput): Promise<LinkExpression> {

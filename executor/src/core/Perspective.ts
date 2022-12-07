@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations } from "@perspect3vism/ad4m"
 import { Link, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -336,6 +336,10 @@ export default class Perspective {
             this.#db.removeTarget(this.uuid, link.target, foundLink!)
             this.#db.remove(this.#db.allLinksKey(this.uuid), foundLink!)
         }
+    }
+
+    async addLinkMutation(linkMutation: LinkMutations): Promise<LinkMutations> {
+
     }
 
     async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
