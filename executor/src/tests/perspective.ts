@@ -58,6 +58,50 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(snapshot.links.length).to.equal(0);
             })
 
+            it('can make mutations using perspective addLinks(), removeLinks() & linkMutations()', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+
+                const create = await ad4mClient.perspective.add("test-mutations");
+                expect(create.name).to.equal("test-mutations");
+
+                const links = [
+                    new Link({
+                        source: "test://test-source",
+                        predicate: "test://test-predicate",
+                        target: "test://test-target"
+                    }),
+                    new Link({
+                        source: "test://test-source2",
+                        predicate: "test://test-predicate2",
+                        target: "test://test-target2"
+                    })
+                ];
+                const linkAdds = await create.addLinks(links);
+                expect(linkAdds.length).to.equal(2);
+
+                const linksPostAdd = await create.get({} as LinkQuery);
+                expect(linksPostAdd.length).to.equal(2);
+
+                const linkRemoves = await create.removeLinks(linkAdds);
+                expect(linkRemoves.length).to.equal(2);
+
+                const linksPostRemove = await create.get({} as LinkQuery);
+                expect(linksPostRemove.length).to.equal(0);
+
+                const addTwoMore = await create.addLinks(links);
+                
+                const linkMutation = {
+                    additions: links,
+                    removals: addTwoMore
+                };
+                const linkMutations = await create.linkMutations(linkMutation);
+                expect(linkMutations.additions.length).to.equal(2);
+                expect(linkMutations.removals.length).to.equal(2);
+
+                const linksPostMutation = await create.get({} as LinkQuery);
+                expect(linksPostMutation.length).to.equal(2);
+            })
+
             it('test local perspective links - time query', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
