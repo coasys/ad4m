@@ -499,7 +499,10 @@ describe('Ad4mClient', () => {
         })
 
         it('addLinks() smoke test', async () => {
-            const links = await ad4mClient.perspective.addLinks('00001', [{source: 'root', target: 'lang://Qm123', predicate: 'p'}])
+            const links = await ad4mClient.perspective.addLinks('00001', [
+                {source: 'root', target: 'lang://Qm123', predicate: 'p'},
+                {source: 'root', target: 'lang://Qm123', predicate: 'p'}
+            ])
             expect(links.length).toBe(2)
             expect(links[0].author).toBe('did:ad4m:test')
             expect(links[0].data.source).toBe('root')
@@ -508,7 +511,10 @@ describe('Ad4mClient', () => {
         })
 
         it('removeLinks() smoke test', async () => {
-            const links = await ad4mClient.perspective.removeLinks('00001', [{source: 'root', target: 'lang://Qm123', predicate: 'p'}])
+            const links = await ad4mClient.perspective.removeLinks('00001', [
+                {author: '', timestamp: '', proof: {signature: '', key: ''}, data: {source: 'root', target: 'lang://Qm123', predicate: 'p'}},
+                {author: '', timestamp: '', proof: {signature: '', key: ''}, data: {source: 'root', target: 'lang://Qm123', predicate: 'p'}}
+            ])
             expect(links.length).toBe(2)
             expect(links[0].author).toBe('did:ad4m:test')
             expect(links[0].data.source).toBe('root')
@@ -518,8 +524,14 @@ describe('Ad4mClient', () => {
 
         it('linkMutations() smoke test', async () => {
             const mutations = await ad4mClient.perspective.linkMutations('00001', {
-                additions: [{source: 'root', target: 'lang://Qm123', predicate: 'p'}],
-                removals: [{source: 'root', target: 'lang://Qm123', predicate: 'p'}]
+                additions: [
+                    {source: 'root', target: 'lang://Qm123', predicate: 'p'},
+                    {source: 'root', target: 'lang://Qm123', predicate: 'p'}
+                ],
+                removals: [
+                    {author: '', timestamp: '', proof: {signature: '', key: ''}, data: {source: 'root', target: 'lang://Qm123', predicate: 'p'}},
+                    {author: '', timestamp: '', proof: {signature: '', key: ''}, data: {source: 'root', target: 'lang://Qm123', predicate: 'p'}}
+                ]
             });
             expect(mutations.additions.length).toBe(2)
             expect(mutations.removals.length).toBe(2)
