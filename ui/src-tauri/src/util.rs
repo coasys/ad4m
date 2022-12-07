@@ -57,7 +57,7 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
     match event {
       WindowEvent::Focused(f) => {
         //println!("focused: {}", f);
-        if !f {
+        if !f && window_clone.inner_size().unwrap().width == 400 {
           let _ = window_clone.hide();
         }
       },
