@@ -1,12 +1,12 @@
 use ad4m_client::Ad4mClient;
 use anyhow::{Context, Result};
 use clap::Subcommand;
+use colour::{self, blue_ln, green_ln};
 use rustyline::Editor;
 use std::fs;
 use std::sync::mpsc::channel;
 
 use crate::bootstrap_publish::*;
-use crate::startup::executor_data_path;
 
 #[derive(Debug, Subcommand)]
 pub enum LanguageFunctions {
@@ -165,28 +165,21 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
             ad4m_host_path,
             seed_proto,
         } => {
-            println!(
+            green_ln!(
                 "Attempting to generate a new bootstrap seed using ad4m-host path: {:?} and agent path: {:?}\n",
                 ad4m_host_path,
                 agent_path
             );
 
-            //Warn the user about deleting ad4m agent during publishing
-            println!("WARNING... THIS WILL DELETE YOUR EXISTING AD4M AGENT AND REPLACE WITH SUPPLIED PUBLISHING AGENT, PLEASE BACKUP BEFORE PROCEEDING\n\n");
-            let mut rl = Editor::<()>::new()?;
-            let continue_response = rl.readline("y/n to continue...")?;
-            if continue_response == String::from("n") || continue_response == String::from("N") {
-                return Ok(());
-            };
-
             //Load the seed proto first so we know that works before making new agent path
             let seed_proto = fs::read_to_string(seed_proto)?;
             let seed_proto: SeedProto = serde_json::from_str(&seed_proto)?;
-            println!("Loaded seed prototype file!\n");
+            green_ln!("Loaded seed prototype file!\n");
 
-            //Create a new ~/.ad4m path with agent.json file supplied
-            //Backup any existing ad4m agent to ~/.ad4m.old
-            let data_path = executor_data_path();
+            //Create a new ~/.ad4m-publish path with agent.json file supplied
+            let data_path = dirs::home_dir()
+                .expect("Could not get home directory")
+                .join(".ad4m-publish");
             let data_path_files = std::fs::read_dir(&data_path);
             if data_path_files.is_ok() {
                 fs::remove_dir_all(&data_path)?;
@@ -203,9 +196,9 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
             //Copy the agent file to correct directory
             fs::write(ad4m_data_path.join("agent.json"), agent_file)?;
             fs::write(data_data_path.join("DIDCache.json"), String::from("{}"))?;
-            println!("Publishing agent directory setup\n");
+            green_ln!("Publishing agent directory setup\n");
 
-            println!("Creating temporary bootstrap seed for publishing purposes...\n");
+            green_ln!("Creating temporary bootstrap seed for publishing purposes...\n");
             let lang_lang_source = fs::read_to_string(&seed_proto.language_language_ref)?;
             let temp_bootstrap_seed = BootstrapSeed {
                 trusted_agents: vec![],
@@ -226,30 +219,29 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
             let ad4m_host_init = std::process::Command::new(&ad4m_host_path)
                 .arg("init")
                 .arg("--networkBootstrapSeed")
-                .arg(temp_publish_bootstrap_path.to_str().unwrap())
+                .arg(&temp_publish_bootstrap_path)
+                .arg("--dataPath")
+                .arg(&data_path)
                 .arg("--overrideConfig")
                 .output()?;
 
-            println!(
+            blue_ln!(
                 "ad4m-host init output: {}\n",
                 String::from_utf8_lossy(&ad4m_host_init.stdout)
             );
 
-            println!(
+            green_ln!(
                 "Starting publishing with bootstrap path: {}\n",
                 temp_publish_bootstrap_path.to_str().unwrap()
             );
 
             let (tx, rx) = channel();
-            serve_ad4m_host(ad4m_host_path, tx)?;
-
-            println!("ad4m-host serve started");
-            println!("Listening for stdout...\n");
+            serve_ad4m_host(ad4m_host_path, data_path, tx)?;
 
             for line in &rx {
                 println!("{}", line);
                 if line.contains("GraphQL server started, Unlock the agent to start holohchain") {
-                    println!("AD4M Host ready for publishing\n");
+                    green_ln!("AD4M Host ready for publishing\n");
                     //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
                     tokio::spawn(async move {
                         start_publishing(
