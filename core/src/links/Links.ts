@@ -24,19 +24,9 @@ export class LinkMutations {
     @Field(type => [LinkInput])
     additions: LinkInput[];
 
-    @Field(type => [LinkExpression])
-    removals: LinkExpression[];
+    @Field(type => [LinkExpressionInput])
+    removals: LinkExpressionInput[];
 }
-
-@InputType()
-export class LinkInputMutations {
-    @Field(type => [LinkInput])
-    additions: LinkInput[];
-
-    @Field(type => [LinkInput])
-    removals: LinkInput[];
-}
-
 @ObjectType()
 export class LinkExpressionMutations {
     @Field(type => [LinkExpression])

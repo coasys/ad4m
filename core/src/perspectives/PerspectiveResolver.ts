@@ -1,5 +1,5 @@
 import { Arg, Mutation, PubSub, PubSubEngine, Query, Resolver, Subscription } from "type-graphql";
-import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkInput, LinkInputMutations } from "../links/Links";
+import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkInput, LinkMutations } from "../links/Links";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
@@ -118,18 +118,18 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => [LinkExpression])
-    perspectiveRemoveLinks(@Arg('uuid') uuid: string, @Arg('links', type => [LinkInput]) links: LinkInput[], @PubSub() pubSub: any): LinkExpression[] {
+    perspectiveRemoveLinks(@Arg('uuid') uuid: string, @Arg('links', type => [LinkExpressionInput]) links: LinkExpressionInput[], @PubSub() pubSub: any): LinkExpression[] {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
         l.proof = testLink.proof
-        l.data = links[0]
+        l.data = links[0].data
         
         const l2 = new LinkExpression()
         l2.author = 'did:ad4m:test'
         l2.timestamp = Date.now()
         l2.proof = testLink.proof
-        l2.data = links[0]
+        l2.data = links[0].data
 
         pubSub.publish(LINK_REMOVED_TOPIC, { link: l })
         pubSub.publish(LINK_ADDED_TOPIC, { link: l2 })
@@ -137,7 +137,7 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => LinkExpressionMutations)
-    perspectiveLinkMutations(@Arg('uuid') uuid: string, @Arg('mutations') mutations: LinkInputMutations, @PubSub() pubSub: any): LinkExpressionMutations {
+    perspectiveLinkMutations(@Arg('uuid') uuid: string, @Arg('mutations') mutations: LinkMutations, @PubSub() pubSub: any): LinkExpressionMutations {
         const perspectiveAddLinks = this.perspectiveAddLinks(uuid, mutations.additions, pubSub);
         const perspectiveRemoveLinks = this.perspectiveRemoveLinks(uuid, mutations.removals, pubSub);
         return new LinkExpressionMutations(perspectiveAddLinks, perspectiveRemoveLinks)

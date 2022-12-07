@@ -1,5 +1,5 @@
 import { LinkCallback, PerspectiveClient } from "./PerspectiveClient";
-import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkInput, LinkInputMutations, LinkMutations } from "../links/Links";
+import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkInput, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle } from './PerspectiveHandle'
@@ -102,25 +102,25 @@ export class PerspectiveProxy {
     }
 
     /** Removes multiple links from this perspective **/
-    async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
+    async removeLinks(links: LinkExpressionInput[]): Promise<LinkExpression[]> {
         return await this.#client.removeLinks(this.#handle.uuid, links)
     }
 
     /** Adds and removes multiple links from this perspective **/
-    async mutateMany(mutations: LinkInputMutations): Promise<LinkExpressionMutations> {
+    async linkMutations(mutations: LinkMutations): Promise<LinkExpressionMutations> {
         return await this.#client.linkMutations(this.#handle.uuid, mutations)
     }
 
     /** Adds a linkExpression to this perspective */
-    async addLinkExpression(link: LinkExpression): Promise<LinkExpression> {
+    async addLinkExpression(link: LinkExpressionInput): Promise<LinkExpression> {
         return await this.#client.addLinkExpression(this.#handle.uuid, link)
     }
 
-    async update(oldLink: LinkExpression, newLink: Link) {
+    async update(oldLink: LinkExpressionInput, newLink: Link) {
         return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink)
     }
 
-    async remove(link: LinkExpression) {
+    async remove(link: LinkExpressionInput) {
         return await this.#client.removeLink(this.#handle.uuid, link)
     }
 

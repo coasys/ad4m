@@ -1,5 +1,5 @@
 import { ApolloClient, gql } from "@apollo/client/core";
-import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkInputMutations, LinkMutations, LinkExpressionMutations } from "../links/Links";
+import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
@@ -179,9 +179,9 @@ export class PerspectiveClient {
         return perspectiveAddLinks
     }
 
-    async removeLinks(uuid: string, links: LinkInput[]): Promise<LinkExpression[]> {
+    async removeLinks(uuid: string, links: LinkExpressionInput[]): Promise<LinkExpression[]> {
         const { perspectiveRemoveLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveRemoveLinks($uuid: String!, $links: [LinkInput!]!){
+            mutation: gql`mutation perspectiveRemoveLinks($uuid: String!, $links: [LinkExpressionInput!]!){
                 perspectiveRemoveLinks(links: $links, uuid: $uuid) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
@@ -191,9 +191,9 @@ export class PerspectiveClient {
         return perspectiveRemoveLinks
     }
 
-    async linkMutations(uuid: string, mutations: LinkInputMutations): Promise<LinkExpressionMutations> {
+    async linkMutations(uuid: string, mutations: LinkMutations): Promise<LinkExpressionMutations> {
         const { perspectiveLinkMutations } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveLinkMutations($uuid: String!, $mutations: LinkInputMutations!){
+            mutation: gql`mutation perspectiveLinkMutations($uuid: String!, $mutations: LinkMutations!){
                 perspectiveLinkMutations(mutations: $mutations, uuid: $uuid) {
                     additions {
                         ${LINK_EXPRESSION_FIELDS}
