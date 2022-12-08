@@ -2,9 +2,19 @@ import { Link } from "./links/Links";
 import { Literal } from "./Literal";
 import { LinkQuery } from "./perspectives/LinkQuery";
 import { PerspectiveProxy } from "./perspectives/PerspectiveProxy";
-import { nanoid } from "nanoid";
 
 export const SMART_LITERAL_CONTENT_PREDICATE = "smart_literal://content"
+
+
+function makeRandomStringID(length: number): string {
+    let result = '';
+    let characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let charactersLength = characters.length;
+    for (let i = 0; i < length; i++) {
+       result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    return result;
+ }
 
 export class SmartLiteral {
     #perspective: PerspectiveProxy
@@ -20,8 +30,7 @@ export class SmartLiteral {
     }
 
     public static async create(perspective: PerspectiveProxy, literal: any): Promise<SmartLiteral> {
-        const base = Literal.from(nanoid()).toUrl()
-        //const base = Literal.from("nanoid()").toUrl()
+        const base = Literal.from(makeRandomStringID(10)).toUrl()
         const smartLiteral = new SmartLiteral(perspective, base)
         await smartLiteral.set(literal)
         return smartLiteral
