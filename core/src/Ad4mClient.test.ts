@@ -498,6 +498,55 @@ describe('Ad4mClient', () => {
             expect(link.data.target).toBe('lang://Qm123')
         })
 
+        it('addLinks() smoke test', async () => {
+            const links = await ad4mClient.perspective.addLinks('00001', [
+                {source: 'root', target: 'lang://Qm123', predicate: 'p'},
+                {source: 'root', target: 'lang://Qm123', predicate: 'p'}
+            ])
+            expect(links.length).toBe(2)
+            expect(links[0].author).toBe('did:ad4m:test')
+            expect(links[0].data.source).toBe('root')
+            expect(links[0].data.predicate).toBe('p')
+            expect(links[0].data.target)
+        })
+
+        it('removeLinks() smoke test', async () => {
+            const links = await ad4mClient.perspective.removeLinks('00001', [
+                {author: '', timestamp: '', proof: {signature: '', key: ''}, data: {source: 'root', target: 'lang://Qm123', predicate: 'p'}},
+                {author: '', timestamp: '', proof: {signature: '', key: ''}, data: {source: 'root', target: 'lang://Qm123', predicate: 'p'}}
+            ])
+            expect(links.length).toBe(2)
+            expect(links[0].author).toBe('did:ad4m:test')
+            expect(links[0].data.source).toBe('root')
+            expect(links[0].data.predicate).toBe('p')
+            expect(links[0].data.target)
+        })
+
+        it('linkMutations() smoke test', async () => {
+            const mutations = await ad4mClient.perspective.linkMutations('00001', {
+                additions: [
+                    {source: 'root', target: 'lang://Qm123', predicate: 'p'},
+                    {source: 'root', target: 'lang://Qm123', predicate: 'p'}
+                ],
+                removals: [
+                    {author: '', timestamp: '', proof: {signature: '', key: ''}, data: {source: 'root', target: 'lang://Qm123', predicate: 'p'}},
+                    {author: '', timestamp: '', proof: {signature: '', key: ''}, data: {source: 'root', target: 'lang://Qm123', predicate: 'p'}}
+                ]
+            });
+            expect(mutations.additions.length).toBe(2)
+            expect(mutations.removals.length).toBe(2)
+
+            expect(mutations.additions[0].author).toBe('did:ad4m:test')
+            expect(mutations.additions[0].data.source).toBe('root')
+            expect(mutations.additions[0].data.predicate).toBe('p')
+            expect(mutations.additions[0].data.target).toBe('lang://Qm123')
+
+            expect(mutations.removals[0].author).toBe('did:ad4m:test')
+            expect(mutations.removals[0].data.source).toBe('root')
+            expect(mutations.removals[0].data.predicate).toBe('p')
+            expect(mutations.removals[0].data.target).toBe('lang://Qm123')
+        })
+
         it('addLinkExpression() smoke test', async () => {
             const testLink = new LinkExpression()
             testLink.author = "did:ad4m:test"
