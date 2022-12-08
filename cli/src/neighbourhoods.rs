@@ -27,7 +27,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: NeighbourhoodFunctions) -> Re
         }
         NeighbourhoodFunctions::Join { url } => {
             let neighbourhood = ad4m_client.neighbourhoods.join(url).await?;
-            println!("Neighbourhod joined!\n{:#?}", neighbourhood);
+            println!("Neighbourhood joined!\n{:#?}", neighbourhood);
         }
     };
     Ok(())
