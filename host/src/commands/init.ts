@@ -7,7 +7,6 @@ import path from 'path';
 import fs from 'fs-extra';
 // @ts-ignore
 import utils from 'util';
-import { fetchLatestBootstrapSeed, MAINNET_SEED } from '../utils/fetchLatestBootstrapSeed';
 import { CONFIG, getConfig } from '../utils/config';
 import ReadlineSync from 'readline-sync';
 import os from 'os'
@@ -109,9 +108,10 @@ async function getSeedFilePath(dataPath?: string, networkBootstrapSeed?: string)
   const appDataPath = ad4mDataDirectory(dataPath)
 
   if (!networkBootstrapSeed) {
-    console.log("No bootstrap seed supplied... downloading the latest AD4M bootstrap seed");
-    await fetchLatestBootstrapSeed(appDataPath);
-    return path.join(appDataPath, MAINNET_SEED);
+    console.log("No bootstrap seed supplied... using the one found in local files");
+    const targetSeedPath = path.join(appDataPath, 'mainnet_seed.seed');
+    await copy(path.join(__dirname, `../mainnet_seed.json`), targetSeedPath);
+    return targetSeedPath;
   } else {
     return path.isAbsolute(networkBootstrapSeed) ? networkBootstrapSeed: path.join(__dirname, networkBootstrapSeed); 
   } 

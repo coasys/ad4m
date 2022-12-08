@@ -21,6 +21,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "rustyline",
+ "serde",
  "serde_json",
  "tokio",
  "unicode-width",
@@ -55,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "ad4min"
-version = "0.0.10"
+version = "0.2.4"
 dependencies = [
  "ad4m-client",
  "directories",
