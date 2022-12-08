@@ -5,7 +5,9 @@ import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
 import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
-import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, Subject, subjectProperty, subjectCollection, sdnaOutput, addLink, hasLink } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
+    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, Subject, subjectProperty, subjectCollection, sdnaOutput,
+} from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
 
