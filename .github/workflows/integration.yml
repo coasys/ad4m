@@ -41,11 +41,14 @@ jobs:
     - name: Build AD4M-Host
       run: yarn run package-macos
 
+    - name: ls host/temp/binary
+      run: ls ./host/temp/binary
+
     - name: code-sign verify
-      run: codesign -vvvv -R="notarized" --check-notarization ./host/temp/binary/holochain 
+      run: codesign -vvvv -R="notarized" --check-notarization ./host/temp/binary/holochain || echo "failed"
 
     - name: code-sign entitlements
-      run: codesign -d --entitlements ./host/temp/binary/holochain 
+      run: codesign -d --entitlements ./host/temp/binary/holochain || echo "failed"
 
     - name: Build AD4M cli
       run: cd cli && cargo build --release
