@@ -74,7 +74,7 @@ setup() {
 
     # Join neighbourhood
     run ./target/release/ad4m -n -e http://localhost:4001/graphql neighbourhoods join $nh_url
-    assert_line --partial "Neighbourhod joined!"
+    assert_line --partial "Neighbourhood joined!"
 
     # Add link
     run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives add-link $perspective_id "nh_test://source" "nh_test://target" "nh_test://predicate"
