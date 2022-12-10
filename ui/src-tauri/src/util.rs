@@ -25,11 +25,8 @@ pub fn find_and_kill_processes(name: &str) {
     for process in processes.processes_by_exact_name(name) {
         log::info!("Prosses running: {} {}", process.pid(), process.name());
 
-        match process.kill_with(Signal::Term) {
-            None => {
-                log::error!("This signal isn't supported on this platform");
-            }
-            _ => {}
+        if process.kill_with(Signal::Term) == None {
+            log::error!("This signal isn't supported on this platform");
         }
     }
 }
@@ -39,7 +36,7 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
 
     let new_ad4min_window = WindowBuilder::new(app, "AD4MIN", WindowUrl::App(url.into()))
         .center()
-        .focus()
+        .focused(true)
         .inner_size(1000.0, 700.0)
         .title("AD4MIN");
 
@@ -53,14 +50,11 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
     let window_clone = tray_window.clone();
     tray_window.on_window_event(move |event| {
         //println!("window event: {:?}", event);
-        match event {
-            WindowEvent::Focused(f) => {
-                //println!("focused: {}", f);
-                if !f {
-                    let _ = window_clone.hide();
-                }
+        if let WindowEvent::Focused(f) = event {
+            //println!("focused: {}", f);
+            if !f {
+                let _ = window_clone.hide();
             }
-            _ => {}
         }
     });
 }

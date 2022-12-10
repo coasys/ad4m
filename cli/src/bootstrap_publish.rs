@@ -88,7 +88,7 @@ pub fn serve_ad4m_host(
 
         match f.read_line(&mut buf) {
             Ok(_) => {
-                if buf != "" {
+                if !buf.is_empty() {
                     sender.send(buf).unwrap();
                 }
             }
@@ -100,7 +100,7 @@ pub fn serve_ad4m_host(
         let mut buf_e = String::new();
         match f_e.read_line(&mut buf_e) {
             Ok(_) => {
-                if buf_e != "" {
+                if !buf_e.is_empty() {
                     println!("{}", buf_e);
                 }
             }
@@ -138,7 +138,7 @@ pub async fn start_publishing(
     let mut bootstrap_seed = BootstrapSeed {
         trusted_agents: vec![agent.did.unwrap()],
         known_link_languages: vec![],
-        language_language_bundle: language_language_bundle,
+        language_language_bundle,
         direct_message_language: String::from(""),
         agent_language: String::from(""),
         perspective_language: String::from(""),
