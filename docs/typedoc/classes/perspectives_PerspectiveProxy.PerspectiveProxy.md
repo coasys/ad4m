@@ -19,7 +19,6 @@ a reference to the PerspectiveClient object that created it.
 ### Properties
 
 - [#client](perspectives_PerspectiveProxy.PerspectiveProxy.md##client)
-- [#executeAction](perspectives_PerspectiveProxy.PerspectiveProxy.md##executeaction)
 - [#handle](perspectives_PerspectiveProxy.PerspectiveProxy.md##handle)
 - [#perspectiveLinkAddedCallbacks](perspectives_PerspectiveProxy.PerspectiveProxy.md##perspectivelinkaddedcallbacks)
 - [#perspectiveLinkRemovedCallbacks](perspectives_PerspectiveProxy.PerspectiveProxy.md##perspectivelinkremovedcallbacks)
@@ -35,22 +34,35 @@ a reference to the PerspectiveClient object that created it.
 
 - [add](perspectives_PerspectiveProxy.PerspectiveProxy.md#add)
 - [addLinkExpression](perspectives_PerspectiveProxy.PerspectiveProxy.md#addlinkexpression)
+- [addLinks](perspectives_PerspectiveProxy.PerspectiveProxy.md#addlinks)
 - [addListener](perspectives_PerspectiveProxy.PerspectiveProxy.md#addlistener)
 - [availableFlows](perspectives_PerspectiveProxy.PerspectiveProxy.md#availableflows)
+- [createSubject](perspectives_PerspectiveProxy.PerspectiveProxy.md#createsubject)
+- [executeAction](perspectives_PerspectiveProxy.PerspectiveProxy.md#executeaction)
 - [expressionsInFlowState](perspectives_PerspectiveProxy.PerspectiveProxy.md#expressionsinflowstate)
 - [flowActions](perspectives_PerspectiveProxy.PerspectiveProxy.md#flowactions)
 - [flowState](perspectives_PerspectiveProxy.PerspectiveProxy.md#flowstate)
 - [get](perspectives_PerspectiveProxy.PerspectiveProxy.md#get)
+- [getAllSubjectInstances](perspectives_PerspectiveProxy.PerspectiveProxy.md#getallsubjectinstances)
+- [getSdna](perspectives_PerspectiveProxy.PerspectiveProxy.md#getsdna)
 - [getSingleTarget](perspectives_PerspectiveProxy.PerspectiveProxy.md#getsingletarget)
+- [getSubjectProxy](perspectives_PerspectiveProxy.PerspectiveProxy.md#getsubjectproxy)
 - [infer](perspectives_PerspectiveProxy.PerspectiveProxy.md#infer)
+- [isSubjectInstance](perspectives_PerspectiveProxy.PerspectiveProxy.md#issubjectinstance)
+- [linkMutations](perspectives_PerspectiveProxy.PerspectiveProxy.md#linkmutations)
 - [loadSnapshot](perspectives_PerspectiveProxy.PerspectiveProxy.md#loadsnapshot)
 - [remove](perspectives_PerspectiveProxy.PerspectiveProxy.md#remove)
+- [removeLinks](perspectives_PerspectiveProxy.PerspectiveProxy.md#removelinks)
 - [removeListener](perspectives_PerspectiveProxy.PerspectiveProxy.md#removelistener)
 - [runFlowAction](perspectives_PerspectiveProxy.PerspectiveProxy.md#runflowaction)
 - [sdnaFlows](perspectives_PerspectiveProxy.PerspectiveProxy.md#sdnaflows)
+- [setSdna](perspectives_PerspectiveProxy.PerspectiveProxy.md#setsdna)
 - [setSingleTarget](perspectives_PerspectiveProxy.PerspectiveProxy.md#setsingletarget)
 - [snapshot](perspectives_PerspectiveProxy.PerspectiveProxy.md#snapshot)
 - [startFlow](perspectives_PerspectiveProxy.PerspectiveProxy.md#startflow)
+- [stringOrTemplateObjectToSubjectClass](perspectives_PerspectiveProxy.PerspectiveProxy.md#stringortemplateobjecttosubjectclass)
+- [subjectClasses](perspectives_PerspectiveProxy.PerspectiveProxy.md#subjectclasses)
+- [subjectClassesByTemplate](perspectives_PerspectiveProxy.PerspectiveProxy.md#subjectclassesbytemplate)
 - [update](perspectives_PerspectiveProxy.PerspectiveProxy.md#update)
 
 ## Constructors
@@ -68,7 +80,7 @@ a reference to the PerspectiveClient object that created it.
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:23](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L23)
+[perspectives/PerspectiveProxy.ts:29](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L29)
 
 ## Properties
 
@@ -78,17 +90,7 @@ a reference to the PerspectiveClient object that created it.
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:18](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L18)
-
-___
-
-### #executeAction
-
-• `Private` **#executeAction**: `any`
-
-#### Defined in
-
-[perspectives/PerspectiveProxy.ts:21](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L21)
+[perspectives/PerspectiveProxy.ts:25](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L25)
 
 ___
 
@@ -98,7 +100,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:17](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L17)
+[perspectives/PerspectiveProxy.ts:24](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L24)
 
 ___
 
@@ -108,7 +110,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:19](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L19)
+[perspectives/PerspectiveProxy.ts:26](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L26)
 
 ___
 
@@ -118,7 +120,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:20](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L20)
+[perspectives/PerspectiveProxy.ts:27](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L27)
 
 ## Accessors
 
@@ -134,7 +136,7 @@ Given name of the perspective
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:70](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L70)
+[perspectives/PerspectiveProxy.ts:85](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L85)
 
 ___
 
@@ -150,7 +152,7 @@ If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expre
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:80](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L80)
+[perspectives/PerspectiveProxy.ts:95](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L95)
 
 ___
 
@@ -166,7 +168,7 @@ If the perspective is shared as a Neighbourhood, this is the Neighbourhood URL
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:75](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L75)
+[perspectives/PerspectiveProxy.ts:90](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L90)
 
 ___
 
@@ -182,7 +184,7 @@ Unique ID of the perspective
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:65](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L65)
+[perspectives/PerspectiveProxy.ts:80](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L80)
 
 ## Methods
 
@@ -204,7 +206,7 @@ Adds a link to this perspective
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:95](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L95)
+[perspectives/PerspectiveProxy.ts:110](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L110)
 
 ___
 
@@ -218,7 +220,7 @@ Adds a linkExpression to this perspective
 
 | Name | Type |
 | :------ | :------ |
-| `link` | [`LinkExpression`](links_Links.LinkExpression.md) |
+| `link` | [`LinkExpressionInput`](links_Links.LinkExpressionInput.md) |
 
 #### Returns
 
@@ -226,7 +228,29 @@ Adds a linkExpression to this perspective
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:100](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L100)
+[perspectives/PerspectiveProxy.ts:130](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L130)
+
+___
+
+### addLinks
+
+▸ **addLinks**(`links`): `Promise`<[`LinkExpression`](links_Links.LinkExpression.md)[]\>
+
+Adds multiple links to this perspective *
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `links` | [`Link`](links_Links.Link.md)[] |
+
+#### Returns
+
+`Promise`<[`LinkExpression`](links_Links.LinkExpression.md)[]\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:115](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L115)
 
 ___
 
@@ -249,7 +273,7 @@ Adds a link listener
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:116](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L116)
+[perspectives/PerspectiveProxy.ts:146](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L146)
 
 ___
 
@@ -271,7 +295,60 @@ Returns all Social DNA flows that can be started from the given expression
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:204](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L204)
+[perspectives/PerspectiveProxy.ts:234](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L234)
+
+___
+
+### createSubject
+
+▸ **createSubject**<`T`\>(`subjectClass`, `exprAddr`): `Promise`<`T`\>
+
+Creates a new subject instance by running its (SDNA defined) constructor,
+which means adding links around the given expression address so that it
+conforms to the given subject class.
+
+#### Type parameters
+
+| Name |
+| :------ |
+| `T` |
+
+#### Parameters
+
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `subjectClass` | `T` | Either a string with the name of the subject class, or an object with the properties of the subject class. In the latter case, the first subject class that matches the given properties will be used. |
+| `exprAddr` | `string` | The address of the expression to be turned into a subject instance |
+
+#### Returns
+
+`Promise`<`T`\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:323](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L323)
+
+___
+
+### executeAction
+
+▸ **executeAction**(`actions`, `expression`, `parameters`): `Promise`<`void`\>
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `actions` | `any` |
+| `expression` | `any` |
+| `parameters` | `Parameter`[] |
+
+#### Returns
+
+`Promise`<`void`\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:38](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L38)
 
 ___
 
@@ -294,7 +371,7 @@ Returns all expressions in the given state of given Social DNA flow
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:218](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L218)
+[perspectives/PerspectiveProxy.ts:248](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L248)
 
 ___
 
@@ -317,7 +394,7 @@ Returns available action names, with regard to Social DNA flow and expression's 
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:230](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L230)
+[perspectives/PerspectiveProxy.ts:260](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L260)
 
 ___
 
@@ -340,7 +417,7 @@ Returns the given expression's flow state with regard to given Social DNA flow
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:224](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L224)
+[perspectives/PerspectiveProxy.ts:254](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L254)
 
 ___
 
@@ -362,7 +439,52 @@ Returns all the links of this perspective that matches the LinkQuery
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:85](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L85)
+[perspectives/PerspectiveProxy.ts:100](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L100)
+
+___
+
+### getAllSubjectInstances
+
+▸ **getAllSubjectInstances**<`T`\>(`subjectClass`): `Promise`<`T`[]\>
+
+Returns all subject instances of the given subject class as proxy objects.
+
+#### Type parameters
+
+| Name |
+| :------ |
+| `T` |
+
+#### Parameters
+
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `subjectClass` | `T` | Either a string with the name of the subject class, or an object with the properties of the subject class. In the latter case, all subject classes that match the given properties will be used. |
+
+#### Returns
+
+`Promise`<`T`[]\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:371](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L371)
+
+___
+
+### getSdna
+
+▸ **getSdna**(): `Promise`<`string`[]\>
+
+Returns the perspective's Social DNA code 
+This will return all SDNA code elements in an array.
+
+#### Returns
+
+`Promise`<`string`[]\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:287](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L287)
 
 ___
 
@@ -392,7 +514,38 @@ setSingelTarget()
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:168](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L168)
+[perspectives/PerspectiveProxy.ts:198](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L198)
+
+___
+
+### getSubjectProxy
+
+▸ **getSubjectProxy**<`T`\>(`base`, `subjectClass`): `Promise`<`T`\>
+
+For an existing subject instance (existing in the perspective's links)
+this function returns a proxy object that can be used to access the subject's
+properties and methods.
+
+#### Type parameters
+
+| Name |
+| :------ |
+| `T` |
+
+#### Parameters
+
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `base` | `string` | URI of the subject's root expression |
+| `subjectClass` | `T` | Either a string with the name of the subject class, or an object with the properties of the subject class. In the latter case, the first subject class that matches the given properties will be used. |
+
+#### Returns
+
+`Promise`<`T`\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:356](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L356)
 
 ___
 
@@ -414,7 +567,58 @@ Runs a Prolog query on the perspective's Prolog engine
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:90](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L90)
+[perspectives/PerspectiveProxy.ts:105](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L105)
+
+___
+
+### isSubjectInstance
+
+▸ **isSubjectInstance**<`T`\>(`expression`, `subjectClass`): `Promise`<`boolean`\>
+
+Checks if the given expression is a subject instance of the given subject class
+
+#### Type parameters
+
+| Name |
+| :------ |
+| `T` |
+
+#### Parameters
+
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `expression` | `string` | The expression to be checked |
+| `subjectClass` | `T` | Either a string with the name of the subject class, or an object with the properties of the subject class. In the latter case, the first subject class that matches the given properties will be used. |
+
+#### Returns
+
+`Promise`<`boolean`\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:341](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L341)
+
+___
+
+### linkMutations
+
+▸ **linkMutations**(`mutations`): `Promise`<[`LinkExpressionMutations`](links_Links.LinkExpressionMutations.md)\>
+
+Adds and removes multiple links from this perspective *
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `mutations` | [`LinkMutations`](links_Links.LinkMutations.md) |
+
+#### Returns
+
+`Promise`<[`LinkExpressionMutations`](links_Links.LinkExpressionMutations.md)\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:125](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L125)
 
 ___
 
@@ -436,7 +640,7 @@ Take and load all the links from the given snapshot
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:149](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L149)
+[perspectives/PerspectiveProxy.ts:179](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L179)
 
 ___
 
@@ -448,7 +652,7 @@ ___
 
 | Name | Type |
 | :------ | :------ |
-| `link` | [`LinkExpression`](links_Links.LinkExpression.md) |
+| `link` | [`LinkExpressionInput`](links_Links.LinkExpressionInput.md) |
 
 #### Returns
 
@@ -456,7 +660,29 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:108](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L108)
+[perspectives/PerspectiveProxy.ts:138](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L138)
+
+___
+
+### removeLinks
+
+▸ **removeLinks**(`links`): `Promise`<[`LinkExpression`](links_Links.LinkExpression.md)[]\>
+
+Removes multiple links from this perspective *
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `links` | [`LinkExpressionInput`](links_Links.LinkExpressionInput.md)[] |
+
+#### Returns
+
+`Promise`<[`LinkExpression`](links_Links.LinkExpression.md)[]\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:120](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L120)
 
 ___
 
@@ -479,7 +705,7 @@ Removes a previously added link listener
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:128](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L128)
+[perspectives/PerspectiveProxy.ts:158](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L158)
 
 ___
 
@@ -503,7 +729,7 @@ Runs given Social DNA flow action
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:236](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L236)
+[perspectives/PerspectiveProxy.ts:266](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L266)
 
 ___
 
@@ -519,7 +745,30 @@ Returns all the Social DNA flows defined in this perspective
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:198](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L198)
+[perspectives/PerspectiveProxy.ts:228](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L228)
+
+___
+
+### setSdna
+
+▸ **setSdna**(`sdnaCode`): `Promise`<`void`\>
+
+Set the perspective's Social DNA code to the given string. 
+This will replace all previous SDNA code elements with the new one.
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `sdnaCode` | `string` |
+
+#### Returns
+
+`Promise`<`void`\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:276](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L276)
 
 ___
 
@@ -550,7 +799,7 @@ getSingleTarget()
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:184](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L184)
+[perspectives/PerspectiveProxy.ts:214](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L214)
 
 ___
 
@@ -567,7 +816,7 @@ A snapshot is a rendered Perspectie object that contains all the links of the pe
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:144](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L144)
+[perspectives/PerspectiveProxy.ts:174](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L174)
 
 ___
 
@@ -590,7 +839,78 @@ Starts the Social DNA flow
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:210](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L210)
+[perspectives/PerspectiveProxy.ts:240](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L240)
+
+___
+
+### stringOrTemplateObjectToSubjectClass
+
+▸ **stringOrTemplateObjectToSubjectClass**<`T`\>(`subjectClass`): `Promise`<`string`\>
+
+#### Type parameters
+
+| Name |
+| :------ |
+| `T` |
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `subjectClass` | `T` |
+
+#### Returns
+
+`Promise`<`string`\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:305](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L305)
+
+___
+
+### subjectClasses
+
+▸ **subjectClasses**(): `Promise`<`string`[]\>
+
+Returns all the Subject classes defined in this perspectives SDNA
+
+#### Returns
+
+`Promise`<`string`[]\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:297](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L297)
+
+___
+
+### subjectClassesByTemplate
+
+▸ **subjectClassesByTemplate**(`obj`): `Promise`<`string`[]\>
+
+Returns all subject classes that match the given template object.
+This function looks at the properties of the template object and
+its setters and collections to create a Prolog query that finds
+all subject classes that would be converted to a proxy object
+with exactly the same properties and collections.
+
+Since there could be multiple subject classes that match the given
+criteria, this function returns a list of class names.
+
+#### Parameters
+
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `obj` | `object` | The template object |
+
+#### Returns
+
+`Promise`<`string`[]\>
+
+#### Defined in
+
+[perspectives/PerspectiveProxy.ts:399](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L399)
 
 ___
 
@@ -602,7 +922,7 @@ ___
 
 | Name | Type |
 | :------ | :------ |
-| `oldLink` | [`LinkExpression`](links_Links.LinkExpression.md) |
+| `oldLink` | [`LinkExpressionInput`](links_Links.LinkExpressionInput.md) |
 | `newLink` | [`Link`](links_Links.Link.md) |
 
 #### Returns
@@ -611,4 +931,4 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveProxy.ts:104](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveProxy.ts#L104)
+[perspectives/PerspectiveProxy.ts:134](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveProxy.ts#L134)

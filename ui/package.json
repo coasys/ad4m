@@ -1,6 +1,6 @@
 {
   "name": "ad4min",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "dependencies": {
@@ -35,7 +35,6 @@
     "start": "react-scripts start",
     "tauri": "tauri",
     "eject": "react-scripts eject",
-  
     "build": "react-scripts build",
     "build-all": "yarn run build && yarn run tauri -- build -v",
     "build-linux": "./scripts/copy-ad4m-host.sh && yarn run build-all",
