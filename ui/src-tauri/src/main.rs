@@ -60,10 +60,8 @@ pub struct AppState {
 }
 
 fn main() {
-    if data_path().exists() {
-        if !data_path().join("ad4m").join("agent.json").exists() {
-            remove_dir_all(data_path());
-        }
+    if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
+        let _ = remove_dir_all(data_path());
     }
     
     if let Err(err) = setup_logs() {
@@ -135,7 +133,7 @@ fn main() {
             .spawn()
             .expect("Failed to spawn ad4m serve");
 
-            let handle = app.handle().clone();
+            let handle = app.handle();
     
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = rx.recv().await {
@@ -178,7 +176,7 @@ fn main() {
             on_tray_event(app, &event);
             match event {
                 SystemTrayEvent::LeftClick { position: _, size: _, .. } => {
-                    let window = get_main_window(&app);
+                    let window = get_main_window(app);
                     let _ = window.set_size(Size::Logical(LogicalSize { width: 400.0, height: 700.0 }));
                     let _ = window.set_decorations(false);
                     let _ = window.set_always_on_top(true);
@@ -202,12 +200,9 @@ fn main() {
     match builder_result {
         Ok(builder) => {
             builder.run(|_app_handle, event| {
-                match event {
-                    RunEvent::ExitRequested { api, .. } => {
-                        api.prevent_exit();
-                    },
-                    _ => {}
-                }
+                if let RunEvent::ExitRequested { api, .. } = event {
+                    api.prevent_exit();
+                };
             });
         }
         Err(err) => log::error!("Error building the app: {:?}", err),
@@ -219,7 +214,7 @@ fn get_main_window(handle: &AppHandle) -> Window {
     if let Some(window) = main {
         window
     } else {
-        create_main_window(&handle);
+        create_main_window(handle);
         let main = handle.get_window("AD4MIN");                
         main.expect("Couldn't get main window right after creating it")
     }

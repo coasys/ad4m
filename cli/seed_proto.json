@@ -1,14 +1,16 @@
 {
     "languageLanguageRef": "/Users/josh/dev/language-persistence/build/bundle.js",
-    "perspectiveDiffSync": {
-        "meta": {
-            "name": "perspectiveDiffSync",
-            "description": "Holochain based Perspective link sharing language",
-            "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
-            "possibleTemplateParams": ["uid", "name", "description"]
-        },
-        "resource": "/Users/josh/dev/perspective-diff-sync/build/bundle.js"
-    },
+    "linkLanguages": [
+        {
+            "meta": {
+                "name": "perspectiveDiffSync",
+                "description": "Holochain based Perspective link sharing language",
+                "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
+                "possibleTemplateParams": ["uid", "name", "description"]
+            },
+            "resource": "/Users/josh/dev/perspective-diff-sync/build/bundle.js"
+        }
+    ],
     "agentLanguage": {
         "meta": {
             "name": "agentLanguage", 

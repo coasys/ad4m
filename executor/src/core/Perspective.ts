@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations } from "@perspect3vism/ad4m"
 import { Link, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -358,6 +358,84 @@ export default class Perspective {
         })
 
         return linkExpression
+    }
+
+    async addLinks(links: (LinkInput | LinkExpressionInput)[]): Promise<LinkExpression[]> {
+        const linkExpressions = links.map(l => this.ensureLinkExpression(l));
+        const diff = {
+            additions: linkExpressions,
+            removals: []
+        } as PerspectiveDiff
+        const addLinks = await this.commit(diff);
+
+        if (!addLinks) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        }
+
+        linkExpressions.forEach(l => this.addLocalLink(l))
+        this.#prologNeedsRebuild = true;
+        for (const link of linkExpressions) {
+            this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+                perspective: this.plain(),
+                link: link
+            })
+        };
+
+        return linkExpressions
+    }
+
+    async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
+        const linkExpressions = links.map(l => this.ensureLinkExpression(l));
+        const diff = {
+            additions: [],
+            removals: linkExpressions
+        } as PerspectiveDiff
+        const removeLinks = await this.commit(diff);
+
+        if (!removeLinks) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        }
+
+        linkExpressions.forEach(l => this.removeLocalLink(l))
+        this.#prologNeedsRebuild = true;
+        for (const link of linkExpressions) {
+            this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+                perspective: this.plain(),
+                link: link
+            })
+        };
+
+        return linkExpressions
+    }
+
+    async linkMutations(mutations: LinkMutations): Promise<LinkExpressionMutations> {
+        const diff = {
+            additions: mutations.additions.map(l => this.ensureLinkExpression(l)),
+            removals: mutations.removals.map(l => this.ensureLinkExpression(l))
+        };
+        const mutation = await this.commit(diff);
+
+        if (!mutation) {
+            this.#db.addPendingDiff(this.uuid, diff);
+        };
+
+        diff.additions.forEach(l => this.addLocalLink(l))
+        diff.removals.forEach(l => this.removeLocalLink(l))
+        this.#prologNeedsRebuild = true;
+        for (const link of diff.additions) {
+            this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+                perspective: this.plain(),
+                link: link
+            });
+        };
+        for (const link of diff.removals) {
+            this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+                perspective: this.plain(),
+                link: link
+            });
+        };
+
+        return diff;
     }
 
     private findLink(linkToFind: LinkExpressionInput): string | undefined {

@@ -1,11 +1,6 @@
 extern crate remove_dir_all;
 use remove_dir_all::*;
-
-use crate::{
-    config::{binary_path, data_path},
-    get_main_window,
-    util::find_and_kill_processes,
-};
+use crate::{get_main_window, config::{data_path}, util::find_and_kill_processes};
 
 #[tauri::command]
 pub fn close_application(app_handle: tauri::AppHandle) {
@@ -26,7 +21,7 @@ pub fn clear_state(app_handle: tauri::AppHandle) {
 
     find_and_kill_processes("holochain");
 
-    remove_dir_all(data_path());
+    let _ = remove_dir_all(data_path());
 
     app_handle.restart();
 }

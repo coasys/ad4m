@@ -59,7 +59,7 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
 
     let endpoint = open_tunnel(
         Some(PROXY_SERVER),
-        Some(&subdomain),
+        Some(subdomain),
         None,
         graphql_port,
         notify_shutdown.clone(),
