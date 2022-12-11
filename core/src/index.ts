@@ -18,5 +18,8 @@ export * from "./perspectives/PerspectiveHandle";
 export * from "./perspectives/PerspectiveProxy";
 export * from "./perspectives/PerspectiveDiff";
 export * from "./perspectives/LinkQuery";
+export * from "./SmartLiteral";
+export * from "./subject/SDNADecorators";
+export * from "./subject/Subject";
 export * from "./neighbourhood/Neighbourhood";
 export * from "./typeDefs";

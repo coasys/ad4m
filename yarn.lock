@@ -21551,9 +21551,9 @@ svgo@^1.0.0, svgo@^1.2.2:
     unquote "~1.1.1"
     util.promisify "~1.0.0"
 
-swipl-stdio@perspect3vism/node-swipl-stdio.git:
+"swipl-stdio@https://github.com/perspect3vism/node-swipl-stdio.git":
   version "1.0.4"
-  resolved "https://codeload.github.com/perspect3vism/node-swipl-stdio/tar.gz/7094a055a4ec3511530140ca7a4447d6649a9dee"
+  resolved "https://github.com/perspect3vism/node-swipl-stdio.git#7094a055a4ec3511530140ca7a4447d6649a9dee"
   dependencies:
     debug "^2.6.4"
     split "^1.0.0"

@@ -1,6 +1,6 @@
 use crate::{formatting::*, util::maybe_parse_datetime};
 use ad4m_client::Ad4mClient;
-use anyhow::Result;
+use anyhow::{anyhow, Result, Context};
 use clap::{Args, Subcommand};
 use regex::Regex;
 use rustyline::Editor;
@@ -62,6 +62,9 @@ pub enum PerspectiveFunctions {
 
     /// Interactive Perspective shell based on Prolog/SDNA runtime
     Repl { id: String },
+
+    /// Set Social DNA of given perspective with SDNA code from file
+    SetDna { id: String, file: String },
 }
 
 pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>) -> Result<()> {
@@ -198,6 +201,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
                     }
                 }
             }
+        }
+        PerspectiveFunctions::SetDna { id, file } => {
+            let dna = std::fs::read_to_string(file.clone()).with_context(|| anyhow!("Could not read provided SDNA file {}", file))?;
+            let perspective = ad4m_client.perspectives.get(id).await?;
+            perspective.set_dna(dna).await?;
+            println!("SDNA set successfully");
         }
     }
     Ok(())
