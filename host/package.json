@@ -29,6 +29,7 @@
       "temp/binary/hc.exe",
       "temp/binary/holochain.exe",
       "temp/binary/lair-keystore.exe",
+      "mainnet_seed.json",
       "node_modules/leveldown/**/*",
       "../node_modules/classic-level/**/*",
       "node_modules/ts-invariant/**/*",

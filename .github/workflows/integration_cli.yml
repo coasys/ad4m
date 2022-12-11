@@ -27,6 +27,18 @@ jobs:
         override: true
         toolchain: 1.63.0
 
+    - name: Cache cargo
+      id: cache-cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v1
       with:
@@ -48,5 +60,5 @@ jobs:
       run: ./tests/bats/bin/bats tests/binaries.bats
 
     - name: Run integration test script
-      run: ./tests/bats/bin/bats tests/integration.bats
+      run: ./tests/bats/bin/bats tests/integration.bats || cat ~/Library/Logs/DiagnosticReports/*
     

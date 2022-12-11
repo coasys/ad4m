@@ -198,6 +198,30 @@ pub async fn generate(
     Ok(response_data.agent_generate)
 }
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct SignMessage;
+
+pub async fn sign_message(
+    executor_url: String,
+    cap_token: String,
+    message: String,
+) -> Result<sign_message::SignMessageAgentSignMessage> {
+    let response: sign_message::ResponseData = query(
+            executor_url,
+            cap_token,
+            SignMessage::build_query(sign_message::Variables { message }),
+        )
+        .await
+        .with_context(|| "Failed to run agent->sign_message")?;
+
+    Ok(response.agent_sign_message)
+}
+
 pub struct AgentClient {
     info: Arc<ClientInfo>,
 }
@@ -270,5 +294,13 @@ impl AgentClient {
             passphrase,
         )
         .await
+    }
+
+    pub async fn sign_message(&self, message: String) -> Result<sign_message::SignMessageAgentSignMessage> {
+        sign_message(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            message
+        ).await
     }
 }
