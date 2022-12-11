@@ -1,10 +1,10 @@
 const fs = require('fs')
 
-function replaceVersionLine(content, version) {
+function replaceVersionLine(content, version, prefix = 'version = ') {
     const lines = content.split('\n')
-    const versionLineIndex = lines.findIndex(line => line.startsWith('version = '))
+    const versionLineIndex = lines.findIndex(line => line.startsWith(prefix))
     const oldVersion = lines[versionLineIndex].split('"')[1]
-    const newVersionLine = 'version = "' + version + '"'
+    const newVersionLine = `${prefix}"${version}"` 
     lines[versionLineIndex] = newVersionLine
     const newContent = lines.join('\n')
     return { oldVersion, newContent }
@@ -31,6 +31,11 @@ const executor = JSON.parse(fs.readFileSync('executor/package.json', 'utf8'))
 console.log("Executor version: " + executor.version + " -> " + VERSION)
 executor.version = VERSION
 fs.writeFileSync('executor/package.json', JSON.stringify(executor, null, 2) + '\n')
+
+
+const executorHardWired = replaceVersionLine(fs.readFileSync('executor/src/core/Config.ts', 'utf8'), VERSION, 'export let ad4mExecutorVersion = "')
+console.log("Hard-wired version string in executor's Config.ts: " + executorHardWired.oldVersion + " -> " + VERSION)
+fs.writeFileSync('executor/src/core/Config.ts', executorHardWired.newContent)
 
 const host = JSON.parse(fs.readFileSync('host/package.json', 'utf8'))
 console.log("Host version: " + host.version + " -> " + VERSION)
