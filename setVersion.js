@@ -36,7 +36,7 @@ fs.writeFileSync('executor/package.json', JSON.stringify(executor, null, 2) + '\
 const executorHardWired = replaceVersionLine(
     fs.readFileSync('executor/src/core/Config.ts', 'utf8'), 
     VERSION, 
-    'export let ad4mExecutorVersion = "',
+    'export let ad4mExecutorVersion = ',
     ';')
 console.log("Hard-wired version string in executor's Config.ts: " + executorHardWired.oldVersion + " -> " + VERSION)
 fs.writeFileSync('executor/src/core/Config.ts', executorHardWired.newContent)
