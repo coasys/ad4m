@@ -25,7 +25,7 @@
 
 #### Defined in
 
-[language/Language.ts:250](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L250)
+[language/Language.ts:250](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L250)
 
 ___
 
@@ -45,7 +45,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:253](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L253)
+[language/Language.ts:253](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L253)
 
 ___
 
@@ -66,7 +66,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:252](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L252)
+[language/Language.ts:252](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L252)
 
 ___
 
@@ -86,4 +86,4 @@ ___
 
 #### Defined in
 
-[language/Language.ts:249](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L249)
+[language/Language.ts:249](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L249)
