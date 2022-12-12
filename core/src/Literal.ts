@@ -1,3 +1,11 @@
+function encodeRFC3986URIComponent(str) {
+    return encodeURIComponent(str)
+        .replace(
+            /[!'()*]/g,
+            (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`
+        );
+}
+
 export class Literal {
     #literal?: any
     #url?: string
@@ -16,18 +24,6 @@ export class Literal {
         return l
     }
 
-    encodeSingleQuote(input: string) {
-        //@ts-ignore
-        input = input.split("'").join("\\'")
-        return input
-    }
-
-    decodeSingleQuote(input: string) {
-        //@ts-ignore
-        input = input.split("\\'").join("'")
-        return input
-    }
-
     toUrl(): string {
         if(this.#url && !this.#literal)
             return this.#url
@@ -37,17 +33,17 @@ export class Literal {
         let encoded
         switch(typeof this.#literal) {
             case 'string':
-                encoded = `string:${this.#literal}`
+                encoded = `string:${encodeRFC3986URIComponent(this.#literal)}`
                 break;
             case 'number':
-                encoded = `number:${this.#literal}`
+                encoded = `number:${encodeRFC3986URIComponent(this.#literal)}`
                 break;
             case 'object':
-                encoded = `json:${JSON.stringify(this.#literal)}`
+                encoded = `json:${encodeRFC3986URIComponent(JSON.stringify(this.#literal))}`
                 break;
         }
 
-        return this.encodeSingleQuote(encodeURI(`literal://${encoded}`))
+        return `literal://${encoded}`
     }
 
     get(): any {
@@ -61,23 +57,24 @@ export class Literal {
             throw new Error("Can't render Literal from non-literal URL")
         
         // get rid of "literal://"
-        const encoded = decodeURI(this.decodeSingleQuote(this.#url.substring(10)))
+        const body = this.#url.substring(10)
+        
 
-        if(encoded.startsWith("string:")) {
-            return encoded.substring(7)
+        if(body.startsWith("string:")) {
+            return decodeURIComponent(body.substring(7))
         }
 
-        if(encoded.startsWith("number:")) {
-            const numberString = encoded.substring(7)
+        if(body.startsWith("number:")) {
+            const numberString = body.substring(7)
             return parseFloat(numberString)
         }
 
-        if(encoded.startsWith("json:")) {
-            const json = encoded.substring(5)
-            return JSON.parse(json)
+        if(body.startsWith("json:")) {
+            const json = body.substring(5)
+            return JSON.parse(decodeURIComponent(json))
         }
 
-        throw new Error(`Can't parse unknown literal: ${encoded}`)
+        throw new Error(`Can't parse unknown literal: ${body}`)
     }
 
 
