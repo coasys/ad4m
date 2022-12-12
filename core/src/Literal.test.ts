@@ -16,8 +16,8 @@ describe("Literal", () => {
     })
 
     it("can handle objects", () => {
-        const testObject = {testString: "test", testNumber: "1337"}
-        const testUrl = "literal://json:%7B%22testString%22%3A%22test%22%2C%22testNumber%22%3A%221337%22%7D"
+        const testObject = {testNumber: "1337", testString: "test"}
+        const testUrl = "literal://json:%7B%22testNumber%22%3A%221337%22%2C%22testString%22%3A%22test%22%7D"
         expect(Literal.from(testObject).toUrl()).toBe(testUrl)
         expect(Literal.fromUrl(testUrl).get()).toStrictEqual(testObject)
     })

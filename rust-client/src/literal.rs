@@ -60,8 +60,7 @@ impl Literal {
                 }
                 LiteralValue::Json(json) => {
                     let encoded = urlencoding::encode(&json.to_string()).to_string();
-                    let fixed = encoded.replace("%3A", ":").replace("%2C", ",");
-                    Ok(format!("literal://json:{}", fixed))
+                    Ok(format!("literal://json:{}", encoded))
                 }
             }
         } else {
@@ -84,8 +83,7 @@ impl Literal {
                 } else if literal.starts_with("json:") {
                     let json = literal.replace("json:", "");
                     let decoded = urlencoding::decode(&json)?;
-                    let decoded_json_string = decoded.to_string().replace("\\'", "'");
-                    let parsed = serde_json::from_str::<serde_json::Value>(&decoded_json_string)?;
+                    let parsed = serde_json::from_str::<serde_json::Value>(&decoded)?;
                     Ok(LiteralValue::Json(parsed))
                 } else {
                     Err(anyhow!("Unknown literal type"))
@@ -158,10 +156,10 @@ mod test {
     #[test]
     fn can_handle_objects() {
         let test_object = json!({
-            "testNumber": "1337",
             "testString": "test", 
+            "testNumber": "1337",
         });
-        let test_url = "literal://json:%7B%22testNumber%22:%221337%22,%22testString%22:%22test%22%7D";
+        let test_url = "literal://json:%7B%22testNumber%22%3A%221337%22%2C%22testString%22%3A%22test%22%7D";
 
         let literal = super::Literal::from_json(test_object.clone());
         assert_eq!(literal.to_url().unwrap(), test_url);
