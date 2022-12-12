@@ -21,3 +21,34 @@ export const RouteContainer = {
   overflowX: 'hidden' as 'hidden',
   maxWidth: 'calc(100%-320px)'
 }
+
+export const Header = {
+  padding: '10px'
+}
+
+export const cardStyle = {
+  width: '100%',
+  display: 'flex',
+  alignItems: 'center',
+  gap: 'var(--j-space-700)',
+  borderRadius: 'var(--j-border-radius)',
+  textDecoration: 'none',
+  backgroundColor: 'var(--j-color-ui-50)',
+  padding: 'var(--j-space-500)',
+  marginBottom: 'var(--j-space-700)'
+}
+
+export const listStyle = {
+  overflow: 'scroll',
+  padding: '20px 20px',
+  height: '50%'
+}
+
+export const gridButton = {
+  display: 'grid',
+  columnGap: 'calc(100% - 312px)',
+  gridTemplateColumns: 'repeat(4, 52px)',
+  justifyContent: 'center',
+  alignItems: 'center',
+  padding: '10px 20px 0 20px'
+}

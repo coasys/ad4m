@@ -3,7 +3,7 @@ import { showNotification } from '@mantine/notifications';
 import { LanguageHandle, Link, Perspective, PerspectiveProxy } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useMemo, useState } from 'react';
 import { generateLanguageInitials, sanitizeLink } from '../util';
-import { MainContainer, MainHeader } from './styles';
+import { cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
 import { Trash } from 'tabler-icons-react';
 import { useDisclosure } from '@mantine/hooks';
 import { Ad4minContext } from '../context/Ad4minContext';
@@ -159,131 +159,125 @@ const Perspectives = (props: Props) => {
     <Container
       style={MainContainer}
     >
-      <div style={MainHeader}>
-        <div style={{display: 'flex'}}>          
-          <MediaQuery largerThan="sm" styles={{ display: 'none' }}>
-            <Burger
-              opened={props.opened}
-              onClick={() => props.setOpened(!props.opened)}
-              size="sm"
-              color={'#fff'}
-              mr="xl"
-            />
-          </MediaQuery>
-          <Title order={3}>Perspectives</Title>
-        </div>
-        <Button onClick={() => setPerspectiveModalOpen(true)}>Add Perspective</Button>
+      <div style={gridButton}>
+        <j-button
+          onClick={() => setPerspectiveModalOpen(true)}
+          square
+          circle
+          size="lg"
+          variant="subtle"
+        >
+          <j-icon size="lg" name="x"></j-icon>
+        </j-button>
       </div>
-
-      <List 
-        spacing="xs"
-        size="sm"
-        center
-        pl={20}
-        pr={20}
-        style={{
-          overflowY: 'auto',
-          overflowX: 'hidden',
-          height: 'auto',
-          maxWidth: 900
-        }}
+      <div 
+        style={listStyle}
       >
         {perspectives.map((e, i) => {
-          console.log(e?.name, Boolean(!e?.neighbourhood || e?.name !== 'Agent Profile'))
           return (
-          <Card key={`perspectice-${e?.name}`} shadow="sm" withBorder={true} style={{ marginBottom: 20 }}>
+          <div key={`perspectice-${e?.name}`} style={{...cardStyle, width: '87%'}}>
             <Group position="apart" align="flex-start">
               <Group align="flex-start">
-                <Avatar radius="xl">{generateLanguageInitials(e!.name)}</Avatar>
                 <Group direction='column' style={{marginTop: 4}}>
-                  <CardItems 
-                    title={'Identifier'}
-                    value={e?.uuid}
-                  />
-                  <CardItems 
-                    title={'Name'}
-                    value={e?.name}
-                  />
-                  {e?.sharedUrl && (
-                    <>
-                      <CardItems 
-                        title={'Shared URL'}
-                        value={e?.sharedUrl}
-                      />
-                      <CardItems 
-                        title={'Link Language'}
-                        value={e?.neighbourhood!.linkLanguage}
-                      />
-                    </>
-                  )}
                   {e?.neighbourhood ? (
-                    <div style={{padding: '2px 20px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>
+                    <div style={{padding: '4px 12px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>
                       Neighbourhood
                     </div>
                   ) : (
-                    <div style={{padding: '2px 20px', background: '#FFF0F6', borderRadius: 30, color: 'rgb(230, 73, 128)'}}>
+                    <div style={{padding: '4px 12px', background: '#FFF0F6', borderRadius: 30, color: 'rgb(230, 73, 128)'}}>
                       Perspective
                     </div>
+                  )}
+                  <j-text weight="bold" >{e?.name}</j-text>
+                  <j-flex a="center">
+                    <j-text nomargin variant="body" size="sm">{e?.uuid?.length || 0 > 25 ? `${e?.uuid?.substring(0, 25)}...` : e?.uuid}</j-text>
+                    <j-box p="100"></j-box>
+                    <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
+                      <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                    </j-button>
+                  </j-flex>
+                  
+                  {e?.sharedUrl && (
+                    <>
+                      <j-flex a="center">
+                        <j-text nomargin variant="body" size="sm">{e?.sharedUrl?.length > 25 ? `${e?.sharedUrl?.substring(0, 25)}...` : e?.sharedUrl}</j-text>
+                        <j-box p="100"></j-box>
+                        <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
+                          <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                        </j-button>
+                      </j-flex>
+                    </>
                   )}
                 </Group>
               </Group>
               <PerspectiveMenu uuid={e!.uuid} reload={fetchPerspective} />
             </Group>
-          </Card>
+          </div>
         )})}
-      </List>
-      <Modal
-        opened={perspectiveModalOpen}
-        onClose={() => setPerspectiveModalOpen(false)}
-        title="Install Langauge"
-        size={700}
-        style={{zIndex: 100}}
-      >
-        <TextInput 
-          label="Name"
-          required
-          placeholder='ex. Test Perspective' 
-          radius="md" 
-          size="md" 
-          onChange={(e) => setPerspectiveName(e.target.value)}
-        />
-        <Space h="md"  />
-        <Switch 
-          checked={isNeighbourhood} 
-          onChange={(event) => setIsNeighbourhood(event.currentTarget.checked)}
-          label="Public Perspective"
-        />
-        {isNeighbourhood && (
-          <>
-            <Select
-              label="Select link-language"
-              placeholder="Pick one"
-              data={langs}
-              value={linkLanguage}
-              onChange={(e) => setLinkLanguage(e as string)}
-            />
-            <Space h="md"  />
-            <MultiSelect
-              label="Select Dependent Languages"
-              data={langs}
-              required
-              placeholder="Pick one"
-              searchable
-              value={linkLanguages}
-              onChange={(e) => setLinkLanguages(e as string[])}
-            />
-          </>
-        )}
-        <Space h="md"  />
-        <Group direction='row'>
-          <Button onClick={() => setPerspectiveModalOpen(false)}>
-            Cancel
-          </Button>
-          <Button onClick={create} loading={loading}>
-            Create
-          </Button>
-        </Group>
-      </Modal>
+      </div>
+      <j-modal
+          size="lg"
+          open={perspectiveModalOpen}
+          onToggle={(e: any) => setPerspectiveModalOpen(e.target.open)}
+        >
+          <j-box p="400">
+            <j-flex gap="500" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Create Perspective
+              </j-text>
+              <j-input
+                label="Name"
+                size="lg"
+                placeholder="ex. Test Perspective"
+                value={perspectiveName}
+                onInput={(e: any) => setPerspectiveName(e.target.value)}
+              >
+              </j-input>
+              <j-toggle
+                style={{width: '100%'}}
+                full
+                size="lg"
+                variant="primary"
+                checked={isNeighbourhood} 
+                onChange={(e: any) => setIsNeighbourhood(e.target.checked)}
+                >Public Perspective</j-toggle>
+              {isNeighbourhood && (
+                <>
+                  <j-select
+                    value={linkLanguage}
+                    onChange={(e: any) => setLinkLanguage(e.target.value)}
+                  >
+                    {
+                      langs.map((e) => (
+                        <j-menu-item label={e.label} value={e.value}> {e.label} </j-menu-item>
+                      ))
+                    }
+                  </j-select>
+                  <j-select
+                    value={linkLanguages}
+                    onChange={(e: any) => setLinkLanguages(e.target.value)}
+                  >
+                    {
+                      langs.map((e) => (
+                        <j-menu-item label={e.label} value={e.value}> {e.label} </j-menu-item>
+                      ))
+                    }
+                  </j-select>
+                </>
+              )}
+            </j-flex>
+            <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={() => setPerspectiveModalOpen(false)}>
+                  Cancel
+                </j-button>
+                <j-box p="200"></j-box>
+                <j-button onClick={create} loading={loading}>
+                  Install
+                </j-button>
+              </j-flex>
+          </j-box>
+      </j-modal>
     </Container>
   )
 }

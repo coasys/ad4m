@@ -3,7 +3,7 @@ import { Agent, Literal } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useState } from 'react';
 import { CircleCheck } from 'tabler-icons-react';
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from '../constants/triples';
-import { MainContainer, MainHeader } from './styles';
+import { cardStyle, MainContainer, MainHeader } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { buildAd4mClient } from '../util';
 import { useCallback } from 'react';
@@ -92,26 +92,22 @@ const Profile = (props: Props) => {
     getTrustedAgents();
   }, [fetchCurrentAgentProfile, getTrustedAgents])
 
+  console.log(trustedAgentModalOpen)
+
   return (
     <Container style={MainContainer}>
-      <div style={MainHeader}>
-        <div style={{display: 'flex'}}>          
-          <MediaQuery largerThan="sm" styles={{ display: 'none' }}>
-            <Burger
-              opened={props.opened}
-              onClick={() => props.setOpened(!props.opened)}
-              size="sm"
-              color={'#fff'}
-              mr="xl"
-            />
-          </MediaQuery>
-          <Title order={3}>Agent Profile</Title>
-        </div>
-        <Button onClick={() => settrustedAgentModalOpen(true)}>Trusted Agents</Button>
-      </div>
       <Container
         style={{ marginLeft: 10, marginTop: 12 }}
       >
+        <j-button
+          onClick={() => settrustedAgentModalOpen(true)}
+          square
+          circle
+          size="lg"
+          variant="subtle"
+        >
+          <j-icon size="lg" name="x"></j-icon>
+        </j-button>
         <Space h="md" />
                 
         <CardItems 
@@ -133,45 +129,33 @@ const Profile = (props: Props) => {
         />
         <Space h="md" />
       </Container>
-      <Modal
-        opened={trustedAgentModalOpen}
-        onClose={() => settrustedAgentModalOpen(false)}
-        title="Trusted Agents"
-        size={700}
-      >
-        <List
-          spacing="xs"
-          size="sm"
-          center
-          icon={
-            <ThemeIcon color="teal" size={24} radius="xl">
-              <CircleCheck size={16} />
-            </ThemeIcon>
-          }
+      <j-modal
+          size="lg"
+          open={trustedAgentModalOpen}
+          onToggle={(e: any) => settrustedAgentModalOpen(e.target.open)}
         >
-          {trustedAgents.map((e, i) => (
-            <Card key={`trusted-agent-${e.did}`} shadow="sm" withBorder={true} style={{ marginBottom: trustedAgents.length-1 === i ? 0 : 20 }}>
-              <Group align="flex-start">
-                <Avatar radius="xl"></Avatar>
-                <Group direction='column' style={{marginTop: 4}}>
-                  <CardItems 
-                    title={'DID'}
-                    value={e.did}
-                  />
-                  {e.username && (<CardItems 
-                    title={'Username'}
-                    value={e.username}
-                  />)}
-                  {(e.firstName || e.lastName) && (<CardItems 
-                    title={'Name'}
-                    value={`${e.firstName || ""} ${e.lastName || ""}`}
-                  />)}
-                </Group>
-              </Group>
-            </Card>
-          ))}
-        </List>
-      </Modal>
+          <j-box p="400">
+            <j-flex gap="500" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Trusted Agents
+              </j-text>
+              {trustedAgents.map((e, i) => (
+                <div key={`trusted-agent-${e.did}`} style={{...cardStyle, marginBottom: 0, width: '85%'}}>
+                  <j-flex direction='column' style={{marginTop: 4}}>
+                    <j-text weight="bold" >{e?.username || 'No username'}</j-text>
+                    <j-flex a="center" j="between">
+                      <j-text nomargin variant="body" size="xs">{e?.did.length > 25 ? `${e?.did.substring(0, 25)}...` : e?.did}</j-text>
+                      <j-box p="100"></j-box>
+                      <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
+                        <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                      </j-button>
+                    </j-flex>
+                  </j-flex>
+                </div>
+              ))}
+            </j-flex>
+          </j-box>
+      </j-modal>
     </Container>
   )
 }

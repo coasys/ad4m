@@ -7,7 +7,7 @@ import { Download, Upload } from 'tabler-icons-react';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { generateLanguageInitials, isSystemLanguage } from '../util';
 import CardItems from './CardItems';
-import { MainContainer, MainHeader } from './styles';
+import { cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
 
 type Props = {
   opened: boolean,
@@ -125,191 +125,176 @@ const Language = (props: Props) => {
 
   return (
     <Container style={MainContainer}>
-      <div style={MainHeader}>
-        <div style={{display: 'flex'}}>
-          <MediaQuery largerThan="sm" styles={{ display: 'none' }}>
-            <Burger
-              opened={props.opened}
-              onClick={() => props.setOpened(!props.opened)}
-              size="sm"
-              color={'#fff'}
-              mr="xl"
-            />
-          </MediaQuery>
-          <Title order={3}>Languages</Title>
-        </div>
-        <Menu opened={opened} onOpen={handlers.open} onClose={handlers.close}>
-          <Menu.Item 
-            icon={<Upload size={16}/>}
-            onClick={() => setPublishLanguageModalOpen(true)}
-          >
-            Publish Language
-          </Menu.Item>
-          <Menu.Item 
-            icon={<Download size={16}/>}
-            onClick={() => setInstallLanguageModalOpen(true)}
-          >
-            Install Language
-          </Menu.Item>
-        </Menu>
+      <div style={gridButton}>
+        <j-button
+          onClick={() => setPublishLanguageModalOpen(true)}
+          square
+          circle
+          size="lg"
+          variant="subtle"
+        >
+          <j-icon size="lg" name="x"></j-icon>
+        </j-button>
+        <j-button
+          onClick={() => setInstallLanguageModalOpen(true)}
+          square
+          circle
+          size="lg"
+          variant="subtle"
+        >
+          <j-icon size="lg" name="x"></j-icon>
+        </j-button>
+        <j-button
+          onClick={() => setPublishLanguageResultModalOpen(true)}
+          square
+          circle
+          size="lg"
+          variant="subtle"
+        >
+          <j-icon size="lg" name="x"></j-icon>
+        </j-button>
       </div>
-      <List 
-        spacing="xs"
-        size="sm"
-        center
-        pl={20}
-        pr={20}
-        mt={20}
-        mr={20}
-        style={{
-          overflowY: 'auto',
-          overflowX: 'hidden',
-          height: 'auto',
-          maxWidth: 920
-        }}
+      <div 
+        style={listStyle}
       >
         {languages.map((e, i) => {
           const {language, perspective} = e;
           const isSystem = isSystemLanguage(language!.name)
 
           return (
-          <Card key={`language-${language?.address}`} shadow="sm" withBorder={true} style={{ marginBottom: 20 }}>
+          <div key={`language-${language?.address}`} style={{...cardStyle, width: '87%'}}>
             <Group align="flex-start">
-              <Avatar radius="xl">{generateLanguageInitials(language!.name)}</Avatar>
-              <Group direction='column' style={{marginTop: 4}}>
-                <CardItems 
-                  title={'Address'}
-                  value={language?.address}
-                />
-                <CardItems 
-                  title={'Name'}
-                  value={language?.name}
-                />
-                {perspective && (
-                  <CardItems 
-                    title={'Perspective'}
-                    value={perspective?.name}
-                  />
-                )}
-                {isSystem ? (
-                  <div style={{padding: '4px 12px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>
-                    System
-                  </div>
-                ) : (
-                  <div style={{padding: '4px 12px', background: '#FFF0F6', borderRadius: 30, color: 'rgb(230, 73, 128)'}}>
-                  Installed
-                  </div>
-                )}
-              </Group>
+              {isSystem ? (
+                <div style={{padding: '4px 12px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>
+                  System
+                </div>
+              ) : (
+                <div style={{padding: '4px 12px', background: '#FFF0F6', borderRadius: 30, color: 'rgb(230, 73, 128)'}}>
+                Installed
+                </div>
+              )}
+              <j-flex direction='column' style={{marginTop: 4}}>
+                <j-text weight="bold" >{language?.name}</j-text>
+                <j-flex a="center" j="between">
+                  <j-text nomargin variant="body" size="xs">{language?.address.length > 25 ? `${language?.address.substring(0, 25)}...` : language?.address}</j-text>
+                  <j-box p="100"></j-box>
+                  <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
+                    <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                  </j-button>
+                </j-flex>
+              </j-flex>
             </Group>
-          </Card>
+          </div>
         )})}
-      </List>
-      <Modal
-        opened={publishLanguageModalOpen}
-        onClose={() => setPublishLanguageModalOpen(false)}
-        title="Install Langauge"
-        size={700}
-        style={{zIndex: 100}}
-      >
-        <TextInput 
-          label="Name"
-          required
-          placeholder='ex. Social-Context' 
-          radius="md" 
-          size="md" 
-          onChange={(e) => setLanguageName(e.target.value)}
-        />
-        <Space h="md"  />
-        <TextInput 
-          label="Description" 
-          required
-          placeholder='Describe what the language does here.' 
-          radius="md" 
-          size="md" 
-          onChange={(e) => setLanguageDescription(e.target.value)}
-        />
-        <Space h="md"  />
-        <TextInput 
-          label="Souce Code Link" 
-          required
-          placeholder='ex. www.example.com' 
-          radius="md" 
-          size="md" 
-          onChange={(e) => setLanguageSourceLink(e.target.value)}
-        />
-        <Space h="md"  />
-        <MultiSelect
-          label="Params"
-          data={data}
-          required
-          placeholder="Add Items"
-          searchable
-          creatable
-          getCreateLabel={(query) => `+ Create ${query}`}
-          onCreate={(query) => setData((current: any) => [...current, query])}
-        />
-        <Space h="md"  />
-        <TextInput 
-          label="Language Bundle Path" 
-          required
-          placeholder='ex. dev/example/language.js' 
-          radius="md" 
-          size="md" 
-          onChange={(e) => setLanguageBundlePath(e.target.value)}
-        />
-        <Space h="md"  />
-        <Group direction='row'>
-          <Button onClick={() => setInstallLanguageModalOpen(false)}>
-            Cancel
-          </Button>
-          <Button onClick={publishLanguage} loading={loading}>
-            Install
-          </Button>
-        </Group>
-      </Modal>
-      <Modal
-        opened={installLanguageModalOpen}
-        onClose={() => setInstallLanguageModalOpen(false)}
-        title="Install Langauge"
-        size={700}
-        style={{zIndex: 100}}
-      >
-        <TextInput 
-          label="Language hash"
-          required
-          placeholder='ex. QmUTkvPcyaUGntqfzi3iR1xomADm5yYC2j8hcPdhMHpTem' 
-          radius="md" 
-          size="md" 
-          onChange={(e) => setLanguageHash(e.target.value)}
-        />
-        <Space h="md"  />
-        <Group direction='row'>
-          <Button onClick={() => setInstallLanguageModalOpen(false)}>
-            Cancel
-          </Button>
-          <Button onClick={installLanguage} loading={loading}>
-            Install
-          </Button>
-        </Group>
-      </Modal>
-      <Modal
-        opened={publishLanguageResultModalOpen}
-        onClose={() => setPublishLanguageResultModalOpen(false)}
-        title="Install Langauge"
-        size={700}
-        style={{zIndex: 100}}
-      >
-        <Text>Name: {publishLanguageResult?.name}</Text>
-        <Text>Address: {publishLanguageResult?.address}</Text>
-        <Text>Description: {publishLanguageResult?.description}</Text>
-        <Text>Author: {publishLanguageResult?.author}</Text>
-        <Text>Source code link: {publishLanguageResult?.sourceCodeLink}</Text>
-        <Space h="md"  />
-        <Button onClick={() => setPublishLanguageResultModalOpen(false)}>
-          Done
-        </Button>
-      </Modal>
+      </div>
+      <j-modal
+          size="lg"
+          open={publishLanguageModalOpen}
+          onToggle={(e: any) => setPublishLanguageModalOpen(e.target.open)}
+        >
+          <j-box p="400">
+            <j-flex gap="200" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Publish Langauge
+              </j-text>
+              <j-box p="200"></j-box>
+              <j-input
+                label="Name"
+                size="lg"
+                placeholder="ex. Social-Context"
+                value={languageName}
+                onInput={(e: any) => setLanguageName(e.target.value)}
+              >
+              </j-input>
+              <j-input
+                label="Description"
+                size="lg"
+                placeholder="Describe what the language does here."
+                value={languageDescription}
+                onInput={(e: any) => setLanguageDescription(e.target.value)}
+              >
+              </j-input>
+              <j-input
+                label="Description"
+                size="lg"
+                placeholder="Describe what the language does here."
+                value={languageDescription}
+                onInput={(e: any) => setLanguageDescription(e.target.value)}
+              >
+              </j-input>
+              <j-input
+                label="Language Bundle Path"
+                size="lg"
+                placeholder="ex. dev/example/language.js"
+                value={languageBundlePath}
+                onInput={(e: any) => setLanguageBundlePath(e.target.value)}
+              >
+              </j-input>
+              <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={() => setInstallLanguageModalOpen(false)}>
+                  Cancel
+                </j-button>
+                <j-box p="200"></j-box>
+                <j-button onClick={installLanguage} loading={loading}>
+                  Install
+                </j-button>
+              </j-flex>
+            </j-flex>
+          </j-box>
+      </j-modal>
+      <j-modal
+          size="lg"
+          open={installLanguageModalOpen}
+          onToggle={(e: any) => setInstallLanguageModalOpen(e.target.open)}
+        >
+          <j-box p="400">
+            <j-flex gap="200" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Install Langauge
+              </j-text>
+              <j-box p="200"></j-box>
+              <j-input
+                label="Language hash"
+                size="lg"
+                placeholder="ex. QmUTkvPcyaUGntqfzi3iR1xomADm5yYC2j8hcPdhMHpTem"
+                value={languageHash}
+                onInput={(e: any) => setLanguageHash(e.target.value)}
+              >
+              </j-input>
+              <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={() => setInstallLanguageModalOpen(false)}>
+                  Cancel
+                </j-button>
+                <j-box p="200"></j-box>
+                <j-button onClick={installLanguage} loading={loading}>
+                  Install
+                </j-button>
+              </j-flex>
+            </j-flex>
+          </j-box>
+      </j-modal>
+      <j-modal
+          size="lg"
+          open={publishLanguageResultModalOpen}
+          onToggle={(e: any) => setPublishLanguageResultModalOpen(e.target.open)}
+        >
+          <j-box p="400">
+            <j-flex gap="200" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Install Langauge
+              </j-text>
+              <j-box p="200"></j-box>
+              <j-text>Name: {publishLanguageResult?.name}</j-text>
+              <j-text>Address: {publishLanguageResult?.address}</j-text>
+              <j-text>Description: {publishLanguageResult?.description}</j-text>
+              <j-text>Author: {publishLanguageResult?.author}</j-text>
+              <j-text>Source code link: {publishLanguageResult?.sourceCodeLink}</j-text>
+            </j-flex>
+            <j-button onClick={() => setPublishLanguageResultModalOpen(false)}>Done</j-button>
+          </j-box>
+      </j-modal>
     </Container>
   )
 }

@@ -1,8 +1,8 @@
 import { Anchor, AppShell, Code, createStyles, Group, Navbar, Image, MediaQuery } from '@mantine/core';
-import { useContext, useEffect, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { Grain, Stack2, User, Settings as SettingsIcon } from 'tabler-icons-react';
-import { Link, Outlet, useNavigate } from 'react-router-dom';
-import { RouteContainer } from './styles';
+import { Link, Outlet, useLocation, useNavigate, useRoutes } from 'react-router-dom';
+import { Header, RouteContainer } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
 import PackageInfo from '../../package.json'
 
@@ -74,15 +74,15 @@ const data = [
   { label: 'Perspectives', link: 'perspective', icon: Grain },
 ]
 
-const Navigation = (props: Props) => {
+const Navigation = ({did, opened, setOpened}: Props) => {
   const { classes, cx } = useStyles();
-  const [active, setActive] = useState('Agent Profile');
   const {state: {
     connected,
     isUnlocked
   }} = useContext(Ad4minContext);
 
   let navigate = useNavigate();
+  let location = useLocation();
 
   useEffect(() => {
     if (!connected) {
@@ -92,23 +92,6 @@ const Navigation = (props: Props) => {
     }
 }, [connected, isUnlocked, navigate])
 
-  const links = data.map((item) => (
-    <Anchor
-      component={Link}
-      className={cx(classes.link, { [classes.linkActive]: item.label === active })}
-      underline={false}
-      to={item.link}
-      key={item.label}
-      onClick={() => {
-        props.setOpened(false)
-        setActive(item.label);
-      }}
-    >
-      <item.icon className={classes.linkIcon} />
-      <span>{item.label}</span>
-    </Anchor>
-
-  ))
 
   return (
     <AppShell
@@ -116,21 +99,45 @@ const Navigation = (props: Props) => {
       style={{width: '100%'}}
       navbarOffsetBreakpoint="sm"
       asideOffsetBreakpoint="sm"
-      navbar={
-        <MediaQuery smallerThan="sm" styles={{ display: !props.opened ? 'none' : 'block', position: !props.opened ? 'relative' : 'fixed' }}>
-          <Navbar height='100vh' width={{ sm: 300 }} hidden={!props.opened} hiddenBreakpoint="sm" p="md" style={{padding: 0, background: 'black'}}>
-            <Navbar.Section grow>
-              <Group className={classes.header} position="apart">
-                <Image src="ad4mlogo_white_angle2_colouremblem.png"></Image>
-                <Code>{PackageInfo.version}</Code>
-              </Group>
-              {links}
-            </Navbar.Section>
-          </Navbar>
-        </MediaQuery>
-      }
     >
       <div style={RouteContainer}>
+        <div style={Header}>
+          <j-flex a="center" j="between">
+            <img src="Logo310.png" height={30} width={30} />
+            <j-popover placement="top">
+              <j-button slot="trigger" variant="ghost" size="sm">
+                <j-flex a="center">
+                  fayeed
+                  <j-box p="200"></j-box>
+                  <j-icon size="xs" name="chevron-down"></j-icon>
+                </j-flex>
+              </j-button>
+              <div slot="content">
+                <j-menu-item>
+                  Lock Agent
+                  <j-icon size="xs" slot="end" name="chevron-down"></j-icon>
+                </j-menu-item>
+                <j-menu-item>
+                  Delete Agent
+                  <j-icon size="xs" slot="end" name="chevron-down"></j-icon>
+                </j-menu-item>
+                <j-menu-item>
+                  Poweroff Agent
+                  <j-icon size="xs" slot="end" name="chevron-down"></j-icon>
+                </j-menu-item>
+                <j-menu-item>
+                  Setup Proxy
+                  <j-icon size="xs" slot="end" name="chevron-down"></j-icon>
+                </j-menu-item>
+              </div>
+            </j-popover>
+          </j-flex>
+        </div>
+        <div style={{padding: '0 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between'}}>
+          <Link to="/profile" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/profile' })}>Profile</Link>
+          <Link to="/language" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/language' })}>Language</Link>
+          <Link to="/perspective" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/perspective' })}>Perspective</Link>
+        </div>
         <Outlet />
       </div>
     </AppShell>
