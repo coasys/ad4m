@@ -70,7 +70,7 @@ const App = () => {
           <Route path="perspective" element={<Perspectives  setOpened={setOpened} opened={opened} />} />
           <Route path="settings" element={
             <AgentProvider>
-              <Settings setOpened={setOpened} opened={opened} />
+              <Settings />
             </AgentProvider>
             }
           />

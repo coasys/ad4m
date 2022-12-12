@@ -1,12 +1,10 @@
-import { Button, Container, TextInput, Text, Modal, MultiSelect, Space, Group, List, Card, Avatar, Title, Menu, MediaQuery, Burger } from '@mantine/core';
+import { Container, Group } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { showNotification } from '@mantine/notifications';
 import { LanguageMeta } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useState } from 'react';
-import { Download, Upload } from 'tabler-icons-react';
 import { Ad4minContext } from '../context/Ad4minContext';
-import { generateLanguageInitials, isSystemLanguage } from '../util';
-import CardItems from './CardItems';
+import { isSystemLanguage } from '../util';
 import { cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
 
 type Props = {

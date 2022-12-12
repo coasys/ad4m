@@ -51,3 +51,11 @@ code {
   --j-menu-item-bg: hsl(var(--j-color-ui-hue), 0%, 15%);
   --j-menu-item-color: var(--j-color-black);
 }
+
+:root j-popover::part(content) {
+  background: var(--j-color-ui-50);
+  box-shadow: 0px 0px 40px 20px
+    hsla(var(--j-color-primary-hue), var(--j-color-saturation), 20%, 0.05);
+  border-radius: 6px;
+  padding: 10px 0;
+}

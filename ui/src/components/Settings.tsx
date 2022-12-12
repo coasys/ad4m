@@ -1,17 +1,13 @@
-import { ActionIcon, Burger, Button, Center, Container, createStyles, Group, Image, MediaQuery, Modal, PasswordInput, Space, Stack, Text } from '@mantine/core';
+import { ActionIcon, Button, Center, createStyles, Group, Modal, PasswordInput, Space, Text } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
-import { useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import { Copy, Qrcode as QRCodeIcon } from 'tabler-icons-react';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { AgentContext } from '../context/AgentContext';
-import { MainContainer, MainHeader } from './styles';
 import { invoke } from '@tauri-apps/api';
 import QRCode from 'react-qr-code';
-
-type Props = {
-  opened: boolean,
-  setOpened: (val: boolean) => void
-}
+import { buildAd4mClient } from '../util';
+import { fetchProfile } from './Profile';
 
 const useStyles = createStyles((theme) => ({
   label: {
@@ -19,7 +15,7 @@ const useStyles = createStyles((theme) => ({
   },
 }));
 
-function Settings(props: Props) {
+function Settings() {
   const { classes } = useStyles();
 
   const {
@@ -42,6 +38,27 @@ function Settings(props: Props) {
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
   const [proxy, setProxy] = useState('');
   const [qrcodeModal, setQRCodeModal] = useState(false);
+  const [profile, setProfile] = useState({
+    firstName: "",
+    lastName: "",
+    username: ""
+  });
+
+
+  const fetchCurrentAgentProfile = useCallback(async () => {
+    if (url) {
+      const client = await buildAd4mClient(url);
+      const agent = await client!.agent.me();
+  
+      const profile = await fetchProfile(agent);
+      
+      setProfile(profile);
+    }
+  }, [url])
+
+  useEffect(() => {
+    fetchCurrentAgentProfile();
+  }, [fetchCurrentAgentProfile])
 
   useEffect(() => {
     const getProxy = async () => {
@@ -128,25 +145,36 @@ function Settings(props: Props) {
   }
 
   return (
-    <Container
-      style={MainContainer}
-    >
-      <div style={MainHeader}>
-        <div style={{display: 'flex'}}>          
-          <MediaQuery largerThan="sm" styles={{ display: 'none' }}>
-              <Burger
-                opened={props.opened}
-                onClick={() => props.setOpened(!props.opened)}
-                size="sm"
-                color={'#fff'}
-                mr="xl"
-              />
-            </MediaQuery>
-          <Image src="ad4mlogo_white_angle2_colouremblem.png"></Image>
+    <div
+    > 
+      <j-popover placement="top" event="contextmenu">
+        <j-button slot="trigger" variant="ghost" size="sm">
+          <j-flex a="center">
+            {profile.username}
+            <j-box p="200"></j-box>
+            <j-icon size="xs" name="chevron-down"></j-icon>
+          </j-flex>
+        </j-button>
+        <div slot="content">
+          <j-menu-item onClick={() => setLockAgentModalOpen(true)}>
+            Lock Agent
+            <j-icon size="xs" slot="start" name="lock"></j-icon>
+          </j-menu-item>
+          <j-menu-item onClick={() => setClearAgentModalOpen(true)}>
+            Delete Agent
+            <j-icon size="xs" slot="start" name="trash"></j-icon>
+          </j-menu-item>
+          <j-menu-item onClick={() => invoke("close_application")}>
+            Poweroff Agent
+            <j-icon size="xs" slot="start" name="x-circle"></j-icon>
+          </j-menu-item>
+          <j-menu-item>
+            Setup Proxy
+            <j-icon size="xs" slot="start" name="wifi"></j-icon>
+          </j-menu-item>
         </div>
-      </div>
-      
-      <Stack style={{
+      </j-popover>
+      {/* <Stack style={{
         padding: '20px'
       }}>
         <Group align="center" style={{}}>
@@ -160,7 +188,7 @@ function Settings(props: Props) {
         <Button style={{ width: '160px' }} onClick={() => setClearAgentModalOpen(true)}>Delete Agent</Button>
         <Button style={{ width: '160px' }} onClick={() => invoke("close_application")}>Poweroff AD4Min</Button>
         {showProxy()}
-      </Stack>
+      </Stack> */}
       <Modal
         opened={lockAgentModalOpen}
         onClose={() => setLockAgentModalOpen(false)}
@@ -219,7 +247,7 @@ function Settings(props: Props) {
           <QRCode value={proxy} />
         </Center>
       </Modal>
-    </Container>
+    </div>
   )
 }
 

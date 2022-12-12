@@ -1,14 +1,13 @@
-import { Avatar, Button, Card, Container, Group, List, Modal, MultiSelect, Menu, Select, Space, Switch, TextInput, Title, MediaQuery, Burger } from '@mantine/core';
+import { Container, Group, Menu } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import { LanguageHandle, Link, Perspective, PerspectiveProxy } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useMemo, useState } from 'react';
-import { generateLanguageInitials, sanitizeLink } from '../util';
+import { sanitizeLink } from '../util';
 import { cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
 import { Trash } from 'tabler-icons-react';
 import { useDisclosure } from '@mantine/hooks';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { nanoid } from 'nanoid';
-import CardItems from './CardItems';
 
 type Props = {
   opened: boolean,

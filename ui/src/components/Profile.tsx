@@ -1,7 +1,6 @@
-import { Avatar, Burger, Button, Card, Container, Group, List, MediaQuery, Modal, Space, ThemeIcon, Title } from '@mantine/core';
+import { Container, Space } from '@mantine/core';
 import { Agent, Literal } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useState } from 'react';
-import { CircleCheck } from 'tabler-icons-react';
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from '../constants/triples';
 import { cardStyle, MainContainer, MainHeader } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
@@ -13,6 +12,28 @@ type Props = {
   did: String,
   opened: boolean,
   setOpened: (val: boolean) => void
+}
+
+export const fetchProfile = async (agent: Agent) => {
+  const tempProfile = {
+    firstName: "",
+    lastName: "",
+    username: ""
+  }
+
+  for (const { data: {source, predicate, target} } of agent.perspective?.links!) {
+    if (source === agent.did) {
+      if (predicate === PREDICATE_FIRSTNAME) {
+        tempProfile.firstName = Literal.fromUrl(target).get()
+      } else if (predicate === PREDICATE_LASTNAME) {
+        tempProfile.lastName = Literal.fromUrl(target).get();
+      } else if (predicate === PREDICATE_USERNAME) {
+        tempProfile.username = Literal.fromUrl(target).get();
+      }
+    }
+  }
+
+  return tempProfile;
 }
 
 const Profile = (props: Props) => {
@@ -53,28 +74,6 @@ const Profile = (props: Props) => {
       setTrustedAgents(tempTempAgents);
     }
   }, [url])
-
-  const fetchProfile = async (agent: Agent) => {
-    const tempProfile = {
-      firstName: "",
-      lastName: "",
-      username: ""
-    }
-
-    for (const { data: {source, predicate, target} } of agent.perspective?.links!) {
-      if (source === agent.did) {
-        if (predicate === PREDICATE_FIRSTNAME) {
-          tempProfile.firstName = Literal.fromUrl(target).get()
-        } else if (predicate === PREDICATE_LASTNAME) {
-          tempProfile.lastName = Literal.fromUrl(target).get();
-        } else if (predicate === PREDICATE_USERNAME) {
-          tempProfile.username = Literal.fromUrl(target).get();
-        }
-      }
-    }
-
-    return tempProfile;
-  }
 
   const fetchCurrentAgentProfile = useCallback(async () => {
     if (url) {

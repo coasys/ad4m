@@ -1,10 +1,11 @@
-import { Anchor, AppShell, Code, createStyles, Group, Navbar, Image, MediaQuery } from '@mantine/core';
-import { useContext, useEffect, useRef, useState } from 'react';
+import { AppShell, createStyles } from '@mantine/core';
+import { useContext, useEffect } from 'react';
 import { Grain, Stack2, User, Settings as SettingsIcon } from 'tabler-icons-react';
 import { Link, Outlet, useLocation, useNavigate, useRoutes } from 'react-router-dom';
 import { Header, RouteContainer } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
 import PackageInfo from '../../package.json'
+import Settings from './Settings';
 
 type Props = {
   did: String,
@@ -104,33 +105,7 @@ const Navigation = ({did, opened, setOpened}: Props) => {
         <div style={Header}>
           <j-flex a="center" j="between">
             <img src="Logo310.png" height={30} width={30} />
-            <j-popover placement="top">
-              <j-button slot="trigger" variant="ghost" size="sm">
-                <j-flex a="center">
-                  fayeed
-                  <j-box p="200"></j-box>
-                  <j-icon size="xs" name="chevron-down"></j-icon>
-                </j-flex>
-              </j-button>
-              <div slot="content">
-                <j-menu-item>
-                  Lock Agent
-                  <j-icon size="xs" slot="end" name="chevron-down"></j-icon>
-                </j-menu-item>
-                <j-menu-item>
-                  Delete Agent
-                  <j-icon size="xs" slot="end" name="chevron-down"></j-icon>
-                </j-menu-item>
-                <j-menu-item>
-                  Poweroff Agent
-                  <j-icon size="xs" slot="end" name="chevron-down"></j-icon>
-                </j-menu-item>
-                <j-menu-item>
-                  Setup Proxy
-                  <j-icon size="xs" slot="end" name="chevron-down"></j-icon>
-                </j-menu-item>
-              </div>
-            </j-popover>
+            <Settings />
           </j-flex>
         </div>
         <div style={{padding: '0 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between'}}>
