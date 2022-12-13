@@ -1,21 +1,18 @@
-import React from 'react';
-import { createRoot } from 'react-dom/client';
-import './index.css';
+import { render } from 'preact';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
 import { MantineProvider } from '@mantine/core';
 import { NotificationsProvider } from '@mantine/notifications';
 import { Ad4minProvider } from './context/Ad4minContext';
 import { BrowserRouter as Router} from 'react-router-dom';
+import "@junto-foundation/junto-elements";
+import "@junto-foundation/junto-elements/dist/main.css";
+import './index.css';
 
 
-const root = createRoot(
-  document.getElementById('root')!
-);
-
-root.render(
-<React.StrictMode>
-  <MantineProvider>
+const Main = () => {
+  return (
+    <MantineProvider>
     <NotificationsProvider>
       <Ad4minProvider>
         <Router>
@@ -24,7 +21,13 @@ root.render(
       </Ad4minProvider>
     </NotificationsProvider>
   </MantineProvider>
-</React.StrictMode>
+  )
+}
+
+
+render(
+  <Main />,
+document.getElementById('root')
 )
 
 // If you want to start measuring performance in your app, pass a function
