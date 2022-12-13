@@ -65,10 +65,12 @@ const styles = css`
     display: flex;
     flex-direction: column;
     flex-gap: 50px;
+    gap: 50px;
   }
 
   .items--small {
     flex-gap: 20px;
+    gap: 20px;
   }
 
   .button {
@@ -117,6 +119,7 @@ const styles = css`
     align-items: center;
     justify-content: center;
     flex-gap: 10px;
+    gap: 10px;
   }
 
   .button--full {
@@ -176,6 +179,7 @@ const styles = css`
     justify-content: center;
     align-items: center;
     flex-gap: 50px;
+    gap: 50px;
     position: relative;
   }
 
@@ -230,6 +234,7 @@ const styles = css`
     display: flex;
     flex-direction: column;
     flex-gap: 10px;
+    gap: 10px;
   }
 
   .input__label {
