@@ -1,10 +1,10 @@
 use ad4m_client::perspective_proxy::PerspectiveProxy;
-use anyhow::{Result};
+use anyhow::Result;
 use regex::Regex;
 use rustyline::Editor;
 use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;
-use syntect::highlighting::{ThemeSet, Style};
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
 use crate::formatting::print_prolog_results;
@@ -19,9 +19,8 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             break;
         }
 
-        let add_link = Regex::new(
-            r"add-link\s+(?P<source>\S+)\s+(?P<predicate>\S+)\s+(?P<target>\S+)",
-        )?;
+        let add_link =
+            Regex::new(r"add-link\s+(?P<source>\S+)\s+(?P<predicate>\S+)\s+(?P<target>\S+)")?;
         let caps = add_link.captures(&line);
         if let Some(caps) = caps {
             let source = caps.name("source").unwrap().as_str().to_string();
@@ -34,9 +33,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                 Some(predicate)
             };
 
-            perspective
-                .add_link(source, target, predicate)
-                .await?;
+            perspective.add_link(source, target, predicate).await?;
             continue;
         }
 
@@ -69,9 +66,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        let subject_create = Regex::new(
-            r"subject.construct\s+(?P<class>\S+)\s+(?P<base>\S+)",
-        )?;
+        let subject_create = Regex::new(r"subject.construct\s+(?P<class>\S+)\s+(?P<base>\S+)")?;
         let caps = subject_create.captures(&line);
         if let Some(caps) = caps {
             let class = caps.name("class").unwrap().as_str().to_string();
@@ -79,13 +74,15 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
 
             match perspective.create_subject(&class, &base).await {
                 Ok(()) => {
-                    println!("\x1b[36mSubject of class {} Created at: \x1b[97m{}", class, base);
+                    println!(
+                        "\x1b[36mSubject of class {} Created at: \x1b[97m{}",
+                        class, base
+                    );
                 }
                 Err(e) => {
                     println!("\x1b[91m{}", e.root_cause());
                 }
             }
-
 
             continue;
         }

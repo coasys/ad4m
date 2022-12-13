@@ -1,6 +1,6 @@
-use crate::{formatting::*, util::maybe_parse_datetime, repl::repl_loop};
+use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
 use ad4m_client::Ad4mClient;
-use anyhow::{anyhow, Result, Context};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
@@ -162,7 +162,8 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             repl_loop(ad4m_client.perspectives.get(id).await?).await?;
         }
         PerspectiveFunctions::SetDna { id, file } => {
-            let dna = std::fs::read_to_string(file.clone()).with_context(|| anyhow!("Could not read provided SDNA file {}", file))?;
+            let dna = std::fs::read_to_string(file.clone())
+                .with_context(|| anyhow!("Could not read provided SDNA file {}", file))?;
             let perspective = ad4m_client.perspectives.get(id).await?;
             perspective.set_dna(dna).await?;
             println!("SDNA set successfully");
