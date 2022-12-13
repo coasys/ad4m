@@ -2,6 +2,10 @@ use ad4m_client::perspective_proxy::PerspectiveProxy;
 use anyhow::{Result};
 use regex::Regex;
 use rustyline::Editor;
+use syntect::easy::HighlightLines;
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{ThemeSet, Style};
+use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
 use crate::formatting::print_prolog_results;
 
@@ -45,8 +49,22 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
 
         if line == "sdna" {
             let dna_zomes = perspective.get_dna().await?;
+
+            // Load these once at the start of your program
+            let ps = SyntaxSet::load_defaults_newlines();
+            let ts = ThemeSet::load_defaults();
+
+            let syntax = ps.find_syntax_by_extension("pl").unwrap();
+            let mut h = HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
+
             for zome in dna_zomes {
-                println!("\x1b[36m{}\n\x1b[97m============", zome);
+                println!("\x1b[97m================");
+                for line in LinesWithEndings::from(&zome) {
+                    let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
+                    let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+                    print!("{}", escaped);
+                }
+                println!("\x1b[97m================");
             }
             continue;
         }
