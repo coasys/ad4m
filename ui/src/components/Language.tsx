@@ -142,15 +142,6 @@ const Language = (props: Props) => {
         >
           <j-icon size="lg" name="x"></j-icon>
         </j-button>
-        <j-button
-          onClick={() => setPublishLanguageResultModalOpen(true)}
-          square
-          circle
-          size="lg"
-          variant="subtle"
-        >
-          <j-icon size="lg" name="x"></j-icon>
-        </j-button>
       </div>
       <div 
         style={listStyle}
