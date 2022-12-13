@@ -51,7 +51,7 @@ impl Literal {
         } else if let Some(value) = &self.value {
             match value {
                 LiteralValue::String(string) => {
-                    let encoded = urlencoding::encode(&string);
+                    let encoded = urlencoding::encode(string);
                     Ok(format!("literal://string:{}", encoded))
                 }
                 LiteralValue::Number(number) => Ok(format!("literal://number:{}", number)),
@@ -146,7 +146,7 @@ mod test {
         let test_number = 3.1415;
         let test_url = "literal://number:3.1415";
 
-        let literal = super::Literal::from_number(test_number.into());
+        let literal = super::Literal::from_number(test_number);
         assert_eq!(literal.to_url().unwrap(), test_url);
 
         let mut literal2 = super::Literal::from_url(test_url.into()).unwrap();
@@ -158,7 +158,7 @@ mod test {
         literal2.convert().expect("Failed to convert");
         assert_eq!(
             literal2.value.unwrap(),
-            super::LiteralValue::Number(test_number.into())
+            super::LiteralValue::Number(test_number)
         );
     }
 

@@ -108,7 +108,7 @@ impl PerspectiveProxy {
                 None,
             )
             .await?;
-        if links.len() == 0 {
+        if links.is_empty() {
             return Err(anyhow::anyhow!("No links found"));
         }
         if links.len() > 1 {
@@ -193,7 +193,7 @@ impl PerspectiveProxy {
     }
 
     async fn execute_action(&self, action: &String, base: &String) -> Result<()> {
-        let comman_array: Value = serde_json::from_str(&action)?;
+        let comman_array: Value = serde_json::from_str(action)?;
         if let Some(commands) = comman_array.as_array() {
             for command in commands {
                 if let Some(Value::String(action)) = command.get("action") {
@@ -204,7 +204,7 @@ impl PerspectiveProxy {
                     let predicate = get_command_param(command, "predicate", base);
                     match action.as_str() {
                         "add_link" => {
-                            self.add_link(source, target.into(), predicate.into())
+                            self.add_link(source, target, predicate)
                                 .await?;
                         }
                         "remove_link" => {
