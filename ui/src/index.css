@@ -32,6 +32,7 @@ code {
 
   --j-color-subtractor: 110%;
   --j-color-multiplier: -1;
+  --j-border-width: 3px;
 
   background-color: var(--j-color-black) !important;
 }

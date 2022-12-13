@@ -52,11 +52,12 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
         //println!("window event: {:?}", event);
         if let WindowEvent::Focused(f) = event {
             //println!("focused: {}", f);
-            if !f {
+            if !f && window_clone.inner_size().unwrap().width == 400 {
                 let _ = window_clone.hide();
             }
         }
     });
+
 }
 
 pub fn save_executor_port(port: u16) {
