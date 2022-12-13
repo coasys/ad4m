@@ -69,6 +69,27 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
+        let subject_create = Regex::new(
+            r"subject.construct\s+(?P<class>\S+)\s+(?P<base>\S+)",
+        )?;
+        let caps = subject_create.captures(&line);
+        if let Some(caps) = caps {
+            let class = caps.name("class").unwrap().as_str().to_string();
+            let base = caps.name("base").unwrap().as_str().to_string();
+
+            match perspective.create_subject(&class, &base).await {
+                Ok(()) => {
+                    println!("\x1b[36mSubject of class {} Created at: \x1b[97m{}", class, base);
+                }
+                Err(e) => {
+                    println!("\x1b[91m{}", e.root_cause());
+                }
+            }
+
+
+            continue;
+        }
+
         match perspective.infer(line).await {
             Ok(results) => {
                 print_prolog_results(results)?;
