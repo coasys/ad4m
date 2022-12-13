@@ -123,23 +123,26 @@ function Settings() {
     if (proxy) {
       return (
         <div>
-          <Group align="center" style={{}}>
-            <Text size="lg" weight={700}>Proxy endpoint: </Text>
-            <span>{proxy}</span>
-            <ActionIcon onClick={copyProxy}>
-              <Copy />
-            </ActionIcon>
-            <ActionIcon onClick={showProxyQRCode}>
-              <QRCodeIcon />
-            </ActionIcon>
-          </Group>
-          <Space h="md" />
-          <Button style={{ width: '160px' }} onClick={stopProxy}>Stop Proxy</Button>
+          <j-menu-item onClick={stopProxy}>
+            Stop Proxy
+            <j-icon size="xs" slot="start" name="wifi"></j-icon>
+          </j-menu-item>
+          <j-menu-item onClick={copyProxy}>
+            Copy Proxy URL
+            <j-icon size="xs" slot="start" name="clipboard"></j-icon>
+          </j-menu-item>
+          <j-menu-item onClick={showProxyQRCode}>
+            Show Proxy QR
+            <j-icon size="xs" slot="start" name="qr-code-scan"></j-icon>
+          </j-menu-item>
         </div>
       )
     } else {
       return (
-        <Button style={{ width: '160px' }} onClick={setupProxy}>Setup Proxy</Button>
+        <j-menu-item onClick={setupProxy}>
+        Setup Proxy
+          <j-icon size="xs" slot="start" name="wifi"></j-icon>
+        </j-menu-item>
       )
     }
   }
@@ -168,10 +171,7 @@ function Settings() {
             Poweroff Agent
             <j-icon size="xs" slot="start" name="x-circle"></j-icon>
           </j-menu-item>
-          <j-menu-item>
-            Setup Proxy
-            <j-icon size="xs" slot="start" name="wifi"></j-icon>
-          </j-menu-item>
+          {showProxy()}
         </div>
       </j-popover>
       <j-modal
