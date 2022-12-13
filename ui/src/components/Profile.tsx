@@ -95,17 +95,18 @@ const Profile = (props: Props) => {
   return (
     <div style={MainContainer}>
       <div style={gridButton}>
-        <j-button
-          onClick={() => settrustedAgentModalOpen(true)}
-          square
-          circle
-          size="lg"
-          variant="subtle"
-        >
-          <j-icon size="sm" name="shield-check"></j-icon>
-        </j-button>
+        <j-tooltip title="Trusted agents" placement="bottom">
+          <j-button
+            onClick={() => settrustedAgentModalOpen(true)}
+            square
+            circle
+            size="xl"
+            variant="subtle"
+          >
+            <j-icon size="sm" name="shield-check"></j-icon>
+          </j-button>
+        </j-tooltip>
         <j-box p="200" />
-                
       </div>
       <div style={{padding: '24px'}}>
         <CardItems 

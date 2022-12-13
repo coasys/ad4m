@@ -159,15 +159,17 @@ const Perspectives = (props: Props) => {
       style={MainContainer}
     >
       <div style={gridButton}>
-        <j-button
-          onClick={() => setPerspectiveModalOpen(true)}
-          square
-          circle
-          size="lg"
-          variant="subtle"
-        >
-          <j-icon size="sm" name="folder-plus"></j-icon>
-        </j-button>
+        <j-tooltip title="Add perspective" placement="bottom">
+          <j-button
+            onClick={() => setPerspectiveModalOpen(true)}
+            square
+            circle
+            size="xl"
+            variant="subtle"
+          >
+            <j-icon size="sm" name="folder-plus"></j-icon>
+          </j-button>
+        </j-tooltip>
       </div>
       <div 
         style={listStyle}

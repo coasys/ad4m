@@ -23,7 +23,7 @@ export const RouteContainer = {
 }
 
 export const Header = {
-  padding: '10px'
+  padding: '20px 30px 10px 30px'
 }
 
 export const cardStyle = {
@@ -46,9 +46,9 @@ export const listStyle = {
 
 export const gridButton = {
   display: 'grid',
-  columnGap: 'calc(100% - 312px)',
-  gridTemplateColumns: 'repeat(4, 52px)',
+  columnGap: 'calc(100% - 330px)',
+  gridTemplateColumns: 'repeat(4, 64px)',
   justifyContent: 'center',
   alignItems: 'center',
-  padding: '10px 20px 0 20px'
+  padding: '30px 20px 0 20px'
 }

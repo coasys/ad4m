@@ -123,24 +123,28 @@ const Language = (props: Props) => {
   return (
     <div style={MainContainer}>
       <div style={gridButton}>
-        <j-button
-          onClick={() => setPublishLanguageModalOpen(true)}
-          square
-          circle
-          size="lg"
-          variant="subtle"
-        >
-          <j-icon size="sm" name="globe"></j-icon>
-        </j-button>
-        <j-button
-          onClick={() => setInstallLanguageModalOpen(true)}
-          square
-          circle
-          size="lg"
-          variant="subtle"
-        >
-          <j-icon size="sm" name="download"></j-icon>
-        </j-button>
+        <j-tooltip title="Publish language" placement="bottom">
+          <j-button
+            onClick={() => setPublishLanguageModalOpen(true)}
+            square
+            circle
+            size="xl"
+            variant="subtle"
+          >
+            <j-icon size="sm" name="globe"></j-icon>
+          </j-button>
+        </j-tooltip>
+        <j-tooltip title="Install language" placement="bottom">
+          <j-button
+            onClick={() => setInstallLanguageModalOpen(true)}
+            square
+            circle
+            size="xl"
+            variant="subtle"
+          >
+            <j-icon size="sm" name="download"></j-icon>
+          </j-button>
+        </j-tooltip>
       </div>
       <div 
         style={listStyle}
