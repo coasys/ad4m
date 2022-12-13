@@ -30,7 +30,7 @@
 
 #### Defined in
 
-[links/Links.ts:40](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/links/Links.ts#L40)
+[links/Links.ts:53](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/links/Links.ts#L53)
 
 ___
 
@@ -40,7 +40,7 @@ ___
 
 #### Defined in
 
-[links/Links.ts:34](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/links/Links.ts#L34)
+[links/Links.ts:47](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/links/Links.ts#L47)
 
 ___
 
@@ -50,4 +50,4 @@ ___
 
 #### Defined in
 
-[links/Links.ts:37](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/links/Links.ts#L37)
+[links/Links.ts:50](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/links/Links.ts#L50)

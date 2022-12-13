@@ -42,4 +42,4 @@ ExpressionGeneric(Link).constructor
 
 #### Defined in
 
-[links/Links.ts:45](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/links/Links.ts#L45)
+[links/Links.ts:58](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/links/Links.ts#L58)

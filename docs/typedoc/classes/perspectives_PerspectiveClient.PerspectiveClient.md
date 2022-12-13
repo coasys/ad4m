@@ -22,6 +22,7 @@
 - [add](perspectives_PerspectiveClient.PerspectiveClient.md#add)
 - [addLink](perspectives_PerspectiveClient.PerspectiveClient.md#addlink)
 - [addLinkExpression](perspectives_PerspectiveClient.PerspectiveClient.md#addlinkexpression)
+- [addLinks](perspectives_PerspectiveClient.PerspectiveClient.md#addlinks)
 - [addPerspectiveAddedListener](perspectives_PerspectiveClient.PerspectiveClient.md#addperspectiveaddedlistener)
 - [addPerspectiveLinkAddedListener](perspectives_PerspectiveClient.PerspectiveClient.md#addperspectivelinkaddedlistener)
 - [addPerspectiveLinkRemovedListener](perspectives_PerspectiveClient.PerspectiveClient.md#addperspectivelinkremovedlistener)
@@ -29,11 +30,13 @@
 - [addPerspectiveUpdatedListener](perspectives_PerspectiveClient.PerspectiveClient.md#addperspectiveupdatedlistener)
 - [all](perspectives_PerspectiveClient.PerspectiveClient.md#all)
 - [byUUID](perspectives_PerspectiveClient.PerspectiveClient.md#byuuid)
+- [linkMutations](perspectives_PerspectiveClient.PerspectiveClient.md#linkmutations)
 - [publishSnapshotByUUID](perspectives_PerspectiveClient.PerspectiveClient.md#publishsnapshotbyuuid)
 - [queryLinks](perspectives_PerspectiveClient.PerspectiveClient.md#querylinks)
 - [queryProlog](perspectives_PerspectiveClient.PerspectiveClient.md#queryprolog)
 - [remove](perspectives_PerspectiveClient.PerspectiveClient.md#remove)
 - [removeLink](perspectives_PerspectiveClient.PerspectiveClient.md#removelink)
+- [removeLinks](perspectives_PerspectiveClient.PerspectiveClient.md#removelinks)
 - [snapshotByUUID](perspectives_PerspectiveClient.PerspectiveClient.md#snapshotbyuuid)
 - [subscribePerspectiveAdded](perspectives_PerspectiveClient.PerspectiveClient.md#subscribeperspectiveadded)
 - [subscribePerspectiveRemoved](perspectives_PerspectiveClient.PerspectiveClient.md#subscribeperspectiveremoved)
@@ -56,7 +59,7 @@
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:43](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L43)
+[perspectives/PerspectiveClient.ts:43](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L43)
 
 ## Properties
 
@@ -66,7 +69,7 @@
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:38](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L38)
+[perspectives/PerspectiveClient.ts:38](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L38)
 
 ___
 
@@ -76,7 +79,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:39](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L39)
+[perspectives/PerspectiveClient.ts:39](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L39)
 
 ___
 
@@ -86,7 +89,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:41](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L41)
+[perspectives/PerspectiveClient.ts:41](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L41)
 
 ___
 
@@ -96,7 +99,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:40](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L40)
+[perspectives/PerspectiveClient.ts:40](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L40)
 
 ## Methods
 
@@ -116,7 +119,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:125](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L125)
+[perspectives/PerspectiveClient.ts:125](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L125)
 
 ___
 
@@ -137,7 +140,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:158](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L158)
+[perspectives/PerspectiveClient.ts:158](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L158)
 
 ___
 
@@ -158,7 +161,28 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:170](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L170)
+[perspectives/PerspectiveClient.ts:211](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L211)
+
+___
+
+### addLinks
+
+▸ **addLinks**(`uuid`, `links`): `Promise`<[`LinkExpression`](links_Links.LinkExpression.md)[]\>
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `uuid` | `string` |
+| `links` | [`Link`](links_Links.Link.md)[] |
+
+#### Returns
+
+`Promise`<[`LinkExpression`](links_Links.LinkExpression.md)[]\>
+
+#### Defined in
+
+[perspectives/PerspectiveClient.ts:170](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L170)
 
 ___
 
@@ -178,7 +202,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:218](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L218)
+[perspectives/PerspectiveClient.ts:259](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L259)
 
 ___
 
@@ -199,7 +223,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:275](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L275)
+[perspectives/PerspectiveClient.ts:316](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L316)
 
 ___
 
@@ -220,7 +244,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:292](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L292)
+[perspectives/PerspectiveClient.ts:333](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L333)
 
 ___
 
@@ -240,7 +264,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:256](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L256)
+[perspectives/PerspectiveClient.ts:297](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L297)
 
 ___
 
@@ -260,7 +284,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:237](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L237)
+[perspectives/PerspectiveClient.ts:278](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L278)
 
 ___
 
@@ -274,7 +298,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:56](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L56)
+[perspectives/PerspectiveClient.ts:56](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L56)
 
 ___
 
@@ -294,7 +318,28 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:68](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L68)
+[perspectives/PerspectiveClient.ts:68](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L68)
+
+___
+
+### linkMutations
+
+▸ **linkMutations**(`uuid`, `mutations`): `Promise`<[`LinkExpressionMutations`](links_Links.LinkExpressionMutations.md)\>
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `uuid` | `string` |
+| `mutations` | [`LinkMutations`](links_Links.LinkMutations.md) |
+
+#### Returns
+
+`Promise`<[`LinkExpressionMutations`](links_Links.LinkExpressionMutations.md)\>
+
+#### Defined in
+
+[perspectives/PerspectiveClient.ts:194](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L194)
 
 ___
 
@@ -314,7 +359,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:92](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L92)
+[perspectives/PerspectiveClient.ts:92](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L92)
 
 ___
 
@@ -335,7 +380,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:102](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L102)
+[perspectives/PerspectiveClient.ts:102](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L102)
 
 ___
 
@@ -356,7 +401,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:114](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L114)
+[perspectives/PerspectiveClient.ts:114](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L114)
 
 ___
 
@@ -376,7 +421,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:149](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L149)
+[perspectives/PerspectiveClient.ts:149](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L149)
 
 ___
 
@@ -397,7 +442,28 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:205](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L205)
+[perspectives/PerspectiveClient.ts:246](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L246)
+
+___
+
+### removeLinks
+
+▸ **removeLinks**(`uuid`, `links`): `Promise`<[`LinkExpression`](links_Links.LinkExpression.md)[]\>
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `uuid` | `string` |
+| `links` | [`LinkExpressionInput`](links_Links.LinkExpressionInput.md)[] |
+
+#### Returns
+
+`Promise`<[`LinkExpression`](links_Links.LinkExpression.md)[]\>
+
+#### Defined in
+
+[perspectives/PerspectiveClient.ts:182](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L182)
 
 ___
 
@@ -417,7 +483,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:81](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L81)
+[perspectives/PerspectiveClient.ts:81](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L81)
 
 ___
 
@@ -431,7 +497,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:222](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L222)
+[perspectives/PerspectiveClient.ts:263](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L263)
 
 ___
 
@@ -445,7 +511,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:260](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L260)
+[perspectives/PerspectiveClient.ts:301](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L301)
 
 ___
 
@@ -459,7 +525,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:241](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L241)
+[perspectives/PerspectiveClient.ts:282](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L282)
 
 ___
 
@@ -480,7 +546,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:137](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L137)
+[perspectives/PerspectiveClient.ts:137](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L137)
 
 ___
 
@@ -502,4 +568,4 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:182](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveClient.ts#L182)
+[perspectives/PerspectiveClient.ts:223](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L223)

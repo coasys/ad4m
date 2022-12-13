@@ -38,6 +38,10 @@ mutation AddLink($uuid: String!, $link: LinkInput!){
     }
 }
 
+mutation RemoveLink($uuid: String!, $link: LinkExpressionInput!) {
+    perspectiveRemoveLink(link: $link, uuid: $uuid)
+}
+
 query QueryLinks($uuid: String!, $query: LinkQuery!) {
     perspectiveQueryLinks(query: $query, uuid: $uuid) {
         author

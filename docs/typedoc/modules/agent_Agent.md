@@ -8,5 +8,6 @@
 
 - [Agent](../classes/agent_Agent.Agent.md)
 - [AgentExpression](../classes/agent_Agent.AgentExpression.md)
+- [AgentSignature](../classes/agent_Agent.AgentSignature.md)
 - [EntanglementProof](../classes/agent_Agent.EntanglementProof.md)
 - [EntanglementProofInput](../classes/agent_Agent.EntanglementProofInput.md)

@@ -35,7 +35,7 @@ for those two cases:
 
 #### Defined in
 
-[language/Language.ts:96](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L96)
+[language/Language.ts:96](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L96)
 
 ## Methods
 
@@ -58,4 +58,4 @@ with that given address
 
 #### Defined in
 
-[language/Language.ts:83](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/Language.ts#L83)
+[language/Language.ts:83](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L83)

@@ -24,12 +24,18 @@ pub fn get_executor_port() -> Result<u16> {
     let file_path = executor_data_path.join("executor-port");
     let executor_port = std::fs::read_to_string(file_path.clone()).with_context(|| {
         format!(
-            "Could not executor port file `{}`!\nIs AD4M executor running?",
+            "Could not get executor port file `{}`!\nIs AD4M executor running?",
             file_path.display()
         )
-    })?;
-    let port = executor_port.trim().parse::<u16>()?;
-    Ok(port)
+    });
+    match executor_port {
+        Ok(port) => Ok(port.parse::<u16>().unwrap()),
+        Err(err) => {
+            println!("{}", err);
+            println!("Attempting to connect on default port 4000...\n");
+            Ok(4000)
+        }
+    }
 }
 
 pub fn get_executor_url() -> Result<String> {

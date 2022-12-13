@@ -20,8 +20,10 @@ extern crate tokio;
 
 pub mod agent;
 pub mod languages;
+pub mod literal;
 pub mod neighbourhoods;
 pub mod perspectives;
+pub mod perspective_proxy;
 pub mod runtime;
 pub mod types;
 mod util;

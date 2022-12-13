@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::{util::query, ClientInfo};
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
+use serde::{Deserialize, Serialize};
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -103,7 +104,7 @@ pub async fn apply_template_and_publish(
     Ok(response_data.language_apply_template_and_publish)
 }
 
-#[derive(GraphQLQuery)]
+#[derive(GraphQLQuery, Debug, Serialize, Deserialize)]
 #[graphql(
     schema_path = "schema.gql",
     query_path = "src/languages.gql",
