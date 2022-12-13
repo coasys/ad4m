@@ -52,18 +52,15 @@ impl Literal {
         } else if let Some(value) = &self.value {
             match value {
                 LiteralValue::String(string) => {
-                    let quote_encoded = Self::encode_single_quote(&string);
-                    let encoded = urlencoding::encode(&quote_encoded);
+                    let encoded = urlencoding::encode(&string);
                     Ok(format!("literal://string:{}", encoded))
                 }
                 LiteralValue::Number(number) => {
                     Ok(format!("literal://number:{}", number))
                 }
                 LiteralValue::Json(json) => {
-                    let quote_encoded = Self::encode_single_quote(&json.to_string());
-                    let encoded = urlencoding::encode(&quote_encoded).to_string();
-                    let fixed = encoded.replace("%3A", ":").replace("%2C", ",");
-                    Ok(format!("literal://json:{}", fixed))
+                    let encoded = urlencoding::encode(&json.to_string()).to_string();
+                    Ok(format!("literal://json:{}", encoded))
                 }
             }
         } else {
@@ -74,7 +71,7 @@ impl Literal {
     pub fn parse_url(&self) -> Result<LiteralValue> {
         if let Some(url) = &self.url {
             if url.starts_with("literal://") {
-                let literal = Self::decode_single_quote(&url.replace("literal://", ""));
+                let literal = url.replace("literal://", "");
                 if literal.starts_with("string:") {
                     let string = literal.replace("string:", "");
                     let decoded = urlencoding::decode(&string)?;
@@ -86,8 +83,7 @@ impl Literal {
                 } else if literal.starts_with("json:") {
                     let json = literal.replace("json:", "");
                     let decoded = urlencoding::decode(&json)?;
-                    let decoded_json_string = decoded.to_string().replace("\\'", "'");
-                    let parsed = serde_json::from_str::<serde_json::Value>(&decoded_json_string)?;
+                    let parsed = serde_json::from_str::<serde_json::Value>(&decoded)?;
                     Ok(LiteralValue::Json(parsed))
                 } else {
                     Err(anyhow!("Unknown literal type"))
@@ -121,15 +117,6 @@ impl Literal {
             Err(anyhow!("No value or URL"))
         }
     }
-
-    fn encode_single_quote(string: &str) -> String {
-        string.replace("'", "\\'")
-    }
-
-    fn decode_single_quote(string: &str) -> String {
-        string.replace("\\'", "'")
-    }
-
 }
 
 #[cfg(test)]
@@ -169,10 +156,10 @@ mod test {
     #[test]
     fn can_handle_objects() {
         let test_object = json!({
-            "testNumber": "1337",
             "testString": "test", 
+            "testNumber": "1337",
         });
-        let test_url = "literal://json:%7B%22testNumber%22:%221337%22,%22testString%22:%22test%22%7D";
+        let test_url = "literal://json:%7B%22testNumber%22%3A%221337%22%2C%22testString%22%3A%22test%22%7D";
 
         let literal = super::Literal::from_json(test_object.clone());
         assert_eq!(literal.to_url().unwrap(), test_url);
@@ -182,5 +169,20 @@ mod test {
 
         literal2.convert().expect("Failed to convert");
         assert_eq!(literal2.value.unwrap(), super::LiteralValue::Json(test_object));
+    }
+
+    #[test]
+    fn can_handle_special_characters() {
+        let test_string = "message(X) :- triple('ad4m://self', _, X).";
+        let test_url = "literal://string:message%28X%29%20%3A-%20triple%28%27ad4m%3A%2F%2Fself%27%2C%20_%2C%20X%29.";
+
+        let literal = super::Literal::from_string(test_string.into());
+        assert_eq!(literal.to_url().unwrap(), test_url);
+
+        let mut literal2 = super::Literal::from_url(test_url.into()).unwrap();
+        assert_eq!(literal2.get().unwrap(), super::LiteralValue::String(test_string.into()));
+
+        literal2.convert().expect("Failed to convert");
+        assert_eq!(literal2.value.unwrap(), super::LiteralValue::String(test_string.into()));
     }
 }
