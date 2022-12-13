@@ -1,4 +1,4 @@
-use crate::{perspectives::{PerspectivesClient, query_links::QueryLinksPerspectiveQueryLinks, add_link::AddLinkPerspectiveAddLink}, types::LinkExpression, literal::Literal};
+use crate::{perspectives::{PerspectivesClient, query_links::QueryLinksPerspectiveQueryLinks, add_link::AddLinkPerspectiveAddLink}, types::LinkExpression, literal::{Literal, LiteralValue}};
 use anyhow::Result;
 use chrono::naive::NaiveDateTime;
 use serde_json::Value;
@@ -61,6 +61,26 @@ impl PerspectiveProxy {
         let literal = Literal::from_string(dna);
         self.set_single_target("ad4m://self".into(), "ad4m://has_zome".into(), literal.to_url()?).await?;
         Ok(())
+    }
+
+    pub async fn get_dna(&self) -> Result<Vec<String>> {
+        self.get(
+            Some("ad4m://self".into()), 
+            None, 
+            Some("ad4m://has_zome".into()), 
+            None, 
+            None, 
+            None
+        ).await?
+        .into_iter()
+        .map(|link| {
+            let literal = Literal::from_url(link.data.target)?;
+            match literal.get() {
+                Ok(LiteralValue::String(string)) => Ok(string),
+                _ => Err(anyhow::anyhow!("Not a string literal"))
+            }
+        })
+        .collect()
     }
 
     pub async fn get_single_target(&self, source: String, predicate: String) -> Result<String> {

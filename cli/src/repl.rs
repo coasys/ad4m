@@ -43,6 +43,14 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
+        if line == "sdna" {
+            let dna_zomes = perspective.get_dna().await?;
+            for zome in dna_zomes {
+                println!("\x1b[36m{}\n\x1b[97m============", zome);
+            }
+            continue;
+        }
+
         match perspective.infer(line).await {
             Ok(results) => {
                 print_prolog_results(results)?;
