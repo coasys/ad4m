@@ -1,4 +1,3 @@
-import { Container, Group } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { showNotification } from '@mantine/notifications';
 import { LanguageMeta } from '@perspect3vism/ad4m';
@@ -122,7 +121,7 @@ const Language = (props: Props) => {
   }, [])
 
   return (
-    <Container style={MainContainer}>
+    <div style={MainContainer}>
       <div style={gridButton}>
         <j-button
           onClick={() => setPublishLanguageModalOpen(true)}
@@ -131,7 +130,7 @@ const Language = (props: Props) => {
           size="lg"
           variant="subtle"
         >
-          <j-icon size="lg" name="x"></j-icon>
+          <j-icon size="sm" name="globe"></j-icon>
         </j-button>
         <j-button
           onClick={() => setInstallLanguageModalOpen(true)}
@@ -140,7 +139,7 @@ const Language = (props: Props) => {
           size="lg"
           variant="subtle"
         >
-          <j-icon size="lg" name="x"></j-icon>
+          <j-icon size="sm" name="download"></j-icon>
         </j-button>
       </div>
       <div 
@@ -152,16 +151,17 @@ const Language = (props: Props) => {
 
           return (
           <div key={`language-${language?.address}`} style={{...cardStyle, width: '87%'}}>
-            <Group align="flex-start">
+            <j-flex a="flex-start" direction="column">
               {isSystem ? (
-                <div style={{padding: '4px 12px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>
+                <div style={{width: 'fit-content', padding: '4px 12px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>
                   System
                 </div>
               ) : (
-                <div style={{padding: '4px 12px', background: '#FFF0F6', borderRadius: 30, color: 'rgb(230, 73, 128)'}}>
+                <div style={{width: 'fit-content', padding: '4px 12px', background: '#FFF0F6', borderRadius: 30, color: 'rgb(230, 73, 128)'}}>
                 Installed
                 </div>
               )}
+              <j-box p="200"></j-box>
               <j-flex direction='column' style={{marginTop: 4}}>
                 <j-text weight="bold" >{language?.name}</j-text>
                 <j-flex a="center" j="between">
@@ -172,7 +172,7 @@ const Language = (props: Props) => {
                   </j-button>
                 </j-flex>
               </j-flex>
-            </Group>
+            </j-flex>
           </div>
         )})}
       </div>
@@ -284,7 +284,7 @@ const Language = (props: Props) => {
             <j-button onClick={() => setPublishLanguageResultModalOpen(false)}>Done</j-button>
           </j-box>
       </j-modal>
-    </Container>
+    </div>
   )
 }
 

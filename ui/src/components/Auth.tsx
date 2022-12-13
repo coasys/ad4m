@@ -1,7 +1,5 @@
-import { Button, Group, Modal, Space, Stack, Text, TextInput, List, ThemeIcon, ActionIcon } from '@mantine/core';
 import { useContext, useEffect, useState } from 'react';
 import { Ad4minContext } from '../context/Ad4minContext';
-import { CircleCheck, Copy } from 'tabler-icons-react';
 import { showNotification } from '@mantine/notifications';
 
 interface Capability {
@@ -53,20 +51,15 @@ const Auth = () => {
 
   const showCapabilities = (capabilities: Capability[]) => {
     return (
-      <List
-        spacing="xs"
-        size="sm"
-        center
-        icon={
-          <ThemeIcon color="teal" size={24} radius="xl">
-            <CircleCheck size={16} />
-          </ThemeIcon>
-        }
+      <j-flex
+        direction="column"
+        gap="200"
+        a="flex-start"
       >
         {
-          capabilities.map(cap => <List.Item>{`${cap.can} => ${cap.with.domain}.${cap.with.pointers}`}</List.Item>)
+          capabilities.map(cap => <j-text>{`${cap.can} => ${cap.with.domain}.${cap.with.pointers}`}</j-text>)
         }
-      </List>
+      </j-flex>
 
     )
   }
@@ -81,61 +74,75 @@ const Auth = () => {
 
   return (
     <div>
-      <Modal
+      <j-modal
         size="lg"
-        opened={requestModalOpened}
-        onClose={closeRequestModal}
-        title="Request Capabilities"
+        open={requestModalOpened}
+        onToggle={(e: any) => setRequestModalOpened(e.target.open)}
       >
-        <Stack>
-          <TextInput
-            value={authInfo.appName}
-            label="App Name"
-            disabled
-          />
-          <TextInput
-            value={authInfo.appDesc}
-            label="App Description"
-            disabled
-          />
-          <TextInput
-            value={authInfo.appUrl}
-            label="App URL"
-            disabled
-          />
-          <Text>Request for these capabilities,</Text>
-          {showCapabilities(authInfo.capabilities)}
-          <Group>
-            <Button variant="outline" onClick={closeRequestModal}>
-              Close
-            </Button>
-            <Space h="md" />
-            <Button onClick={permitCapability}>
-              Confirm
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
+        <j-box p="400">
+          <j-flex gap="200" direction="column">
+            <j-text nomargin variant="heading-sm">
+            Request Capabilities
+            </j-text>
+            <j-box p="200"></j-box>
+            <j-input
+              label="App Name"
+              size="lg"
+              disabled
+              value={authInfo.appName}
+            ></j-input>
+            <j-input
+              label="App Description"
+              size="lg"
+              disabled
+              value={authInfo.appDesc}
+            ></j-input>
+            <j-input
+              label="App URL"
+              size="lg"
+              disabled
+              value={authInfo.appUrl}
+            ></j-input>
+            <j-text>Request for these capabilities,</j-text>
+            {showCapabilities(authInfo.capabilities)}
+            <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={closeRequestModal}>
+                Close
+                </j-button>
+                <j-box p="200"></j-box>
+                <j-button onClick={permitCapability} >
+                Confirm
+                </j-button>
+              </j-flex>
+          </j-flex>
+        </j-box>
+      </j-modal>
 
-      <Modal
+      <j-modal
         size="lg"
-        opened={secretCodeModalOpened}
-        onClose={closeSecretCodeModal}
-        title="Secret Code"
+        open={secretCodeModalOpened}
+        onToggle={(e: any) => setSecretCodeModalOpened(e.target.open)}
       >
-        <Group direction='row'>
-          <Text weight={700} size="lg" underline>{secretCode}</Text>
-          <ActionIcon onClick={copyCode}>
-            <Copy />
-          </ActionIcon>
-        </Group>
-        <Space h="md" />
-        <Group position="center">
-          <Button onClick={closeSecretCodeModal}>
-            Close
-          </Button>
-        </Group>
-      </Modal>
+        <j-box p="400">
+          <j-flex gap="200" direction="column">
+            <j-flex a="center" gap="200">
+              <j-text nomargin variant="heading-sm">
+              {secretCode}
+                <j-Button variant="subtle" onClick={copyCode}>
+                  <j-icon size="sm" name="clipboard"></j-icon>
+                </j-Button>
+              </j-text>
+            </j-flex>
+            <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={closeSecretCodeModal}>
+                Close
+                </j-button>
+              </j-flex>
+          </j-flex>
+        </j-box>
+      </j-modal>
     </div>
   )
 }

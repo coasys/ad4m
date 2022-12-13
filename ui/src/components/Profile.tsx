@@ -1,8 +1,7 @@
-import { Container, Space } from '@mantine/core';
 import { Agent, Literal } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useState } from 'react';
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from '../constants/triples';
-import { cardStyle, MainContainer, MainHeader } from './styles';
+import { cardStyle, gridButton, MainContainer, MainHeader } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { buildAd4mClient } from '../util';
 import { useCallback } from 'react';
@@ -94,10 +93,8 @@ const Profile = (props: Props) => {
   console.log(trustedAgentModalOpen)
 
   return (
-    <Container style={MainContainer}>
-      <Container
-        style={{ marginLeft: 10, marginTop: 12 }}
-      >
+    <div style={MainContainer}>
+      <div style={gridButton}>
         <j-button
           onClick={() => settrustedAgentModalOpen(true)}
           square
@@ -105,29 +102,31 @@ const Profile = (props: Props) => {
           size="lg"
           variant="subtle"
         >
-          <j-icon size="lg" name="x"></j-icon>
+          <j-icon size="sm" name="shield-check"></j-icon>
         </j-button>
-        <Space h="md" />
+        <j-box p="200" />
                 
+      </div>
+      <div style={{padding: '24px'}}>
         <CardItems 
           title={'Agent ID'}
           value={props.did as string}
           titleUnderline
         />
-        <Space h="md" />
+        <j-box p="200" />
         <CardItems 
           title={'Username'}
           value={profile?.username}
           titleUnderline
         />
-        <Space h="md" />
+        <j-box p="200" />
         <CardItems 
           title={'Name'}
           value={`${profile.firstName} ${profile.lastName}`}
           titleUnderline
         />
-        <Space h="md" />
-      </Container>
+        <j-box p="200" />
+      </div>
       <j-modal
           size="lg"
           open={trustedAgentModalOpen}
@@ -155,7 +154,7 @@ const Profile = (props: Props) => {
             </j-flex>
           </j-box>
       </j-modal>
-    </Container>
+    </div>
   )
 }
 

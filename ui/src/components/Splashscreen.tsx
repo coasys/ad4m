@@ -1,6 +1,5 @@
-import { Title, Text, Button, createStyles, Space, Image } from '@mantine/core'
+import { createStyles, Image } from '@mantine/core'
 import { appWindow } from '@tauri-apps/api/window';
-import React from 'react'
 import { useState } from 'react';
 import { useEffect } from 'react';
 

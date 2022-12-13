@@ -1,4 +1,3 @@
-import { Button, Group, Modal, Space, Stack, TextInput } from '@mantine/core';
 import { useContext, useEffect, useState } from 'react';
 import { showNotification } from '@mantine/notifications';
 import { Ad4minContext } from '../context/Ad4minContext';
@@ -34,29 +33,36 @@ const TrustAgent = (props: Props) => {
 
   return (
     <div>
-      <Modal
+      <j-modal
         size="lg"
-        opened={opened}
-        onClose={() => closeModal()}
-        title="Trust Agent"
+        open={opened}
+        onToggle={(e: any) => e.target.open && closeModal()}
       >
-        <Stack>
-          <TextInput
-            defaultValue={props.candidate}
-            label="Agent DID"
-            disabled
-          />
-          <Group>
-            <Button variant="outline" onClick={() => closeModal()}>
-              Close
-            </Button>
-            <Space h="md" />
-            <Button onClick={addTrustedAgent}>
+        <j-box p="400">
+          <j-flex gap="200" direction="column">
+            <j-flex a="center" gap="200">
+              <j-text nomargin variant="heading-sm">
               Trust Agent
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
+              </j-text>
+            </j-flex>
+            <j-input
+              label="Agent DID"
+              value={props.candidate}
+              disabled
+            ></j-input>
+            <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={closeModal}>
+                Close
+                </j-button>
+                <j-box p="200"></j-box>
+                <j-button onClick={addTrustedAgent}>
+                Trust Agent
+                </j-button>
+              </j-flex>
+          </j-flex>
+        </j-box>
+      </j-modal>
     </div>
   )
 }

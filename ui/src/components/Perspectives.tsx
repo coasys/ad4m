@@ -1,4 +1,4 @@
-import { Container, Group, Menu } from '@mantine/core';
+import { Group, Menu } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import { LanguageHandle, Link, Perspective, PerspectiveProxy } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useMemo, useState } from 'react';
@@ -155,7 +155,7 @@ const Perspectives = (props: Props) => {
   const langs = useMemo(() => languages.map(e => ({label: e!.name, value: e!.address})), [languages])
 
   return (
-    <Container
+    <div
       style={MainContainer}
     >
       <div style={gridButton}>
@@ -166,7 +166,7 @@ const Perspectives = (props: Props) => {
           size="lg"
           variant="subtle"
         >
-          <j-icon size="lg" name="x"></j-icon>
+          <j-icon size="sm" name="folder-plus"></j-icon>
         </j-button>
       </div>
       <div 
@@ -277,7 +277,7 @@ const Perspectives = (props: Props) => {
               </j-flex>
           </j-box>
       </j-modal>
-    </Container>
+    </div>
   )
 }
 

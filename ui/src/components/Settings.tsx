@@ -1,4 +1,4 @@
-import { ActionIcon, Button, Center, createStyles, Group, Modal, PasswordInput, Space, Text } from '@mantine/core';
+import { ActionIcon, Button, createStyles, Group, Space, Text } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import { useCallback, useContext, useEffect, useState } from 'react';
 import { Copy, Qrcode as QRCodeIcon } from 'tabler-icons-react';
@@ -174,79 +174,79 @@ function Settings() {
           </j-menu-item>
         </div>
       </j-popover>
-      {/* <Stack style={{
-        padding: '20px'
-      }}>
-        <Group align="center" style={{}}>
-          <Text size="lg" weight={700}>Connected executor URL: </Text>
-          <span>{url}</span>
-          <ActionIcon onClick={copyUrl}>
-            <Copy />
-          </ActionIcon>
-        </Group>
-        <Button style={{ width: '160px' }} onClick={() => setLockAgentModalOpen(true)}>Lock Agent</Button>
-        <Button style={{ width: '160px' }} onClick={() => setClearAgentModalOpen(true)}>Delete Agent</Button>
-        <Button style={{ width: '160px' }} onClick={() => invoke("close_application")}>Poweroff AD4Min</Button>
-        {showProxy()}
-      </Stack> */}
-      <Modal
-        opened={lockAgentModalOpen}
-        onClose={() => setLockAgentModalOpen(false)}
-        title="Lock Agent"
-        size={700}
-        style={{ zIndex: 100 }}
+      <j-modal
+        size="lg"
+        open={lockAgentModalOpen}
+        onToggle={(e: any) => setLockAgentModalOpen(e.target.open)}
       >
-        <PasswordInput
-          placeholder="Password"
-          label="Input your passphrase"
-          radius="md"
-          size="md"
-          required
-          onChange={onPasswordChange}
-          classNames={{
-            label: classes.label
-          }}
-        />
-        <Space h={20} />
-        <Button onClick={() => lockAgent(password)} loading={loading}>
-          Lock agent
-        </Button>
-      </Modal>
-      <Modal
-        opened={clearAgentModalOpen}
-        onClose={() => setClearAgentModalOpen(false)}
-        title="Clear Agent"
-        size={700}
-        style={{ zIndex: 100 }}
+        <j-box p="400">
+          <j-flex gap="200" direction="column">
+            <j-text nomargin variant="heading-sm">
+            Lock Agent
+            </j-text>
+            <j-box p="200"></j-box>
+            <j-input
+              placeholder="Password"
+              label="Input your passphrase"
+              size="lg"
+              required
+              onInput={onPasswordChange}
+            ></j-input>
+            <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={() => lockAgent(password)} loading={loading}>
+                Lock agent
+                </j-button>
+              </j-flex>
+          </j-flex>
+        </j-box>
+      </j-modal>
+      <j-modal
+        size="lg"
+        open={clearAgentModalOpen}
+        onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}
       >
-        <Text size="sm"><span style={{color: 'red'}}>Warning:</span> By clearing the agent you will loose all the data and will have to start with a fresh agent.<br /><br /> Please enter your pass below to proceed.</Text>
-        <Space h="md" />
-        <PasswordInput
-          placeholder="Password"
-          label="Input your passphrase"
-          radius="md"
-          size="md"
-          required
-          onChange={onPasswordChange}
-          classNames={{
-            label: classes.label
-          }}
-        />
-        <Space h={20} />
-        <Button onClick={() => clearAgent(password)} loading={loading}>
-          Delete Agent
-        </Button>
-      </Modal>
-      <Modal
-        opened={qrcodeModal}
-        onClose={() => setQRCodeModal(false)}
+        <j-box p="400">
+          <j-flex gap="200" direction="column">
+            <j-text nomargin variant="heading-sm">
+            Clear Agent
+            </j-text>
+            <j-box p="200"></j-box>
+            <j-text>Warning:By clearing the agent you will loose all the data and will have to start with a fresh agent<br /><br /> Please enter your pass below to proceed</j-text>
+            <j-box p="200"></j-box>
+            <j-input
+              placeholder="Password"
+              label="Input your passphrase"
+              size="lg"
+              required
+              onInput={onPasswordChange}
+            ></j-input>
+            <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={() => clearAgent(password)} loading={loading}>
+                Delete Agent
+                </j-button>
+              </j-flex>
+          </j-flex>
+        </j-box>
+      </j-modal>
+      <j-modal
+        size="lg"
+        open={qrcodeModal}
+        onToggle={(e: any) => setQRCodeModal(e.target.open)}
         title="Proxy QR Code"
         centered
       >
-        <Center>
+        <j-box p="400">
+          <j-flex gap="200" direction="column">
+            <j-text nomargin variant="heading-sm">
+            Proxy QR Code
+            </j-text>
+            <j-box p="200"></j-box>
           <QRCode value={proxy} />
-        </Center>
-      </Modal>
+          </j-flex>
+        </j-box>
+      </j-modal>
     </div>
   )
 }

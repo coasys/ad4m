@@ -1,7 +1,6 @@
-import { PasswordInput, Button, Stack, TextInput, ActionIcon, Tooltip, Image } from '@mantine/core';
+import { Image } from '@mantine/core';
 import { useContext, useEffect, useState } from 'react';
 import { AgentContext } from '../context/AgentContext';
-import { Link } from 'tabler-icons-react';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { useNavigate } from 'react-router-dom';
 
@@ -81,6 +80,7 @@ const Login = (props: any) => {
     }
   }
 
+  // @ts-ignore
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") {
       if(isInitialized) {

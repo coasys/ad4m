@@ -1,5 +1,4 @@
 import Header from './Header';
-import { TextInput, Button, Stack, Loader } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
 import { useContext, useState, useEffect } from 'react';
 import { useNavigate } from "react-router-dom";
@@ -80,27 +79,27 @@ export function Connect() {
   }, [connected, isUnlocked, navigate])
 
   return (
-    <Stack align="center" spacing="xl" style={{margin: "auto"}}>
+    <j-flex direction="column" a="center" gap="500" style={{margin: "auto"}}>
       <Header />
       {connectedLaoding ? (
           <j-spinner size="lg"></j-spinner>
         ) : (
           <>
-            <TextInput 
+            <j-input 
               label="Ad4m URL" 
               placeholder='ws://www.example.com/graphql' 
               radius="md" 
               size="md" 
-              onChange={onUrlChange}
+              onInput={onUrlChange}
               required
               error={urlError}
             />
-            <Button onClick={onInitialize} loading={loading}>
+            <j-button onClick={onInitialize} variant="primary" loading={loading}>
               Initialize Client
-            </Button>
+            </j-button>
           </>
         )
       }
-  </Stack>
+  </j-flex>
   )
 }
