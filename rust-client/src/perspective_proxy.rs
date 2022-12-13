@@ -121,4 +121,16 @@ impl PerspectiveProxy {
             .await?;
         Ok(())
     }
+
+    pub async fn subject_classes(&self) -> Result<Vec<String>> {
+        let mut classes = Vec::new();
+        if let Value::Array(classes_results) = self.infer("subject_class(X, _)".into()).await? {
+            for class in classes_results {
+                if let Some(Value::String(class_name)) = class.get("X") {
+                    classes.push(class_name.clone());
+                }
+            }
+        }
+        Ok(classes)
+    }
 }

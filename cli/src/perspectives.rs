@@ -159,7 +159,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
         }
         PerspectiveFunctions::Repl { id } => {
             //let _ = perspectives::run_watch(cap_token, id);
-            repl_loop(ad4m_client, id).await?;
+            repl_loop(ad4m_client.perspectives.get(id).await?).await?;
         }
         PerspectiveFunctions::SetDna { id, file } => {
             let dna = std::fs::read_to_string(file.clone()).with_context(|| anyhow!("Could not read provided SDNA file {}", file))?;

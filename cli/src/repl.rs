@@ -1,11 +1,11 @@
-use ad4m_client::{Ad4mClient};
+use ad4m_client::perspective_proxy::PerspectiveProxy;
 use anyhow::{Result};
 use regex::Regex;
 use rustyline::Editor;
 
 use crate::formatting::print_prolog_results;
 
-pub async fn repl_loop(ad4m_client: Ad4mClient, id: String) -> Result<()> {
+pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
     let mut rl = Editor::<()>::new()?;
     loop {
         let line = rl.readline("\x1b[97m> ")?;
@@ -30,14 +30,20 @@ pub async fn repl_loop(ad4m_client: Ad4mClient, id: String) -> Result<()> {
                 Some(predicate)
             };
 
-            ad4m_client
-                .perspectives
-                .add_link(id.clone(), source, target, predicate)
+            perspective
+                .add_link(source, target, predicate)
                 .await?;
             continue;
         }
 
-        match ad4m_client.perspectives.infer(id.clone(), line).await {
+        if line == "subject.classes" {
+            for class in perspective.subject_classes().await? {
+                println!("\x1b[36mSubject Class: \x1b[97m{}", class);
+            }
+            continue;
+        }
+
+        match perspective.infer(line).await {
             Ok(results) => {
                 print_prolog_results(results)?;
             }
