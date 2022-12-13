@@ -83,7 +83,7 @@ export function Connect() {
     <Stack align="center" spacing="xl" style={{margin: "auto"}}>
       <Header />
       {connectedLaoding ? (
-          <Loader />
+          <j-spinner size="lg"></j-spinner>
         ) : (
           <>
             <TextInput 

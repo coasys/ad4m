@@ -58,7 +58,6 @@ const App = () => {
         <Route path="/splashscreen" element={<Splashscreen />} />
         <Route path="/login" element={
           <Stack align="center" spacing="xl" style={{margin: "auto"}}>
-            <Header />
             <AgentProvider>
               <Login />
             </AgentProvider>
