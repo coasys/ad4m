@@ -30,18 +30,21 @@ export const cardStyle = {
   width: '100%',
   display: 'flex',
   alignItems: 'center',
-  gap: 'var(--j-space-700)',
+  gap: 'var(--j-space-500)',
   borderRadius: 'var(--j-border-radius)',
   textDecoration: 'none',
   backgroundColor: 'var(--j-color-ui-50)',
   padding: 'var(--j-space-500)',
-  marginBottom: 'var(--j-space-700)'
+  marginBottom: 'var(--j-space-500)',
+  position: 'relative'
 }
 
 export const listStyle = {
   overflow: 'scroll',
-  padding: '20px 20px',
-  height: '50%'
+  padding: 20,
+  height: 465,
+  overflowX: 'hidden',
+  marginTop: 10,
 }
 
 export const gridButton = {
@@ -51,4 +54,13 @@ export const gridButton = {
   justifyContent: 'center',
   alignItems: 'center',
   padding: '30px 20px 0 20px'
+}
+
+export const badge = {
+  width: 'fit-content', 
+  padding: '4px 12px', 
+  background: '#845EF7', 
+  borderRadius: 30, 
+  color: 'var(--j-color-black)',
+  fontSize: 'var(--j-font-size-400)'
 }

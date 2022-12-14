@@ -3,7 +3,7 @@ import { showNotification } from '@mantine/notifications';
 import { LanguageHandle, Link, Perspective, PerspectiveProxy } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useMemo, useState } from 'react';
 import { sanitizeLink } from '../util';
-import { cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
+import { badge, cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
 import { Trash } from 'tabler-icons-react';
 import { useDisclosure } from '@mantine/hooks';
 import { Ad4minContext } from '../context/Ad4minContext';
@@ -177,42 +177,39 @@ const Perspectives = (props: Props) => {
         {perspectives.map((e, i) => {
           return (
           <div key={`perspectice-${e?.name}`} style={{...cardStyle, width: '87%'}}>
-            <Group position="apart" align="flex-start">
-              <Group align="flex-start">
-                <Group direction='column' style={{marginTop: 4}}>
-                  {e?.neighbourhood ? (
-                    <div style={{padding: '4px 12px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>
-                      Neighbourhood
-                    </div>
-                  ) : (
-                    <div style={{padding: '4px 12px', background: '#FFF0F6', borderRadius: 30, color: 'rgb(230, 73, 128)'}}>
-                      Perspective
-                    </div>
-                  )}
+            <j-flex  align="flex-start">
+              <j-flex align="flex-start">
+                <j-flex a="flex-start" direction="column">
+                  <div style={{...badge, backgroundColor: e?.neighbourhood ? '#6e52c2bb' : 'rgba(230, 73, 128, 0.671)'}}>
+                    {e?.neighbourhood ? 'Neighbourhood' : 'Perspective'}
+                  </div>
+                  <j-box p="200"></j-box>
                   <j-text weight="bold" >{e?.name}</j-text>
-                  <j-flex a="center">
-                    <j-text nomargin variant="body" size="sm">{e?.uuid?.length || 0 > 25 ? `${e?.uuid?.substring(0, 25)}...` : e?.uuid}</j-text>
+                  <j-flex a="center" j="between">
+                    <j-text nomargin variant="body" size="400">{e?.uuid?.length || 0 > 32 ? `${e?.uuid?.substring(0, 32)}...` : e?.uuid}</j-text>
                     <j-box p="100"></j-box>
-                    <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
+                    <j-button size="xs" variant="subtle"  onClick={() => console.log('wow')}>
                       <j-icon size="xs" slot="end" name="clipboard"></j-icon>
                     </j-button>
                   </j-flex>
-                  
+                  <j-box p="200"></j-box>
                   {e?.sharedUrl && (
                     <>
-                      <j-flex a="center">
-                        <j-text nomargin variant="body" size="sm">{e?.sharedUrl?.length > 25 ? `${e?.sharedUrl?.substring(0, 25)}...` : e?.sharedUrl}</j-text>
+                      <j-flex a="center" j="between">
+                        <j-text nomargin variant="body" size="400">{e?.sharedUrl?.length > 28 ? `${e?.sharedUrl?.substring(0, 28)}...` : e?.sharedUrl}</j-text>
                         <j-box p="100"></j-box>
-                        <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
+                        <j-button size="xs" variant="subtle"  onClick={() => console.log('wow')}>
                           <j-icon size="xs" slot="end" name="clipboard"></j-icon>
                         </j-button>
                       </j-flex>
                     </>
                   )}
-                </Group>
-              </Group>
-              <PerspectiveMenu uuid={e!.uuid} reload={fetchPerspective} />
-            </Group>
+                </j-flex>
+              </j-flex>
+              <div style={{position: 'absolute', top: 10, right: 10}}>
+                <PerspectiveMenu uuid={e!.uuid} reload={fetchPerspective} />
+              </div>
+            </j-flex>
           </div>
         )})}
       </div>

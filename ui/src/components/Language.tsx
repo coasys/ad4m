@@ -4,7 +4,7 @@ import { LanguageMeta } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useState } from 'react';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { isSystemLanguage } from '../util';
-import { cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
+import { badge, cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
 
 type Props = {
   opened: boolean,
@@ -156,22 +156,16 @@ const Language = (props: Props) => {
           return (
           <div key={`language-${language?.address}`} style={{...cardStyle, width: '87%'}}>
             <j-flex a="flex-start" direction="column">
-              {isSystem ? (
-                <div style={{width: 'fit-content', padding: '4px 12px', background: 'rgb(243, 240, 255)', borderRadius: 30, color: '#845EF7'}}>
-                  System
-                </div>
-              ) : (
-                <div style={{width: 'fit-content', padding: '4px 12px', background: '#FFF0F6', borderRadius: 30, color: 'rgb(230, 73, 128)'}}>
-                Installed
-                </div>
-              )}
+              <div style={{...badge, backgroundColor: isSystem ? '#6e52c2bb' : 'rgba(230, 73, 128, 0.671)'}}>
+                {isSystem ? 'System' : 'Installed'}
+              </div>
               <j-box p="200"></j-box>
               <j-flex direction='column' style={{marginTop: 4}}>
                 <j-text weight="bold" >{language?.name}</j-text>
                 <j-flex a="center" j="between">
-                  <j-text nomargin variant="body" size="xs">{language?.address.length > 25 ? `${language?.address.substring(0, 25)}...` : language?.address}</j-text>
+                  <j-text nomargin variant="body" size="400">{language?.address.length > 28 ? `${language?.address.substring(0, 28)}...` : language?.address}</j-text>
                   <j-box p="100"></j-box>
-                  <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
+                  <j-button size="xs" variant="subtle"  onClick={() => console.log('wow')}>
                     <j-icon size="xs" slot="end" name="clipboard"></j-icon>
                   </j-button>
                 </j-flex>
