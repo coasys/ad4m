@@ -129,7 +129,7 @@ const Profile = (props: Props) => {
         <j-box p="200" />
       </div>
       <j-modal
-          size="lg"
+          size="fullscreen"
           open={trustedAgentModalOpen}
           onToggle={(e: any) => settrustedAgentModalOpen(e.target.open)}
         >

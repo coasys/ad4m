@@ -75,7 +75,7 @@ const Auth = () => {
   return (
     <div>
       <j-modal
-        size="lg"
+        size="fullscreen"
         open={requestModalOpened}
         onToggle={(e: any) => setRequestModalOpened(e.target.open)}
       >
@@ -120,7 +120,7 @@ const Auth = () => {
       </j-modal>
 
       <j-modal
-        size="lg"
+        size="fullscreen"
         open={secretCodeModalOpened}
         onToggle={(e: any) => setSecretCodeModalOpened(e.target.open)}
       >

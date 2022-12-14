@@ -217,7 +217,7 @@ const Perspectives = (props: Props) => {
         )})}
       </div>
       <j-modal
-          size="lg"
+          size="fullscreen"
           open={perspectiveModalOpen}
           onToggle={(e: any) => setPerspectiveModalOpen(e.target.open)}
         >

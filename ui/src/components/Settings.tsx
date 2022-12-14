@@ -175,7 +175,7 @@ function Settings() {
         </div>
       </j-popover>
       <j-modal
-        size="lg"
+        size="fullscreen"
         open={lockAgentModalOpen}
         onToggle={(e: any) => setLockAgentModalOpen(e.target.open)}
       >
@@ -202,7 +202,7 @@ function Settings() {
         </j-box>
       </j-modal>
       <j-modal
-        size="lg"
+        size="fullscreen"
         open={clearAgentModalOpen}
         onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}
       >
@@ -231,7 +231,7 @@ function Settings() {
         </j-box>
       </j-modal>
       <j-modal
-        size="lg"
+        size="fullscreen"
         open={qrcodeModal}
         onToggle={(e: any) => setQRCodeModal(e.target.open)}
         title="Proxy QR Code"

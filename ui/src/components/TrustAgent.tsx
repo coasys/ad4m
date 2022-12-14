@@ -34,7 +34,7 @@ const TrustAgent = (props: Props) => {
   return (
     <div>
       <j-modal
-        size="lg"
+        size="fullscreen"
         open={opened}
         onToggle={(e: any) => e.target.open && closeModal()}
       >

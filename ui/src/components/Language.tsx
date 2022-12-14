@@ -181,7 +181,7 @@ const Language = (props: Props) => {
         )})}
       </div>
       <j-modal
-          size="lg"
+          size="fullscreen"
           open={publishLanguageModalOpen}
           onToggle={(e: any) => setPublishLanguageModalOpen(e.target.open)}
         >
@@ -237,7 +237,7 @@ const Language = (props: Props) => {
           </j-box>
       </j-modal>
       <j-modal
-          size="lg"
+          size="fullscreen"
           open={installLanguageModalOpen}
           onToggle={(e: any) => setInstallLanguageModalOpen(e.target.open)}
         >
@@ -269,7 +269,7 @@ const Language = (props: Props) => {
           </j-box>
       </j-modal>
       <j-modal
-          size="lg"
+          size="fullscreen"
           open={publishLanguageResultModalOpen}
           onToggle={(e: any) => setPublishLanguageResultModalOpen(e.target.open)}
         >
