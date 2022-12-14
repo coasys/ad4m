@@ -101,7 +101,7 @@ export function AgentProvider({ children }: any) {
 
     await invoke('close_main_window');
     
-    navigate('/profile');
+    navigate('/settings');
   };
 
   const unlockAgent = async (password: string) => {
@@ -115,7 +115,7 @@ export function AgentProvider({ children }: any) {
       handleLogin(client!, agentStatus!.isUnlocked, agentStatus!.did!);
       console.log("agent status in unlock: ", agentStatus);
       await invoke('close_main_window');
-      navigate('/profile');
+      navigate('/settings');
     } else {
       setState((prev) => ({ ...prev, hasLoginError: true }));
     }
