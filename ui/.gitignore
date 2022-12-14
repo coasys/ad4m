@@ -10,6 +10,7 @@
 
 # production
 /build
+/dist
 
 # bin
 src-tauri/bins

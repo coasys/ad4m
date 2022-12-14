@@ -4,7 +4,7 @@
     "version": "0.2.5"
   },
   "build": {
-    "distDir": "../build",
+    "distDir": "../dist",
     "devPath": "http://127.0.01:3000",
     "beforeDevCommand": "",
     "beforeBuildCommand": ""
