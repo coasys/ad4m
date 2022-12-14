@@ -5,8 +5,8 @@ import { Link, Outlet, useLocation, useNavigate, useRoutes } from 'react-router-
 import { Header, RouteContainer } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
 import PackageInfo from '../../package.json'
-import Settings from './Settings';
 import Logo from './Logo';
+import Profile from './Profile';
 
 type Props = {
   did: String,
@@ -98,18 +98,18 @@ const Navigation = ({did, opened, setOpened}: Props) => {
         <div style={Header}>
           <j-flex a="center" j="between">
             <Logo height={30} width={31} />
-            <Settings />
+            <Profile />
           </j-flex>
         </div>
         <div className={classes.linkContainer}>
-          <Link to="/profile" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/profile' })}>
-            <j-text variant="caption">Profile</j-text>
-          </Link>
           <Link to="/language" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/language' })}>
             <j-text variant="caption">Language</j-text>
           </Link>
           <Link to="/perspective" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/perspective' })}>
             <j-text variant="caption">Perspective</j-text>
+          </Link>
+          <Link to="/settings" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/settings' })}>
+            <j-text variant="caption">Settings</j-text>
           </Link>
         </div>
         <Outlet />

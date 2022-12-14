@@ -1,78 +1,47 @@
-import { Agent, Literal } from '@perspect3vism/ad4m';
-import { useContext, useEffect, useState } from 'react';
-import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from '../constants/triples';
-import { cardStyle, gridButton, MainContainer, MainHeader } from './styles';
+import { ActionIcon, Button, createStyles, Group, Space, Text } from '@mantine/core';
+import { showNotification } from '@mantine/notifications';
+import { useCallback, useContext, useEffect, useState } from 'react';
+import { Copy, Qrcode as QRCodeIcon } from 'tabler-icons-react';
 import { Ad4minContext } from '../context/Ad4minContext';
+import { AgentContext } from '../context/AgentContext';
+import { invoke } from '@tauri-apps/api';
+import QRCode from 'react-qr-code';
 import { buildAd4mClient } from '../util';
-import { useCallback } from 'react';
+import { fetchProfile } from './Settings';
 import CardItems from './CardItems';
 
-type Props = {
-  did: String,
-  opened: boolean,
-  setOpened: (val: boolean) => void
-}
+const useStyles = createStyles((theme) => ({
+  label: {
+    color: theme.colors.dark[1]
+  },
+}));
 
-export const fetchProfile = async (agent: Agent) => {
-  const tempProfile = {
-    firstName: "",
-    lastName: "",
-    username: ""
-  }
+function Profile() {
+  const { classes } = useStyles();
 
-  for (const { data: {source, predicate, target} } of agent.perspective?.links!) {
-    if (source === agent.did) {
-      if (predicate === PREDICATE_FIRSTNAME) {
-        tempProfile.firstName = Literal.fromUrl(target).get()
-      } else if (predicate === PREDICATE_LASTNAME) {
-        tempProfile.lastName = Literal.fromUrl(target).get();
-      } else if (predicate === PREDICATE_USERNAME) {
-        tempProfile.username = Literal.fromUrl(target).get();
-      }
-    }
-  }
+  const {
+    state: {
+      loading,
+    },
+    methods: {
+      lockAgent
+    } } = useContext(AgentContext);
 
-  return tempProfile;
-}
+  const {
+    state: {
+      url,
+      did
+    } } = useContext(Ad4minContext);
 
-const Profile = (props: Props) => {
-  const {state: {
-    url
-  }} = useContext(Ad4minContext);
-
-  const [trustedAgents, setTrustedAgents] = useState<any[]>([]);
-
-  const [trustedAgentModalOpen, settrustedAgentModalOpen] = useState(false);
-  
+  const [password, setPassword] = useState('');
+  const [showProfileInfo, setShowProfileInfo] = useState(false);
+  const [lockAgentModalOpen, setLockAgentModalOpen] = useState(false);
   const [profile, setProfile] = useState({
     firstName: "",
     lastName: "",
     username: ""
   });
 
-  const getTrustedAgents = useCallback(async () => {
-    if (url) {
-      const client = await buildAd4mClient(url);
-      const trustedAgents = await client!.runtime.getTrustedAgents()
-      
-      const tempTempAgents = [];
-      
-      for (const agent of trustedAgents) {
-        const fetchedAgent = await client!.agent.byDID(agent)
-  
-        if (fetchedAgent) {
-          const profile = await fetchProfile(fetchedAgent)
-    
-          tempTempAgents.push({did: agent, ...profile});
-        } else {
-          tempTempAgents.push({did: agent});
-        }
-  
-      }
-  
-      setTrustedAgents(tempTempAgents);
-    }
-  }, [url])
 
   const fetchCurrentAgentProfile = useCallback(async () => {
     if (url) {
@@ -87,73 +56,106 @@ const Profile = (props: Props) => {
 
   useEffect(() => {
     fetchCurrentAgentProfile();
-    getTrustedAgents();
-  }, [fetchCurrentAgentProfile, getTrustedAgents])
+  }, [fetchCurrentAgentProfile])
 
-  console.log(trustedAgentModalOpen)
+
+  const onPasswordChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    event.preventDefault();
+    let { value } = event.target;
+    setPassword(value);
+  }
 
   return (
-    <div style={MainContainer}>
-      <div style={gridButton}>
-        <j-tooltip title="Trusted agents" placement="bottom">
-          <j-button
-            onClick={() => settrustedAgentModalOpen(true)}
-            square
-            circle
-            size="xl"
-            variant="subtle"
-          >
-            <j-icon size="sm" name="shield-check"></j-icon>
-          </j-button>
-        </j-tooltip>
-        <j-box p="200" />
-      </div>
-      <div style={{padding: '24px'}}>
-        <CardItems 
-          title={'Agent ID'}
-          value={props.did as string}
-          titleUnderline
-        />
-        <j-box p="200" />
-        <CardItems 
-          title={'Username'}
-          value={profile?.username}
-          titleUnderline
-        />
-        <j-box p="200" />
-        <CardItems 
-          title={'Name'}
-          value={`${profile.firstName} ${profile.lastName}`}
-          titleUnderline
-        />
-        <j-box p="200" />
-      </div>
+    <div
+    > 
+      <j-popover placement="top">
+        <j-button slot="trigger" variant="ghost" size="sm">
+          <j-flex a="center">
+            {profile.username}
+            <j-box p="200"></j-box>
+            <j-icon size="xs" name="chevron-down"></j-icon>
+          </j-flex>
+        </j-button>
+        <div slot="content">
+          <j-menu-item onClick={() => setLockAgentModalOpen(true)}>
+            Lock Agent
+            <j-icon size="xs" slot="start" name="lock"></j-icon>
+          </j-menu-item>
+          <j-menu-item onClick={() => setShowProfileInfo(true)}>
+            Profile details
+            <j-icon size="xs" slot="start" name="info-circle"></j-icon>
+          </j-menu-item>
+          <j-menu-item onClick={() => invoke("close_application")}>
+            Poweroff Agent
+            <j-icon size="xs" slot="start" name="x-circle"></j-icon>
+          </j-menu-item>
+        </div>
+      </j-popover>
       <j-modal
-          size="fullscreen"
-          open={trustedAgentModalOpen}
-          onToggle={(e: any) => settrustedAgentModalOpen(e.target.open)}
-        >
-          <j-box p="400">
-            <j-flex gap="500" direction="column">
-              <j-text nomargin variant="heading-sm">
-                Trusted Agents
-              </j-text>
-              {trustedAgents.map((e, i) => (
-                <div key={`trusted-agent-${e.did}`} style={{...cardStyle, marginBottom: 0, width: '85%'}}>
-                  <j-flex direction='column' style={{marginTop: 4}}>
-                    <j-text weight="bold" >{e?.username || 'No username'}</j-text>
-                    <j-flex a="center" j="between">
-                      <j-text nomargin variant="body" size="xs">{e?.did.length > 25 ? `${e?.did.substring(0, 25)}...` : e?.did}</j-text>
-                      <j-box p="100"></j-box>
-                      <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
-                        <j-icon size="xs" slot="end" name="clipboard"></j-icon>
-                      </j-button>
-                    </j-flex>
-                  </j-flex>
-                </div>
-              ))}
-            </j-flex>
-          </j-box>
+        size="fullscreen"
+        open={lockAgentModalOpen}
+        onToggle={(e: any) => setLockAgentModalOpen(e.target.open)}
+      >
+        <j-box p="400">
+          <j-flex gap="200" direction="column">
+            <j-text nomargin variant="heading-sm">
+            Lock Agent
+            </j-text>
+            <j-box p="200"></j-box>
+            <j-input
+              placeholder="Password"
+              label="Input your passphrase"
+              size="lg"
+              required
+              onInput={onPasswordChange}
+            ></j-input>
+            <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={() => lockAgent(password)} loading={loading}>
+                Lock agent
+                </j-button>
+              </j-flex>
+          </j-flex>
+        </j-box>
+      </j-modal>
+      <j-modal
+        size="fullscreen"
+        open={showProfileInfo}
+        onToggle={(e: any) => setShowProfileInfo(e.target.open)}
+      >
+        <j-box p="400">
+          <j-flex gap="200" direction="column">
+            <j-text nomargin variant="heading-sm">
+            Profile details
+            </j-text>
+            <div style={{padding: '24px'}}>
+              <CardItems 
+                title={'Agent ID'}
+                value={did as string}
+                titleUnderline
+              />
+              <j-box p="200" />
+              <CardItems 
+                title={'Username'}
+                value={profile?.username}
+                titleUnderline
+              />
+              <j-box p="200" />
+              <CardItems 
+                title={'Name'}
+                value={`${profile.firstName} ${profile.lastName}`}
+                titleUnderline
+              />
+              <j-box p="200" />
+            </div>
+            <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={() => setShowProfileInfo(false)}>
+                Close
+                </j-button>
+              </j-flex>
+          </j-flex>
+        </j-box>
       </j-modal>
     </div>
   )

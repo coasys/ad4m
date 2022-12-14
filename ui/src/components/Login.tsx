@@ -95,7 +95,7 @@ const Login = (props: any) => {
       if (!connected) {
         navigate('/connect');
       } else if (connected && isUnlocked) {
-        navigate('/profile');
+        navigate('/settings');
       }
   }, [connected, isUnlocked, navigate])
 

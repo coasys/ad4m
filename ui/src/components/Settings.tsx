@@ -1,49 +1,104 @@
-import { ActionIcon, Button, createStyles, Group, Space, Text } from '@mantine/core';
-import { showNotification } from '@mantine/notifications';
-import { useCallback, useContext, useEffect, useState } from 'react';
-import { Copy, Qrcode as QRCodeIcon } from 'tabler-icons-react';
+import { Agent, Literal } from '@perspect3vism/ad4m';
+import { useContext, useEffect, useState } from 'react';
+import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from '../constants/triples';
+import { cardStyle, gridButton, MainContainer, MainHeader } from './styles';
 import { Ad4minContext } from '../context/Ad4minContext';
-import { AgentContext } from '../context/AgentContext';
+import { buildAd4mClient } from '../util';
+import { useCallback } from 'react';
+import CardItems from './CardItems';
+import { showNotification } from '@mantine/notifications';
 import { invoke } from '@tauri-apps/api';
 import QRCode from 'react-qr-code';
-import { buildAd4mClient } from '../util';
-import { fetchProfile } from './Profile';
+import { AgentContext } from '../context/AgentContext';
 
-const useStyles = createStyles((theme) => ({
-  label: {
-    color: theme.colors.dark[1]
-  },
-}));
+type Props = {
+  did: String,
+  opened: boolean,
+  setOpened: (val: boolean) => void
+}
 
-function Settings() {
-  const { classes } = useStyles();
+export const fetchProfile = async (agent: Agent) => {
+  const tempProfile = {
+    firstName: "",
+    lastName: "",
+    username: ""
+  }
 
+  for (const { data: {source, predicate, target} } of agent.perspective?.links!) {
+    if (source === agent.did) {
+      if (predicate === PREDICATE_FIRSTNAME) {
+        tempProfile.firstName = Literal.fromUrl(target).get()
+      } else if (predicate === PREDICATE_LASTNAME) {
+        tempProfile.lastName = Literal.fromUrl(target).get();
+      } else if (predicate === PREDICATE_USERNAME) {
+        tempProfile.username = Literal.fromUrl(target).get();
+      }
+    }
+  }
+
+  return tempProfile;
+}
+
+const Profile = (props: Props) => {
+  
   const {
     state: {
       loading,
-    },
-    methods: {
-      lockAgent
     } } = useContext(AgentContext);
 
-  const {
-    state: {
-      url,
-      did,
-      client
-    } } = useContext(Ad4minContext);
+  const {state: {
+    url,
+    did,
+    client
+  }} = useContext(Ad4minContext);
+
+  const [trustedAgents, setTrustedAgents] = useState<any[]>([]);
+
+  const [trustedAgentModalOpen, settrustedAgentModalOpen] = useState(false);
+
+  const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
+
+  const [proxy, setProxy] = useState('');
+
+  const [qrcodeModal, setQRCodeModal] = useState(false);
 
   const [password, setPassword] = useState('');
-  const [lockAgentModalOpen, setLockAgentModalOpen] = useState(false);
-  const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
-  const [proxy, setProxy] = useState('');
-  const [qrcodeModal, setQRCodeModal] = useState(false);
+  
   const [profile, setProfile] = useState({
     firstName: "",
     lastName: "",
     username: ""
   });
 
+  const onPasswordChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    event.preventDefault();
+    let { value } = event.target;
+    setPassword(value);
+  }
+
+  const getTrustedAgents = useCallback(async () => {
+    if (url) {
+      const client = await buildAd4mClient(url);
+      const trustedAgents = await client!.runtime.getTrustedAgents()
+      
+      const tempTempAgents = [];
+      
+      for (const agent of trustedAgents) {
+        const fetchedAgent = await client!.agent.byDID(agent)
+  
+        if (fetchedAgent) {
+          const profile = await fetchProfile(fetchedAgent)
+    
+          tempTempAgents.push({did: agent, ...profile});
+        } else {
+          tempTempAgents.push({did: agent});
+        }
+  
+      }
+  
+      setTrustedAgents(tempTempAgents);
+    }
+  }, [url])
 
   const fetchCurrentAgentProfile = useCallback(async () => {
     if (url) {
@@ -58,7 +113,8 @@ function Settings() {
 
   useEffect(() => {
     fetchCurrentAgentProfile();
-  }, [fetchCurrentAgentProfile])
+    getTrustedAgents();
+  }, [fetchCurrentAgentProfile, getTrustedAgents])
 
   useEffect(() => {
     const getProxy = async () => {
@@ -69,10 +125,31 @@ function Settings() {
     getProxy().catch(console.error);;
   }, []);
 
-  const onPasswordChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    event.preventDefault();
-    let { value } = event.target;
-    setPassword(value);
+  console.log(trustedAgentModalOpen);
+
+  const formatProxy = (proxy: string) => {
+    return proxy.replace(/^https(.*)/, 'wss$1').replace(/^http(.*)/, 'ws$1') + "/graphql";
+  }
+
+  const copyProxy = () => {
+    navigator.clipboard.writeText(proxy);
+    showNotification({
+      message: 'Proxy endpoint copied to clipboard',
+      autoClose: 1000
+    });
+  }
+
+  const showProxyQRCode = () => {
+    setQRCodeModal(true);
+  }
+
+  const clearAgent = async (password: string) => {
+    console.log('clearAgent 0', password)
+    let agentStatus = await client?.agent.lock(password);
+    console.log('clearAgent 1', agentStatus)
+    if (!agentStatus?.isUnlocked) {
+      await invoke("clear_state");
+    }
   }
 
   const copyUrl = () => {
@@ -94,113 +171,125 @@ function Settings() {
     setProxy('');
   }
 
-  const formatProxy = (proxy: string) => {
-    return proxy.replace(/^https(.*)/, 'wss$1').replace(/^http(.*)/, 'ws$1') + "/graphql";
-  }
-
-  const clearAgent = async (password: string) => {
-    console.log('clearAgent 0', password)
-    let agentStatus = await client?.agent.lock(password);
-    console.log('clearAgent 1', agentStatus)
-    if (!agentStatus?.isUnlocked) {
-      await invoke("clear_state");
-    }
-  }
-
-  const copyProxy = () => {
-    navigator.clipboard.writeText(proxy);
-    showNotification({
-      message: 'Proxy endpoint copied to clipboard',
-      autoClose: 1000
-    });
-  }
-
-  const showProxyQRCode = () => {
-    setQRCodeModal(true);
-  }
-
   const showProxy = () => {
-    if (proxy) {
-      return (
-        <div>
-          <j-menu-item onClick={stopProxy}>
-            Stop Proxy
-            <j-icon size="xs" slot="start" name="wifi"></j-icon>
-          </j-menu-item>
-          <j-menu-item onClick={copyProxy}>
-            Copy Proxy URL
-            <j-icon size="xs" slot="start" name="clipboard"></j-icon>
-          </j-menu-item>
-          <j-menu-item onClick={showProxyQRCode}>
-            Show Proxy QR
-            <j-icon size="xs" slot="start" name="qr-code-scan"></j-icon>
-          </j-menu-item>
-        </div>
-      )
-    } else {
-      return (
-        <j-menu-item onClick={setupProxy}>
-        Setup Proxy
-          <j-icon size="xs" slot="start" name="wifi"></j-icon>
-        </j-menu-item>
-      )
-    }
+    return (
+      <>
+        <j-tooltip title={proxy.length === 0 ? "Setup proxy" : "Stop Proxy"} placement="bottom">
+          <j-button
+            onClick={() => proxy.length === 0 ? setupProxy() : stopProxy()}
+            square
+            circle
+            size="xl"
+            variant="subtle"
+          >
+            <j-icon size="sm" name="wifi"></j-icon>
+          </j-button>
+        </j-tooltip>
+        {
+          proxy && (
+            <>
+              <j-tooltip title="Copy proxy URL" placement="bottom">
+                <j-button
+                  onClick={copyProxy}
+                  square
+                  circle
+                  size="xl"
+                  variant="subtle"
+                >
+                  <j-icon size="sm" name="clipboard"></j-icon>
+                </j-button>
+              </j-tooltip>
+              <j-tooltip title="Show Proxy QR" placement="bottom">
+                <j-button
+                  onClick={showProxyQRCode}
+                  square
+                  circle
+                  size="xl"
+                  variant="subtle"
+                >
+                  <j-icon size="sm" name="qr-code-scan"></j-icon>
+                </j-button>
+              </j-tooltip>
+            </>
+          )
+        }
+      </>
+    )
   }
 
   return (
-    <div
-    > 
-      <j-popover placement="top" event="contextmenu">
-        <j-button slot="trigger" variant="ghost" size="sm">
-          <j-flex a="center">
-            {profile.username}
-            <j-box p="200"></j-box>
-            <j-icon size="xs" name="chevron-down"></j-icon>
-          </j-flex>
-        </j-button>
-        <div slot="content">
-          <j-menu-item onClick={() => setLockAgentModalOpen(true)}>
-            Lock Agent
-            <j-icon size="xs" slot="start" name="lock"></j-icon>
-          </j-menu-item>
-          <j-menu-item onClick={() => setClearAgentModalOpen(true)}>
-            Delete Agent
-            <j-icon size="xs" slot="start" name="trash"></j-icon>
-          </j-menu-item>
-          <j-menu-item onClick={() => invoke("close_application")}>
-            Poweroff Agent
-            <j-icon size="xs" slot="start" name="x-circle"></j-icon>
-          </j-menu-item>
-          {showProxy()}
-        </div>
-      </j-popover>
+    <div style={MainContainer}>
+      <div style={gridButton}>
+        <j-tooltip title="Trusted agents" placement="bottom">
+          <j-button
+            onClick={() => settrustedAgentModalOpen(true)}
+            square
+            circle
+            size="xl"
+            variant="subtle"
+          >
+            <j-icon size="sm" name="shield-check"></j-icon>
+          </j-button>
+        </j-tooltip>
+        <j-tooltip title="Delete Agent" placement="bottom">
+          <j-button
+            onClick={() => setClearAgentModalOpen(true)}
+            square
+            circle
+            size="xl"
+            variant="subtle"
+          >
+            <j-icon size="sm" name="trash"></j-icon>
+          </j-button>
+        </j-tooltip>
+        {showProxy()}
+        <j-box p="200" />
+      </div>
+      <j-modal
+          size="fullscreen"
+          open={trustedAgentModalOpen}
+          onToggle={(e: any) => settrustedAgentModalOpen(e.target.open)}
+        >
+          <j-box p="400">
+            <j-flex gap="500" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Trusted Agents
+              </j-text>
+              {trustedAgents.map((e, i) => (
+                <div key={`trusted-agent-${e.did}`} style={{...cardStyle, marginBottom: 0, width: '85%'}}>
+                  <j-flex direction='column' style={{marginTop: 4}}>
+                    <j-text weight="bold" >{e?.username || 'No username'}</j-text>
+                    <j-flex a="center" j="between">
+                      <j-text nomargin variant="body" size="xs">{e?.did.length > 25 ? `${e?.did.substring(0, 25)}...` : e?.did}</j-text>
+                      <j-box p="100"></j-box>
+                      <j-button size="xs" variant="transparent"  onClick={() => console.log('wow')}>
+                        <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                      </j-button>
+                    </j-flex>
+                  </j-flex>
+                </div>
+              ))}
+            </j-flex>
+          </j-box>
+      </j-modal>
       <j-modal
         size="fullscreen"
-        open={lockAgentModalOpen}
-        onToggle={(e: any) => setLockAgentModalOpen(e.target.open)}
+        open={qrcodeModal}
+        onToggle={(e: any) => setQRCodeModal(e.target.open)}
+        title="Proxy QR Code"
+        centered
       >
         <j-box p="400">
           <j-flex gap="200" direction="column">
             <j-text nomargin variant="heading-sm">
-            Lock Agent
+            Proxy QR Code
             </j-text>
             <j-box p="200"></j-box>
-            <j-input
-              placeholder="Password"
-              label="Input your passphrase"
-              size="lg"
-              required
-              onInput={onPasswordChange}
-            ></j-input>
-            <j-box p="200"></j-box>
-              <j-flex>
-                <j-button onClick={() => lockAgent(password)} loading={loading}>
-                Lock agent
-                </j-button>
-              </j-flex>
+          <QRCode value={proxy} />
           </j-flex>
         </j-box>
       </j-modal>
+
       <j-modal
         size="fullscreen"
         open={clearAgentModalOpen}
@@ -230,25 +319,8 @@ function Settings() {
           </j-flex>
         </j-box>
       </j-modal>
-      <j-modal
-        size="fullscreen"
-        open={qrcodeModal}
-        onToggle={(e: any) => setQRCodeModal(e.target.open)}
-        title="Proxy QR Code"
-        centered
-      >
-        <j-box p="400">
-          <j-flex gap="200" direction="column">
-            <j-text nomargin variant="heading-sm">
-            Proxy QR Code
-            </j-text>
-            <j-box p="200"></j-box>
-          <QRCode value={proxy} />
-          </j-flex>
-        </j-box>
-      </j-modal>
     </div>
   )
 }
 
-export default Settings
+export default Profile

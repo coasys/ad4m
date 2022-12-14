@@ -64,12 +64,11 @@ const App = () => {
           </Stack>
         }/>
         <Route path="/" element={<Navigation did={did} setOpened={setOpened} opened={opened} />}>
-          <Route path="profile" element={<Profile did={did} setOpened={setOpened} opened={opened} />} />
           <Route path="language" element={<Language setOpened={setOpened} opened={opened} />} />
           <Route path="perspective" element={<Perspectives  setOpened={setOpened} opened={opened} />} />
           <Route path="settings" element={
             <AgentProvider>
-              <Settings />
+              <Settings did={did} setOpened={setOpened} opened={opened} />
             </AgentProvider>
             }
           />
