@@ -6,8 +6,9 @@ use crate::{
     },
     types::LinkExpression,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::naive::NaiveDateTime;
+use regex::Regex;
 use serde_json::Value;
 type DateTime = NaiveDateTime;
 
@@ -169,12 +170,12 @@ impl PerspectiveProxy {
     }
 
     pub async fn create_subject(&self, class: &String, base: &String) -> Result<()> {
-        if let Value::Array(results) = self
+        if let Ok(Value::Array(results)) = self
             .infer(format!(
                 "subject_class(\"{}\", C), constructor(C, Action)",
                 class
             ))
-            .await?
+            .await
         {
             println!("{:?}", results);
             if let Some(Value::Object(action)) = results.first() {
@@ -193,49 +194,91 @@ impl PerspectiveProxy {
     }
 
     async fn execute_action(&self, action: &String, base: &String) -> Result<()> {
-        let comman_array: Value = serde_json::from_str(action)?;
-        if let Some(commands) = comman_array.as_array() {
-            for command in commands {
-                if let Some(Value::String(action)) = command.get("action") {
-                    let source = get_command_param(command, "source", base)
-                        .ok_or(anyhow::anyhow!("No source in action"))?;
-                    let target = get_command_param(command, "target", base)
-                        .ok_or(anyhow::anyhow!("No target in action"))?;
-                    let predicate = get_command_param(command, "predicate", base);
-                    match action.as_str() {
-                        "add_link" => {
-                            self.add_link(source, target, predicate)
-                                .await?;
-                        }
-                        "remove_link" => {
-                            unimplemented!();
-                            //let links = self.get(Some(source), Some(target), predicate, None, None, None).await?;
-                            //elf.remove_link(source, target.into(), predicate.into()).await?;
-                        }
-                        "set_single_target" => {
-                            self.set_single_target(
-                                source,
-                                predicate.ok_or(anyhow::anyhow!(
-                                    "No predicate in set_single_target action"
-                                ))?,
-                                target,
-                            )
-                            .await?;
-                        }
-                        _ => {}
-                    }
+        let commands = parse_action(action)?;
+        for command in commands {
+            let command = command.replace("this", base);
+            match command.action.as_str() {
+                "addLink" => {
+                    //println!("addLink: {:?}", command);
+                    self.add_link(command.source, command.target, command.predicate)
+                        .await?;
+                }
+                "removeLink" => {
+                    unimplemented!();
+                    //let links = self.get(Some(source), Some(target), predicate, None, None, None).await?;
+                    //elf.remove_link(source, target.into(), predicate.into()).await?;
+                }
+                "setSingleTarget" => {
+                    self.set_single_target(
+                        command.source,
+                        command.predicate.ok_or(anyhow::anyhow!(
+                            "No predicate in set_single_target action"
+                        ))?,
+                        command.target,
+                    )
+                    .await?;
+                }
+                _ => {
+                    return Err(anyhow::anyhow!("Unknown action: {}", command.action));
                 }
             }
         }
-
         Ok(())
     }
 }
 
-fn get_command_param(command: &Value, param: &str, base: &String) -> Option<String> {
-    let raw: Option<String> = command
-        .get(param)
-        .and_then(|s| s.as_str())
-        .map(|s| s.into());
-    raw.map(|s| s.replace("this", base))
+#[derive(Debug)]
+struct Command {
+    pub action: String,
+    pub source: String,
+    pub predicate: Option<String>,
+    pub target: String,
+}
+
+impl Command {
+    pub fn replace(&self, pattern: &str, replacement: &str) -> Command {
+        Command {
+            action: self.action.replace(pattern, replacement),
+            source: self.source.replace(pattern, replacement),
+            predicate: self.predicate.as_ref().map(|f| f.replace(pattern, replacement)),
+            target: self.target.replace(pattern, replacement),
+        }
+    }
+}
+
+fn parse_action(action: &String) -> Result<Vec<Command>> {
+    let action_regex =
+        Regex::new(r"\[(?P<command>\{.*})*\]")?;
+
+    // This parses strings like:
+    // {action: "<action>", source: "<source>", predicate: "<predicate>", target: "<target>"}
+    let command_regex =
+        Regex::new(r#"\{(action:\s*"(?P<action>[\S--,]+)",?\s*)|(source:\s*"(?P<source>[\S--,]+)",?\s*)|(predicate:\s*"(?P<predicate>[\S--,]+)",?\s*)|(target:\s*"(?P<target>[\S--,]+)",?\s*)\}"#)?;
+
+    let mut commands = Vec::new();
+    for capture in action_regex.captures_iter(action) {
+        let mut action = None;
+        let mut source = None;
+        let mut predicate = None;
+        let mut target = None;
+        command_regex
+            .captures_iter(capture.name("command").unwrap().as_str())
+            .for_each(|capture| {
+                action = action.or(capture.name("action").map(|e| e.as_str()));
+                source = source.or(capture.name("source").map(|e| e.as_str()));
+                predicate = predicate.or(capture.name("predicate").map(|e| e.as_str()));
+                target = target.or(capture.name("target").map(|e| e.as_str()));
+                
+            });
+
+        commands.push(Command {
+            action: action.ok_or(anyhow!("Comman without action"))?.into(),
+            source: source.ok_or(anyhow!("Comman without source"))?.into(),
+            predicate: predicate.map(|e| e.into()),
+            target: target.ok_or(anyhow!("Comman without target"))?.into(),
+        });
+        println!("{:?}", commands);
+    }
+            
+    Ok(commands)
 }
