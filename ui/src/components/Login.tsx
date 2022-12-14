@@ -25,6 +25,7 @@ const Login = (props: any) => {
   let navigate = useNavigate();
 
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentSignupIndex, setCurrentSignupIndex] = useState(0);
 
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
@@ -38,42 +39,8 @@ const Login = (props: any) => {
     passwordError = "Invalid password"
   }
 
-  const onPasswordChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    event.preventDefault();
-    let { value } = event.target;
-    setPassword(value);
-  }
-
-  const onFirstNameChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    event.preventDefault();
-    const { value } = event.target;
-    setFirstName(value);
-  }
-
-  const onLastNameChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    event.preventDefault();
-    const { value } = event.target;
-    setLastName(value);
-  }
-
-  const onUsernameChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    event.preventDefault();
-    const { value } = event.target;
-    setUsername(value);
-  }
-
   const generate = () => {
-    if (username.length === 0) {
-      setUsernameError("Username is requied");
-    } else {
-      setUsernameError(null);
-    }
-
-    if (password.length === 0) {
-      setPasswordError("Password is requied");
-    } else {
-      setPasswordError(null);
-    }
+    checkUsernamePassword();
 
     if (username.length > 0 && password.length > 0) {
       generateAgent(username, firstName, lastName, password);
@@ -91,13 +58,37 @@ const Login = (props: any) => {
     }
   }
 
+  const checkUsernamePassword = () => {
+    if (username.length === 0) {
+      setUsernameError("Username is requied");
+    } else {
+      setUsernameError(null);
+    }
+
+    if (password.length === 0) {
+      setPasswordError("Password is requied");
+    } else {
+      setPasswordError(null);
+    }
+  }
+
+  const gotoNextSignUpStep = () => {
+    checkUsernamePassword();
+
+    if (username.length > 0 && password.length > 0) {
+      setCurrentSignupIndex(1);
+    }
+  }
+
   useEffect(() => {
       if (!connected) {
         navigate('/connect');
       } else if (connected && isUnlocked) {
         navigate('/settings');
+      } else if (isInitialized) {
+        setCurrentIndex(5)
       }
-  }, [connected, isUnlocked, navigate])
+  }, [connected, isUnlocked, navigate, isInitialized])
 
   return (
     <div>
@@ -210,61 +201,82 @@ Censorship free.
         )}
         {currentIndex === 4 && (
           <div style={{width: 400, display: 'flex', flexDirection: 'column'}}>
-            <j-input
-              autofocus
-              size="lg"
-              label="Username"
-              minlength={10}
-              maxlength={30}
-              autovalidate
-              required
-              type="text"
-              onInput={(e: any) => setUsername(e.target.value)}
-            ></j-input>
-            <j-box p="400"></j-box>
-            <j-input
-              autofocus
-              size="lg"
-              label="Firstname"
-              minlength={10}
-              maxlength={30}
-              autovalidate
-              required
-              type="text"
-              onInput={(e: any) => setFirstName(e.target.value)}
-            ></j-input>
-            <j-box p="400"></j-box>
-            <j-input
-              autofocus
-              size="lg"
-              label="Lastname"
-              minlength={10}
-              maxlength={30}
-              autovalidate
-              required
-              type="password"
-              onInput={(e: any) => setLastName(e.target.value)}
-            ></j-input>
-            <j-box p="400"></j-box>
-            <j-input
-              autofocus
-              size="lg"
-              label="Password"
-              minlength={10}
-              maxlength={30}
-              autovalidate
-              required
-              type="password"
-              onInput={(e: any) => setPassword(e.target.value)}
-            ></j-input>
-            <j-box p="400"></j-box>
-            <j-button size="lg" variant="primary" style={{alignSelf: 'center'}} onClick={() => generate()} loading={loading}>
-              Generate Agent
-            </j-button>
+            <Image style={{width: '140px', margin: 'auto'}} src="ad4msquarelogo2_white_colouremblem.png"></Image>
+            <j-box p="500"></j-box>
+            {
+              currentSignupIndex === 0 && (
+                <>                
+                  <j-input
+                    autofocus
+                    size="lg"
+                    label="Username"
+                    minlength={10}
+                    maxlength={30}
+                    autovalidate
+                    required
+                    type="text"
+                    onInput={(e: any) => setUsername(e.target.value)}
+                  ></j-input>
+                  <j-box p="400"></j-box>
+                  <j-input
+                    autofocus
+                    size="lg"
+                    label="Password"
+                    minlength={10}
+                    maxlength={30}
+                    autovalidate
+                    required
+                    type="password"
+                    onInput={(e: any) => setPassword(e.target.value)}
+                  ></j-input>
+                  <j-box p="400"></j-box>
+                  <j-button size="lg" variant="primary" style={{alignSelf: 'center'}} onClick={() => gotoNextSignUpStep()} loading={loading}>
+                    Next
+                  </j-button>
+                </>
+              )
+            }
+            {
+              currentSignupIndex === 1 && (
+                <>                
+                  <j-input
+                    autofocus
+                    size="lg"
+                    label="Firstname"
+                    minlength={10}
+                    maxlength={30}
+                    autovalidate
+                    required
+                    type="text"
+                    onInput={(e: any) => setFirstName(e.target.value)}
+                  ></j-input>
+                  <j-box p="400"></j-box>
+                  <j-input
+                    autofocus
+                    size="lg"
+                    label="Lastname"
+                    minlength={10}
+                    maxlength={30}
+                    autovalidate
+                    required
+                    type="password"
+                    onInput={(e: any) => setLastName(e.target.value)}
+                  ></j-input>
+                  <j-box p="400"></j-box>
+                  <j-box p="400"></j-box>
+                  <j-button size="lg" variant="primary" style={{alignSelf: 'center'}} onClick={() => generate()} loading={loading}>
+                    Generate Agent
+                  </j-button>
+                </>
+              )
+            }
+
           </div>
         )}
         {currentIndex === 5 && (
           <div style={{width: 400, display: 'flex', flexDirection: 'column'}}>
+            <Image style={{width: '140px', margin: 'auto'}} src="ad4msquarelogo2_white_colouremblem.png"></Image>
+            <j-box p="500"></j-box>
             <j-input
               autofocus
               size="lg"
