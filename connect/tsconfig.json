@@ -6,13 +6,12 @@
     "outDir": "dist",
     "target": "es6",
     "moduleResolution": "Node",
+    "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "types": ["node", "jest"],
-    "skipLibCheck": true,
+    "skipLibCheck": true
   },
-  "include": [
-    "**/*",
-  ],
+  "include": ["**/*"],
   "exclude": [
     "node_modules/*",
     "**/*.spec.ts",
