@@ -171,6 +171,21 @@ impl PerspectiveProxy {
         Ok(classes)
     }
 
+    pub async fn subject_class_properties(&self, class: &String) -> Result<Vec<String>> {
+        let mut propertys = Vec::new();
+        if let Value::Array(propertys_results) = self
+            .infer(format!("subject_class(\"{}\", C), property(C, X)", class))
+            .await?
+        {
+            for property in propertys_results {
+                if let Some(Value::String(property_name)) = property.get("X") {
+                    propertys.push(property_name.clone());
+                }
+            }
+        }
+        Ok(propertys)
+    }
+
     pub async fn create_subject(&self, class: &String, base: &String) -> Result<()> {
         if let Ok(Value::Array(results)) = self
             .infer(format!(

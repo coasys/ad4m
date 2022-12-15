@@ -104,6 +104,38 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
+        let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\]\s*=\s*(?P<value>\S+)")?;
+        let caps = subject_create.captures(&line);
+
+        if let Some(caps) = caps {
+            let base = caps.name("base").unwrap().as_str().to_string();
+            let name = caps.name("name").unwrap().as_str().to_string();
+            let value = caps.name("value").unwrap().as_str().to_string();
+
+            let classes = perspective.get_subject_classes(&base).await?;
+            if classes.is_empty() {
+                println!("\x1b[91mNo subject found at: \x1b[97m{}", base);
+                continue;
+            }
+            let mut done = false;
+            for class in &classes {
+                if let Ok(subject) =  perspective.get_subject(class, &base).await {
+                    if let Ok(()) = subject.set_property(&name, &value).await {
+                        done = true;
+                    }
+                }
+            }
+            if !done {
+                println!("\x1b[91mNo subject class found at: '\x1b[97m{}\x1b[91m', that has a property named '{}'", base, name);
+                println!("Found classes:");
+                for class in &classes {
+                    println!("\t{} [{}]", class, perspective.subject_class_properties(class).await?.join(", "));
+                }
+                
+            }
+            continue;
+        }
+
         let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)")?;
         let caps = subject_create.captures(&line);
 
@@ -136,28 +168,6 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                 } 
             }
             
-            continue;
-        }
-
-        let subject_create = Regex::new(r"subject.set\((?P<class>\S+),\s*(?P<base>\S+),\s*(?P<name>\S+),\s*(?P<value>\S+)\)")?;
-        let caps = subject_create.captures(&line);
-
-        if let Some(caps) = caps {
-            let class = caps.name("class").unwrap().as_str().to_string();
-            let base = caps.name("base").unwrap().as_str().to_string();
-            let name = caps.name("name").unwrap().as_str().to_string();
-            let value = caps.name("value").unwrap().as_str().to_string();
-
-            match perspective.get_subject(&class, &base).await {
-                Ok(subject) => {
-                    if let Err(e) = subject.set_property(&name, &value).await {
-                        println!("\x1b[91m{}", e.root_cause());
-                    }
-                }
-                Err(e) => {
-                    println!("\x1b[91m{}", e.root_cause());
-                }
-            } 
             continue;
         }
 
