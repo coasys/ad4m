@@ -14,7 +14,7 @@ export default function ActionButton({tooltip, onClick, icon}: ActionButtonProps
         size="xl"
         variant="subtle"
       >
-        <j-icon size="sm" name={icon}></j-icon>
+        <j-icon size="md" name={icon}></j-icon>
       </j-button>
     </j-tooltip>
   )

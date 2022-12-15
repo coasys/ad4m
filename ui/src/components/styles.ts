@@ -49,8 +49,9 @@ export const listStyle = {
 
 export const gridButton = {
   display: 'grid',
-  columnGap: 'calc(100% - 330px)',
-  gridTemplateColumns: 'repeat(4, 64px)',
+  columnGap: 'calc(100% - 305px)',
+  rowGap: '30px',
+  gridTemplateColumns: 'repeat(3, 79px)',
   justifyContent: 'center',
   alignItems: 'center',
   padding: '30px 20px 0 20px'

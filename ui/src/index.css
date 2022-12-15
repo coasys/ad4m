@@ -33,6 +33,7 @@ code {
   --j-color-subtractor: 110%;
   --j-color-multiplier: -1;
   --j-border-width: 3px;
+  --j-size-xl: 80px;
 
   background-color: var(--j-color-black) !important;
 }
@@ -84,4 +85,8 @@ code {
   height: var(--j-toggle-size);
   align-items: center;
   gap: var(--j-space-400);
+}
+
+:root j-button::part([size="xl"]) {
+  --j-button-height: 500px;
 }
