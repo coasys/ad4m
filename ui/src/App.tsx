@@ -16,7 +16,7 @@ import Language from './components/Language';
 import Settings from './components/Settings';
 import { appWindow } from '@tauri-apps/api/window';
 import { Connect } from './components/Connect';
-import { Apps } from 'tabler-icons-react';
+import Apps from './components/Apps';
 
 const App = () => {
   const [opened, setOpened] = useState(false);

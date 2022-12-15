@@ -125,3 +125,68 @@ export class AgentSignature {
         this.publicKey = publicKey;
     }
 }
+
+@ObjectType()
+export class Resource {
+    @Field()
+    domain: string;
+
+    @Field(type => [String])
+    pointers: string[];
+
+    constructor(domain: string, pointers: string[]) {
+        this.domain = domain;
+        this.pointers = pointers;
+    }
+}
+
+@ObjectType()
+export class Capability {
+    @Field(type => Resource)
+    with: Resource;
+
+    @Field(type => [String])
+    can: string[];
+
+    constructor(withF: Resource, can: string[]) {
+        this.with = withF;
+        this.can = can;
+    }
+}
+
+
+@ObjectType()
+export class AuthInfo {
+    @Field()
+    appName: string;
+
+    @Field()
+    appDesc: string;
+
+    @Field()
+    appUrl: string;
+
+    @Field(type => [Capability])
+    capabilities: Capability[];
+
+    constructor(appName: string, appDesc: string, appUrl: string, capabilities: Capability[]) {
+        this.appName = appName;
+        this.appDesc = appDesc;
+        this.appUrl = appUrl;
+        this.capabilities = capabilities;
+    }
+}
+
+@ObjectType()
+export class Apps {
+    @Field()
+    requestId: string;
+
+    @Field()
+    auth: AuthInfo;
+
+    constructor(requestId: string, auth: AuthInfo) {
+        this.requestId = requestId;
+        this.auth = auth;
+    }
+}

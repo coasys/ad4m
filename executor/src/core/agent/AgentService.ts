@@ -23,6 +23,8 @@ export default class AgentService {
     #signingKeyId?: string
     #wallet?: object
     #file: string
+    #appsFile: string;
+    #requestingAuthInfo?: AuthInfoExtended;
     #fileProfile: string
     #agent?: Agent
     #agentLanguage?: Language
@@ -38,6 +40,7 @@ export default class AgentService {
     constructor(rootConfigPath: string, reqCredential?: string) {
         this.#file = path.join(rootConfigPath, "agent.json")
         this.#fileProfile = path.join(rootConfigPath, "agentProfile.json")
+        this.#appsFile = path.join(rootConfigPath, "apps.json")
         this.#pubsub = PubSubInstance.get()
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
@@ -347,6 +350,8 @@ export default class AgentService {
         let rand = genRandomDigits()
         this.#requests.set(genRequestKey(requestId, rand), auth)
         
+        this.#requestingAuthInfo = JSON.parse(authExt);
+
         return rand
     }
 
@@ -375,7 +380,21 @@ export default class AgentService {
 
         this.#requests.delete(authKey)
 
+        if (requestId === this.#requestingAuthInfo?.requestId) {
+            const apps = JSON.parse(fs.readFileSync(this.#appsFile).toString())
+            fs.writeFileSync(this.#appsFile, JSON.stringify([...apps, this.#requestingAuthInfo]))
+        }
+
         return jwt
+    }
+
+    getApps(): AuthInfoExtended[] {
+        try {
+            return JSON.parse(fs.readFileSync(this.#appsFile).toString())
+        } catch (e) {
+            fs.writeFileSync(this.#appsFile, '[]')
+            return []
+        }
     }
 
     async signMessage(msg: string) {
