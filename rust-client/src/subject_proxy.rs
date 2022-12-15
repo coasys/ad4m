@@ -67,9 +67,11 @@ impl <'a> SubjectProxy<'a> {
             let result = self.perspective.infer(query).await?;
 
             if let Some(result_array) = result.as_array() {
-                if let Some(Value::String(value)) = result_array[0].get("Value") {
-                    values.insert(p, value.clone());
-                }
+                match result_array[0].get("Value") {
+                    Some(Value::String(value)) => values.insert(p.clone(), value.clone()),
+                    Some(Value::Number(value)) => values.insert(p.clone(), value.to_string()),
+                    _ => None
+                };
             }
         }
         Ok(values)
