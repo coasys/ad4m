@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-
+use maplit::btreemap;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
@@ -94,5 +94,22 @@ impl <'a> SubjectProxy<'a> {
             }
         }
         Ok(values)
+    }
+
+    pub async fn set_property(&self, property: &String, value: &String) -> Result<()> {
+        let query = format!(
+            r#"subject_class("{}", C), property_setter(C, "{}", Action)"#, 
+            self.subject_class,
+            property,
+        );
+        let result = self.perspective.infer(query).await?;
+        if let Some(result_array) = result.as_array() {
+            if let Some(Value::String(action)) = result_array[0].get("Action") {
+                self.perspective.execute_action(action, &self.base, Some(btreemap!{"value" => value})).await?;
+            }
+        } else {
+            return Err(anyhow!(r#"No property_setter found for property "{}" on class "{}""#, property, self.subject_class));
+        }
+        Ok(())
     }
 }

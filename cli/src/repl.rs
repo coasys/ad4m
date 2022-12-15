@@ -66,7 +66,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        let subject_create = Regex::new(r"subject.construct\s+(?P<class>\S+)\s+(?P<base>\S+)")?;
+        let subject_create = Regex::new(r"new\s+(?P<class>\S+)\(\s*(?P<base>\S+)\s*\)")?;
         let caps = subject_create.captures(&line);
         if let Some(caps) = caps {
             let class = caps.name("class").unwrap().as_str().to_string();
@@ -94,19 +94,48 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             let class = caps.name("class").unwrap().as_str().to_string();
             let base = caps.name("base").unwrap().as_str().to_string();
 
-            let subject = perspective.get_subject(&class, &base);
-            let properties = subject.get_property_values().await?;
-            let collections = subject.get_collection_values().await?;
-            println!("\x1b[90mSubject at:\n\x1b[95m{}\x1b[37m", base);
-            println!("================");
-            println!("\x1b[90mClass \x1b[36m{}:", class);
-            for (key, value) in properties {
-                println!("🧩\t \x1b[36m{}: \x1b[97m{}", key, value);
-            }
-            println!("================");
-            for (key, value) in collections {
-                println!("📦\t \x1b[36m{}: \x1b[97m{}", key, value.join(", "));
-            }
+            match perspective.get_subject(&class, &base).await {
+                Ok(subject) => {
+                    let properties = subject.get_property_values().await?;
+                    let collections = subject.get_collection_values().await?;
+                    println!("\x1b[90mSubject at:\n\x1b[95m{}\x1b[37m", base);
+                    println!("================");
+                    println!("\x1b[90mClass \x1b[36m{}:", class);
+                    for (key, value) in properties {
+                        println!("🧩\t \x1b[36m{}: \x1b[97m{}", key, value);
+                    }
+                    println!("================");
+                    for (key, value) in collections {
+                        println!("📦\t \x1b[36m{}: \x1b[97m{}", key, value.join(", "));
+                    }
+                }
+                Err(e) => {
+                    println!("\x1b[91m{}", e.root_cause());
+                }
+            } 
+            
+            continue;
+        }
+
+        let subject_create = Regex::new(r"subject.set\((?P<class>\S+),\s*(?P<base>\S+),\s*(?P<name>\S+),\s*(?P<value>\S+)\)")?;
+        let caps = subject_create.captures(&line);
+
+        if let Some(caps) = caps {
+            let class = caps.name("class").unwrap().as_str().to_string();
+            let base = caps.name("base").unwrap().as_str().to_string();
+            let name = caps.name("name").unwrap().as_str().to_string();
+            let value = caps.name("value").unwrap().as_str().to_string();
+
+            match perspective.get_subject(&class, &base).await {
+                Ok(subject) => {
+                    if let Err(e) = subject.set_property(&name, &value).await {
+                        println!("\x1b[91m{}", e.root_cause());
+                    }
+                }
+                Err(e) => {
+                    println!("\x1b[91m{}", e.root_cause());
+                }
+            } 
             continue;
         }
 

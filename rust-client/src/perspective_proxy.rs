@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::{
     literal::{Literal, LiteralValue},
     perspectives::{
@@ -177,15 +179,15 @@ impl PerspectiveProxy {
             ))
             .await
         {
-            println!("{:?}", results);
+            //println!("{:?}", results);
             if let Some(Value::Object(action)) = results.first() {
-                println!("{:?}", action);
+                //println!("{:?}", action);
                 if let Value::String(action_string) = action
                     .get("Action")
                     .ok_or(anyhow::anyhow!("Unbound variable Action is not set"))?
                 {
-                    println!("{}", action_string);
-                    self.execute_action(action_string, base).await?;
+                    //println!("{}", action_string);
+                    self.execute_action(action_string, base, None).await?;
                     return Ok(());
                 }
             }
@@ -193,14 +195,38 @@ impl PerspectiveProxy {
         Err(anyhow::anyhow!("No constructor found for class: {}", class))
     }
 
-    pub fn get_subject(&self, class: &String, base: &String) -> SubjectProxy {
-        SubjectProxy::new(self.clone(), class.clone(), base.clone())
+    pub async fn is_subject_instance(&self, class: &String, base: &String) -> Result<bool> {
+        match self.infer(format!(r#"subject_class("{}", C), instance(C, "{}")"#, class, base))
+            .await? {
+            Value::Array(results) => {
+                if results.is_empty() {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
+            Value::Bool(b) => Ok(b),
+            _ => Ok(false),
+        }
     }
 
-    async fn execute_action(&self, action: &String, base: &String) -> Result<()> {
+    pub async fn get_subject(&self, class: &String, base: &String) -> Result<SubjectProxy> {
+        if self.is_subject_instance(class, base).await? {
+            Ok(SubjectProxy::new(self.clone(), class.clone(), base.clone()))
+        } else {
+            Err(anyhow!("Expression {} is not a subject instance of class: {}", base, class))
+        }
+    }
+
+    pub async fn execute_action(&self, action: &String, base: &String, params: Option<BTreeMap<&str, &String>>) -> Result<()> {
         let commands = parse_action(action)?;
         for command in commands {
-            let command = command.replace("this", base);
+            let mut command = command.replace("this", base);
+            if let Some(ref params) = params {
+                for (key, value) in params.iter() {
+                    command = command.replace(key, value);
+                }
+            }
             match command.action.as_str() {
                 "addLink" => {
                     //println!("addLink: {:?}", command);
@@ -281,7 +307,7 @@ fn parse_action(action: &String) -> Result<Vec<Command>> {
             predicate: predicate.map(|e| e.into()),
             target: target.ok_or(anyhow!("Comman without target"))?.into(),
         });
-        println!("{:?}", commands);
+        //println!("{:?}", commands);
     }
             
     Ok(commands)

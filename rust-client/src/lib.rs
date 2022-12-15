@@ -12,6 +12,7 @@ extern crate chrono;
 extern crate clap;
 extern crate dirs;
 extern crate graphql_client;
+extern crate maplit;
 extern crate rand;
 extern crate regex;
 extern crate reqwest;
