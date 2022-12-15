@@ -11,6 +11,7 @@ import { invoke } from '@tauri-apps/api';
 import QRCode from 'react-qr-code';
 import { AgentContext } from '../context/AgentContext';
 import ActionButton from './ActionButton';
+import { appWindow } from '@tauri-apps/api/window';
 
 type Props = {
   did: String,
@@ -66,6 +67,16 @@ const Profile = (props: Props) => {
   const [qrcodeModal, setQRCodeModal] = useState(false);
 
   const [password, setPassword] = useState('');
+
+
+  function copyFile() {
+    appWindow.emit('copyLogs')
+
+    showNotification({
+      message: 'Copy logs opened',
+      autoClose: 1000
+    })
+  }
   
   const [profile, setProfile] = useState({
     firstName: "",
@@ -222,17 +233,22 @@ const Profile = (props: Props) => {
         </j-toggle>
       </div>
       <div style={{...gridButton, paddingTop: 20}}>
+        {showProxy()}
         <ActionButton 
           tooltip="Trusted agents"
           onClick={() => settrustedAgentModalOpen(true)}
           icon="shield-check"
         />
         <ActionButton 
+          tooltip="Copy logs"
+          onClick={copyFile}
+          icon="clipboard"
+        />
+        <ActionButton 
           tooltip="Delete Agent"
           onClick={() => setClearAgentModalOpen(true)}
           icon="trash"
         />
-        {showProxy()}
         <j-box p="200" />
       </div>
       <j-modal
