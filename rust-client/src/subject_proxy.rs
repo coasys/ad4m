@@ -1,0 +1,98 @@
+use std::collections::BTreeMap;
+
+use anyhow::{anyhow, Result};
+use serde_json::Value;
+
+use crate::perspective_proxy::PerspectiveProxy;
+
+
+pub struct SubjectProxy<'a> {
+    perspective: &'a PerspectiveProxy,
+    subject_class: String,
+    base: String
+}
+
+impl <'a> SubjectProxy<'a> {
+    pub fn new(perspective: &'a PerspectiveProxy, subject_class: String, base: String) -> Self {
+        Self {
+            perspective,
+            subject_class,
+            base
+        }
+    }
+
+    async fn query_to_array(&self, query: String) -> Result<Vec<String>> {
+        let result = self.perspective.infer(query.clone()).await?;
+        let mut values = Vec::new();
+        if let Some(result_array) = result.as_array() {
+            for p in result_array {
+                if let Some(Value::String(p)) = p.get("Value") {
+                    values.push(p.clone());
+                }
+            }
+            Ok(values)
+        } else {
+            Err(anyhow!("No results found running query: {}", query))
+        }
+    }
+
+    pub async fn property_names(&self) -> Result<Vec<String>> {
+        self
+            .query_to_array(format!(r#"subject_class("{}", C), property(C, Value)"#, self.subject_class))
+            .await
+            .or_else(|_| Ok(Vec::new()))
+    }
+
+    pub async fn get_property_values(&self) -> Result<BTreeMap<String, String>> {
+        let mut values = BTreeMap::new();
+        let properties = self.property_names().await?;
+        for p in properties {
+            let query = format!(
+                r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, 
+                self.subject_class,
+                self.base,
+                p
+            );
+            let result = self.perspective.infer(query).await?;
+
+            if let Some(result_array) = result.as_array() {
+                if let Some(Value::String(value)) = result_array[0].get("Value") {
+                    values.insert(p, value.clone());
+                }
+            }
+        }
+        Ok(values)
+    }
+
+    pub async fn collection_names(&self) -> Result<Vec<String>> {
+        self
+            .query_to_array(format!(r#"subject_class("{}", C), collection(C, Value)"#, self.subject_class))
+            .await
+            .or_else(|_| Ok(Vec::new()))
+    }
+
+    pub async fn get_collection_values(&self) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut values = BTreeMap::new();
+        let collections = self.collection_names().await?;
+        for c in collections {
+            let query = format!(
+                r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#, 
+                self.subject_class,
+                self.base,
+                c
+            );
+            let result = self.perspective.infer(query).await?;
+
+            if let Some(result_array) = result.as_array() {
+                let mut collection_values = Vec::new();
+                for p in result_array {
+                    if let Some(Value::String(value)) = p.get("Value") {
+                        collection_values.push(value.clone());
+                    }
+                }
+                values.insert(c, collection_values);
+            }
+        }
+        Ok(values)
+    }
+}

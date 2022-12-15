@@ -4,7 +4,7 @@ use crate::{
         add_link::AddLinkPerspectiveAddLink, query_links::QueryLinksPerspectiveQueryLinks,
         PerspectivesClient,
     },
-    types::LinkExpression,
+    types::LinkExpression, subject_proxy::SubjectProxy,
 };
 use anyhow::{anyhow, Result};
 use chrono::naive::NaiveDateTime;
@@ -191,6 +191,10 @@ impl PerspectiveProxy {
             }
         }
         Err(anyhow::anyhow!("No constructor found for class: {}", class))
+    }
+
+    pub fn get_subject(&self, class: &String, base: &String) -> SubjectProxy {
+        SubjectProxy::new(self.clone(), class.clone(), base.clone())
     }
 
     async fn execute_action(&self, action: &String, base: &String) -> Result<()> {

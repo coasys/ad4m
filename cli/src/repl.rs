@@ -87,6 +87,25 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
+        let subject_create = Regex::new(r"subject.print\((?P<class>\S+),\s*(?P<base>\S+)\)")?;
+        let caps = subject_create.captures(&line);
+
+        if let Some(caps) = caps {
+            let class = caps.name("class").unwrap().as_str().to_string();
+            let base = caps.name("base").unwrap().as_str().to_string();
+
+            let subject = perspective.get_subject(&class, &base);
+            let values = subject.get_property_values().await?;
+            println!("\x1b[90mSubject at:\n\x1b[95m{}\x1b[37m", base);
+            println!("================");
+            println!("\x1b[90mClass \x1b[36m{}:", class);
+            for (key, value) in values {
+                println!("🧩\t \x1b[36m{}: \x1b[97m{}", key, value);
+            }
+            println!("================");
+            continue;
+        }
+
         match perspective.infer(line).await {
             Ok(results) => {
                 print_prolog_results(results)?;

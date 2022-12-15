@@ -25,6 +25,7 @@ pub mod neighbourhoods;
 pub mod perspective_proxy;
 pub mod perspectives;
 pub mod runtime;
+pub mod subject_proxy;
 pub mod types;
 mod util;
 
