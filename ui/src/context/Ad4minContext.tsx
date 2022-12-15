@@ -42,7 +42,7 @@ const initialState: ContextProps = {
     auth: '',
     connected: false,
     connectedLaoding: true,
-    expertMode: Boolean(localStorage.getItem('expertMode'))
+    expertMode: localStorage.getItem('expertMode') === 'true'
   },
   methods: {
     configureEndpoint: () => null,
