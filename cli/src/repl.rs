@@ -7,7 +7,7 @@ use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
-use crate::formatting::print_prolog_results;
+use crate::formatting::{print_prolog_results, print_link};
 
 pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
     let mut rl = Editor::<()>::new()?;
@@ -36,6 +36,23 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             perspective.add_link(source, target, predicate).await?;
             continue;
         }
+
+        let link_query =
+            Regex::new(r"query\(\s*(?P<source>\S+)(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)")?;
+
+        let caps = link_query.captures(&line);
+        if let Some(caps) = caps {
+            let source = caps.name("source").map(|x| x.as_str().to_string());
+            let predicate = caps.name("predicate").map(|x| x.as_str().to_string());
+            let target = caps.name("target").map(|x| x.as_str().to_string());
+
+            let links = perspective.get(source, predicate, target, None, None, None).await?;
+            for link in links {
+                print_link(link.into());
+            }
+            continue;
+        }
+
 
         if line == "subject.classes" {
             for class in perspective.subject_classes().await? {
