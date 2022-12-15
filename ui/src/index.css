@@ -19,7 +19,7 @@ code {
 .slider__slide-content {
   max-width: 750px;
   min-width: 400px;
-  width: 400px;
+  width: 600px;
   display: flex;
   flex-direction: column;
   align-items: center;
