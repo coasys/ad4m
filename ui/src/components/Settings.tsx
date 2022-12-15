@@ -163,9 +163,17 @@ const Profile = (props: Props) => {
   }
 
   const setupProxy = async () => {
-    const proxy: string = await invoke("setup_proxy", { subdomain: did });
-    console.log("Finish setup proxy, ", proxy);
-    setProxy(formatProxy(proxy));
+    try {      
+      const proxy: string = await invoke("setup_proxy", { subdomain: did });
+      console.log("Finish setup proxy, ", proxy);
+      setProxy(formatProxy(proxy));
+    } catch (e) {
+      showNotification({
+        color: 'red',
+        message: 'Error while starting proxy',
+        autoClose: 5000
+      });
+    }  
   }
 
   const stopProxy = async () => {
