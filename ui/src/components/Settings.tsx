@@ -40,7 +40,6 @@ export const fetchProfile = async (agent: Agent) => {
 }
 
 const Profile = (props: Props) => {
-  
   const {
     state: {
       loading,
@@ -49,7 +48,10 @@ const Profile = (props: Props) => {
   const {state: {
     url,
     did,
-    client
+    client,
+    expertMode
+  }, methods: {
+    toggleExpertMode
   }} = useContext(Ad4minContext);
 
   const [trustedAgents, setTrustedAgents] = useState<any[]>([]);
@@ -219,7 +221,16 @@ const Profile = (props: Props) => {
 
   return (
     <div style={MainContainer}>
-      <div style={gridButton}>
+      <div style={{padding: '20px 30px 0 30px'}}>
+        <j-toggle
+        full=""
+        checked={expertMode}
+        onChange={e => toggleExpertMode()}
+        >
+          Expert mode
+        </j-toggle>
+      </div>
+      <div style={{...gridButton, paddingTop: 20}}>
         <j-tooltip title="Trusted agents" placement="bottom">
           <j-button
             onClick={() => settrustedAgentModalOpen(true)}

@@ -30,12 +30,13 @@ const useStyles = createStyles((theme, _params, getRef) => {
       ...theme.fn.focusStyles(),
       display: 'flex',
       alignItems: 'center',
-      margin: '6px 6px 0 6px',
       textDecoration: 'none',
       fontSize: theme.fontSizes.sm,
       color: 'var(--j-color-black)',
       padding: `${theme.spacing.xs}px ${theme.spacing.sm}px`,
       fontWeight: 500,
+      width: '50%',
+      justifyContent: 'center'
     },
 
     linkIcon: {
@@ -72,7 +73,8 @@ const Navigation = ({did, opened, setOpened}: Props) => {
   const { classes, cx } = useStyles();
   const {state: {
     connected,
-    isUnlocked
+    isUnlocked,
+    expertMode
   }} = useContext(Ad4minContext);
 
   let navigate = useNavigate();
@@ -102,14 +104,21 @@ const Navigation = ({did, opened, setOpened}: Props) => {
           </j-flex>
         </div>
         <div className={classes.linkContainer}>
-          <Link to="/language" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/language' })}>
-            <j-text variant="caption">Language</j-text>
+          <Link to="/apps" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/apps' })}>
+            <j-text variant="caption" size="400">Apps</j-text>
           </Link>
-          <Link to="/perspective" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/perspective' })}>
-            <j-text variant="caption">Perspective</j-text>
-          </Link>
+          {expertMode && (
+            <>            
+              <Link to="/language" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/language' })}>
+                <j-text variant="caption" size="400">Language</j-text>
+              </Link>
+              <Link to="/perspective" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/perspective' })}>
+                <j-text variant="caption" size="400">Perspective</j-text>
+              </Link>
+            </>
+          )}
           <Link to="/settings" className={cx(classes.link, { [classes.linkActive]: location.pathname === '/settings' })}>
-            <j-text variant="caption">Settings</j-text>
+            <j-text variant="caption" size="400">Settings</j-text>
           </Link>
         </div>
         <Outlet />

@@ -16,6 +16,7 @@ import Language from './components/Language';
 import Settings from './components/Settings';
 import { appWindow } from '@tauri-apps/api/window';
 import { Connect } from './components/Connect';
+import { Apps } from 'tabler-icons-react';
 
 const App = () => {
   const [opened, setOpened] = useState(false);
@@ -64,6 +65,7 @@ const App = () => {
           </Stack>
         }/>
         <Route path="/" element={<Navigation did={did} setOpened={setOpened} opened={opened} />}>
+          <Route path="apps" element={<Apps />} />
           <Route path="language" element={<Language setOpened={setOpened} opened={opened} />} />
           <Route path="perspective" element={<Perspectives  setOpened={setOpened} opened={opened} />} />
           <Route path="settings" element={

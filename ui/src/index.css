@@ -75,3 +75,13 @@ code {
   border-radius: 6px;
   padding: 10px 0; 
 }
+
+:root j-toggle::part(base) {
+  cursor: pointer;
+  flex-direction: row-reverse;
+  display: flex;
+  justify-content: space-between;
+  height: var(--j-toggle-size);
+  align-items: center;
+  gap: var(--j-space-400);
+}
