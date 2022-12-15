@@ -5,6 +5,17 @@ use serde_json::Value;
 
 use crate::perspective_proxy::PerspectiveProxy;
 
+fn prolog_list_to_array(list: &Value) -> Vec<String> {
+    if let Some(Value::String(head)) = list.get("head") {
+        let mut values = vec![head.clone()];
+        if let Some(tail) = list.get("tail") {
+            values.extend(prolog_list_to_array(tail));
+        }
+        values
+    } else {
+        vec![]
+    }
+}
 
 pub struct SubjectProxy<'a> {
     perspective: &'a PerspectiveProxy,
@@ -86,8 +97,24 @@ impl <'a> SubjectProxy<'a> {
             if let Some(result_array) = result.as_array() {
                 let mut collection_values = Vec::new();
                 for p in result_array {
-                    if let Some(Value::String(value)) = p.get("Value") {
-                        collection_values.push(value.clone());
+                    println!("{:?}", p.get("Value"));
+                    let value = p.get("Value");
+                    match value {
+                        Some(Value::String(value)) => {
+                            collection_values.push(value.clone());
+                        },
+                        Some(Value::Object(_)) => {
+                            collection_values.extend(prolog_list_to_array(value.as_ref().unwrap()));
+                        },
+                        Some(Value::Array(value)) => {
+                            collection_values.extend(
+                                value
+                                    .iter()
+                                    .map(|v| v.as_str().unwrap().to_string())
+                                    .collect::<Vec<String>>()
+                            );
+                        }
+                        _ => {}
                     }
                 }
                 values.insert(c, collection_values);
@@ -109,6 +136,23 @@ impl <'a> SubjectProxy<'a> {
             }
         } else {
             return Err(anyhow!(r#"No property_setter found for property "{}" on class "{}""#, property, self.subject_class));
+        }
+        Ok(())
+    }
+
+    pub async fn add_collection(&self, collection: &String, new_element: &String) -> Result<()> {
+        let query = format!(
+            r#"subject_class("{}", C), collection_adder(C, "{}", Action)"#, 
+            self.subject_class,
+            collection,
+        );
+        let result = self.perspective.infer(query).await?;
+        if let Some(result_array) = result.as_array() {
+            if let Some(Value::String(action)) = result_array[0].get("Action") {
+                self.perspective.execute_action(action, &self.base, Some(btreemap!{"value" => new_element})).await?;
+            }
+        } else {
+            return Err(anyhow!(r#"No collection_adder found for collection "{}" on class "{}""#, collection, self.subject_class));
         }
         Ok(())
     }

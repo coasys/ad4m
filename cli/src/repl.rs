@@ -104,7 +104,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\]\s*=\s*(?P<value>\S+)")?;
+        let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\][\s--<]*=\s*(?P<value>\S+)")?;
         let caps = subject_create.captures(&line);
 
         if let Some(caps) = caps {
@@ -137,7 +137,40 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)")?;
+        let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\]\s*<=\s*(?P<value>\S+)")?;
+        let caps = subject_create.captures(&line);
+
+        if let Some(caps) = caps {
+            let base = caps.name("base").unwrap().as_str().to_string();
+            let name = caps.name("name").unwrap().as_str().to_string();
+            let value = caps.name("value").unwrap().as_str().to_string();
+
+            let classes = perspective.get_subject_classes(&base).await?;
+            if classes.is_empty() {
+                println!("\x1b[91mNo subject found at: \x1b[97m{}", base);
+                continue;
+            }
+            let mut done = false;
+            for class in &classes {
+                if let Ok(subject) =  perspective.get_subject(class, &base).await {
+                    if let Ok(()) = subject.add_collection(&name, &value).await {
+                        done = true;
+                    }
+                }
+            }
+            if !done {
+                println!("\x1b[91mNo subject class found at: '\x1b[97m{}\x1b[91m', that has a collection named '{}'", base, name);
+                println!("Found classes:");
+                for class in &classes {
+                    println!("\t{} [{}]", class, perspective.subject_class_properties(class).await?.join(", "));
+                }
+                
+            }
+            println!("");
+            continue;
+        }
+
+        let subject_create = Regex::new(r"^\s*subject\(\s*(?P<base>\S+)\s*\)\s*$")?;
         let caps = subject_create.captures(&line);
 
         if let Some(caps) = caps {
