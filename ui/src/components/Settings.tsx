@@ -250,6 +250,11 @@ const Profile = (props: Props) => {
           icon="clipboard"
         />
         <ActionButton 
+          tooltip="Ad4m Docs"
+          onClick={() => window.open('https://docs.ad4m.dev/')}
+          icon="file-earmark-richtext"
+        />
+        <ActionButton 
           tooltip="Delete Agent"
           onClick={() => setClearAgentModalOpen(true)}
           icon="trash"
