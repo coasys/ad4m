@@ -214,6 +214,11 @@ const Profile = (props: Props) => {
                 onClick={showProxyQRCode}
                 icon="qr-code-scan"
               />
+              <ActionButton 
+                tooltip="Open Graphql Client"
+                onClick={() => window.open(url.replace('ws', 'http'))}
+                icon="box-arrow-up-right"
+              />
             </>
           )
         }
