@@ -90,6 +90,22 @@ pub async fn me(executor_url: String, cap_token: String) -> Result<me::MeAgent> 
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
+pub struct GetApps;
+
+pub async fn getApps(executor_url: String, cap_token: String,) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
+    let response_data: get_apps::ResponseData =
+        query(executor_url, cap_token, GetApps::build_query(get_apps::Variables {}))
+            .await
+            .with_context(|| "Failed to run agent->me query")?;
+    Ok(response_data.agent_get_apps)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
 pub struct AgentStatus;
 
 pub async fn status(
@@ -258,6 +274,10 @@ impl AgentClient {
 
     pub async fn status(&self) -> Result<agent_status::AgentStatusAgentStatus> {
         status(self.info.executor_url.clone(), self.info.cap_token.clone()).await
+    }
+
+    pub async fn getApps(&self) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
+        getApps(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
     pub async fn lock(&self, passphrase: String) -> Result<lock::LockAgentLock> {
