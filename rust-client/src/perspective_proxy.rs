@@ -218,6 +218,21 @@ impl PerspectiveProxy {
         }
     }
 
+    pub async fn get_subject_classes(&self, base: &String) -> Result<Vec<String>> {
+        let mut classes = Vec::new();
+        if let Value::Array(classes_results) = self
+            .infer(format!(r#"instance(C, "{}"), subject_class(Classname, C)"#, base))
+            .await?
+        {
+            for class in classes_results {
+                if let Some(Value::String(class_name)) = class.get("Classname") {
+                    classes.push(class_name.clone());
+                }
+            }
+        }
+        Ok(classes)
+    }
+
     pub async fn execute_action(&self, action: &String, base: &String, params: Option<BTreeMap<&str, &String>>) -> Result<()> {
         let commands = parse_action(action)?;
         for command in commands {

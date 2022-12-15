@@ -104,32 +104,37 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        let subject_create = Regex::new(r"subject.print\((?P<class>\S+),\s*(?P<base>\S+)\)")?;
+        let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)")?;
         let caps = subject_create.captures(&line);
 
         if let Some(caps) = caps {
-            let class = caps.name("class").unwrap().as_str().to_string();
             let base = caps.name("base").unwrap().as_str().to_string();
-
-            match perspective.get_subject(&class, &base).await {
-                Ok(subject) => {
-                    let properties = subject.get_property_values().await?;
-                    let collections = subject.get_collection_values().await?;
-                    println!("\x1b[90mSubject at:\n\x1b[95m{}\x1b[37m", base);
-                    println!("================");
-                    println!("\x1b[90mClass \x1b[36m{}:", class);
-                    for (key, value) in properties {
-                        println!("🧩\t \x1b[36m{}: \x1b[97m{}", key, value);
+            let classes = perspective.get_subject_classes(&base).await?;
+            if classes.is_empty() {
+                println!("\x1b[91mNo subject found at: \x1b[97m{}", base);
+                continue;
+            }
+            for class in classes {
+                match perspective.get_subject(&class, &base).await {
+                    Ok(subject) => {
+                        let properties = subject.get_property_values().await?;
+                        let collections = subject.get_collection_values().await?;
+                        println!("\x1b[90mSubject at:\n\x1b[95m{}\x1b[37m", base);
+                        println!("================");
+                        println!("\x1b[90mClass \x1b[36m{}:", class);
+                        for (key, value) in properties {
+                            println!("🧩\t \x1b[36m{}: \x1b[97m{}", key, value);
+                        }
+                        println!("================");
+                        for (key, value) in collections {
+                            println!("📦\t \x1b[36m{}: \x1b[97m{}", key, value.join(", "));
+                        }
                     }
-                    println!("================");
-                    for (key, value) in collections {
-                        println!("📦\t \x1b[36m{}: \x1b[97m{}", key, value.join(", "));
+                    Err(e) => {
+                        println!("\x1b[91m{}", e.root_cause());
                     }
-                }
-                Err(e) => {
-                    println!("\x1b[91m{}", e.root_cause());
-                }
-            } 
+                } 
+            }
             
             continue;
         }
