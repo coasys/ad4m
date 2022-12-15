@@ -10,6 +10,7 @@ import { showNotification } from '@mantine/notifications';
 import { invoke } from '@tauri-apps/api';
 import QRCode from 'react-qr-code';
 import { AgentContext } from '../context/AgentContext';
+import ActionButton from './ActionButton';
 
 type Props = {
   did: String,
@@ -184,42 +185,24 @@ const Profile = (props: Props) => {
   const showProxy = () => {
     return (
       <>
-        <j-tooltip title={proxy.length === 0 ? "Setup proxy" : "Stop Proxy"} placement="bottom">
-          <j-button
-            onClick={() => proxy.length === 0 ? setupProxy() : stopProxy()}
-            square
-            circle
-            size="xl"
-            variant="subtle"
-          >
-            <j-icon size="sm" name="wifi"></j-icon>
-          </j-button>
-        </j-tooltip>
+        <ActionButton 
+          tooltip={proxy.length === 0 ? "Setup proxy" : "Stop Proxy"}
+          onClick={() => proxy.length === 0 ? setupProxy() : stopProxy()}
+          icon="wifi"
+        />
         {
           proxy && (
             <>
-              <j-tooltip title="Copy proxy URL" placement="bottom">
-                <j-button
-                  onClick={copyProxy}
-                  square
-                  circle
-                  size="xl"
-                  variant="subtle"
-                >
-                  <j-icon size="sm" name="clipboard"></j-icon>
-                </j-button>
-              </j-tooltip>
-              <j-tooltip title="Show Proxy QR" placement="bottom">
-                <j-button
-                  onClick={showProxyQRCode}
-                  square
-                  circle
-                  size="xl"
-                  variant="subtle"
-                >
-                  <j-icon size="sm" name="qr-code-scan"></j-icon>
-                </j-button>
-              </j-tooltip>
+              <ActionButton 
+                tooltip="Copy proxy URL"
+                onClick={copyProxy}
+                icon="clipboard"
+              />
+              <ActionButton 
+                tooltip="Show Proxy QR"
+                onClick={showProxyQRCode}
+                icon="qr-code-scan"
+              />
             </>
           )
         }
@@ -239,28 +222,16 @@ const Profile = (props: Props) => {
         </j-toggle>
       </div>
       <div style={{...gridButton, paddingTop: 20}}>
-        <j-tooltip title="Trusted agents" placement="bottom">
-          <j-button
-            onClick={() => settrustedAgentModalOpen(true)}
-            square
-            circle
-            size="xl"
-            variant="subtle"
-          >
-            <j-icon size="sm" name="shield-check"></j-icon>
-          </j-button>
-        </j-tooltip>
-        <j-tooltip title="Delete Agent" placement="bottom">
-          <j-button
-            onClick={() => setClearAgentModalOpen(true)}
-            square
-            circle
-            size="xl"
-            variant="subtle"
-          >
-            <j-icon size="sm" name="trash"></j-icon>
-          </j-button>
-        </j-tooltip>
+        <ActionButton 
+          tooltip="Trusted agents"
+          onClick={() => settrustedAgentModalOpen(true)}
+          icon="shield-check"
+        />
+        <ActionButton 
+          tooltip="Delete Agent"
+          onClick={() => setClearAgentModalOpen(true)}
+          icon="trash"
+        />
         {showProxy()}
         <j-box p="200" />
       </div>

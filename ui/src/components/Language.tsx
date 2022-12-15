@@ -4,6 +4,7 @@ import { LanguageMeta } from '@perspect3vism/ad4m';
 import { useContext, useEffect, useState } from 'react';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { isSystemLanguage } from '../util';
+import ActionButton from './ActionButton';
 import { badge, cardStyle, gridButton, listStyle, MainContainer, MainHeader } from './styles';
 
 type Props = {
@@ -123,28 +124,16 @@ const Language = (props: Props) => {
   return (
     <div style={MainContainer}>
       <div style={gridButton}>
-        <j-tooltip title="Publish language" placement="bottom">
-          <j-button
-            onClick={() => setPublishLanguageModalOpen(true)}
-            square
-            circle
-            size="xl"
-            variant="subtle"
-          >
-            <j-icon size="sm" name="globe"></j-icon>
-          </j-button>
-        </j-tooltip>
-        <j-tooltip title="Install language" placement="bottom">
-          <j-button
-            onClick={() => setInstallLanguageModalOpen(true)}
-            square
-            circle
-            size="xl"
-            variant="subtle"
-          >
-            <j-icon size="sm" name="download"></j-icon>
-          </j-button>
-        </j-tooltip>
+        <ActionButton 
+          tooltip="Publish language"
+          onClick={() => setPublishLanguageModalOpen(true)}
+          icon="globe"
+        />
+        <ActionButton 
+          tooltip="Install language"
+          onClick={() => setInstallLanguageModalOpen(true)}
+          icon="download"
+        />
       </div>
       <div 
         style={listStyle}

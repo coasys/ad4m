@@ -8,6 +8,7 @@ import { Trash } from 'tabler-icons-react';
 import { useDisclosure } from '@mantine/hooks';
 import { Ad4minContext } from '../context/Ad4minContext';
 import { nanoid } from 'nanoid';
+import ActionButton from './ActionButton';
 
 type Props = {
   opened: boolean,
@@ -159,17 +160,11 @@ const Perspectives = (props: Props) => {
       style={MainContainer}
     >
       <div style={gridButton}>
-        <j-tooltip title="Add perspective" placement="bottom">
-          <j-button
-            onClick={() => setPerspectiveModalOpen(true)}
-            square
-            circle
-            size="xl"
-            variant="subtle"
-          >
-            <j-icon size="sm" name="folder-plus"></j-icon>
-          </j-button>
-        </j-tooltip>
+        <ActionButton 
+          tooltip="Add perspective"
+          onClick={() => setPerspectiveModalOpen(true)}
+          icon="folder-plus"
+        />
       </div>
       <div 
         style={listStyle}
