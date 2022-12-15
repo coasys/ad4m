@@ -95,14 +95,18 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             let base = caps.name("base").unwrap().as_str().to_string();
 
             let subject = perspective.get_subject(&class, &base);
-            let values = subject.get_property_values().await?;
+            let properties = subject.get_property_values().await?;
+            let collections = subject.get_collection_values().await?;
             println!("\x1b[90mSubject at:\n\x1b[95m{}\x1b[37m", base);
             println!("================");
             println!("\x1b[90mClass \x1b[36m{}:", class);
-            for (key, value) in values {
+            for (key, value) in properties {
                 println!("🧩\t \x1b[36m{}: \x1b[97m{}", key, value);
             }
             println!("================");
+            for (key, value) in collections {
+                println!("📦\t \x1b[36m{}: \x1b[97m{}", key, value.join(", "));
+            }
             continue;
         }
 
