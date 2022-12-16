@@ -7,7 +7,7 @@ use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
-use crate::formatting::{print_prolog_results, print_link};
+use crate::formatting::{print_link, print_prolog_results};
 
 pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
     let mut rl = Editor::<()>::new()?;
@@ -37,8 +37,9 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        let link_query =
-            Regex::new(r"query\(\s*(?P<source>\S+)(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)")?;
+        let link_query = Regex::new(
+            r"query\(\s*(?P<source>\S+)(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)",
+        )?;
 
         let caps = link_query.captures(&line);
         if let Some(caps) = caps {
@@ -46,13 +47,14 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             let predicate = caps.name("predicate").map(|x| x.as_str().to_string());
             let target = caps.name("target").map(|x| x.as_str().to_string());
 
-            let links = perspective.get(source, predicate, target, None, None, None).await?;
+            let links = perspective
+                .get(source, predicate, target, None, None, None)
+                .await?;
             for link in links {
                 print_link(link.into());
             }
             continue;
         }
-
 
         if line == "subject.classes" {
             for class in perspective.subject_classes().await? {
@@ -104,7 +106,9 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\][\s--<]*=\s*(?P<value>\S+)")?;
+        let subject_create = Regex::new(
+            r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\][\s--<]*=\s*(?P<value>\S+)",
+        )?;
         let caps = subject_create.captures(&line);
 
         if let Some(caps) = caps {
@@ -119,7 +123,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             }
             let mut done = false;
             for class in &classes {
-                if let Ok(subject) =  perspective.get_subject(class, &base).await {
+                if let Ok(subject) = perspective.get_subject(class, &base).await {
                     if let Ok(()) = subject.set_property(&name, &value).await {
                         done = true;
                     }
@@ -129,15 +133,22 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                 println!("\x1b[91mNo subject class found at: '\x1b[97m{}\x1b[91m', that has a property named '{}'", base, name);
                 println!("Found classes:");
                 for class in &classes {
-                    println!("\t{} [{}]", class, perspective.subject_class_properties(class).await?.join(", "));
+                    println!(
+                        "\t{} [{}]",
+                        class,
+                        perspective
+                            .subject_class_properties(class)
+                            .await?
+                            .join(", ")
+                    );
                 }
-                
             }
             println!("");
             continue;
         }
 
-        let subject_create = Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\]\s*<=\s*(?P<value>\S+)")?;
+        let subject_create =
+            Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\]\s*<=\s*(?P<value>\S+)")?;
         let caps = subject_create.captures(&line);
 
         if let Some(caps) = caps {
@@ -152,7 +163,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             }
             let mut done = false;
             for class in &classes {
-                if let Ok(subject) =  perspective.get_subject(class, &base).await {
+                if let Ok(subject) = perspective.get_subject(class, &base).await {
                     if let Ok(()) = subject.add_collection(&name, &value).await {
                         done = true;
                     }
@@ -162,9 +173,15 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                 println!("\x1b[91mNo subject class found at: '\x1b[97m{}\x1b[91m', that has a collection named '{}'", base, name);
                 println!("Found classes:");
                 for class in &classes {
-                    println!("\t{} [{}]", class, perspective.subject_class_properties(class).await?.join(", "));
+                    println!(
+                        "\t{} [{}]",
+                        class,
+                        perspective
+                            .subject_class_properties(class)
+                            .await?
+                            .join(", ")
+                    );
                 }
-                
             }
             println!("");
             continue;
@@ -199,7 +216,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                     Err(e) => {
                         println!("\x1b[91m{}", e.root_cause());
                     }
-                } 
+                }
             }
             println!("");
             continue;
