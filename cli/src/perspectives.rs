@@ -64,10 +64,19 @@ pub enum PerspectiveFunctions {
     /// Set Social DNA of given perspective with SDNA code from file
     SetDna { id: String, file: String },
 
+    /// Get all defined Subject classes
     SubjectClasses { id: String },
+
+    /// Construct a new Subject instance of given class over given base
     SubjectConstruct { id: String, class: String, base: String },
+
+    /// Get the value of the subject instance's given property
     SubjectGetProperty { id: String, base: String, property: String },
+
+    /// Set the value of the subject instance's given property
     SubjectSetProperty { id: String, base: String, property: String, value: String },
+
+    /// Add the given value to the subject instance's collection
     SubjectAddCollection { id: String, base: String, collection: String, value: String },
 }
 
