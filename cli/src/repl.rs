@@ -102,7 +102,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                     println!("\x1b[91m{}", e.root_cause());
                 }
             }
-            println!("");
+            println!();
             continue;
         }
 
@@ -143,7 +143,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                     );
                 }
             }
-            println!("");
+            println!();
             continue;
         }
 
@@ -183,7 +183,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                     );
                 }
             }
-            println!("");
+            println!();
             continue;
         }
 
@@ -218,7 +218,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
                     }
                 }
             }
-            println!("");
+            println!();
             continue;
         }
 
