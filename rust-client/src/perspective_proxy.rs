@@ -6,7 +6,8 @@ use crate::{
         add_link::AddLinkPerspectiveAddLink, query_links::QueryLinksPerspectiveQueryLinks,
         PerspectivesClient,
     },
-    types::LinkExpression, subject_proxy::SubjectProxy,
+    subject_proxy::SubjectProxy,
+    types::LinkExpression,
 };
 use anyhow::{anyhow, Result};
 use chrono::naive::NaiveDateTime;
@@ -226,8 +227,13 @@ impl PerspectiveProxy {
     }
 
     pub async fn is_subject_instance(&self, class: &String, base: &String) -> Result<bool> {
-        match self.infer(format!(r#"subject_class("{}", C), instance(C, "{}")"#, class, base))
-            .await? {
+        match self
+            .infer(format!(
+                r#"subject_class("{}", C), instance(C, "{}")"#,
+                class, base
+            ))
+            .await?
+        {
             Value::Array(results) => {
                 if results.is_empty() {
                     Ok(false)
@@ -244,14 +250,21 @@ impl PerspectiveProxy {
         if self.is_subject_instance(class, base).await? {
             Ok(SubjectProxy::new(self.clone(), class.clone(), base.clone()))
         } else {
-            Err(anyhow!("Expression {} is not a subject instance of class: {}", base, class))
+            Err(anyhow!(
+                "Expression {} is not a subject instance of class: {}",
+                base,
+                class
+            ))
         }
     }
 
     pub async fn get_subject_classes(&self, base: &String) -> Result<Vec<String>> {
         let mut classes = Vec::new();
         if let Value::Array(classes_results) = self
-            .infer(format!(r#"instance(C, "{}"), subject_class(Classname, C)"#, base))
+            .infer(format!(
+                r#"instance(C, "{}"), subject_class(Classname, C)"#,
+                base
+            ))
             .await?
         {
             for class in classes_results {
@@ -263,7 +276,12 @@ impl PerspectiveProxy {
         Ok(classes)
     }
 
-    pub async fn execute_action(&self, action: &String, base: &String, params: Option<BTreeMap<&str, &String>>) -> Result<()> {
+    pub async fn execute_action(
+        &self,
+        action: &String,
+        base: &String,
+        params: Option<BTreeMap<&str, &String>>,
+    ) -> Result<()> {
         let commands = parse_action(action)?;
         for command in commands {
             let mut command = command.replace("this", base);
@@ -286,9 +304,9 @@ impl PerspectiveProxy {
                 "setSingleTarget" => {
                     self.set_single_target(
                         command.source,
-                        command.predicate.ok_or(anyhow::anyhow!(
-                            "No predicate in set_single_target action"
-                        ))?,
+                        command
+                            .predicate
+                            .ok_or(anyhow::anyhow!("No predicate in set_single_target action"))?,
                         command.target,
                     )
                     .await?;
@@ -315,20 +333,23 @@ impl Command {
         Command {
             action: self.action.replace(pattern, replacement),
             source: self.source.replace(pattern, replacement),
-            predicate: self.predicate.as_ref().map(|f| f.replace(pattern, replacement)),
+            predicate: self
+                .predicate
+                .as_ref()
+                .map(|f| f.replace(pattern, replacement)),
             target: self.target.replace(pattern, replacement),
         }
     }
 }
 
 fn parse_action(action: &String) -> Result<Vec<Command>> {
-    let action_regex =
-        Regex::new(r"\[(?P<command>\{.*})*\]")?;
+    let action_regex = Regex::new(r"\[(?P<command>\{.*})*\]")?;
 
     // This parses strings like:
     // {action: "<action>", source: "<source>", predicate: "<predicate>", target: "<target>"}
-    let command_regex =
-        Regex::new(r#"\{(action:\s*"(?P<action>[\S--,]+)",?\s*)|(source:\s*"(?P<source>[\S--,]+)",?\s*)|(predicate:\s*"(?P<predicate>[\S--,]+)",?\s*)|(target:\s*"(?P<target>[\S--,]+)",?\s*)\}"#)?;
+    let command_regex = Regex::new(
+        r#"\{(action:\s*"(?P<action>[\S--,]+)",?\s*)|(source:\s*"(?P<source>[\S--,]+)",?\s*)|(predicate:\s*"(?P<predicate>[\S--,]+)",?\s*)|(target:\s*"(?P<target>[\S--,]+)",?\s*)\}"#,
+    )?;
 
     let mut commands = Vec::new();
     for capture in action_regex.captures_iter(action) {
@@ -343,7 +364,6 @@ fn parse_action(action: &String) -> Result<Vec<Command>> {
                 source = source.or(capture.name("source").map(|e| e.as_str()));
                 predicate = predicate.or(capture.name("predicate").map(|e| e.as_str()));
                 target = target.or(capture.name("target").map(|e| e.as_str()));
-                
             });
 
         commands.push(Command {
@@ -354,6 +374,6 @@ fn parse_action(action: &String) -> Result<Vec<Command>> {
         });
         //println!("{:?}", commands);
     }
-            
+
     Ok(commands)
 }

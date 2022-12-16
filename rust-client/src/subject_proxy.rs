@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use maplit::btreemap;
 use anyhow::{anyhow, Result};
+use maplit::btreemap;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::perspective_proxy::PerspectiveProxy;
 
@@ -20,15 +20,15 @@ fn prolog_list_to_array(list: &Value) -> Vec<String> {
 pub struct SubjectProxy<'a> {
     perspective: &'a PerspectiveProxy,
     subject_class: String,
-    base: String
+    base: String,
 }
 
-impl <'a> SubjectProxy<'a> {
+impl<'a> SubjectProxy<'a> {
     pub fn new(perspective: &'a PerspectiveProxy, subject_class: String, base: String) -> Self {
         Self {
             perspective,
             subject_class,
-            base
+            base,
         }
     }
 
@@ -48,10 +48,12 @@ impl <'a> SubjectProxy<'a> {
     }
 
     pub async fn property_names(&self) -> Result<Vec<String>> {
-        self
-            .query_to_array(format!(r#"subject_class("{}", C), property(C, Value)"#, self.subject_class))
-            .await
-            .or_else(|_| Ok(Vec::new()))
+        self.query_to_array(format!(
+            r#"subject_class("{}", C), property(C, Value)"#,
+            self.subject_class
+        ))
+        .await
+        .or_else(|_| Ok(Vec::new()))
     }
 
     pub async fn get_property_values(&self) -> Result<BTreeMap<String, String>> {
@@ -59,10 +61,8 @@ impl <'a> SubjectProxy<'a> {
         let properties = self.property_names().await?;
         for p in properties {
             let query = format!(
-                r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, 
-                self.subject_class,
-                self.base,
-                p
+                r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#,
+                self.subject_class, self.base, p
             );
             let result = self.perspective.infer(query).await?;
 
@@ -70,7 +70,7 @@ impl <'a> SubjectProxy<'a> {
                 match result_array[0].get("Value") {
                     Some(Value::String(value)) => values.insert(p.clone(), value.clone()),
                     Some(Value::Number(value)) => values.insert(p.clone(), value.to_string()),
-                    _ => None
+                    _ => None,
                 };
             }
         }
@@ -78,10 +78,12 @@ impl <'a> SubjectProxy<'a> {
     }
 
     pub async fn collection_names(&self) -> Result<Vec<String>> {
-        self
-            .query_to_array(format!(r#"subject_class("{}", C), collection(C, Value)"#, self.subject_class))
-            .await
-            .or_else(|_| Ok(Vec::new()))
+        self.query_to_array(format!(
+            r#"subject_class("{}", C), collection(C, Value)"#,
+            self.subject_class
+        ))
+        .await
+        .or_else(|_| Ok(Vec::new()))
     }
 
     pub async fn get_collection_values(&self) -> Result<BTreeMap<String, Vec<String>>> {
@@ -89,10 +91,8 @@ impl <'a> SubjectProxy<'a> {
         let collections = self.collection_names().await?;
         for c in collections {
             let query = format!(
-                r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#, 
-                self.subject_class,
-                self.base,
-                c
+                r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#,
+                self.subject_class, self.base, c
             );
             let result = self.perspective.infer(query).await?;
 
@@ -104,16 +104,16 @@ impl <'a> SubjectProxy<'a> {
                     match value {
                         Some(Value::String(value)) => {
                             collection_values.push(value.clone());
-                        },
+                        }
                         Some(Value::Object(_)) => {
                             collection_values.extend(prolog_list_to_array(value.as_ref().unwrap()));
-                        },
+                        }
                         Some(Value::Array(value)) => {
                             collection_values.extend(
                                 value
                                     .iter()
                                     .map(|v| v.as_str().unwrap().to_string())
-                                    .collect::<Vec<String>>()
+                                    .collect::<Vec<String>>(),
                             );
                         }
                         _ => {}
@@ -127,34 +127,44 @@ impl <'a> SubjectProxy<'a> {
 
     pub async fn set_property(&self, property: &String, value: &String) -> Result<()> {
         let query = format!(
-            r#"subject_class("{}", C), property_setter(C, "{}", Action)"#, 
-            self.subject_class,
-            property,
+            r#"subject_class("{}", C), property_setter(C, "{}", Action)"#,
+            self.subject_class, property,
         );
         let result = self.perspective.infer(query).await?;
         if let Some(result_array) = result.as_array() {
             if let Some(Value::String(action)) = result_array[0].get("Action") {
-                self.perspective.execute_action(action, &self.base, Some(btreemap!{"value" => value})).await?;
+                self.perspective
+                    .execute_action(action, &self.base, Some(btreemap! {"value" => value}))
+                    .await?;
             }
         } else {
-            return Err(anyhow!(r#"No property_setter found for property "{}" on class "{}""#, property, self.subject_class));
+            return Err(anyhow!(
+                r#"No property_setter found for property "{}" on class "{}""#,
+                property,
+                self.subject_class
+            ));
         }
         Ok(())
     }
 
     pub async fn add_collection(&self, collection: &String, new_element: &String) -> Result<()> {
         let query = format!(
-            r#"subject_class("{}", C), collection_adder(C, "{}", Action)"#, 
-            self.subject_class,
-            collection,
+            r#"subject_class("{}", C), collection_adder(C, "{}", Action)"#,
+            self.subject_class, collection,
         );
         let result = self.perspective.infer(query).await?;
         if let Some(result_array) = result.as_array() {
             if let Some(Value::String(action)) = result_array[0].get("Action") {
-                self.perspective.execute_action(action, &self.base, Some(btreemap!{"value" => new_element})).await?;
+                self.perspective
+                    .execute_action(action, &self.base, Some(btreemap! {"value" => new_element}))
+                    .await?;
             }
         } else {
-            return Err(anyhow!(r#"No collection_adder found for collection "{}" on class "{}""#, collection, self.subject_class));
+            return Err(anyhow!(
+                r#"No collection_adder found for collection "{}" on class "{}""#,
+                collection,
+                self.subject_class
+            ));
         }
         Ok(())
     }
