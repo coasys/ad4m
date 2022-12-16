@@ -37,17 +37,17 @@ async fn add_link(perspective: &PerspectiveProxy, line: &String) -> bool {
 async fn link_query(perspective: &PerspectiveProxy, line: &String) -> bool {
     // query(source, predicate, target)
     let link_query = Regex::new(
-        r"query\(\s*(?P<source>\S+)(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)",
+        r"query\(\s*(?P<source>\S+)?(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)",
     ).expect("Error parsing link_query regex");
 
     let caps = link_query.captures(&line);
     if let Some(caps) = caps {
-        let source = caps.name("source").map(|x| x.as_str().to_string());
-        let predicate = caps.name("predicate").map(|x| x.as_str().to_string());
-        let target = caps.name("target").map(|x| x.as_str().to_string());
+        let source = caps.name("source").map(|x| x.as_str().to_string()).filter(|x| x != "_");
+        let predicate = caps.name("predicate").map(|x| x.as_str().to_string()).filter(|x| x != "_");
+        let target = caps.name("target").map(|x| x.as_str().to_string()).filter(|x| x != "_");
 
         match perspective
-            .get(source, predicate, target, None, None, None)
+            .get(source, target, predicate, None, None, None)
             .await {
             Ok(links) => {
                 for link in links {
