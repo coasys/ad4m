@@ -7,7 +7,7 @@ import {
 import { WebSocketServer } from 'ws';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, LanguageRef, LinkExpression } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, LanguageRef, LinkExpression, PerspectiveHandle } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -674,7 +674,9 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return withFilter(
                         () => pubsub.asyncIterator(PubSub.LINK_ADDED_TOPIC),
-                        (payload, argsInner) => payload.perspective.uuid === argsInner.uuid
+                        (payload: {perspective: PerspectiveHandle, link: LinkExpression}, variables) => {
+                            return payload.perspective.uuid === variables.uuid
+                        }
                     )(undefined, args)
                 },
                 //@ts-ignore
@@ -686,7 +688,9 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return withFilter(
                         () => pubsub.asyncIterator(PubSub.LINK_REMOVED_TOPIC),
-                        (payload, variables) => payload.perspective.uuid === variables.uuid
+                        (payload: {perspective: PerspectiveHandle, link: LinkExpression}, variables) => {
+                            return payload.perspective.uuid === variables.uuid
+                        }
                     )(undefined, args)
                 },
                 //@ts-ignore

@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "ad4min"
-version = "0.2.1"
+version = "0.0.10"
 dependencies = [
  "ad4m-client",
  "directories",

@@ -29,6 +29,18 @@ export class LinkMutations {
 }
 
 @InputType()
+export class NullableLinkFilter {
+    @Field({nullable: true})
+    source?: string;
+    
+    @Field({nullable: true})
+    target?: string;
+    
+    @Field({nullable: true})
+    predicate?: string;
+}
+
+@InputType()
 export class LinkInput {
     @Field()
     source: string;

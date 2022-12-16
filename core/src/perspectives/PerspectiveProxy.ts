@@ -1,9 +1,10 @@
 import { LinkCallback, PerspectiveClient } from "./PerspectiveClient";
-import { Link, LinkExpression, LinkExpressionInput } from "../links/Links";
+import { Link, LinkExpression, NullableLinkFilter } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
+import { Subscription } from "zen-observable-ts";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed"
 
@@ -16,17 +17,11 @@ type PerspectiveListenerTypes = "link-added" | "link-removed"
 export class PerspectiveProxy {
     #handle: PerspectiveHandle
     #client: PerspectiveClient
-    #perspectiveLinkAddedCallbacks: LinkCallback[]
-    #perspectiveLinkRemovedCallbacks: LinkCallback[]
     #executeAction
 
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
-        this.#perspectiveLinkAddedCallbacks = []
-        this.#perspectiveLinkRemovedCallbacks = []
         this.#handle = handle
         this.#client = ad4m
-        this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
-        this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
 
         this.#executeAction = async (actions, expression) => {
             console.log("execute:", actions)
@@ -111,32 +106,16 @@ export class PerspectiveProxy {
 
     /** Adds a link listener
      * @param type Can be 'link-added' or 'link-removed'
-     * @param cb Callback function that is called when a link is added to the perspective
+     * @param callback Callback function that is called when a link is added to the perspective
+     * @param filter Optional filter values that are used to filter out links and only returns links matching values in the filter
      */
-    async addListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
+    addListener(type: PerspectiveListenerTypes, callback: LinkCallback, filter?: NullableLinkFilter): Subscription {
         if (type === 'link-added') {
-            this.#perspectiveLinkAddedCallbacks.push(cb);
+            return this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, callback, filter)
         } else if (type === 'link-removed') {
-            this.#perspectiveLinkRemovedCallbacks.push(cb);
+            return this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, callback, filter)
         }
     }
-
-    /** Removes a previously added link listener
-     * @param type Can be 'link-added' or 'link-removed'
-     * @param cb Callback function that is called when a link is added to the perspective
-     */
-    async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
-        if (type === 'link-added') {
-            const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkAddedCallbacks.splice(index, 1);
-        } else if (type === 'link-removed') {
-            const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
-
-            this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
-        }
-    }
-
 
     /** Create and return a snapshot of this perspective
      * A snapshot is a rendered Perspectie object that contains all the links of the perspective.

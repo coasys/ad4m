@@ -538,22 +538,40 @@ describe('Ad4mClient', () => {
             const linkAdded = jest.fn()
             const linkRemoved = jest.fn()
 
-            await perspective.addListener('link-added', linkAdded)
+            const addedListener  = await perspective.addListener('link-added', linkAdded)
             const link = new LinkExpressionInput()
             link.source = 'root'
             link.target = 'perspective://Qm34589a3ccc0'
+            console.log("adding a new link 1");
             await perspective.add(link)  
+            console.log("complete");
 
             expect(linkAdded).toBeCalledTimes(1)
             expect(linkRemoved).toBeCalledTimes(0)
 
             perspective = await ad4mClient.perspective.byUUID('00004')
 
-            await perspective.addListener('link-removed', linkRemoved)
+            const removedListener = await perspective.addListener('link-removed', linkRemoved)
             await perspective.remove(testLink)  
 
             expect(linkAdded).toBeCalledTimes(1)
             expect(linkRemoved).toBeCalledTimes(1)
+
+            await addedListener.unsubscribe();
+            await removedListener.unsubscribe();
+
+            // const linkAddedFilter = jest.fn();
+            // const linkAddedNoFilter = jest.fn();
+
+            // await perspective.addListener('link-added', linkAddedFilter, {source: "source"});
+            // await perspective.addListener('link-added', linkAddedNoFilter);
+
+            // const linkFiltered = new Link({source: "root", predicate: "p", target: "neighbourhood://Qm12345"});
+            // console.log("adding second sub link");
+            // await perspective.add(linkFiltered);
+
+            // expect(linkAddedFilter).toBeCalledTimes(0);
+            // expect(linkAddedNoFilter).toBeCalledTimes(1);
         })
 
         it('removeListener() smoke test', async () => {
@@ -561,19 +579,19 @@ describe('Ad4mClient', () => {
             
             const linkAdded = jest.fn()
 
-            await perspective.addListener('link-added', linkAdded)
+            const subscription = await perspective.addListener('link-added', linkAdded)
             await perspective.add({source: 'root', target: 'neighbourhood://Qm12345'})  
 
             expect(linkAdded).toBeCalledTimes(1)
 
             linkAdded.mockClear();
-            
-            perspective = await ad4mClient.perspective.byUUID('00004')
 
-            await perspective.removeListener('link-added', linkAdded)
+            expect(linkAdded).toBeCalledTimes(0)
+
+            await subscription.unsubscribe();
             await perspective.add({source: 'root', target: 'neighbourhood://Qm123456'})  
 
-            expect(linkAdded).toBeCalledTimes(1)
+            expect(linkAdded).toBeCalledTimes(0)
         })
 
         it('updateLink() smoke test', async () => {

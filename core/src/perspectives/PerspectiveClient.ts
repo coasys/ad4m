@@ -1,5 +1,6 @@
 import { ApolloClient, gql } from "@apollo/client/core";
-import { Link, LinkExpressionInput, LinkExpression, LinkInput } from "../links/Links";
+import { Subscription } from "zen-observable-ts";
+import { Link, LinkExpressionInput, LinkExpression, LinkInput, NullableLinkFilter } from "../links/Links";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
@@ -272,37 +273,41 @@ export class PerspectiveClient {
         })
     }
 
-    async addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveLinkAdded(uuid: "${uuid}") { ${LINK_EXPRESSION_FIELDS} }
-            }   
-        `}).subscribe({
-            next: result => {
-                cb.forEach(c => {
-                    c(result.data.perspectiveLinkAdded)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
+    addPerspectiveLinkAddedListener(uuid: String, callback: LinkCallback, filter?: NullableLinkFilter): Subscription {
+        //TODO; this function should save the state of any existing callbacks + filters we have, if a subscription already exists
+        //with a given function, it should not open a new one but just add that callback to a callbacks array that gets called 
+        //by the client when it receives a subscription message
+        const subscription = this.#apolloClient.subscribe({
+            query: gql`subscription perspectiveLinkAdded($uuid: String!, $filter: NullableLinkFilter) {
+                perspectiveLinkAdded(uuid: $uuid, filter: $filter) { ${LINK_EXPRESSION_FIELDS} }
+            }`, 
+            variables: { uuid, filter }})
+        .subscribe(
+            {
+                next: result => {
+                    callback(result.data.perspectiveLinkAdded)
+                },
+                error: (e) => console.error(e)
+            }
+        )
+        return subscription;
     }
 
-    async addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveLinkRemoved(uuid: "${uuid}") { ${LINK_EXPRESSION_FIELDS} }
-            }   
-        `}).subscribe({
-            next: result => {
-                cb.forEach(c => {
-                    c(result.data.perspectiveLinkRemoved)
-                })
-            },
-            error: (e) => console.error(e)
+    addPerspectiveLinkRemovedListener(uuid: String, callback: LinkCallback, filter?: NullableLinkFilter): Subscription {
+        const subscription = this.#apolloClient.subscribe({
+            query: gql`subscription perspectiveLinkRemoved($uuid: String!, $filter: NullableLinkFilter) {
+                perspectiveLinkRemoved(uuid: $uuid, filter: $filter) { ${LINK_EXPRESSION_FIELDS} }
+            }`, 
+            variables: { uuid, filter }
         })
-
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
+        .subscribe(
+            {
+                next: result => {
+                    callback(result.data.perspectiveLinkRemoved)
+                },
+                error: (e) => console.error(e)
+            }
+        )
+        return subscription
     }
 }

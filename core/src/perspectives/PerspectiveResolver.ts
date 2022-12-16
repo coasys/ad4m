@@ -1,5 +1,6 @@
 import { Arg, Mutation, PubSub, PubSubEngine, Query, Resolver, Subscription } from "type-graphql";
-import { LinkExpression, LinkExpressionInput, LinkInput } from "../links/Links";
+import {withFilter} from "graphql-subscriptions";
+import { LinkExpression, LinkExpressionInput, LinkInput, NullableLinkFilter } from "../links/Links";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
@@ -140,12 +141,49 @@ export default class PerspectiveResolver {
     }
 
     @Subscription({topics: LINK_ADDED_TOPIC, nullable: true})
-    perspectiveLinkAdded(@Arg('uuid') uuid: string): LinkExpression {
-        return testLink
+    perspectiveLinkAdded(@Arg('uuid') uuid: string, @Arg('filter', {nullable: true}) filter?: NullableLinkFilter): LinkExpression {
+        console.log("link added", uuid, filter, testLink);
+        if (filter) {
+            if (filter.source) {
+                if (filter.source === testLink.data.source) {
+                    return testLink
+                }
+            }
+            if (filter.predicate) {
+                if (filter.predicate === testLink.data.predicate) {
+                    return testLink
+                }
+            }
+            if (filter.target) {
+                if (filter.target === testLink.data.target) {
+                    return testLink
+                }
+            }
+        } else {
+            return testLink
+        }
     }
 
     @Subscription({topics: LINK_REMOVED_TOPIC, nullable: true})
-    perspectiveLinkRemoved(@Arg('uuid') uuid: string): LinkExpression {
-        return testLink
+    perspectiveLinkRemoved(@Arg('uuid') uuid: string, @Arg('filter', {nullable: true}) filter?: NullableLinkFilter): LinkExpression {
+        if (filter) {
+            if (filter.source) {
+                if (filter.source === testLink.data.source) {
+                    return testLink
+                }
+            }
+            if (filter.predicate) {
+                if (filter.predicate === testLink.data.predicate) {
+                    return testLink
+                }
+            }
+            if (filter.target) {
+                if (filter.target === testLink.data.target) {
+                    return testLink
+                }
+            }
+        } else {
+            return testLink
+        }
     }
 }
