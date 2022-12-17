@@ -6,7 +6,8 @@ import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
-    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, Subject, subjectProperty, subjectCollection, sdnaOutput,
+    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
+    instanceQuery, Subject, subjectProperty, subjectCollection, sdnaOutput,
 } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
@@ -313,6 +314,10 @@ describe("Integration", () => {
                 // isSubjectInstance = [hasLink("todo://state")]
 
                 //@ts-ignore
+                @instanceQuery()
+                static async all(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
+                //@ts-ignore
                 @subjectProperty({
                     through: "todo://state", 
                     initial:"todo://ready",
@@ -366,6 +371,11 @@ describe("Integration", () => {
                 let comment = Literal.from("new comment").toUrl()
                 await todo.addComment(comment)
                 expect(await todo.comments).to.deep.equal([comment])
+            })
+
+            it("can retrieve instances through instaceQuery decorator (all(), finished()..)", async () => {
+                let todos = await Todo.all(perspective!)
+                expect(todos.length).to.equal(3)
             })
         })
     })

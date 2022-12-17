@@ -1,3 +1,5 @@
+import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { Subject } from "./Subject";
 import { collectionToAdderName, propertyNameToSetterName, stringifyObjectLiteral } from "./util";
 
 export class PerspectiveAction {
@@ -18,6 +20,40 @@ export function addLink(source: string, predicate: string, target: string): Pers
 
 export function hasLink(predicate: string): string {
     return `triple(this, "${predicate}", _)`
+}
+
+interface InstanceQueryParams {
+    where?: string;
+}
+
+export function instanceQuery(options?: InstanceQueryParams) {
+    return function <T>(target: T, key: keyof T, descriptor: PropertyDescriptor) {
+        const originalMethod = descriptor.value;
+        if(typeof originalMethod !== "function") {
+            throw new Error("instanceQuery decorator can only be applied to methods");
+        }
+
+        descriptor.value = async function(perspective: PerspectiveProxy): Promise<T[]> {
+            let instances: T[] = []
+            //@ts-ignore
+            let subjectClassName = target.name
+            let query = `subject_class("${subjectClassName}", c), instance(c, Instance)`
+            if(options && options.where) {
+                query += `, ${options.where}`
+            }
+
+            let results = await perspective.infer(query)
+            for(let result of results) {
+                let instance = result.Instance
+                console.log("Instance: " + instance)
+                let subject = new Subject(perspective, instance, subjectClassName)
+                await subject.init()
+                instances.push(subject as T)
+            }
+
+            return instances
+        }
+    };
 }
 
 interface PropertyOptions {
