@@ -317,6 +317,12 @@ describe("Integration", () => {
                 @instanceQuery()
                 static async all(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
+                @instanceQuery({where: {state: "todo://ready"}})
+                static async allReady(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
+                @instanceQuery({where: { state: "todo://done" }})
+                static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
                 //@ts-ignore
                 @subjectProperty({
                     through: "todo://state", 
@@ -373,9 +379,19 @@ describe("Integration", () => {
                 expect(await todo.comments).to.deep.equal([comment])
             })
 
-            it("can retrieve instances through instaceQuery decorator (all(), finished()..)", async () => {
+            it("can retrieve all instances through instaceQuery decoratored all()", async () => {
                 let todos = await Todo.all(perspective!)
                 expect(todos.length).to.equal(3)
+            })
+
+            it("can retrieve all mathching instance through instanceQuery(where: ..)", async () => {
+                let todos = await Todo.allReady(perspective!)
+                expect(todos.length).to.equal(1)
+                expect(await todos[0].state).to.equal("todo://ready")
+
+                todos = await Todo.allDone(perspective!)
+                expect(todos.length).to.equal(1)
+                expect(await todos[0].state).to.equal("todo://done")
             })
         })
     })
