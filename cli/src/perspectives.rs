@@ -80,19 +80,6 @@ pub enum PerspectiveFunctions {
     SubjectAddCollection { id: String, base: String, collection: String, value: String },
 }
 
-async fn get_subject_instance_classes(perspective: &PerspectiveProxy, base: &String) -> Result<Vec<String>> {
-    let classes = perspective
-        .get_subject_classes(&base)
-        .await
-        .with_context(||format!("Getting subject classes for {}", base))?;
-
-    if classes.is_empty() {
-        return Err(anyhow!("\x1b[91mNo subject found at: \x1b[97m{}", base));
-    }
-
-    return Ok(classes)
-}
-
 pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>) -> Result<()> {
     if command.is_none() {
         let all_perspectives = ad4m_client.perspectives.all().await?;
