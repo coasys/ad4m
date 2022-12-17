@@ -48,7 +48,6 @@ export function instanceQuery(options?: InstanceQueryParams) {
             let results = await perspective.infer(query)
             for(let result of results) {
                 let instance = result.Instance
-                console.log("Instance: " + instance)
                 let subject = new Subject(perspective, instance, subjectClassName)
                 await subject.init()
                 instances.push(subject as T)
