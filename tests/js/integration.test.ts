@@ -323,6 +323,9 @@ describe("Integration", () => {
                 @instanceQuery({where: { state: "todo://done" }})
                 static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
+                @instanceQuery({condition: 'triple("ad4m://self", _, Instance)'})
+                static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
                 //@ts-ignore
                 @subjectProperty({
                     through: "todo://state", 
@@ -392,6 +395,19 @@ describe("Integration", () => {
                 todos = await Todo.allDone(perspective!)
                 expect(todos.length).to.equal(1)
                 expect(await todos[0].state).to.equal("todo://done")
+            })
+
+            it("can retrieve matching instance through instanceQuery(condition: ..)", async () => {
+                let todos = await Todo.allSelf(perspective!)
+                expect(todos.length).to.equal(0)
+
+                todos = await Todo.all(perspective!)
+                let todo = todos[0]
+                //@ts-ignore
+                perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
+                
+                todos = await Todo.allSelf(perspective!)
+                expect(todos.length).to.equal(1)
             })
         })
     })

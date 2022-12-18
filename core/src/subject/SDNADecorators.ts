@@ -24,6 +24,7 @@ export function hasLink(predicate: string): string {
 
 interface InstanceQueryParams {
     where?: object;
+    condition?: string;
 }
 
 export function instanceQuery(options?: InstanceQueryParams) {
@@ -45,7 +46,17 @@ export function instanceQuery(options?: InstanceQueryParams) {
                 }
             }
 
+            if(options && options.condition) {
+                query += ', ' + options.condition
+            }
+
             let results = await perspective.infer(query)
+            if(results == false) {
+                return instances
+            }
+            if(typeof results == "string") {
+                throw results
+            }
             for(let result of results) {
                 let instance = result.Instance
                 let subject = new Subject(perspective, instance, subjectClassName)
