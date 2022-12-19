@@ -28,7 +28,7 @@ const Apps = () => {
       >        
         {
           apps.map((app, index) => (
-            <div key={`app-${index}`} style={{...cardStyle, width: '87%'}}>
+            <div key={`app-${index}`} style={{...cardStyle, width: '100%'}}>
               <j-flex a="flex-start" direction="column">
                 <j-flex direction='column' style={{marginTop: 4}}>
                   <j-text variant="bold" size="600">{app.auth.appName}</j-text>

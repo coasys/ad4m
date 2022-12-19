@@ -155,7 +155,7 @@ const Language = (props: Props) => {
           return (
             <div
               key={`language-${language?.address}`}
-              style={{ ...cardStyle, width: "87%" }}
+              style={{ ...cardStyle, width: "100%" }}
             >
               <j-flex a="flex-start" direction="column">
                 <div

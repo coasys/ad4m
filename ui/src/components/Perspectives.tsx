@@ -201,7 +201,7 @@ const Perspectives = (props: Props) => {
           return (
             <div
               key={`perspectice-${e?.name}`}
-              style={{ ...cardStyle, width: "87%" }}
+              style={{ ...cardStyle, width: "100%" }}
             >
               <j-flex align="flex-start">
                 <j-flex align="flex-start">
