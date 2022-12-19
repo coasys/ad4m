@@ -28,11 +28,17 @@ export class Subject {
         
 
         for(let p of properties) {
+            const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_resolve(c, "${p}")`)
             Object.defineProperty(this, p, {
                 get: async () => {
                     let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_getter(c, "${this.#baseExpression}", "${p}", Value)`)
                     if(results && results.length > 0) {
-                        return results[0].Value
+                        let expressionURI = results[0].Value
+                        if(resolveExpressionURI) {
+                            return await this.#perspective.getExpression(expressionURI)
+                        } else {
+                            return expressionURI
+                        }
                     } else {
                         return undefined
                     }
@@ -41,15 +47,22 @@ export class Subject {
         }
 
 
-        let setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_setter(c, Property, Setter)`)
+        const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_setter(c, Property, Setter)`)
+        
         //console.log("Subject setters: " + setters.map(setter => setter.Property))
         for(let setter of setters) {
             if(setter) {
                 const property = setter.Property
                 const actions = eval(setter.Setter)
+                const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_resolve_language(c, "${property}", Language)`)
+                let resolveLanguage
+                if(resolveLanguageResults && resolveLanguageResults.length > 0) {
+                    resolveLanguage = resolveLanguageResults[0].Language
+                }
                 this[propertyNameToSetterName(property)] = async (value: any) => {
-                    //console.log("Setting property: " + property + " to " + value)
-                    //console.log("Actions: " + JSON.stringify(actions))
+                    if(resolveLanguage) {
+                        value = await this.#perspective.createExpression(value, resolveLanguage)
+                    }
                     await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
                 }
             }

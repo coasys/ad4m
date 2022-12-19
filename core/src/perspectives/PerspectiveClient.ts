@@ -1,4 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core";
+import { Expression, ExpressionRendered } from "../expression/Expression";
+import { ExpressionClient } from "../expression/ExpressionClient";
+import { ExpressionRef } from "../expression/ExpressionRef";
 import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
@@ -39,6 +42,7 @@ export class PerspectiveClient {
     #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
     #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
     #perspectiveRemovedCallbacks: UuidCallback[]
+    #expressionClient?: ExpressionClient
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
@@ -51,6 +55,10 @@ export class PerspectiveClient {
             this.subscribePerspectiveUpdated()
             this.subscribePerspectiveRemoved()
         }
+    }
+
+    setExpressionClient(client: ExpressionClient) {
+        this.#expressionClient = client
     }
 
     async all(): Promise<PerspectiveProxy[]> {
@@ -253,6 +261,15 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, link }
         }))
+    }
+
+    // ExpressionClient functions, needed for Subjects:
+    async getExpression(expressionURI: string): Promise<ExpressionRendered> {
+        return await this.#expressionClient.get(expressionURI)
+    }
+
+    async createExpression(content: any, languageAddress: string): Promise<string> {
+        return await this.#expressionClient.create(content, languageAddress)
     }
 
     // Subscriptions:

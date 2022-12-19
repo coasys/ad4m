@@ -161,15 +161,17 @@ describe("Integration", () => {
                 expect(await subject.state).to.equal("todo://done")
             })
 
-            it("should work with a property that is not set initially", async () => {
+            it("should work with a property that is not set initially and that auto-resolves", async () => {
                 //@ts-ignore
                 expect(await subject.title).to.be.undefined
         
-                let title = Literal.from("test title").toUrl()
+                let title = "test title"
                 //@ts-ignore
                 await subject.setTitle(title)
                 //@ts-ignore
-                expect(await subject.title).to.equal(title)
+                let retrieved = await subject.title
+                //@ts-ignore
+                expect(JSON.parse(retrieved.data)).to.equal(title)
             })
 
             it("should be able to get collections as arrays", async () => {
@@ -416,6 +418,24 @@ describe("Integration", () => {
                 
                 todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(1)
+            })
+
+            it("can deal with properties that resolve the URI and create Expressions", async () => {
+                let todos = await Todo.all(perspective!)
+                let todo = todos[0]
+                expect(await todo.title).to.equal(undefined)
+
+                await todo.setTitle("new title")
+
+                const title = await todo.title
+                //@ts-ignore
+                expect(title.data).to.equal(JSON.stringify("new title"))
+
+                //@ts-ignore
+                let links = await perspective!.get(new LinkQuery({source: todo.baseExpression, predicate: "todo://has_title"}))
+                expect(links.length).to.equal(1)
+                let literal = Literal.fromUrl(links[0].data.target).get()
+                expect(literal.data).to.equal("new title")
             })
         })
     })
