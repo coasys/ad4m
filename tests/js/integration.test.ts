@@ -7,7 +7,8 @@ import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
-    instanceQuery, Subject, subjectProperty, subjectCollection, sdnaOutput,
+    instanceQuery, Subject, subjectProperty, subjectPropertySetter,
+    subjectCollection, sdnaOutput,
 } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
@@ -343,8 +344,15 @@ describe("Integration", () => {
                 setState(state: string) {}
 
                 //@ts-ignore
-                @subjectProperty({through: "todo://has_title"})
+                @subjectProperty({
+                    through: "todo://has_title",
+                    resolve: true,
+                })
                 title: string = ""
+
+                @subjectPropertySetter({
+                    resolveLanguage: 'literal'
+                })
                 setTitle(title: string) {}
 
                 //@ts-ignore

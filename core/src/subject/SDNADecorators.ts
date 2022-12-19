@@ -1,6 +1,6 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { Subject } from "./Subject";
-import { collectionToAdderName, propertyNameToSetterName, stringifyObjectLiteral } from "./util";
+import { collectionToAdderName, propertyNameToSetterName, setterNameToPropertyName, stringifyObjectLiteral } from "./util";
 
 export class PerspectiveAction {
     action: string
@@ -73,11 +73,13 @@ interface PropertyOptions {
     through: string;
     initial?: string,
     required?: boolean,
+    resolve?: boolean,
 }
 export function subjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__properties"] = target["__properties"] || {};
-        target["__properties"][key] = opts;
+        target["__properties"][key] = target["__properties"][key] || {};
+        target["__properties"][key] = { ...target["__properties"][key], ...opts }
         Object.defineProperty(target, key, {});
         //return descriptor;
     };
@@ -88,6 +90,20 @@ export function subjectCollection(opts: PropertyOptions) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
         Object.defineProperty(target, key, {});
+        //return descriptor;
+    };
+}
+
+interface PropertySetterOptions {
+    resolveLanguage: string;
+}
+
+export function subjectPropertySetter(opts: PropertySetterOptions) {
+    return function <T>(target: T, key: keyof T) {
+        const propertyName = setterNameToPropertyName(key as string)
+        target["__properties"] = target["__properties"] || {};
+        target["__properties"][propertyName] = target["__properties"][propertyName] || {};
+        target["__properties"][propertyName] = { ...target["__properties"][propertyName], ...opts }
         //return descriptor;
     };
 }
@@ -120,7 +136,15 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
         for(let property in properties) {
             let propertyCode = `property(c, "${property}").\n`
 
-            let { through, initial, required } = properties[property]
+            let { through, initial, required, resolve, resolveLanguage } = properties[property]
+
+            if(resolve) {
+                propertyCode += `property_resolve(c, "${property}").\n`
+
+                if(resolveLanguage) {
+                    propertyCode += `property_resolve_language(c, "${property}", "${resolveLanguage}").\n`
+                }
+            }
             
             if(through) {
                 propertyCode += `property_getter(c, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
