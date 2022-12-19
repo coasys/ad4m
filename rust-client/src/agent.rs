@@ -228,12 +228,12 @@ pub async fn sign_message(
     message: String,
 ) -> Result<sign_message::SignMessageAgentSignMessage> {
     let response: sign_message::ResponseData = query(
-            executor_url,
-            cap_token,
-            SignMessage::build_query(sign_message::Variables { message }),
-        )
-        .await
-        .with_context(|| "Failed to run agent->sign_message")?;
+        executor_url,
+        cap_token,
+        SignMessage::build_query(sign_message::Variables { message }),
+    )
+    .await
+    .with_context(|| "Failed to run agent->sign_message")?;
 
     Ok(response.agent_sign_message)
 }
@@ -316,11 +316,15 @@ impl AgentClient {
         .await
     }
 
-    pub async fn sign_message(&self, message: String) -> Result<sign_message::SignMessageAgentSignMessage> {
+    pub async fn sign_message(
+        &self,
+        message: String,
+    ) -> Result<sign_message::SignMessageAgentSignMessage> {
         sign_message(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
-            message
-        ).await
+            message,
+        )
+        .await
     }
 }

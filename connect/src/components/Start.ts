@@ -1,32 +1,15 @@
 import { html } from "lit";
+import { version } from "../../package.json";
+import { detectOS } from "../utils";
 
 function downloadAd4m() {
-  const windowsLink =
-    "https://github.com/perspect3vism/ad4m/releases/download/v0.2.0/AD4Min_0.2.0_x64_en-US.msi";
-  const macLink =
-    "https://github.com/perspect3vism/ad4m/releases/download/v0.2.0/AD4Min_0.2.0_x64.dmg";
-  const linuxLink =
-    "https://github.com/perspect3vism/ad4m/releases/download/v0.2.0/ad4-min_0.2.0_amd64.deb";
-  let OSName = "Unkown";
-  if (window.navigator.userAgent.indexOf("Windows NT 10.0") !== -1)
-    OSName = "Windows";
-  if (window.navigator.userAgent.indexOf("Windows NT 6.3") !== -1)
-    OSName = "Windows";
-  if (window.navigator.userAgent.indexOf("Windows NT 6.2") !== -1)
-    OSName = "Windows";
-  if (window.navigator.userAgent.indexOf("Windows NT 6.1") !== -1)
-    OSName = "Windows";
-  if (window.navigator.userAgent.indexOf("Windows NT 6.0") !== -1)
-    OSName = "Windows";
-  if (window.navigator.userAgent.indexOf("Windows NT 5.1") !== -1)
-    OSName = "Windows";
-  if (window.navigator.userAgent.indexOf("Windows NT 5.0") !== -1)
-    OSName = "Windows";
-  if (window.navigator.userAgent.indexOf("Mac") !== -1) OSName = "Mac";
-  if (window.navigator.userAgent.indexOf("X11") !== -1) OSName = "UNIX";
-  if (window.navigator.userAgent.indexOf("Linux") !== -1) OSName = "Linux";
+  const windowsLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/AD4Min_${version}_x64_en-US.msi`;
+  const macLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/AD4Min_${version}_x64.dmg`;
+  const linuxLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/ad4-min_${version}_amd64.deb`;
+  const OSName = detectOS();
   const link = document.createElement("a");
-  if (OSName === "Mac") {
+  console.log({ OSName, link });
+  if (OSName === "MacOS") {
     link.setAttribute("href", macLink);
     link.click();
   }
@@ -55,7 +38,7 @@ export default function Start({
               target="_blank"
               @click=${() => downloadAd4m()}
             >
-              Install AD4M Extension
+              Install AD4M
             </a>`
           : html`<button class="button" @click=${() => scanQrcode()}>
               Connect with QR
