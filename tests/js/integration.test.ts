@@ -169,9 +169,7 @@ describe("Integration", () => {
                 //@ts-ignore
                 await subject.setTitle(title)
                 //@ts-ignore
-                let retrieved = await subject.title
-                //@ts-ignore
-                expect(JSON.parse(retrieved.data)).to.equal(title)
+                expect(await subject.title).to.equal(title)
             })
 
             it("should be able to get collections as arrays", async () => {
@@ -426,10 +424,7 @@ describe("Integration", () => {
                 expect(await todo.title).to.equal(undefined)
 
                 await todo.setTitle("new title")
-
-                const title = await todo.title
-                //@ts-ignore
-                expect(title.data).to.equal(JSON.stringify("new title"))
+                expect(await todo.title).to.equal("new title")
 
                 //@ts-ignore
                 let links = await perspective!.get(new LinkQuery({source: todo.baseExpression, predicate: "todo://has_title"}))
