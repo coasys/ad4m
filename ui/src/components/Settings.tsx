@@ -5,17 +5,17 @@ import {
   PREDICATE_LASTNAME,
   PREDICATE_USERNAME,
 } from "../constants/triples";
-import { cardStyle, gridButton, MainContainer, MainHeader } from "./styles";
+import { cardStyle, gridButton, MainContainer } from "./styles";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { buildAd4mClient } from "../util";
 import { useCallback } from "react";
-import CardItems from "./CardItems";
 import { showNotification } from "@mantine/notifications";
 import { invoke } from "@tauri-apps/api";
 import QRCode from "react-qr-code";
 import { AgentContext } from "../context/AgentContext";
 import ActionButton from "./ActionButton";
 import { appWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/api/shell";
 
 type Props = {
   did: String;
@@ -218,7 +218,7 @@ const Profile = (props: Props) => {
             />
             <ActionButton
               title="Open GraphQL"
-              onClick={() => window.open(url.replace("ws", "http"))}
+              onClick={() => open(url.replace("ws", "http"))}
               icon="box-arrow-up-right"
             />
           </>
@@ -248,7 +248,7 @@ const Profile = (props: Props) => {
         <ActionButton title="Copy logs" onClick={copyFile} icon="clipboard" />
         <ActionButton
           title="Docs"
-          onClick={() => window.open("https://docs.ad4m.dev/")}
+          onClick={() => open("https://docs.ad4m.dev/")}
           icon="file-earmark-richtext"
         />
         <ActionButton
