@@ -117,21 +117,35 @@ const Auth = () => {
         open={secretCodeModalOpened}
         onToggle={(e: any) => setSecretCodeModalOpened(e.target.open)}
       >
-        <div className="center">
-          <j-flex gap="200" direction="column">
-            <j-flex a="center" gap="200">
-              <j-text nomargin variant="heading-sm">
-                {secretCode}
-                <j-button variant="subtle" onClick={copyCode}>
-                  <j-icon size="sm" name="clipboard"></j-icon>
-                </j-button>
-              </j-text>
-            </j-flex>
-            <j-box p="200"></j-box>
-            <j-flex>
-              <j-button onClick={closeSecretCodeModal}>Close</j-button>
-            </j-flex>
-          </j-flex>
+        <div
+          className="center"
+          style={{
+            height: "100%",
+            width: "100%",
+            maxWidth: "500px",
+            paddingLeft: "var(--j-space-400)",
+            paddingRight: "var(--j-space-400)",
+          }}
+        >
+          <div>
+            <j-text size="700" color="black" weight="600">
+              Verification Code
+            </j-text>
+            <j-input
+              className="one-time-pass"
+              label="Go back to your app to verify"
+              readonly
+              size="xl"
+              value={secretCode}
+            >
+              <j-button square slot="end" variant="subtle" onClick={copyCode}>
+                <j-icon size="sm" name="clipboard"></j-icon>
+              </j-button>
+            </j-input>
+            <j-button variant="primary" onClick={closeSecretCodeModal}>
+              Close
+            </j-button>
+          </div>
         </div>
       </j-modal>
     </div>

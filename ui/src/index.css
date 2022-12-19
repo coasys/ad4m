@@ -87,3 +87,7 @@ code {
   align-items: center;
   gap: var(--j-space-400);
 }
+
+:root j-input.one-time-pass::part(input-field) {
+  font-size: var(--j-font-size-800);
+}
