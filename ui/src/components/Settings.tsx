@@ -342,7 +342,11 @@ const Profile = (props: Props) => {
             ></j-input>
             <j-box p="200"></j-box>
             <j-flex>
-              <j-button onClick={() => clearAgent(password)} loading={loading}>
+              <j-button
+                variant="primary"
+                onClick={() => clearAgent(password)}
+                loading={loading}
+              >
                 Delete Agent
               </j-button>
             </j-flex>

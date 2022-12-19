@@ -111,7 +111,11 @@ function Profile() {
           ></j-input>
           <j-box p="200"></j-box>
           <j-flex>
-            <j-button onClick={() => lockAgent(password)} loading={loading}>
+            <j-button
+              variant="primary"
+              onClick={() => lockAgent(password)}
+              loading={loading}
+            >
               Lock agent
             </j-button>
           </j-flex>
