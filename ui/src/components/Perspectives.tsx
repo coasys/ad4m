@@ -267,72 +267,74 @@ const Perspectives = (props: Props) => {
           );
         })}
       </div>
-      <j-modal
-        size="fullscreen"
-        open={perspectiveModalOpen}
-        onToggle={(e: any) => setPerspectiveModalOpen(e.target.open)}
-      >
-        <j-box p="400">
-          <j-flex gap="500" direction="column">
-            <j-text nomargin variant="heading-sm">
-              Create Perspective
-            </j-text>
-            <j-input
-              label="Name"
-              size="lg"
-              placeholder="ex. Test Perspective"
-              value={perspectiveName}
-              onInput={(e: any) => setPerspectiveName(e.target.value)}
-            ></j-input>
-            <j-toggle
-              style={{ width: "100%" }}
-              full
-              size="lg"
-              variant="primary"
-              checked={isNeighbourhood}
-              onChange={(e: any) => setIsNeighbourhood(e.target.checked)}
-            >
-              Public Perspective
-            </j-toggle>
-            {isNeighbourhood && (
-              <>
-                <j-select
-                  value={linkLanguage}
-                  onChange={(e: any) => setLinkLanguage(e.target.value)}
-                >
-                  {langs.map((e) => (
-                    <j-menu-item label={e.label} value={e.value}>
-                      {" "}
-                      {e.label}{" "}
-                    </j-menu-item>
-                  ))}
-                </j-select>
-                <j-select
-                  value={linkLanguages}
-                  onChange={(e: any) => setLinkLanguages(e.target.value)}
-                >
-                  {langs.map((e) => (
-                    <j-menu-item label={e.label} value={e.value}>
-                      {" "}
-                      {e.label}{" "}
-                    </j-menu-item>
-                  ))}
-                </j-select>
-              </>
-            )}
-          </j-flex>
-          <j-box p="200"></j-box>
-          <j-flex>
-            <j-button onClick={() => setPerspectiveModalOpen(false)}>
-              Cancel
-            </j-button>
+      {perspectiveModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={perspectiveModalOpen}
+          onToggle={(e: any) => setPerspectiveModalOpen(e.target.open)}
+        >
+          <j-box p="400">
+            <j-flex gap="500" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Create Perspective
+              </j-text>
+              <j-input
+                label="Name"
+                size="lg"
+                placeholder="ex. Test Perspective"
+                value={perspectiveName}
+                onInput={(e: any) => setPerspectiveName(e.target.value)}
+              ></j-input>
+              <j-toggle
+                style={{ width: "100%" }}
+                full
+                size="lg"
+                variant="primary"
+                checked={isNeighbourhood}
+                onChange={(e: any) => setIsNeighbourhood(e.target.checked)}
+              >
+                Public Perspective
+              </j-toggle>
+              {isNeighbourhood && (
+                <>
+                  <j-select
+                    value={linkLanguage}
+                    onChange={(e: any) => setLinkLanguage(e.target.value)}
+                  >
+                    {langs.map((e) => (
+                      <j-menu-item label={e.label} value={e.value}>
+                        {" "}
+                        {e.label}{" "}
+                      </j-menu-item>
+                    ))}
+                  </j-select>
+                  <j-select
+                    value={linkLanguages}
+                    onChange={(e: any) => setLinkLanguages(e.target.value)}
+                  >
+                    {langs.map((e) => (
+                      <j-menu-item label={e.label} value={e.value}>
+                        {" "}
+                        {e.label}{" "}
+                      </j-menu-item>
+                    ))}
+                  </j-select>
+                </>
+              )}
+            </j-flex>
             <j-box p="200"></j-box>
-            <j-button onClick={create} loading={loading}>
-              Install
-            </j-button>
-          </j-flex>
-        </j-box>
-      </j-modal>
+            <j-flex>
+              <j-button onClick={() => setPerspectiveModalOpen(false)}>
+                Cancel
+              </j-button>
+              <j-box p="200"></j-box>
+              <j-button onClick={create} loading={loading}>
+                Install
+              </j-button>
+            </j-flex>
+          </j-box>
+        </j-modal>
+      )}
     </div>
   );
 };

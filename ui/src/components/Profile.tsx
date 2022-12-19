@@ -75,7 +75,7 @@ function Profile() {
             <j-icon size="xs" name="chevron-down"></j-icon>
           </j-flex>
         </j-button>
-        <div slot="content">
+        <j-menu slot="content">
           <j-menu-item onClick={() => setLockAgentModalOpen(true)}>
             Lock Agent
             <j-icon size="xs" slot="start" name="lock"></j-icon>
@@ -88,7 +88,7 @@ function Profile() {
             Poweroff Agent
             <j-icon size="xs" slot="start" name="x-circle"></j-icon>
           </j-menu-item>
-        </div>
+        </j-menu>
       </j-popover>
       <j-modal
         size="fullscreen"

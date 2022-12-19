@@ -192,113 +192,121 @@ const Language = (props: Props) => {
           );
         })}
       </div>
-      <j-modal
-        size="fullscreen"
-        open={publishLanguageModalOpen}
-        onToggle={(e: any) => setPublishLanguageModalOpen(e.target.open)}
-      >
-        <j-box p="400">
-          <j-flex gap="200" direction="column">
-            <j-text nomargin variant="heading-sm">
-              Publish Langauge
-            </j-text>
-            <j-box p="200"></j-box>
-            <j-input
-              label="Name"
-              size="lg"
-              placeholder="ex. Social-Context"
-              value={languageName}
-              onInput={(e: any) => setLanguageName(e.target.value)}
-            ></j-input>
-            <j-input
-              label="Description"
-              size="lg"
-              placeholder="Describe what the language does here."
-              value={languageDescription}
-              onInput={(e: any) => setLanguageDescription(e.target.value)}
-            ></j-input>
-            <j-input
-              label="Description"
-              size="lg"
-              placeholder="Describe what the language does here."
-              value={languageDescription}
-              onInput={(e: any) => setLanguageDescription(e.target.value)}
-            ></j-input>
-            <j-input
-              label="Language Bundle Path"
-              size="lg"
-              placeholder="ex. dev/example/language.js"
-              value={languageBundlePath}
-              onInput={(e: any) => setLanguageBundlePath(e.target.value)}
-            ></j-input>
-            <j-box p="200"></j-box>
-            <j-flex>
-              <j-button onClick={() => setInstallLanguageModalOpen(false)}>
-                Cancel
-              </j-button>
+      {publishLanguageModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={publishLanguageModalOpen}
+          onToggle={(e: any) => setPublishLanguageModalOpen(e.target.open)}
+        >
+          <j-box p="400">
+            <j-flex gap="200" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Publish Langauge
+              </j-text>
               <j-box p="200"></j-box>
-              <j-button onClick={installLanguage} loading={loading}>
-                Install
-              </j-button>
-            </j-flex>
-          </j-flex>
-        </j-box>
-      </j-modal>
-      <j-modal
-        size="fullscreen"
-        open={installLanguageModalOpen}
-        onToggle={(e: any) => setInstallLanguageModalOpen(e.target.open)}
-      >
-        <j-box p="400">
-          <j-flex gap="200" direction="column">
-            <j-text nomargin variant="heading-sm">
-              Install Langauge
-            </j-text>
-            <j-box p="200"></j-box>
-            <j-input
-              label="Language hash"
-              size="lg"
-              placeholder="ex. QmUTkvPcyaUGntqfzi3iR1xomADm5yYC2j8hcPdhMHpTem"
-              value={languageHash}
-              onInput={(e: any) => setLanguageHash(e.target.value)}
-            ></j-input>
-            <j-box p="200"></j-box>
-            <j-flex>
-              <j-button onClick={() => setInstallLanguageModalOpen(false)}>
-                Cancel
-              </j-button>
+              <j-input
+                label="Name"
+                size="lg"
+                placeholder="ex. Social-Context"
+                value={languageName}
+                onInput={(e: any) => setLanguageName(e.target.value)}
+              ></j-input>
+              <j-input
+                label="Description"
+                size="lg"
+                placeholder="Describe what the language does here."
+                value={languageDescription}
+                onInput={(e: any) => setLanguageDescription(e.target.value)}
+              ></j-input>
+              <j-input
+                label="Description"
+                size="lg"
+                placeholder="Describe what the language does here."
+                value={languageDescription}
+                onInput={(e: any) => setLanguageDescription(e.target.value)}
+              ></j-input>
+              <j-input
+                label="Language Bundle Path"
+                size="lg"
+                placeholder="ex. dev/example/language.js"
+                value={languageBundlePath}
+                onInput={(e: any) => setLanguageBundlePath(e.target.value)}
+              ></j-input>
               <j-box p="200"></j-box>
-              <j-button onClick={installLanguage} loading={loading}>
-                Install
-              </j-button>
+              <j-flex>
+                <j-button onClick={() => setInstallLanguageModalOpen(false)}>
+                  Cancel
+                </j-button>
+                <j-box p="200"></j-box>
+                <j-button onClick={installLanguage} loading={loading}>
+                  Install
+                </j-button>
+              </j-flex>
             </j-flex>
-          </j-flex>
-        </j-box>
-      </j-modal>
-      <j-modal
-        size="fullscreen"
-        open={publishLanguageResultModalOpen}
-        onToggle={(e: any) => setPublishLanguageResultModalOpen(e.target.open)}
-      >
-        <j-box p="400">
-          <j-flex gap="200" direction="column">
-            <j-text nomargin variant="heading-sm">
-              Install Langauge
-            </j-text>
-            <j-box p="200"></j-box>
-            <j-text>Name: {publishLanguageResult?.name}</j-text>
-            <j-text>Address: {publishLanguageResult?.address}</j-text>
-            <j-text>Description: {publishLanguageResult?.description}</j-text>
-            <j-text>Author: {publishLanguageResult?.author}</j-text>
-            <j-text>
-              Source code link: {publishLanguageResult?.sourceCodeLink}
-            </j-text>
-          </j-flex>
-          <j-button onClick={() => setPublishLanguageResultModalOpen(false)}>
-            Done
-          </j-button>
-        </j-box>
-      </j-modal>
+          </j-box>
+        </j-modal>
+      )}
+      {installLanguageModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={installLanguageModalOpen}
+          onToggle={(e: any) => setInstallLanguageModalOpen(e.target.open)}
+        >
+          <j-box p="400">
+            <j-flex gap="200" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Install Langauge
+              </j-text>
+              <j-box p="200"></j-box>
+              <j-input
+                label="Language hash"
+                size="lg"
+                placeholder="ex. QmUTkvPcyaUGntqfzi3iR1xomADm5yYC2j8hcPdhMHpTem"
+                value={languageHash}
+                onInput={(e: any) => setLanguageHash(e.target.value)}
+              ></j-input>
+              <j-box p="200"></j-box>
+              <j-flex>
+                <j-button onClick={() => setInstallLanguageModalOpen(false)}>
+                  Cancel
+                </j-button>
+                <j-box p="200"></j-box>
+                <j-button onClick={installLanguage} loading={loading}>
+                  Install
+                </j-button>
+              </j-flex>
+            </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+      {publishLanguageResultModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={publishLanguageResultModalOpen}
+          onToggle={(e: any) =>
+            setPublishLanguageResultModalOpen(e.target.open)
+          }
+        >
+          <j-box p="400">
+            <j-flex gap="200" direction="column">
+              <j-text nomargin variant="heading-sm">
+                Install Langauge
+              </j-text>
+              <j-box p="200"></j-box>
+              <j-text>Name: {publishLanguageResult?.name}</j-text>
+              <j-text>Address: {publishLanguageResult?.address}</j-text>
+              <j-text>Description: {publishLanguageResult?.description}</j-text>
+              <j-text>Author: {publishLanguageResult?.author}</j-text>
+              <j-text>
+                Source code link: {publishLanguageResult?.sourceCodeLink}
+              </j-text>
+            </j-flex>
+            <j-button onClick={() => setPublishLanguageResultModalOpen(false)}>
+              Done
+            </j-button>
+          </j-box>
+        </j-modal>
+      )}
     </div>
   );
 };
