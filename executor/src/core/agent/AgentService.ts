@@ -381,7 +381,13 @@ export default class AgentService {
         this.#requests.delete(authKey)
 
         if (requestId === this.#requestingAuthInfo?.requestId) {
-            const apps = JSON.parse(fs.readFileSync(this.#appsFile).toString())
+            let apps
+            try {
+                apps = JSON.parse(fs.readFileSync(this.#appsFile).toString())
+            } catch(e) {
+                apps = []
+            }
+            
             fs.writeFileSync(this.#appsFile, JSON.stringify([...apps, this.#requestingAuthInfo]))
         }
 
