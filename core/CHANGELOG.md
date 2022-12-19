@@ -1,13 +1,7 @@
-# @perspect3vism/ad4m-connect
+# @perspect3vism/ad4m
 
 ## 0.3.0
 
 ### Minor Changes
 
 - 32e6e98: ad4min UI refactored / rebuilt and added support for seeing applications which have requested capabilities from ad4m-executor
-
-## 0.2.2
-
-### Minor Changes
-
-- a6d7fa9: Updated correct download links to ad4min
