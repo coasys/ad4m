@@ -254,7 +254,14 @@ const Login = (props: any) => {
           </div>
         )}
         {currentIndex === 4 && (
-          <div style={{ width: 400, display: "flex", flexDirection: "column" }}>
+          <div
+            style={{
+              width: "100%",
+              maxWidth: 400,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
             <Image
               style={{ width: "140px", margin: "auto" }}
               src="ad4msquarelogo2_white_colouremblem.png"
@@ -335,7 +342,14 @@ const Login = (props: any) => {
           </div>
         )}
         {currentIndex === 5 && (
-          <div style={{ width: 400, display: "flex", flexDirection: "column" }}>
+          <div
+            style={{
+              width: "100%",
+              maxWidth: 400,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
             <Image
               style={{ width: "140px", margin: "auto" }}
               src="ad4msquarelogo2_white_colouremblem.png"
