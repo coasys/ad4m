@@ -92,7 +92,7 @@ pub async fn me(executor_url: String, cap_token: String) -> Result<me::MeAgent> 
 )]
 pub struct GetApps;
 
-pub async fn getApps(executor_url: String, cap_token: String,) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
+pub async fn get_apps(executor_url: String, cap_token: String,) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
     let response_data: get_apps::ResponseData =
         query(executor_url, cap_token, GetApps::build_query(get_apps::Variables {}))
             .await
@@ -276,8 +276,8 @@ impl AgentClient {
         status(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
-    pub async fn getApps(&self) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
-        getApps(self.info.executor_url.clone(), self.info.cap_token.clone()).await
+    pub async fn get_apps(&self) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
+        get_apps(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
     pub async fn lock(&self, passphrase: String) -> Result<lock::LockAgentLock> {
