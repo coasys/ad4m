@@ -17,7 +17,8 @@ const Login = (props: any) => {
   const {state: {
     isInitialized,
     isUnlocked,
-    connected
+    connected,
+    connectedLaoding
   }, methods: {
     resetEndpoint
   }} = useContext(Ad4minContext)
@@ -81,14 +82,14 @@ const Login = (props: any) => {
   }
 
   useEffect(() => {
-      if (!connected) {
+      if (!connected && !connectedLaoding) {
         navigate('/connect');
       } else if (connected && isUnlocked) {
         navigate('/settings');
       } else if (isInitialized) {
         setCurrentIndex(5)
       }
-  }, [connected, isUnlocked, navigate, isInitialized])
+  }, [connected, isUnlocked, navigate, isInitialized, connectedLaoding])
 
   return (
     <div>

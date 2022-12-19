@@ -74,19 +74,20 @@ const Navigation = ({did, opened, setOpened}: Props) => {
   const {state: {
     connected,
     isUnlocked,
-    expertMode
+    expertMode,
+    connectedLaoding
   }} = useContext(Ad4minContext);
 
   let navigate = useNavigate();
   let location = useLocation();
 
   useEffect(() => {
-    if (!connected) {
+    if (!connected && !connectedLaoding) {
       navigate('/connect');
     } else if (connected && !isUnlocked) {
       navigate('/login');
     }
-}, [connected, isUnlocked, navigate])
+}, [connected, isUnlocked, navigate, connectedLaoding])
 
 
   return (
