@@ -231,7 +231,7 @@ const Login = (props: any) => {
                   </j-button>
                   {!isInitialized ? (
                     <j-button
-                      size="lg"
+                      size="xl"
                       variant="primary"
                       onClick={() => setCurrentIndex(4)}
                     >
@@ -239,7 +239,7 @@ const Login = (props: any) => {
                     </j-button>
                   ) : (
                     <j-button
-                      size="lg"
+                      size="xl"
                       variant="primary"
                       onClick={() => {
                         setCurrentIndex(5);
@@ -275,7 +275,6 @@ const Login = (props: any) => {
                 ></j-input>
                 <j-box p="400"></j-box>
                 <j-input
-                  autofocus
                   size="lg"
                   label="Password"
                   minlength={10}
@@ -312,14 +311,13 @@ const Login = (props: any) => {
                 ></j-input>
                 <j-box p="400"></j-box>
                 <j-input
-                  autofocus
                   size="lg"
                   label="Lastname"
                   minlength={10}
                   maxlength={30}
                   autovalidate
                   required
-                  type="password"
+                  type="text"
                   onInput={(e: any) => setLastName(e.target.value)}
                 ></j-input>
                 <j-box p="400"></j-box>

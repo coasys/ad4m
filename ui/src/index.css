@@ -66,7 +66,3 @@ code {
   align-items: center;
   gap: var(--j-space-400);
 }
-
-:root j-button::part([size="xl"]) {
-  --j-button-height: 500px;
-}
