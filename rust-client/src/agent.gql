@@ -32,6 +32,24 @@ query Me { agent {
     }
 }}
 
+query GetApps {
+    agentGetApps {
+        requestId
+        auth {
+            appName
+            appDesc
+            appUrl
+            capabilities {
+                with {
+                    domain
+                    pointers
+                }
+                can 
+            }
+        }
+    }
+}
+
 mutation Lock($passphrase: String!) {
     agentLock(passphrase: $passphrase) {
         isInitialized

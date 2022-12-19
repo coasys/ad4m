@@ -242,6 +242,12 @@ describe('Ad4mClient', () => {
             expect(requestId).toBe("test-request-id")
         })
 
+        
+        it('agentGetApps() smoke tests', async () => {
+            const apps = await ad4mClient.agent.getApps()
+            expect(apps.length).toBe(0)
+        })
+
         it('agentPermitCapability() smoke tests', async () => {
             const rand = await ad4mClient.agent.permitCapability('{"requestId":"4f30e2e2-d307-4f2b-b0a0-6dac4ca4af26","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]}}')
             expect(rand).toBe("123")

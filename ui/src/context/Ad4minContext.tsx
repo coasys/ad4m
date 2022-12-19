@@ -16,6 +16,7 @@ type State = {
   auth: string;
   connected: boolean;
   connectedLaoding: boolean;
+  expertMode: boolean;
 }
 
 type ContextProps = {
@@ -25,6 +26,7 @@ type ContextProps = {
     resetEndpoint: () => void
     handleTrustAgent: (str: string) => void,
     handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void,
+    toggleExpertMode: () => void
   };
 }
 
@@ -39,13 +41,15 @@ const initialState: ContextProps = {
     candidate: '',
     auth: '',
     connected: false,
-    connectedLaoding: true
+    connectedLaoding: true,
+    expertMode: localStorage.getItem('expertMode') === 'true'
   },
   methods: {
     configureEndpoint: () => null,
     resetEndpoint: () => null,
     handleTrustAgent: () => null,
-    handleLogin: () => null
+    handleLogin: () => null,
+    toggleExpertMode: () => null
   }
 }
 
@@ -54,6 +58,17 @@ export const Ad4minContext = createContext(initialState);
 
 export function Ad4minProvider({ children }: any) {
   const [state, setState] = useState(initialState.state);
+
+  useEffect(() => {
+    localStorage.setItem('expertMode', state.expertMode.toString());
+  }, [state])
+
+  const toggleExpertMode = () => {
+    setState((prevState) => ({
+      ...prevState,
+      expertMode: !prevState.expertMode
+    }))
+  }
 
 
   const checkConnection = useCallback(async (url: string, client: Ad4mClient): Promise<string> => {
@@ -230,7 +245,8 @@ export function Ad4minProvider({ children }: any) {
           configureEndpoint,
           handleTrustAgent,
           resetEndpoint,
-          handleLogin
+          handleLogin,
+          toggleExpertMode
         }
       }}
     >

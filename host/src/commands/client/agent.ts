@@ -15,7 +15,7 @@ export const builder = (yargs: Argv) =>
     .positional('action', {
       type: 'string',
       describe: 'Action that should be executed on the agent',
-      choices: ['generate', 'lock', 'unlock', 'status', 'me'],
+      choices: ['generate', 'lock', 'unlock', 'status', 'me', 'getApps'],
       default: 'status',
     }).options({
       passphrase: {type: 'string', describe: 'Password for the agent'}
@@ -33,6 +33,7 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
     case 'unlock': await unlock(ad4mClient, passphrase); break;
     case 'status': await status(ad4mClient); break;
     case 'me': await me(ad4mClient); break;
+    case 'getApps': await getApps(ad4mClient); break;
 
     default:
       console.info(`Action "${argv.action}" is not defined on agent.`)
@@ -68,4 +69,9 @@ async function status(ad4mClient: Ad4mClient) {
 async function me(ad4mClient: Ad4mClient) {
   const agent = await ad4mClient.agent.me();
   prettify(agent);
+}
+
+async function getApps(ad4mClient: Ad4mClient) {
+  const apps = await ad4mClient.agent.getApps();
+  prettify(apps);
 }

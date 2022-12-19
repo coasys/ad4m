@@ -1,6 +1,6 @@
 import { Arg, Mutation, Query, Resolver, Subscription, PubSub } from "type-graphql";
 import { Perspective, PerspectiveInput } from "../perspectives/Perspective";
-import { Agent, AgentSignature, EntanglementProof, EntanglementProofInput } from "./Agent";
+import { Agent, AgentSignature, Apps, EntanglementProof, EntanglementProofInput } from "./Agent";
 import { AgentStatus } from "./AgentStatus"
 import { AGENT_STATUS_CHANGED, AGENT_UPDATED } from "../PubSub";
 
@@ -133,6 +133,11 @@ export default class AgentResolver {
     @Query(returns => Boolean)
     agentIsLocked(): Boolean {
         return false
+    }
+
+    @Query(returns => [Apps])
+    agentGetApps(): [] {
+        return []
     }
 
     @Mutation(returns => AgentSignature)

@@ -1,7 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import unwrapApolloResult from "../unwrapApolloResult";
-import { Agent, EntanglementProof, EntanglementProofInput } from "./Agent";
+import { Agent, Apps, AuthInfo, EntanglementProof, EntanglementProofInput } from "./Agent";
 import { AgentStatus } from "./AgentStatus"
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
@@ -21,6 +21,23 @@ const AGENT_SUBITEMS = `
         }
     }
 `
+
+const Apps_FIELDS = `
+    requestId
+    auth {
+        appName
+        appDesc
+        appUrl
+        capabilities {
+            with {
+                domain
+                pointers
+            }
+            can 
+        }
+    }
+`
+
 
 const AGENT_STATUS_FIELDS =`
     isInitialized
@@ -351,6 +368,17 @@ export class AgentClient {
             variables: { requestId, rand }
         }))
         return agentGenerateJwt
+    }
+
+    async getApps(): Promise<Apps[]> {
+        const { agentGetApps } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`query agentGetApps {
+                agentGetApps {
+                    ${Apps_FIELDS}
+                }
+            }`,
+        }))
+        return agentGetApps
     }
 
     async isLocked(): Promise<boolean> {
