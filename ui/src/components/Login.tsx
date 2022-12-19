@@ -84,7 +84,7 @@ const Login = (props: any) => {
   }, [connected, isUnlocked, navigate, isInitialized, connectedLaoding]);
 
   return (
-    <div>
+    <j-box px="400">
       <div className="slider">
         {currentIndex === 0 && (
           <div className="slider__slide">
@@ -273,7 +273,7 @@ const Login = (props: any) => {
                   type="text"
                   onInput={(e: any) => setUsername(e.target.value)}
                 ></j-input>
-                <j-box p="400"></j-box>
+                <j-box p="200"></j-box>
                 <j-input
                   size="lg"
                   label="Password"
@@ -284,7 +284,7 @@ const Login = (props: any) => {
                   type="password"
                   onInput={(e: any) => setPassword(e.target.value)}
                 ></j-input>
-                <j-box p="400"></j-box>
+                <j-box p="200"></j-box>
                 <j-button
                   size="lg"
                   variant="primary"
@@ -309,7 +309,7 @@ const Login = (props: any) => {
                   type="text"
                   onInput={(e: any) => setFirstName(e.target.value)}
                 ></j-input>
-                <j-box p="400"></j-box>
+                <j-box p="200"></j-box>
                 <j-input
                   size="lg"
                   label="Lastname"
@@ -320,8 +320,7 @@ const Login = (props: any) => {
                   type="text"
                   onInput={(e: any) => setLastName(e.target.value)}
                 ></j-input>
-                <j-box p="400"></j-box>
-                <j-box p="400"></j-box>
+                <j-box p="200"></j-box>
                 <j-button
                   size="lg"
                   variant="primary"
@@ -367,7 +366,7 @@ const Login = (props: any) => {
           </div>
         )}
       </div>
-    </div>
+    </j-box>
   );
 };
 

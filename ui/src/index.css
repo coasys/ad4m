@@ -29,11 +29,9 @@ code {
 
 :root {
   --j-color-saturation: 50%;
-
   --j-color-subtractor: 110%;
   --j-color-multiplier: -1;
   --j-border-width: 3px;
-  --j-size-xl: 80px;
 }
 
 :root j-modal {
