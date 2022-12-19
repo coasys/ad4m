@@ -324,12 +324,15 @@ const Perspectives = (props: Props) => {
             )}
 
             <j-box p="200"></j-box>
-            <j-flex>
-              <j-button onClick={() => setPerspectiveModalOpen(false)}>
+            <j-flex gap="200">
+              <j-button
+                variant="link"
+                onClick={() => setPerspectiveModalOpen(false)}
+              >
                 Cancel
               </j-button>
-              <j-box p="200"></j-box>
-              <j-button onClick={create} loading={loading}>
+
+              <j-button variant="primary" onClick={create} loading={loading}>
                 Install
               </j-button>
             </j-flex>

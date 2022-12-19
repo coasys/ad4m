@@ -233,12 +233,18 @@ const Language = (props: Props) => {
               onInput={(e: any) => setLanguageBundlePath(e.target.value)}
             ></j-input>
             <j-box p="200"></j-box>
-            <j-flex>
-              <j-button onClick={() => setInstallLanguageModalOpen(false)}>
+            <j-flex a="center" gap="200">
+              <j-button
+                variant="link"
+                onClick={() => setInstallLanguageModalOpen(false)}
+              >
                 Cancel
               </j-button>
-              <j-box p="200"></j-box>
-              <j-button onClick={installLanguage} loading={loading}>
+              <j-button
+                variant="primary"
+                onClick={installLanguage}
+                loading={loading}
+              >
                 Install
               </j-button>
             </j-flex>
@@ -265,12 +271,18 @@ const Language = (props: Props) => {
               onInput={(e: any) => setLanguageHash(e.target.value)}
             ></j-input>
             <j-box p="200"></j-box>
-            <j-flex>
-              <j-button onClick={() => setInstallLanguageModalOpen(false)}>
+            <j-flex gap="200">
+              <j-button
+                variant="link"
+                onClick={() => setInstallLanguageModalOpen(false)}
+              >
                 Cancel
               </j-button>
-              <j-box p="200"></j-box>
-              <j-button onClick={installLanguage} loading={loading}>
+              <j-button
+                variant="primary"
+                onClick={installLanguage}
+                loading={loading}
+              >
                 Install
               </j-button>
             </j-flex>
