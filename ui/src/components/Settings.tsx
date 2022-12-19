@@ -199,24 +199,25 @@ const Profile = (props: Props) => {
     return (
       <>
         <ActionButton
-          tooltip={proxy.length === 0 ? "Setup proxy" : "Stop Proxy"}
+          iconColor={proxy.length === 0 ? undefined : "success-500"}
+          title={proxy.length === 0 ? "Proxy" : "Stop proxy"}
           onClick={() => (proxy.length === 0 ? setupProxy() : stopProxy())}
           icon="wifi"
         />
         {proxy && (
           <>
             <ActionButton
-              tooltip="Copy proxy URL"
+              title="Proxy URL"
               onClick={copyProxy}
               icon="clipboard"
             />
             <ActionButton
-              tooltip="Show Proxy QR"
+              title="QR Code"
               onClick={showProxyQRCode}
               icon="qr-code-scan"
             />
             <ActionButton
-              tooltip="Open Graphql Client"
+              title="Open GraphQL"
               onClick={() => window.open(url.replace("ws", "http"))}
               icon="box-arrow-up-right"
             />
@@ -240,108 +241,114 @@ const Profile = (props: Props) => {
       <div style={{ ...gridButton, paddingTop: 20 }}>
         {showProxy()}
         <ActionButton
-          tooltip="Trusted agents"
+          title="Trusted agents"
           onClick={() => settrustedAgentModalOpen(true)}
           icon="shield-check"
         />
-        <ActionButton tooltip="Copy logs" onClick={copyFile} icon="clipboard" />
+        <ActionButton title="Copy logs" onClick={copyFile} icon="clipboard" />
         <ActionButton
-          tooltip="Ad4m Docs"
+          title="Docs"
           onClick={() => window.open("https://docs.ad4m.dev/")}
           icon="file-earmark-richtext"
         />
         <ActionButton
-          tooltip="Delete Agent"
+          title="Delete Agent"
           onClick={() => setClearAgentModalOpen(true)}
           icon="trash"
         />
         <j-box p="200" />
       </div>
-      <j-modal
-        size="fullscreen"
-        open={trustedAgentModalOpen}
-        onToggle={(e: any) => settrustedAgentModalOpen(e.target.open)}
-      >
-        <j-box px="400" py="600">
-          <j-box pb="500">
-            <j-text nomargin size="600" color="black" weight="600">
-              Trusted Agents
-            </j-text>
-          </j-box>
-          {trustedAgents.map((e, i) => (
-            <div
-              key={`trusted-agent-${e.did}`}
-              style={{ ...cardStyle, marginBottom: 0, width: "85%" }}
-            >
-              <j-flex direction="column" style={{ marginTop: 4 }}>
-                <j-text weight="bold">{e?.username || "No username"}</j-text>
-                <j-flex a="center" j="between">
-                  <j-text nomargin variant="body" size="xs">
-                    {e?.did.length > 25
-                      ? `${e?.did.substring(0, 25)}...`
-                      : e?.did}
-                  </j-text>
-                  <j-box p="100"></j-box>
-                  <j-button
-                    size="xs"
-                    variant="transparent"
-                    onClick={() => console.log("wow")}
-                  >
-                    <j-icon size="xs" slot="end" name="clipboard"></j-icon>
-                  </j-button>
+      {trustedAgentModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={trustedAgentModalOpen}
+          onToggle={(e: any) => settrustedAgentModalOpen(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Trusted Agents
+              </j-text>
+            </j-box>
+            {trustedAgents.map((e, i) => (
+              <div
+                key={`trusted-agent-${e.did}`}
+                style={{ ...cardStyle, marginBottom: 0, width: "85%" }}
+              >
+                <j-flex direction="column" style={{ marginTop: 4 }}>
+                  <j-text weight="bold">{e?.username || "No username"}</j-text>
+                  <j-flex a="center" j="between">
+                    <j-text nomargin variant="body" size="xs">
+                      {e?.did.length > 25
+                        ? `${e?.did.substring(0, 25)}...`
+                        : e?.did}
+                    </j-text>
+                    <j-box p="100"></j-box>
+                    <j-button
+                      size="xs"
+                      variant="transparent"
+                      onClick={() => console.log("wow")}
+                    >
+                      <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                    </j-button>
+                  </j-flex>
                 </j-flex>
-              </j-flex>
-            </div>
-          ))}
-        </j-box>
-      </j-modal>
-      <j-modal
-        size="fullscreen"
-        open={qrcodeModal}
-        onToggle={(e: any) => setQRCodeModal(e.target.open)}
-        title="Proxy QR Code"
-      >
-        <j-box px="400" py="600">
-          <j-box pb="500">
-            <j-text nomargin size="600" color="black" weight="600">
-              Scan this QR on your phone
-            </j-text>
+              </div>
+            ))}
           </j-box>
-          <QRCode value={proxy} />
-        </j-box>
-      </j-modal>
+        </j-modal>
+      )}
+      {qrcodeModal && (
+        <j-modal
+          size="fullscreen"
+          open={qrcodeModal}
+          onToggle={(e: any) => setQRCodeModal(e.target.open)}
+          title="Proxy QR Code"
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Scan this QR on your phone
+              </j-text>
+            </j-box>
+            <QRCode value={proxy} />
+          </j-box>
+        </j-modal>
+      )}
 
-      <j-modal
-        size="fullscreen"
-        open={clearAgentModalOpen}
-        onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}
-      >
-        <j-box px="400" py="600">
-          <j-box pb="500">
-            <j-text nomargin size="600" color="black" weight="600">
-              Clear agent
+      {clearAgentModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={clearAgentModalOpen}
+          onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Clear agent
+              </j-text>
+            </j-box>
+            <j-text>
+              Warning: by clearing the agent you will loose all the data and
+              will have to start with a fresh agent
             </j-text>
+            <j-box p="200"></j-box>
+            <j-input
+              placeholder="Password"
+              label="Input your passphrase to clear agent"
+              size="lg"
+              required
+              onInput={onPasswordChange}
+            ></j-input>
+            <j-box p="200"></j-box>
+            <j-flex>
+              <j-button onClick={() => clearAgent(password)} loading={loading}>
+                Delete Agent
+              </j-button>
+            </j-flex>
           </j-box>
-          <j-text>
-            Warning: by clearing the agent you will loose all the data and will
-            have to start with a fresh agent
-          </j-text>
-          <j-box p="200"></j-box>
-          <j-input
-            placeholder="Password"
-            label="Input your passphrase to clear agent"
-            size="lg"
-            required
-            onInput={onPasswordChange}
-          ></j-input>
-          <j-box p="200"></j-box>
-          <j-flex>
-            <j-button onClick={() => clearAgent(password)} loading={loading}>
-              Delete Agent
-            </j-button>
-          </j-flex>
-        </j-box>
-      </j-modal>
+        </j-modal>
+      )}
     </div>
   );
 };
