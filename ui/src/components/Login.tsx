@@ -84,11 +84,19 @@ const Login = (props: any) => {
   }, [connected, isUnlocked, navigate, isInitialized, connectedLaoding]);
 
   return (
-    <j-box px="400">
+    <div
+      className="center"
+      style={{
+        width: "100%",
+        height: "100%",
+        paddingLeft: "var(--j-space-400)",
+        paddingRight: "var(--j-space-400)",
+      }}
+    >
       <div className="slider">
         {currentIndex === 0 && (
           <div className="slider__slide">
-            <div className="slider__slide-content">
+            <div className="slider__slide-content text-center">
               <j-box pt="500" pb="800">
                 <Image
                   style={{ width: "200px", margin: "auto" }}
@@ -135,7 +143,7 @@ const Login = (props: any) => {
         )}
         {currentIndex === 1 && (
           <div className="slider__slide">
-            <div className="slider__slide-content">
+            <div className="slider__slide-content text-center">
               <j-box pt="500" pb="800">
                 <Image
                   style={{ width: "200px", margin: "auto" }}
@@ -171,7 +179,7 @@ const Login = (props: any) => {
         )}
         {currentIndex === 2 && (
           <div className="slider__slide">
-            <div className="slider__slide-content">
+            <div className="slider__slide-content text-center">
               <j-box pt="500" pb="800">
                 <Image
                   style={{ width: "200px", margin: "auto" }}
@@ -207,7 +215,7 @@ const Login = (props: any) => {
         )}
         {currentIndex === 3 && (
           <div className="slider__slide">
-            <div className="slider__slide-content">
+            <div className="slider__slide-content text-center">
               <j-box pt="500" pb="800">
                 <Image
                   style={{ width: "200px", margin: "auto" }}
@@ -254,133 +262,130 @@ const Login = (props: any) => {
           </div>
         )}
         {currentIndex === 4 && (
-          <div
-            style={{
-              width: "100%",
-              maxWidth: 400,
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <Image
-              style={{ width: "140px", margin: "auto" }}
-              src="ad4msquarelogo2_white_colouremblem.png"
-            ></Image>
-            <j-box p="500"></j-box>
-            {currentSignupIndex === 0 && (
-              <>
-                <j-input
-                  autofocus
-                  size="lg"
-                  label="Username"
-                  minlength={10}
-                  maxlength={30}
-                  autovalidate
-                  required
-                  type="text"
-                  onInput={(e: any) => setUsername(e.target.value)}
-                ></j-input>
-                <j-box p="200"></j-box>
-                <j-input
-                  size="lg"
-                  label="Password"
-                  minlength={10}
-                  maxlength={30}
-                  autovalidate
-                  required
-                  type="password"
-                  onInput={(e: any) => setPassword(e.target.value)}
-                ></j-input>
-                <j-box p="200"></j-box>
-                <j-button
-                  size="lg"
-                  variant="primary"
-                  style={{ alignSelf: "center" }}
-                  onClick={() => gotoNextSignUpStep()}
-                  loading={loading}
-                >
-                  Next
-                </j-button>
-              </>
-            )}
-            {currentSignupIndex === 1 && (
-              <>
-                <j-input
-                  autofocus
-                  size="lg"
-                  label="Firstname"
-                  minlength={10}
-                  maxlength={30}
-                  autovalidate
-                  required
-                  type="text"
-                  onInput={(e: any) => setFirstName(e.target.value)}
-                ></j-input>
-                <j-box p="200"></j-box>
-                <j-input
-                  size="lg"
-                  label="Lastname"
-                  minlength={10}
-                  maxlength={30}
-                  autovalidate
-                  required
-                  type="text"
-                  onInput={(e: any) => setLastName(e.target.value)}
-                ></j-input>
-                <j-box p="200"></j-box>
-                <j-button
-                  size="lg"
-                  variant="primary"
-                  style={{ alignSelf: "center" }}
-                  onClick={() => generate()}
-                  loading={loading}
-                >
-                  Generate Agent
-                </j-button>
-              </>
-            )}
+          <div className="slider__slide">
+            <div className="slider__slide-content slider__slide-content--small">
+              <Image
+                style={{ width: "140px", margin: "auto" }}
+                src="ad4msquarelogo2_white_colouremblem.png"
+              ></Image>
+              <j-box p="500"></j-box>
+              {currentSignupIndex === 0 && (
+                <>
+                  <j-input
+                    full
+                    autofocus
+                    size="lg"
+                    label="Username"
+                    minlength={10}
+                    maxlength={30}
+                    autovalidate
+                    required
+                    type="text"
+                    onInput={(e: any) => setUsername(e.target.value)}
+                  ></j-input>
+                  <j-box p="200"></j-box>
+                  <j-input
+                    full
+                    size="lg"
+                    label="Password"
+                    minlength={10}
+                    maxlength={30}
+                    autovalidate
+                    required
+                    type="password"
+                    onInput={(e: any) => setPassword(e.target.value)}
+                  ></j-input>
+                  <j-box p="200"></j-box>
+                  <j-button
+                    full
+                    size="lg"
+                    variant="primary"
+                    style={{ alignSelf: "center" }}
+                    onClick={() => gotoNextSignUpStep()}
+                    loading={loading}
+                  >
+                    Next
+                  </j-button>
+                </>
+              )}
+              {currentSignupIndex === 1 && (
+                <>
+                  <j-input
+                    full
+                    autofocus
+                    size="lg"
+                    label="First name"
+                    minlength={10}
+                    maxlength={30}
+                    autovalidate
+                    required
+                    type="text"
+                    onInput={(e: any) => setFirstName(e.target.value)}
+                  ></j-input>
+                  <j-box p="200"></j-box>
+                  <j-input
+                    full
+                    size="lg"
+                    label="Last name"
+                    minlength={10}
+                    maxlength={30}
+                    autovalidate
+                    required
+                    type="text"
+                    onInput={(e: any) => setLastName(e.target.value)}
+                  ></j-input>
+                  <j-box p="200"></j-box>
+                  <j-button
+                    full
+                    size="lg"
+                    variant="primary"
+                    style={{ alignSelf: "center" }}
+                    onClick={() => generate()}
+                    loading={loading}
+                  >
+                    Generate Agent
+                  </j-button>
+                </>
+              )}
+            </div>
           </div>
         )}
         {currentIndex === 5 && (
-          <div
-            style={{
-              width: "100%",
-              maxWidth: 400,
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <Image
-              style={{ width: "140px", margin: "auto" }}
-              src="ad4msquarelogo2_white_colouremblem.png"
-            ></Image>
-            <j-box p="500"></j-box>
-            <j-input
-              autofocus
-              size="lg"
-              label="Password"
-              minlength={10}
-              maxlength={30}
-              autovalidate
-              required
-              type="password"
-              full
-              onInput={(e: any) => setPassword(e.target.value)}
-            ></j-input>
-            <j-box p="400"></j-box>
-            <j-button
-              size="lg"
-              variant="primary"
-              style={{ alignSelf: "center" }}
-              onClick={() => unlockAgent(password)}
-              loading={loading}
-            >
-              Unlock Agent
-            </j-button>
+          <div className="slider__slide">
+            <div className="slider__slide-content slider__slide-content--small">
+              <Image
+                style={{ width: "140px", margin: "auto" }}
+                src="ad4msquarelogo2_white_colouremblem.png"
+              ></Image>
+              <j-box p="500"></j-box>
+              <j-input
+                autofocus
+                size="lg"
+                label="Password"
+                minlength={10}
+                maxlength={30}
+                autovalidate
+                required
+                type="password"
+                full
+                onInput={(e: any) => setPassword(e.target.value)}
+              ></j-input>
+              <j-box p="200"></j-box>
+              <j-button
+                full
+                size="lg"
+                variant="primary"
+                style={{ alignSelf: "center" }}
+                onClick={() => unlockAgent(password)}
+                loading={loading}
+              >
+                Unlock Agent
+              </j-button>
+            </div>
           </div>
         )}
       </div>
-    </j-box>
+    </div>
   );
 };
 

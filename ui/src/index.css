@@ -7,24 +7,47 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+html {
+  box-sizing: border-box;
+}
+*,
+*:before,
+*:after {
+  box-sizing: inherit;
+}
+
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
     monospace;
 }
 
+.center {
+  display: grid;
+  place-items: center;
+}
+
+.slider {
+  width: 100%;
+}
+
 .slider__slide {
+}
+
+.text-center {
   text-align: center;
 }
 
 .slider__slide-content {
+  width: 100%;
   max-width: 750px;
-  min-width: 400px;
-  width: 600px;
   display: flex;
   flex-direction: column;
   align-items: center;
   margin: 0 auto;
-  padding: var(--j-space-900);
+}
+
+.slider__slide-content--small {
+  max-width: 400px;
 }
 
 :root {
