@@ -69,12 +69,12 @@ const Profile = (props: Props) => {
 
   const [password, setPassword] = useState("");
 
-  function copyFile() {
+  function openLogs() {
     appWindow.emit("copyLogs");
 
     showNotification({
-      message: "Copy logs opened",
-      autoClose: 1000,
+      message: "Opened logs folder... Please send ad4min.log to support on Discord",
+      autoClose: 30000,
     });
   }
 
@@ -245,7 +245,7 @@ const Profile = (props: Props) => {
           onClick={() => settrustedAgentModalOpen(true)}
           icon="shield-check"
         />
-        <ActionButton title="Copy logs" onClick={copyFile} icon="clipboard" />
+        <ActionButton title="Open Logs" onClick={openLogs} icon="clipboard" />
         <ActionButton
           title="Docs"
           onClick={() => open("https://docs.ad4m.dev/")}
