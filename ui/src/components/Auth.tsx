@@ -100,9 +100,13 @@ const Auth = () => {
             {showCapabilities(authInfo.capabilities)}
             <j-box p="200"></j-box>
             <j-flex>
-              <j-button onClick={closeRequestModal}>Close</j-button>
+              <j-button variant="link" onClick={closeRequestModal}>
+                Close
+              </j-button>
               <j-box p="200"></j-box>
-              <j-button onClick={permitCapability}>Confirm</j-button>
+              <j-button variant="primary" onClick={permitCapability}>
+                Confirm
+              </j-button>
             </j-flex>
           </j-flex>
         </j-box>
@@ -113,14 +117,14 @@ const Auth = () => {
         open={secretCodeModalOpened}
         onToggle={(e: any) => setSecretCodeModalOpened(e.target.open)}
       >
-        <j-box p="400">
+        <div className="center">
           <j-flex gap="200" direction="column">
             <j-flex a="center" gap="200">
               <j-text nomargin variant="heading-sm">
                 {secretCode}
-                <j-Button variant="subtle" onClick={copyCode}>
+                <j-button variant="subtle" onClick={copyCode}>
                   <j-icon size="sm" name="clipboard"></j-icon>
-                </j-Button>
+                </j-button>
               </j-text>
             </j-flex>
             <j-box p="200"></j-box>
@@ -128,7 +132,7 @@ const Auth = () => {
               <j-button onClick={closeSecretCodeModal}>Close</j-button>
             </j-flex>
           </j-flex>
-        </j-box>
+        </div>
       </j-modal>
     </div>
   );
