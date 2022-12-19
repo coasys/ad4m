@@ -17,6 +17,7 @@ mod bootstrap_publish;
 mod languages;
 mod neighbourhoods;
 mod perspectives;
+mod repl;
 mod runtime;
 
 use crate::{agent::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*};

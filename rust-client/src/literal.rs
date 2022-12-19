@@ -9,16 +9,15 @@ pub enum LiteralValue {
 
 pub struct Literal {
     value: Option<LiteralValue>,
-    url: Option<String>
+    url: Option<String>,
 }
 
 impl Literal {
-    
     pub fn from_url(url: String) -> Result<Self> {
-        if url.starts_with("literal://")  {
+        if url.starts_with("literal://") {
             Ok(Self {
                 value: None,
-                url: Some(url)
+                url: Some(url),
             })
         } else {
             Err(anyhow!("Not a literal URL"))
@@ -28,21 +27,21 @@ impl Literal {
     pub fn from_string(string: String) -> Self {
         Self {
             value: Some(LiteralValue::String(string)),
-            url: None
+            url: None,
         }
     }
 
     pub fn from_number(number: f64) -> Self {
         Self {
             value: Some(LiteralValue::Number(number)),
-            url: None
+            url: None,
         }
     }
 
     pub fn from_json(json: serde_json::Value) -> Self {
         Self {
             value: Some(LiteralValue::Json(json)),
-            url: None
+            url: None,
         }
     }
 
@@ -52,12 +51,10 @@ impl Literal {
         } else if let Some(value) = &self.value {
             match value {
                 LiteralValue::String(string) => {
-                    let encoded = urlencoding::encode(&string);
+                    let encoded = urlencoding::encode(string);
                     Ok(format!("literal://string:{}", encoded))
                 }
-                LiteralValue::Number(number) => {
-                    Ok(format!("literal://number:{}", number))
-                }
+                LiteralValue::Number(number) => Ok(format!("literal://number:{}", number)),
                 LiteralValue::Json(json) => {
                     let encoded = urlencoding::encode(&json.to_string()).to_string();
                     Ok(format!("literal://json:{}", encoded))
@@ -132,10 +129,16 @@ mod test {
         assert_eq!(literal.to_url().unwrap(), test_url);
 
         let mut literal2 = super::Literal::from_url(test_url.into()).unwrap();
-        assert_eq!(literal2.get().unwrap(), super::LiteralValue::String(test_string.into()));
+        assert_eq!(
+            literal2.get().unwrap(),
+            super::LiteralValue::String(test_string.into())
+        );
 
         literal2.convert().expect("Failed to convert");
-        assert_eq!(literal2.value.unwrap(), super::LiteralValue::String(test_string.into()));
+        assert_eq!(
+            literal2.value.unwrap(),
+            super::LiteralValue::String(test_string.into())
+        );
     }
 
     #[test]
@@ -143,32 +146,45 @@ mod test {
         let test_number = 3.1415;
         let test_url = "literal://number:3.1415";
 
-        let literal = super::Literal::from_number(test_number.into());
+        let literal = super::Literal::from_number(test_number);
         assert_eq!(literal.to_url().unwrap(), test_url);
 
         let mut literal2 = super::Literal::from_url(test_url.into()).unwrap();
-        assert_eq!(literal2.get().unwrap(), super::LiteralValue::Number(test_number));
+        assert_eq!(
+            literal2.get().unwrap(),
+            super::LiteralValue::Number(test_number)
+        );
 
         literal2.convert().expect("Failed to convert");
-        assert_eq!(literal2.value.unwrap(), super::LiteralValue::Number(test_number.into()));
+        assert_eq!(
+            literal2.value.unwrap(),
+            super::LiteralValue::Number(test_number)
+        );
     }
 
     #[test]
     fn can_handle_objects() {
         let test_object = json!({
-            "testString": "test", 
+            "testString": "test",
             "testNumber": "1337",
         });
-        let test_url = "literal://json:%7B%22testNumber%22%3A%221337%22%2C%22testString%22%3A%22test%22%7D";
+        let test_url =
+            "literal://json:%7B%22testNumber%22%3A%221337%22%2C%22testString%22%3A%22test%22%7D";
 
         let literal = super::Literal::from_json(test_object.clone());
         assert_eq!(literal.to_url().unwrap(), test_url);
 
         let mut literal2 = super::Literal::from_url(test_url.into()).unwrap();
-        assert_eq!(literal2.get().unwrap(), super::LiteralValue::Json(test_object.clone()));
+        assert_eq!(
+            literal2.get().unwrap(),
+            super::LiteralValue::Json(test_object.clone())
+        );
 
         literal2.convert().expect("Failed to convert");
-        assert_eq!(literal2.value.unwrap(), super::LiteralValue::Json(test_object));
+        assert_eq!(
+            literal2.value.unwrap(),
+            super::LiteralValue::Json(test_object)
+        );
     }
 
     #[test]
@@ -180,9 +196,15 @@ mod test {
         assert_eq!(literal.to_url().unwrap(), test_url);
 
         let mut literal2 = super::Literal::from_url(test_url.into()).unwrap();
-        assert_eq!(literal2.get().unwrap(), super::LiteralValue::String(test_string.into()));
+        assert_eq!(
+            literal2.get().unwrap(),
+            super::LiteralValue::String(test_string.into())
+        );
 
         literal2.convert().expect("Failed to convert");
-        assert_eq!(literal2.value.unwrap(), super::LiteralValue::String(test_string.into()));
+        assert_eq!(
+            literal2.value.unwrap(),
+            super::LiteralValue::String(test_string.into())
+        );
     }
 }

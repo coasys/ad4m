@@ -50,6 +50,65 @@ setup() {
     assert_output --partial "test://source"
 }
 
+@test "can use subjects and run potluck example sdna" {
+    # Create perspective
+    perspective_id=`./target/release/ad4m -n -e http://localhost:4000/graphql perspectives add "sdna subject test"`
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives set-dna $perspective_id ./tests/potluck.pl
+    assert_output --partial "SDNA set successfully"
+
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-classes $perspective_id
+    assert_output --partial "Dish"
+    assert_output --partial "Potluck"
+
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-construct $perspective_id "Dish" "test://dish1"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-get-property $perspective_id "test://dish1" "kind"
+    assert_output --partial "liminal://unknown_kind"
+
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-set-property $perspective_id "test://dish1" "kind" "liminal://pizza"
+
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-construct $perspective_id "Dish" "test://dish2"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-set-property $perspective_id "test://dish2" "kind" "liminal://pasta"
+
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-construct $perspective_id "Dish" "test://dish3"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-set-property $perspective_id "test://dish3" "kind" "liminal://pizza"
+
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-construct $perspective_id "Potluck" "test://potluck"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-add-collection $perspective_id "test://potluck" "dishes" "test://dish1"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-add-collection $perspective_id "test://potluck" "dishes" "test://dish2"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-add-collection $perspective_id "test://potluck" "dishes" "test://dish3"
+
+    # Dish1 is the first pizza, so it should be the most unique
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-get-property $perspective_id "test://dish1" "uniqueness"
+    assert_output --partial "1"
+
+    # Dish2 is the only pasta, so it should be the most unique
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-get-property $perspective_id "test://dish2" "uniqueness"
+    assert_output --partial "1"
+
+    # Dish3 is the second pizza, so it gets a score of 0.5
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-get-property $perspective_id "test://dish3" "uniqueness"
+    assert_output --partial "0.5"
+
+    # Let's add a fourth dish 
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-construct $perspective_id "Dish" "test://dish4"
+    # Also a pizze
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-set-property $perspective_id "test://dish4" "kind" "liminal://pizza"
+    # As long as it's on it's own, it should be the most unique
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-get-property $perspective_id "test://dish4" "uniqueness"
+    assert_output --partial "1"
+    # But when we add it to the potluck, it is now the 3rd pizza, so it's score should be 0.3333333333333333
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-add-collection $perspective_id "test://potluck" "dishes" "test://dish4"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-get-property $perspective_id "test://dish4" "uniqueness"
+    assert_output --partial "0.3333333333333333"
+
+    # But the new pizza should not have changed the score of the ones already in:
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-get-property $perspective_id "test://dish1" "uniqueness"
+    assert_output --partial "1"
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives subject-get-property $perspective_id "test://dish3" "uniqueness"
+    assert_output --partial "0.5"
+
+}
+
 @test "can create neighbourhood, join and share links" {
     skip
     # Create perspective

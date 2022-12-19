@@ -119,7 +119,7 @@ pub async fn remove_link(
     executor_url: String,
     cap_token: String,
     uuid: String,
-    link: LinkExpression
+    link: LinkExpression,
 ) -> Result<()> {
     let response_data: remove_link::ResponseData = query(
         executor_url,
@@ -373,16 +373,12 @@ impl PerspectivesClient {
         .await
     }
 
-    pub async fn remove_link(
-        &self,
-        uid: String,
-        link: LinkExpression
-    ) -> Result<()> {
+    pub async fn remove_link(&self, uid: String, link: LinkExpression) -> Result<()> {
         remove_link(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
             uid,
-            link
+            link,
         )
         .await
     }
@@ -450,7 +446,7 @@ impl PerspectivesClient {
             .iter()
             .find(|p| p.uuid == uuid)
             .ok_or_else(|| anyhow!("Perspective with ID {} not found!", uuid))?;
-            
+
         Ok(PerspectiveProxy::new(self.clone(), uuid.clone()))
     }
 }
