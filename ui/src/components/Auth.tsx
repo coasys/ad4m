@@ -20,6 +20,7 @@ const Auth = () => {
   const [requestModalOpened, setRequestModalOpened] = useState(true);
   const [secretCodeModalOpened, setSecretCodeModalOpened] = useState(false);
   const [secretCode, setSecretCode] = useState("");
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setRequestModalOpened(true);
@@ -58,6 +59,13 @@ const Auth = () => {
 
   const copyCode = () => {
     navigator.clipboard.writeText(secretCode);
+
+    setCopied(true);
+
+    setTimeout(() => {
+      setCopied(false);
+    }, 2000);
+
     showNotification({
       message: "Secret code copied to clipboard",
       autoClose: 1000,
@@ -139,7 +147,7 @@ const Auth = () => {
               value={secretCode}
             >
               <j-button square slot="end" variant="subtle" onClick={copyCode}>
-                <j-icon size="sm" name="clipboard"></j-icon>
+                <j-icon size="sm" name={!copied ? 'clipboard' : 'clipboard-check'}></j-icon>
               </j-button>
             </j-input>
             <j-button variant="primary" onClick={closeSecretCodeModal}>
