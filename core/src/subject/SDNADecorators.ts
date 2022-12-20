@@ -215,3 +215,13 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
 
     return descriptor
 }
+
+function createListener(target: any, key: string, descriptor: PropertyDescriptor) {
+    const originalMethod = descriptor.value;
+    if(typeof originalMethod !== "function") {
+        throw new Error("createListener decorator can only be applied to methods");
+    }
+
+    descriptor.value = () => {
+    }
+}

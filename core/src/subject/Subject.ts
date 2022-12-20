@@ -1,3 +1,4 @@
+import { LinkExpression } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { collectionToAdderName, propertyNameToSetterName } from "./util";
 
@@ -112,5 +113,14 @@ export class Subject {
                 }
             }
         }
+    }
+
+    onPropertyChange(property: string, callback: (value: any) => void) {
+        this.#perspective.addListener('link-added', (link: LinkExpression) => {
+            if(link.data.source == this.#baseExpression && link.data.predicate == property) {
+                
+            }
+            return null
+        })
     }
 }

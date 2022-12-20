@@ -362,6 +362,9 @@ describe("Integration", () => {
 
                 @sdnaOutput
                 static generateSdna(): string { return "" }
+
+                @createListener
+                static addCreateListener(perspective: PerspectiveProxy, listener: (subject: Todo) => void) {}
             }
 
             it("should generate correct SDNA from a JS class", async () => {
