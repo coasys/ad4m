@@ -1,6 +1,5 @@
-import { Title, Text, Button, createStyles, Space, Image } from '@mantine/core'
+import { createStyles, Image } from '@mantine/core'
 import { appWindow } from '@tauri-apps/api/window';
-import React from 'react'
 import { useState } from 'react';
 import { useEffect } from 'react';
 
@@ -13,7 +12,6 @@ const useStyles = createStyles((theme, _params, getRef) => {
       flexDirection: 'column',
       height: '100vh',
       width: '100vw',
-      background: 'linear-gradient(90deg, rgba(2,0,36,1) 0%, rgba(38,3,23,1) 41%, rgba(51,4,31,1) 100%)',
       color: 'white',
       fontFamily: 'comfortaa'
     },
@@ -64,27 +62,13 @@ export default function Splashscreen() {
 
   return (
     <div className={classes.container}>
-      <Title order={1} style={{
-            fontSize: 90
-          }}>
-            <Image style={{width: '300px'}} src="ad4msquarelogo2_white_colouremblem.png"></Image>
-      </Title>
+      <Image style={{width: '200px'}} src="ad4msquarelogo2_white_colouremblem.png"></Image>
       <div id="error" className={classes.error}>
         <div className={classes.errorFlex}>
-          <Text align="center" size='xl' weight={700} style={{
-            fontSize: 40,
-            fontFamily: 'comfortaa',
-          }} >Whoops, something broke! 😅</Text>
-          <Space h="md" />
-          <Text align="center" size='lg' style={{
-            fontSize: 22,
-            fontFamily: 'comfortaa',
-          }}>
-            If you have also been asked to include a log file with your report,
-            click the button below to copy a log file to your desktop:
-          </Text>
-          <Space h="md" />
-          <Button onClick={copyFile}>{copied ? "Copied" : "Copy"}</Button>
+          <j-text variant="heading-lg">Whoops, something broke! 😅</j-text>
+          <j-text variant="ingress">If you have also been asked to include a log file with your report,
+            click the button below to copy a log file to your desktop:</j-text>
+          <j-button variant="primary" onClick={copyFile}>{copied ? "Copied" : "Copy"}</j-button>
         </div>
       </div>
     </div>

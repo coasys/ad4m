@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::perspective_proxy::PerspectiveProxy;
 use crate::types::{LinkExpression, Perspective};
 use crate::util::{create_websocket_client, query, query_raw};
 use crate::ClientInfo;
@@ -104,6 +105,52 @@ pub async fn add_link(
     .with_context(|| "Failed to run perspectives->addLink query")?;
 
     Ok(response_data.perspective_add_link)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/perspectives.gql",
+    response_derives = "Debug"
+)]
+pub struct RemoveLink;
+
+pub async fn remove_link(
+    executor_url: String,
+    cap_token: String,
+    uuid: String,
+    link: LinkExpression,
+) -> Result<()> {
+    let response_data: remove_link::ResponseData = query(
+        executor_url,
+        cap_token,
+        RemoveLink::build_query(remove_link::Variables {
+            uuid,
+            link: remove_link::LinkExpressionInput {
+                author: link.author,
+                timestamp: link.timestamp,
+                data: remove_link::LinkInput {
+                    source: link.data.source,
+                    target: link.data.target,
+                    predicate: link.data.predicate,
+                },
+                proof: remove_link::ExpressionProofInput {
+                    signature: link.proof.signature,
+                    key: link.proof.key,
+                    invalid: link.proof.invalid,
+                    valid: link.proof.valid,
+                },
+            },
+        }),
+    )
+    .await
+    .with_context(|| "Failed to run perspectives->removeLink query")?;
+
+    if response_data.perspective_remove_link {
+        Ok(())
+    } else {
+        Err(anyhow!("Failed to remove link"))
+    }
 }
 
 #[derive(GraphQLQuery)]
@@ -276,6 +323,7 @@ pub async fn snapshot(
         .into())
 }
 
+#[derive(Clone)]
 pub struct PerspectivesClient {
     info: Arc<ClientInfo>,
 }
@@ -321,6 +369,16 @@ impl PerspectivesClient {
             source,
             target,
             predicate,
+        )
+        .await
+    }
+
+    pub async fn remove_link(&self, uid: String, link: LinkExpression) -> Result<()> {
+        remove_link(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            uid,
+            link,
         )
         .await
     }
@@ -380,5 +438,15 @@ impl PerspectivesClient {
             uuid,
         )
         .await
+    }
+
+    pub async fn get(&self, uuid: String) -> Result<PerspectiveProxy> {
+        self.all()
+            .await?
+            .iter()
+            .find(|p| p.uuid == uuid)
+            .ok_or_else(|| anyhow!("Perspective with ID {} not found!", uuid))?;
+
+        Ok(PerspectiveProxy::new(self.clone(), uuid.clone()))
     }
 }

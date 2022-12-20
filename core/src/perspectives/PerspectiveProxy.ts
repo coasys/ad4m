@@ -4,8 +4,17 @@ import { LinkQuery } from "./LinkQuery";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
+import { Literal } from "../Literal";
+import { Subject } from "../subject/Subject";
+import { ExpressionClient } from "../expression/ExpressionClient";
+import { ExpressionRendered } from "../expression/Expression";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed"
+
+interface Parameter {
+    name: string
+    value: string
+}
 
 /** Perspective UI proxy object
  * 
@@ -18,7 +27,6 @@ export class PerspectiveProxy {
     #client: PerspectiveClient
     #perspectiveLinkAddedCallbacks: LinkCallback[]
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
-    #executeAction
 
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = []
@@ -27,36 +35,45 @@ export class PerspectiveProxy {
         this.#client = ad4m
         this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
         this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
+    }
 
-        this.#executeAction = async (actions, expression) => {
-            console.log("execute:", actions)
-    
-            const replaceThis = (input: string|undefined) => {
-                if(input)
-                    return input.replace('this', expression)
-                else
-                    return undefined
-            }
-    
-            for(let command of actions) {
-                switch(command.action) {
-                    case 'addLink':
-                        await this.add(new Link({
-                            source: replaceThis(command.source),
-                            predicate: replaceThis(command.predicate),
-                            target: replaceThis(command.target)
-                        }))
-                        break;
-                    case 'removeLink':
-                        const linkExpressions = await this.get(new LinkQuery({
-                            source: replaceThis(command.source), 
-                            predicate: replaceThis(command.predicate), 
-                            target: replaceThis(command.target)}))
-                        for (const linkExpression of linkExpressions) {
-                            await this.remove(linkExpression)
-                        }
-                        break;
+    async executeAction(actions, expression, parameters: Parameter[]) {
+        const replaceThis = (input: string|undefined) => {
+            if(input)
+                return input.replace('this', expression)
+            else
+                return undefined
+        }
+
+        const replaceParameters = (input: string|undefined) => {
+            if(parameters) {
+                let output = input
+                for(const parameter of parameters) {
+                    output = output.replace(parameter.name, parameter.value)
                 }
+                return output
+            } else
+                return input
+        }
+
+
+        for(let command of actions) {
+            let source = replaceThis(replaceParameters(command.source))
+            let predicate = replaceThis(replaceParameters(command.predicate))
+            let target = replaceThis(replaceParameters(command.target))
+            switch(command.action) {
+                case 'addLink':
+                    await this.add(new Link({source, predicate, target}))
+                    break;
+                case 'removeLink':
+                    const linkExpressions = await this.get(new LinkQuery({source, predicate, target}))
+                    for (const linkExpression of linkExpressions) {
+                        await this.remove(linkExpression)
+                    }
+                    break;
+                case 'setSingleTarget':
+                    await this.setSingleTarget(new Link({source, predicate, target}))
+                    break;
             }
         }
     }
@@ -122,6 +139,14 @@ export class PerspectiveProxy {
 
     async remove(link: LinkExpressionInput) {
         return await this.#client.removeLink(this.#handle.uuid, link)
+    }
+
+    async getExpression(expressionURI: string): Promise<ExpressionRendered> {
+        return await this.#client.getExpression(expressionURI)
+    }
+
+    async createExpression(content: any, languageAddress: string): Promise<string> {
+        return await this.#client.createExpression(content, languageAddress)
     }
 
     /** Adds a link listener
@@ -226,7 +251,7 @@ export class PerspectiveProxy {
         let startAction = await this.infer(`start_action(Action, F), register_sdna_flow("${flowName}", F)`)
         // should always return one solution...
         startAction = eval(startAction[0].Action)
-        await this.#executeAction(startAction, exprAddr)
+        await this.executeAction(startAction, exprAddr, undefined)
     }
 
     /** Returns all expressions in the given state of given Social DNA flow */
@@ -252,7 +277,183 @@ export class PerspectiveProxy {
         let action = await this.infer(`register_sdna_flow("${flowName}", Flow), flow_state("${exprAddr}", State, Flow), action(State, "${actionName}", _, Action)`)
         // should find only one
         action = eval(action[0].Action)
-        await this.#executeAction(action, exprAddr)
+        await this.executeAction(action, exprAddr, undefined)
     }
 
+    /** Set the perspective's Social DNA code to the given string. 
+     * This will replace all previous SDNA code elements with the new one.
+     */
+    async setSdna(sdnaCode: string) {
+        await this.setSingleTarget(new Link({
+            source: "ad4m://self",
+            predicate: "ad4m://has_zome",
+            target: Literal.from(sdnaCode).toUrl()
+        }))
+    }
+
+    /** Returns the perspective's Social DNA code 
+     * This will return all SDNA code elements in an array.
+     */
+    async getSdna(): Promise<string[]> {
+        let links = await this.get(new LinkQuery({
+            source: "ad4m://self",
+            predicate: "ad4m://has_zome"
+        }))
+
+        return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
+    }
+
+    /** Returns all the Subject classes defined in this perspectives SDNA */
+    async subjectClasses(): Promise<string[]> {
+        try {
+            return (await this.infer("subject_class(X, _)")).map(x => x.X)
+        }catch(e) {
+            return []
+        }
+    }
+
+    async stringOrTemplateObjectToSubjectClass<T>(subjectClass: T): Promise<string> {
+        if(typeof subjectClass === "string")
+            return subjectClass
+        else { 
+            let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
+            return subjectClasses[0]
+        }
+    }
+
+    /** Creates a new subject instance by running its (SDNA defined) constructor,
+     * which means adding links around the given expression address so that it
+     * conforms to the given subject class.
+     * 
+     * @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, the first subject class
+     * that matches the given properties will be used.
+     * @param exprAddr The address of the expression to be turned into a subject instance
+     */
+    async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
+        if(!result.length) {
+            throw "No constructor found for given subject class"
+        }
+
+        let actions = result.map(x => eval(x.Actions))
+        await this.executeAction(actions[0], exprAddr, undefined)
+        return this.getSubjectProxy(exprAddr, subjectClass)
+    }
+
+    /** Checks if the given expression is a subject instance of the given subject class 
+     * @param expression The expression to be checked
+     * @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, the first subject class
+     * that matches the given properties will be used.
+    */
+    async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        return await this.infer(`subject_class("${className}", c), instance(c, "${expression}")`)
+    }
+
+
+    /** For an existing subject instance (existing in the perspective's links)
+     * this function returns a proxy object that can be used to access the subject's
+     * properties and methods.
+     * 
+     * @param base URI of the subject's root expression
+     * @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, the first subject class
+     * that matches the given properties will be used.
+     */
+    async getSubjectProxy<T>(base: string, subjectClass: T): Promise<T> {
+        if(!await this.isSubjectInstance(base, subjectClass)) {
+            throw `Expression ${base} is not a subject instance of given class: ${subjectClass}`
+        }
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)   
+        let subject = new Subject(this, base, className)
+        await subject.init()
+        return subject as unknown as T
+    }
+
+    /** Returns all subject instances of the given subject class as proxy objects.
+     *  @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, all subject classes
+     * that match the given properties will be used.
+     */
+    async getAllSubjectInstances<T>(subjectClass: T): Promise<T[]> {
+        let classes = []
+        if(typeof subjectClass === "string") {
+            classes = [subjectClass]
+        } else {
+            classes = await this.subjectClassesByTemplate(subjectClass as object)
+        }
+
+        let instances = []
+        for(let className of classes) {
+            let instanceBaseExpressions = await this.infer(`subject_class("${className}", c), instance(c, X)`)
+            let newInstances = await Promise.all(instanceBaseExpressions.map(async x => await this.getSubjectProxy(x.X, className) as unknown as T))
+            instances = instances.concat(newInstances)
+        }
+        return instances
+    }
+
+    /** Returns all subject classes that match the given template object.
+     * This function looks at the properties of the template object and
+     * its setters and collections to create a Prolog query that finds
+     * all subject classes that would be converted to a proxy object
+     * with exactly the same properties and collections.
+     * 
+     * Since there could be multiple subject classes that match the given
+     * criteria, this function returns a list of class names.
+     * 
+     * @param obj The template object
+     */
+    async subjectClassesByTemplate(obj: object): Promise<string[]> {
+        // Collect all string properties of the object in a list
+        let properties = Object.keys(obj).filter(key => typeof obj[key] === "string")
+
+        // Collect all collections of the object in a list
+        let collections = Object.keys(obj).filter(key => Array.isArray(obj[key]))
+
+        // Collect all set functions of the object in a list
+        let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set"))
+        // Add all set functions of the object's prototype to that list
+        setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("set")))
+
+        // Collect all add functions of the object in a list
+        let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("add"))
+        // Add all add functions of the object's prototype to that list
+        addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("add")))
+
+        // Construct query to find all subject classes that have the given properties and collections
+        let query = `subject_class(Class, c)`
+
+        for(let property of properties) {
+            query += `, property(c, "${property}")`
+        }
+        for(let collection of collections) {
+            query += `, collection(c, "${collection}")`
+        }
+
+        for(let setFunction of setFunctions) {
+            // e.g.  "setState" -> "state"
+            let property = setFunction.substring(3)
+            property = property.charAt(0).toLowerCase() + property.slice(1)
+            query += `, property_setter(c, "${property}", _)`
+        }
+        for(let addFunction of addFunctions) {
+            // e.g. "addComment" -> "comments"
+            let property = addFunction.substring(3)
+            property = property.charAt(0).toLowerCase() + property.slice(1) + "s"
+            query += `, collection_adder(c, "${property}", _)`
+        }
+
+        query += "."
+        //console.log(query)
+        let result = await this.infer(query)
+
+        if(!result) {
+            return []
+        } else {
+            return result.map(x => x.Class)
+        }
+    }
 }

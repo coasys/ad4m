@@ -58,6 +58,13 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return !core.agentService.isUnlocked
             },
             //@ts-ignore
+            agentGetApps: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
+                let apps = await core.agentService.getApps()
+                return apps;
+
+            },
+            //@ts-ignore
             expression: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const url = args.url.toString();

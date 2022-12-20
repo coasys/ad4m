@@ -129,15 +129,20 @@ export default class PerspectivesController {
     }
 
     remove(uuid: string) {
-        let perspective = this.#perspectiveInstances.get(uuid);
-        perspective?.clearPolling();
-        if (perspective?.neighbourhood) {
-            this.#context.languageController?.languageRemove(perspective.neighbourhood.linkLanguage);
+        try {
+            let perspective = this.#perspectiveInstances.get(uuid);
+            perspective?.clearPolling();
+            if (perspective?.neighbourhood) {
+                this.#context.languageController?.languageRemove(perspective.neighbourhood.linkLanguage);
+            }
+            this.#perspectiveHandles.delete(uuid)
+            this.#perspectiveInstances.delete(uuid)
+            this.save()
+            this.pubsub.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, { uuid })
+        } catch (e) {
+            console.error("Error removing perspective:", e);
+            throw new Error(`Error removing perspective: ${e}`);
         }
-        this.#perspectiveHandles.delete(uuid)
-        this.#perspectiveInstances.delete(uuid)
-        this.save()
-        this.pubsub.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, { uuid })
     }
 
     update(uuid: string, name: string) {

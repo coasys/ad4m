@@ -32,7 +32,7 @@
 
 #### Defined in
 
-[perspectives/PerspectiveHandle.ts:20](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveHandle.ts#L20)
+[perspectives/PerspectiveHandle.ts:20](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveHandle.ts#L20)
 
 ## Properties
 
@@ -42,7 +42,7 @@
 
 #### Defined in
 
-[perspectives/PerspectiveHandle.ts:12](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveHandle.ts#L12)
+[perspectives/PerspectiveHandle.ts:12](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveHandle.ts#L12)
 
 ___
 
@@ -52,7 +52,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveHandle.ts:18](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveHandle.ts#L18)
+[perspectives/PerspectiveHandle.ts:18](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveHandle.ts#L18)
 
 ___
 
@@ -62,7 +62,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveHandle.ts:15](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveHandle.ts#L15)
+[perspectives/PerspectiveHandle.ts:15](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveHandle.ts#L15)
 
 ___
 
@@ -72,4 +72,4 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveHandle.ts:10](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveHandle.ts#L10)
+[perspectives/PerspectiveHandle.ts:10](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveHandle.ts#L10)

@@ -38,7 +38,7 @@
 
 #### Defined in
 
-[Literal.ts:2](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/Literal.ts#L2)
+[Literal.ts:2](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L2)
 
 ___
 
@@ -48,7 +48,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:3](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/Literal.ts#L3)
+[Literal.ts:3](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L3)
 
 ## Methods
 
@@ -68,7 +68,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:25](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/Literal.ts#L25)
+[Literal.ts:25](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L25)
 
 ___
 
@@ -88,7 +88,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:19](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/Literal.ts#L19)
+[Literal.ts:19](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L19)
 
 ___
 
@@ -102,7 +102,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:53](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/Literal.ts#L53)
+[Literal.ts:53](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L53)
 
 ___
 
@@ -116,7 +116,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:31](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/Literal.ts#L31)
+[Literal.ts:31](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L31)
 
 ___
 
@@ -136,7 +136,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:13](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/Literal.ts#L13)
+[Literal.ts:13](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L13)
 
 ___
 
@@ -156,4 +156,4 @@ ___
 
 #### Defined in
 
-[Literal.ts:5](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/Literal.ts#L5)
+[Literal.ts:5](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L5)

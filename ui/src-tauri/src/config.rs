@@ -29,7 +29,7 @@ pub fn app_url() -> String {
 
 #[cfg(not(feature = "custom-protocol"))]
 pub fn app_url() -> String {
-    "http://localhost:3000".to_string()
+    "http://127.0.0.1:3000".to_string()
 }
 
 pub fn executor_port_path() -> PathBuf {

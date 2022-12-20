@@ -1,226 +1,360 @@
-import { ActionIcon, Burger, Button, Center, Container, createStyles, Group, Image, MediaQuery, Modal, PasswordInput, Space, Stack, Text } from '@mantine/core';
-import { showNotification } from '@mantine/notifications';
-import { useContext, useEffect, useState } from 'react';
-import { Copy, Qrcode as QRCodeIcon } from 'tabler-icons-react';
-import { Ad4minContext } from '../context/Ad4minContext';
-import { AgentContext } from '../context/AgentContext';
-import { MainContainer, MainHeader } from './styles';
-import { invoke } from '@tauri-apps/api';
-import QRCode from 'react-qr-code';
+import { Agent, Literal } from "@perspect3vism/ad4m";
+import { useContext, useEffect, useState } from "react";
+import {
+  PREDICATE_FIRSTNAME,
+  PREDICATE_LASTNAME,
+  PREDICATE_USERNAME,
+} from "../constants/triples";
+import { cardStyle, gridButton, MainContainer } from "./styles";
+import { Ad4minContext } from "../context/Ad4minContext";
+import { buildAd4mClient } from "../util";
+import { useCallback } from "react";
+import { showNotification } from "@mantine/notifications";
+import { invoke } from "@tauri-apps/api";
+import QRCode from "react-qr-code";
+import { AgentContext } from "../context/AgentContext";
+import ActionButton from "./ActionButton";
+import { appWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/api/shell";
 
 type Props = {
-  opened: boolean,
-  setOpened: (val: boolean) => void
-}
+  did: String;
+  opened: boolean;
+  setOpened: (val: boolean) => void;
+};
 
-const useStyles = createStyles((theme) => ({
-  label: {
-    color: theme.colors.dark[1]
-  },
-}));
+export const fetchProfile = async (agent: Agent) => {
+  const tempProfile = {
+    firstName: "",
+    lastName: "",
+    username: "",
+  };
 
-function Settings(props: Props) {
-  const { classes } = useStyles();
+  for (const {
+    data: { source, predicate, target },
+  } of agent.perspective?.links!) {
+    if (source === agent.did) {
+      if (predicate === PREDICATE_FIRSTNAME) {
+        tempProfile.firstName = Literal.fromUrl(target).get();
+      } else if (predicate === PREDICATE_LASTNAME) {
+        tempProfile.lastName = Literal.fromUrl(target).get();
+      } else if (predicate === PREDICATE_USERNAME) {
+        tempProfile.username = Literal.fromUrl(target).get();
+      }
+    }
+  }
+
+  return tempProfile;
+};
+
+const Profile = (props: Props) => {
+  const {
+    state: { loading },
+  } = useContext(AgentContext);
 
   const {
-    state: {
-      loading,
-    },
-    methods: {
-      lockAgent
-    } } = useContext(AgentContext);
+    state: { url, did, client, expertMode },
+    methods: { toggleExpertMode },
+  } = useContext(Ad4minContext);
 
-  const {
-    state: {
-      url,
-      did,
-      client
-    } } = useContext(Ad4minContext);
+  const [trustedAgents, setTrustedAgents] = useState<any[]>([]);
 
-  const [password, setPassword] = useState('');
-  const [lockAgentModalOpen, setLockAgentModalOpen] = useState(false);
+  const [trustedAgentModalOpen, settrustedAgentModalOpen] = useState(false);
+
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
-  const [proxy, setProxy] = useState('');
+
+  const [proxy, setProxy] = useState("");
+
   const [qrcodeModal, setQRCodeModal] = useState(false);
+
+  const [password, setPassword] = useState("");
+
+  function openLogs() {
+    appWindow.emit("copyLogs");
+
+    showNotification({
+      message: "Opened logs folder... Please send ad4min.log to support on Discord",
+      autoClose: 30000,
+    });
+  }
+
+  const [profile, setProfile] = useState({
+    firstName: "",
+    lastName: "",
+    username: "",
+  });
+
+  const onPasswordChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    event.preventDefault();
+    let { value } = event.target;
+    setPassword(value);
+  };
+
+  const getTrustedAgents = useCallback(async () => {
+    if (url) {
+      const client = await buildAd4mClient(url);
+      const trustedAgents = await client!.runtime.getTrustedAgents();
+
+      const tempTempAgents = [];
+
+      for (const agent of trustedAgents) {
+        const fetchedAgent = await client!.agent.byDID(agent);
+
+        if (fetchedAgent) {
+          const profile = await fetchProfile(fetchedAgent);
+
+          tempTempAgents.push({ did: agent, ...profile });
+        } else {
+          tempTempAgents.push({ did: agent });
+        }
+      }
+
+      setTrustedAgents(tempTempAgents);
+    }
+  }, [url]);
+
+  const fetchCurrentAgentProfile = useCallback(async () => {
+    if (url) {
+      const client = await buildAd4mClient(url);
+      const agent = await client!.agent.me();
+
+      const profile = await fetchProfile(agent);
+
+      setProfile(profile);
+    }
+  }, [url]);
+
+  useEffect(() => {
+    fetchCurrentAgentProfile();
+    getTrustedAgents();
+  }, [fetchCurrentAgentProfile, getTrustedAgents]);
 
   useEffect(() => {
     const getProxy = async () => {
       const proxy: string = await invoke("get_proxy");
       console.log(proxy);
       setProxy(formatProxy(proxy));
-    }
-    getProxy().catch(console.error);;
+    };
+    getProxy().catch(console.error);
   }, []);
 
-  const onPasswordChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    event.preventDefault();
-    let { value } = event.target;
-    setPassword(value);
-  }
-
-  const copyUrl = () => {
-    navigator.clipboard.writeText(url);
-    showNotification({
-      message: 'URL copied to clipboard',
-      autoClose: 1000
-    });
-  }
-
-  const setupProxy = async () => {
-    const proxy: string = await invoke("setup_proxy", { subdomain: did });
-    console.log("Finish setup proxy, ", proxy);
-    setProxy(formatProxy(proxy));
-  }
-
-  const stopProxy = async () => {
-    await invoke("stop_proxy");
-    setProxy('');
-  }
+  console.log(trustedAgentModalOpen);
 
   const formatProxy = (proxy: string) => {
-    return proxy.replace(/^https(.*)/, 'wss$1').replace(/^http(.*)/, 'ws$1') + "/graphql";
-  }
-
-  const clearAgent = async (password: string) => {
-    console.log('clearAgent 0', password)
-    let agentStatus = await client?.agent.lock(password);
-    console.log('clearAgent 1', agentStatus)
-    if (!agentStatus?.isUnlocked) {
-      await invoke("clear_state");
-    }
-  }
+    return (
+      proxy.replace(/^https(.*)/, "wss$1").replace(/^http(.*)/, "ws$1") +
+      "/graphql"
+    );
+  };
 
   const copyProxy = () => {
     navigator.clipboard.writeText(proxy);
     showNotification({
-      message: 'Proxy endpoint copied to clipboard',
-      autoClose: 1000
+      message: "Proxy endpoint copied to clipboard",
+      autoClose: 1000,
     });
-  }
+  };
 
   const showProxyQRCode = () => {
     setQRCodeModal(true);
-  }
+  };
+
+  const clearAgent = async (password: string) => {
+    console.log("clearAgent 0", password);
+    let agentStatus = await client?.agent.lock(password);
+    console.log("clearAgent 1", agentStatus);
+    if (!agentStatus?.isUnlocked) {
+      await invoke("clear_state");
+    }
+  };
+
+  const copyUrl = () => {
+    navigator.clipboard.writeText(url);
+    showNotification({
+      message: "URL copied to clipboard",
+      autoClose: 1000,
+    });
+  };
+
+  const setupProxy = async () => {
+    try {
+      const proxy: string = await invoke("setup_proxy", { subdomain: did });
+      console.log("Finish setup proxy, ", proxy);
+      setProxy(formatProxy(proxy));
+    } catch (e) {
+      showNotification({
+        color: "red",
+        message: "Error while starting proxy",
+        autoClose: 5000,
+      });
+    }
+  };
+
+  const stopProxy = async () => {
+    await invoke("stop_proxy");
+    setProxy("");
+  };
 
   const showProxy = () => {
-    if (proxy) {
-      return (
-        <div>
-          <Group align="center" style={{}}>
-            <Text size="lg" weight={700}>Proxy endpoint: </Text>
-            <span>{proxy}</span>
-            <ActionIcon onClick={copyProxy}>
-              <Copy />
-            </ActionIcon>
-            <ActionIcon onClick={showProxyQRCode}>
-              <QRCodeIcon />
-            </ActionIcon>
-          </Group>
-          <Space h="md" />
-          <Button style={{ width: '160px' }} onClick={stopProxy}>Stop Proxy</Button>
-        </div>
-      )
-    } else {
-      return (
-        <Button style={{ width: '160px' }} onClick={setupProxy}>Setup Proxy</Button>
-      )
-    }
-  }
+    return (
+      <>
+        <ActionButton
+          iconColor={proxy.length === 0 ? undefined : "success-500"}
+          title={proxy.length === 0 ? "Proxy" : "Stop proxy"}
+          onClick={() => (proxy.length === 0 ? setupProxy() : stopProxy())}
+          icon="wifi"
+        />
+        {proxy && (
+          <>
+            <ActionButton
+              title="Proxy URL"
+              onClick={copyProxy}
+              icon="clipboard"
+            />
+            <ActionButton
+              title="QR Code"
+              onClick={showProxyQRCode}
+              icon="qr-code-scan"
+            />
+            <ActionButton
+              title="Open GraphQL"
+              onClick={() => open(url.replace("ws", "http"))}
+              icon="box-arrow-up-right"
+            />
+          </>
+        )}
+      </>
+    );
+  };
 
   return (
-    <Container
-      style={MainContainer}
-    >
-      <div style={MainHeader}>
-        <div style={{display: 'flex'}}>          
-          <MediaQuery largerThan="sm" styles={{ display: 'none' }}>
-              <Burger
-                opened={props.opened}
-                onClick={() => props.setOpened(!props.opened)}
-                size="sm"
-                color={'#fff'}
-                mr="xl"
-              />
-            </MediaQuery>
-          <Image src="ad4mlogo_white_angle2_colouremblem.png"></Image>
-        </div>
+    <div style={MainContainer}>
+      <div style={{ padding: "20px 30px 0 30px" }}>
+        <j-toggle
+          full=""
+          checked={expertMode}
+          onChange={(e) => toggleExpertMode()}
+        >
+          Expert mode
+        </j-toggle>
       </div>
-      
-      <Stack style={{
-        padding: '20px'
-      }}>
-        <Group align="center" style={{}}>
-          <Text size="lg" weight={700}>Connected executor URL: </Text>
-          <span>{url}</span>
-          <ActionIcon onClick={copyUrl}>
-            <Copy />
-          </ActionIcon>
-        </Group>
-        <Button style={{ width: '160px' }} onClick={() => setLockAgentModalOpen(true)}>Lock Agent</Button>
-        <Button style={{ width: '160px' }} onClick={() => setClearAgentModalOpen(true)}>Delete Agent</Button>
-        <Button style={{ width: '160px' }} onClick={() => invoke("close_application")}>Poweroff AD4Min</Button>
+      <div style={{ ...gridButton, paddingTop: 20 }}>
         {showProxy()}
-      </Stack>
-      <Modal
-        opened={lockAgentModalOpen}
-        onClose={() => setLockAgentModalOpen(false)}
-        title="Lock Agent"
-        size={700}
-        style={{ zIndex: 100 }}
-      >
-        <PasswordInput
-          placeholder="Password"
-          label="Input your passphrase"
-          radius="md"
-          size="md"
-          required
-          onChange={onPasswordChange}
-          classNames={{
-            label: classes.label
-          }}
+        <ActionButton
+          title="Trusted agents"
+          onClick={() => settrustedAgentModalOpen(true)}
+          icon="shield-check"
         />
-        <Space h={20} />
-        <Button onClick={() => lockAgent(password)} loading={loading}>
-          Lock agent
-        </Button>
-      </Modal>
-      <Modal
-        opened={clearAgentModalOpen}
-        onClose={() => setClearAgentModalOpen(false)}
-        title="Clear Agent"
-        size={700}
-        style={{ zIndex: 100 }}
-      >
-        <Text size="sm"><span style={{color: 'red'}}>Warning:</span> By clearing the agent you will loose all the data and will have to start with a fresh agent.<br /><br /> Please enter your pass below to proceed.</Text>
-        <Space h="md" />
-        <PasswordInput
-          placeholder="Password"
-          label="Input your passphrase"
-          radius="md"
-          size="md"
-          required
-          onChange={onPasswordChange}
-          classNames={{
-            label: classes.label
-          }}
+        <ActionButton title="Open Logs" onClick={openLogs} icon="clipboard" />
+        <ActionButton
+          title="Docs"
+          onClick={() => open("https://docs.ad4m.dev/")}
+          icon="file-earmark-richtext"
         />
-        <Space h={20} />
-        <Button onClick={() => clearAgent(password)} loading={loading}>
-          Delete Agent
-        </Button>
-      </Modal>
-      <Modal
-        opened={qrcodeModal}
-        onClose={() => setQRCodeModal(false)}
-        title="Proxy QR Code"
-        centered
-      >
-        <Center>
-          <QRCode value={proxy} />
-        </Center>
-      </Modal>
-    </Container>
-  )
-}
+        <ActionButton
+          title="Delete Agent"
+          onClick={() => setClearAgentModalOpen(true)}
+          icon="trash"
+        />
+        <j-box p="200" />
+      </div>
+      {trustedAgentModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={trustedAgentModalOpen}
+          onToggle={(e: any) => settrustedAgentModalOpen(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Trusted Agents
+              </j-text>
+            </j-box>
+            {trustedAgents.map((e, i) => (
+              <div
+                key={`trusted-agent-${e.did}`}
+                style={{ ...cardStyle, marginBottom: 0, width: "85%" }}
+              >
+                <j-flex direction="column" style={{ marginTop: 4 }}>
+                  <j-text weight="bold">{e?.username || "No username"}</j-text>
+                  <j-flex a="center" j="between">
+                    <j-text nomargin variant="body" size="xs">
+                      {e?.did.length > 25
+                        ? `${e?.did.substring(0, 25)}...`
+                        : e?.did}
+                    </j-text>
+                    <j-box p="100"></j-box>
+                    <j-button
+                      size="xs"
+                      variant="transparent"
+                      onClick={() => console.log("wow")}
+                    >
+                      <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                    </j-button>
+                  </j-flex>
+                </j-flex>
+              </div>
+            ))}
+          </j-box>
+        </j-modal>
+      )}
+      {qrcodeModal && (
+        <j-modal
+          size="fullscreen"
+          open={qrcodeModal}
+          onToggle={(e: any) => setQRCodeModal(e.target.open)}
+          title="Proxy QR Code"
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Scan this QR on your phone
+              </j-text>
+            </j-box>
+            <QRCode value={proxy} />
+          </j-box>
+        </j-modal>
+      )}
 
-export default Settings
+      {clearAgentModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={clearAgentModalOpen}
+          onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Clear agent
+              </j-text>
+            </j-box>
+            <j-text>
+              Warning: by clearing the agent you will loose all the data and
+              will have to start with a fresh agent
+            </j-text>
+            <j-box p="200"></j-box>
+            <j-input
+              placeholder="Password"
+              label="Input your passphrase to clear agent"
+              size="lg"
+              required
+              onInput={onPasswordChange}
+            ></j-input>
+            <j-box p="200"></j-box>
+            <j-flex>
+              <j-button
+                variant="primary"
+                onClick={() => clearAgent(password)}
+                loading={loading}
+              >
+                Delete Agent
+              </j-button>
+            </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+    </div>
+  );
+};
+
+export default Profile;

@@ -22,7 +22,7 @@
 
 #### Defined in
 
-[language/LanguageContext.ts:6](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageContext.ts#L6)
+[language/LanguageContext.ts:6](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L6)
 
 ## Methods
 
@@ -42,4 +42,4 @@
 
 #### Defined in
 
-[language/LanguageContext.ts:7](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/language/LanguageContext.ts#L7)
+[language/LanguageContext.ts:7](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L7)

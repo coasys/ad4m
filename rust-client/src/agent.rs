@@ -90,6 +90,22 @@ pub async fn me(executor_url: String, cap_token: String) -> Result<me::MeAgent> 
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
+pub struct GetApps;
+
+pub async fn get_apps(executor_url: String, cap_token: String,) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
+    let response_data: get_apps::ResponseData =
+        query(executor_url, cap_token, GetApps::build_query(get_apps::Variables {}))
+            .await
+            .with_context(|| "Failed to run agent->me query")?;
+    Ok(response_data.agent_get_apps)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
 pub struct AgentStatus;
 
 pub async fn status(
@@ -212,12 +228,12 @@ pub async fn sign_message(
     message: String,
 ) -> Result<sign_message::SignMessageAgentSignMessage> {
     let response: sign_message::ResponseData = query(
-            executor_url,
-            cap_token,
-            SignMessage::build_query(sign_message::Variables { message }),
-        )
-        .await
-        .with_context(|| "Failed to run agent->sign_message")?;
+        executor_url,
+        cap_token,
+        SignMessage::build_query(sign_message::Variables { message }),
+    )
+    .await
+    .with_context(|| "Failed to run agent->sign_message")?;
 
     Ok(response.agent_sign_message)
 }
@@ -260,6 +276,10 @@ impl AgentClient {
         status(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 
+    pub async fn get_apps(&self) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
+        get_apps(self.info.executor_url.clone(), self.info.cap_token.clone()).await
+    }
+
     pub async fn lock(&self, passphrase: String) -> Result<lock::LockAgentLock> {
         lock(
             self.info.executor_url.clone(),
@@ -296,11 +316,15 @@ impl AgentClient {
         .await
     }
 
-    pub async fn sign_message(&self, message: String) -> Result<sign_message::SignMessageAgentSignMessage> {
+    pub async fn sign_message(
+        &self,
+        message: String,
+    ) -> Result<sign_message::SignMessageAgentSignMessage> {
         sign_message(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
-            message
-        ).await
+            message,
+        )
+        .await
     }
 }
