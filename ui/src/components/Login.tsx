@@ -21,6 +21,7 @@ const Login = (props: any) => {
   const [currentSignupIndex, setCurrentSignupIndex] = useState(0);
 
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [username, setUsername] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -297,17 +298,22 @@ const Login = (props: any) => {
                   ></j-input>
                   <j-box p="200"></j-box>
                   <j-input
-                    full
+                    autofocus
                     size="lg"
                     label="Password"
                     minlength={10}
                     maxlength={30}
                     autovalidate
                     required
-                    type="password"
-                    onKeyDown={onSignupStepOneKeyDown}
+                    type={showPassword ? "text" :"password"}
+                    full
                     onInput={(e: any) => setPassword(e.target.value)}
-                  ></j-input>
+                    onKeyDown={onSignupStepOneKeyDown}
+                  >
+                    <j-button onClick={() => setShowPassword(!showPassword)} slot="end" variant="link" square>
+                      <j-icon name={showPassword ? 'eye-slash' : 'eye'} size="sm" ></j-icon>
+                    </j-button>
+                  </j-input>
                   <j-box p="200"></j-box>
                   <j-button
                     full
@@ -327,11 +333,10 @@ const Login = (props: any) => {
                     full
                     autofocus
                     size="lg"
-                    label="First name"
+                    label="First name (optional)"
                     minlength={10}
                     maxlength={30}
                     autovalidate
-                    required
                     type="text"
                     onKeyDown={onSignupStepTwoKeyDown}
                     onInput={(e: any) => setFirstName(e.target.value)}
@@ -340,11 +345,10 @@ const Login = (props: any) => {
                   <j-input
                     full
                     size="lg"
-                    label="Last name"
+                    label="Last name (optional)"
                     minlength={10}
                     maxlength={30}
                     autovalidate
-                    required
                     type="text"
                     onKeyDown={onSignupStepTwoKeyDown}
                     onInput={(e: any) => setLastName(e.target.value)}
@@ -381,11 +385,15 @@ const Login = (props: any) => {
                 maxlength={30}
                 autovalidate
                 required
-                type="password"
+                type={showPassword ? "text" :"password"}
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
                 onKeyDown={onKeyDown}
-              ></j-input>
+              >
+                <j-button onClick={() => setShowPassword(!showPassword)} slot="end" variant="link" square>
+                  <j-icon name={showPassword ? 'eye-slash' : 'eye'} size="sm" ></j-icon>
+                </j-button>
+              </j-input>
               <j-box p="200"></j-box>
               <j-button
                 full
