@@ -114,7 +114,9 @@ const Navigation = ({ did, opened, setOpened }: Props) => {
       <div style={RouteContainer}>
         <div style={Header}>
           <j-flex a="center" j="between">
-            <Logo height={30} width={31} />
+            <a href="https://ad4m.dev" target="_blank">
+              <Logo height={30} width={31} />
+            </a>
             <Profile />
           </j-flex>
         </div>
