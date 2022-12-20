@@ -36,6 +36,9 @@ export class ExpressionProofInput {
     
     @Field({nullable: true})
     invalid?: boolean;
+
+    @Field({nullable: true})
+    socialOrganismCoherence?: number;
 }
 
 //Note having any as return type here fixes compilation errors but I think we loose the ExpressionClass type in resulting .d.ts gql files
@@ -44,6 +47,9 @@ export function ExpressionGeneric<DataType>(DataTypeClass: ClassType<DataType>):
     abstract class ExpressionClass {
         @Field()
         author: string;
+
+        @Field({nullable: true})
+        socialOrganismSource?: string;
     
         @Field()
         timestamp: string;
