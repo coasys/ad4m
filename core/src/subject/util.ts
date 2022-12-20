@@ -7,6 +7,11 @@ export function propertyNameToSetterName(property: string): string {
     return `set${capitalize(property)}`
 }
 
+// e.g. "setName" -> "name"
+export function setterNameToPropertyName(setter: string): string {
+    return setter.replace("set", "").replace(/^[A-Z]/, (m) => m.toLowerCase())
+}
+
 export function singularToPlural(singular: string): string {
     if(singular.endsWith("y")) {
         return singular.slice(0, -1) + "ies"
@@ -29,6 +34,7 @@ export function pluralToSingular(plural: string): string {
 export function collectionToAdderName(collection: string): string {
     return `add${capitalize(pluralToSingular(collection))}`
 }
+
 
 export function stringifyObjectLiteral(obj) {
     if(Array.isArray(obj)) {

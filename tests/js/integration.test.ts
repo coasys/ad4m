@@ -6,7 +6,9 @@ import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
-    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, Subject, subjectProperty, subjectCollection, sdnaOutput,
+    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
+    instanceQuery, Subject, subjectProperty, subjectPropertySetter,
+    subjectCollection, sdnaOutput,
 } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
@@ -159,11 +161,11 @@ describe("Integration", () => {
                 expect(await subject.state).to.equal("todo://done")
             })
 
-            it("should work with a property that is not set initially", async () => {
+            it("should work with a property that is not set initially and that auto-resolves", async () => {
                 //@ts-ignore
                 expect(await subject.title).to.be.undefined
         
-                let title = Literal.from("test title").toUrl()
+                let title = "test title"
                 //@ts-ignore
                 await subject.setTitle(title)
                 //@ts-ignore
@@ -313,6 +315,19 @@ describe("Integration", () => {
                 // isSubjectInstance = [hasLink("todo://state")]
 
                 //@ts-ignore
+                @instanceQuery()
+                static async all(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
+                @instanceQuery({where: {state: "todo://ready"}})
+                static async allReady(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
+                @instanceQuery({where: { state: "todo://done" }})
+                static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
+                @instanceQuery({condition: 'triple("ad4m://self", _, Instance)'})
+                static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
+                //@ts-ignore
                 @subjectProperty({
                     through: "todo://state", 
                     initial:"todo://ready",
@@ -329,8 +344,15 @@ describe("Integration", () => {
                 setState(state: string) {}
 
                 //@ts-ignore
-                @subjectProperty({through: "todo://has_title"})
+                @subjectProperty({
+                    through: "todo://has_title",
+                    resolve: true,
+                })
                 title: string = ""
+
+                @subjectPropertySetter({
+                    resolveLanguage: 'literal'
+                })
                 setTitle(title: string) {}
 
                 //@ts-ignore
@@ -366,6 +388,49 @@ describe("Integration", () => {
                 let comment = Literal.from("new comment").toUrl()
                 await todo.addComment(comment)
                 expect(await todo.comments).to.deep.equal([comment])
+            })
+
+            it("can retrieve all instances through instaceQuery decoratored all()", async () => {
+                let todos = await Todo.all(perspective!)
+                expect(todos.length).to.equal(3)
+            })
+
+            it("can retrieve all mathching instance through instanceQuery(where: ..)", async () => {
+                let todos = await Todo.allReady(perspective!)
+                expect(todos.length).to.equal(1)
+                expect(await todos[0].state).to.equal("todo://ready")
+
+                todos = await Todo.allDone(perspective!)
+                expect(todos.length).to.equal(1)
+                expect(await todos[0].state).to.equal("todo://done")
+            })
+
+            it("can retrieve matching instance through instanceQuery(condition: ..)", async () => {
+                let todos = await Todo.allSelf(perspective!)
+                expect(todos.length).to.equal(0)
+
+                todos = await Todo.all(perspective!)
+                let todo = todos[0]
+                //@ts-ignore
+                perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
+                
+                todos = await Todo.allSelf(perspective!)
+                expect(todos.length).to.equal(1)
+            })
+
+            it("can deal with properties that resolve the URI and create Expressions", async () => {
+                let todos = await Todo.all(perspective!)
+                let todo = todos[0]
+                expect(await todo.title).to.equal(undefined)
+
+                await todo.setTitle("new title")
+                expect(await todo.title).to.equal("new title")
+
+                //@ts-ignore
+                let links = await perspective!.get(new LinkQuery({source: todo.baseExpression, predicate: "todo://has_title"}))
+                expect(links.length).to.equal(1)
+                let literal = Literal.fromUrl(links[0].data.target).get()
+                expect(literal.data).to.equal("new title")
             })
         })
     })
