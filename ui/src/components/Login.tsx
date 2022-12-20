@@ -51,6 +51,18 @@ const Login = (props: any) => {
     }
   };
 
+  const onSignupStepOneKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      gotoNextSignUpStep();
+    }
+  };
+
+  const onSignupStepTwoKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      generate()
+    }
+  };
+
   const checkUsernamePassword = () => {
     if (username.length === 0) {
       setUsernameError("Username is requied");
@@ -293,6 +305,7 @@ const Login = (props: any) => {
                     autovalidate
                     required
                     type="password"
+                    onKeyDown={onSignupStepOneKeyDown}
                     onInput={(e: any) => setPassword(e.target.value)}
                   ></j-input>
                   <j-box p="200"></j-box>
@@ -320,6 +333,7 @@ const Login = (props: any) => {
                     autovalidate
                     required
                     type="text"
+                    onKeyDown={onSignupStepTwoKeyDown}
                     onInput={(e: any) => setFirstName(e.target.value)}
                   ></j-input>
                   <j-box p="200"></j-box>
@@ -332,6 +346,7 @@ const Login = (props: any) => {
                     autovalidate
                     required
                     type="text"
+                    onKeyDown={onSignupStepTwoKeyDown}
                     onInput={(e: any) => setLastName(e.target.value)}
                   ></j-input>
                   <j-box p="200"></j-box>
@@ -369,6 +384,7 @@ const Login = (props: any) => {
                 type="password"
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
+                onKeyDown={onKeyDown}
               ></j-input>
               <j-box p="200"></j-box>
               <j-button
