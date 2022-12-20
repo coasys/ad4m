@@ -32,16 +32,37 @@ fn deconstruct_value_object(value: Value) -> Result<String> {
                 Value::String(string) => string,
                 Value::Number(number) => number.to_string(),
                 Value::Bool(boolean) => boolean.to_string(),
-                Value::Array(_) => bail!("Unexpected nested array value"),
+                Value::Array(_) => deconstruct_value_array(value)?,
                 Value::Object(_) => deconstruct_value_object(value)?,
                 Value::Null => "null".to_string(),
             };
             collected.push(format!("{}: {}", key, value));
         }
 
-        Ok(collected.join(", "))
+        Ok(format!("{{ {} }}", collected.join(", ")))
     } else {
         bail!("Can't deconstruct non-object value")
+    }
+}
+
+fn deconstruct_value_array(value: Value) -> Result<String> {
+    if let Value::Array(array) = value {
+        let mut collected = vec![];
+        for item in array {
+            let item = match item {
+                Value::String(string) => string,
+                Value::Number(number) => number.to_string(),
+                Value::Bool(boolean) => boolean.to_string(),
+                Value::Array(_) => deconstruct_value_array(item)?,
+                Value::Object(_) => deconstruct_value_object(item)?,
+                Value::Null => "null".to_string(),
+            };
+            collected.push(item);
+        }
+
+        Ok(format!("[ {} ]", collected.join(", ")))
+    } else {
+        bail!("Can't deconstruct non-array value")
     }
 }
 
@@ -53,7 +74,7 @@ pub fn print_prolog_result(result: Value) -> Result<()> {
                     Value::String(string) => string,
                     Value::Number(number) => number.to_string(),
                     Value::Bool(boolean) => boolean.to_string(),
-                    Value::Array(_) => bail!("Unexpected nested array value"),
+                    Value::Array(_) => deconstruct_value_array(value)?,
                     Value::Object(_) => deconstruct_value_object(value)?,
                     Value::Null => "null".to_string(),
                 };
