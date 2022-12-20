@@ -6,6 +6,8 @@ import { PerspectiveHandle } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
 import { Subject } from "../subject/Subject";
+import { ExpressionClient } from "../expression/ExpressionClient";
+import { ExpressionRendered } from "../expression/Expression";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed"
 
@@ -137,6 +139,14 @@ export class PerspectiveProxy {
 
     async remove(link: LinkExpressionInput) {
         return await this.#client.removeLink(this.#handle.uuid, link)
+    }
+
+    async getExpression(expressionURI: string): Promise<ExpressionRendered> {
+        return await this.#client.getExpression(expressionURI)
+    }
+
+    async createExpression(content: any, languageAddress: string): Promise<string> {
+        return await this.#client.createExpression(content, languageAddress)
     }
 
     /** Adds a link listener
