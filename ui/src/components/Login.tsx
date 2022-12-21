@@ -52,15 +52,19 @@ const Login = (props: any) => {
     }
   };
 
-  const onSignupStepOneKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+  const onSignupStepOneKeyDown = (
+    event: React.KeyboardEvent<HTMLInputElement>
+  ) => {
     if (event.key === "Enter") {
       gotoNextSignUpStep();
     }
   };
 
-  const onSignupStepTwoKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+  const onSignupStepTwoKeyDown = (
+    event: React.KeyboardEvent<HTMLInputElement>
+  ) => {
     if (event.key === "Enter") {
-      generate()
+      generate();
     }
   };
 
@@ -298,20 +302,27 @@ const Login = (props: any) => {
                   ></j-input>
                   <j-box p="200"></j-box>
                   <j-input
-                    autofocus
                     size="lg"
                     label="Password"
                     minlength={10}
                     maxlength={30}
                     autovalidate
                     required
-                    type={showPassword ? "text" :"password"}
+                    type={showPassword ? "text" : "password"}
                     full
                     onInput={(e: any) => setPassword(e.target.value)}
                     onKeyDown={onSignupStepOneKeyDown}
                   >
-                    <j-button onClick={() => setShowPassword(!showPassword)} slot="end" variant="link" square>
-                      <j-icon name={showPassword ? 'eye-slash' : 'eye'} size="sm" ></j-icon>
+                    <j-button
+                      onClick={() => setShowPassword(!showPassword)}
+                      slot="end"
+                      variant="link"
+                      square
+                    >
+                      <j-icon
+                        name={showPassword ? "eye-slash" : "eye"}
+                        size="sm"
+                      ></j-icon>
                     </j-button>
                   </j-input>
                   <j-box p="200"></j-box>
@@ -385,13 +396,21 @@ const Login = (props: any) => {
                 maxlength={30}
                 autovalidate
                 required
-                type={showPassword ? "text" :"password"}
+                type={showPassword ? "text" : "password"}
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
                 onKeyDown={onKeyDown}
               >
-                <j-button onClick={() => setShowPassword(!showPassword)} slot="end" variant="link" square>
-                  <j-icon name={showPassword ? 'eye-slash' : 'eye'} size="sm" ></j-icon>
+                <j-button
+                  onClick={() => setShowPassword(!showPassword)}
+                  slot="end"
+                  variant="link"
+                  square
+                >
+                  <j-icon
+                    name={showPassword ? "eye-slash" : "eye"}
+                    size="sm"
+                  ></j-icon>
                 </j-button>
               </j-input>
               <j-box p="200"></j-box>
