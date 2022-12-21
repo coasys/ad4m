@@ -146,8 +146,11 @@ const Auth = () => {
               size="xl"
               value={secretCode}
             >
-              <j-button square slot="end" variant="subtle" onClick={copyCode}>
-                <j-icon size="sm" name={!copied ? 'clipboard' : 'clipboard-check'}></j-icon>
+              <j-button square slot="end" variant="link" onClick={copyCode}>
+                <j-icon
+                  size="sm"
+                  name={!copied ? "clipboard" : "clipboard-check"}
+                ></j-icon>
               </j-button>
             </j-input>
             <j-button variant="primary" onClick={closeSecretCodeModal}>
