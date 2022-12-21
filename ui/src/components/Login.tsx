@@ -381,7 +381,7 @@ const Login = (props: any) => {
           </div>
         )}
         {currentIndex === 5 && (
-          <div className="slider__slide">
+          <div className="slider__slide center" style={{ height: "100vh" }}>
             <div className="slider__slide-content slider__slide-content--small">
               <Image
                 style={{ width: "140px", margin: "auto" }}
