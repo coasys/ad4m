@@ -42,7 +42,7 @@ export const cardStyle = {
 export const listStyle = {
   overflow: 'scroll',
   padding: 20,
-  height: 465,
+  height: 500,
   overflowX: 'hidden',
   marginTop: 10,
 }

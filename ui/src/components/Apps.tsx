@@ -24,7 +24,7 @@ const Apps = () => {
   return (
     <div style={MainContainer}>
       <div 
-        style={listStyle}
+        style={{...listStyle, height: 590}}
       >        
         {
           apps.map((app, index) => (

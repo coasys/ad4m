@@ -273,7 +273,7 @@ const Profile = (props: Props) => {
             {trustedAgents.map((e, i) => (
               <div
                 key={`trusted-agent-${e.did}`}
-                style={{ ...cardStyle, marginBottom: 0, width: "85%" }}
+                style={{ ...cardStyle, width: "100%" }}
               >
                 <j-flex direction="column" style={{ marginTop: 4 }}>
                   <j-text weight="bold">{e?.username || "No username"}</j-text>
