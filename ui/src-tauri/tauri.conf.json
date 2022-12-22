@@ -1,6 +1,6 @@
 {
   "package": {
-    "productName": "AD4Min",
+    "productName": "AD4M",
     "version": "0.2.7"
   },
   "build": {
@@ -28,7 +28,7 @@
       ],
       "resources": [],
       "externalBin": [
-        "bins/ad4m"
+        "bins/ad4m-host"
       ],
       "copyright": "",
       "category": "DeveloperTool",
@@ -60,7 +60,7 @@
     "windows": [
       {
         "label": "splashscreen",
-        "title": "Ad4min UI",
+        "title": "AD4M Launcher",
         "width": 1000,
         "height": 700,
         "resizable": true,

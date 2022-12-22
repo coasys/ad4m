@@ -1,11 +1,11 @@
 [package]
-name = "ad4min"
+name = "ad4m-launcher"
 version = "0.2.7"
 description = "Administration of ad4m services"
 authors = ["Kaichao Sun"]
 license = ""
 repository = ""
-default-run = "ad4min"
+default-run = "ad4m-launcher"
 edition = "2021"
 rust-version = "1.57"
 

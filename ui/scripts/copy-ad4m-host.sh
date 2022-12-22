@@ -15,6 +15,6 @@ case "${unameOut}" in
 esac
 echo "Got ad4m-host binaries for machine type: ${unameOut}"
 
-cp $AD4M_HOST_BINARY src-tauri/bins/ad4m-$TARGET_TRIPLE
+cp $AD4M_HOST_BINARY src-tauri/bins/ad4m-host-$TARGET_TRIPLE
 
-chmod 755 src-tauri/bins/ad4m-$TARGET_TRIPLE
+chmod 755 src-tauri/bins/ad4m-host-$TARGET_TRIPLE

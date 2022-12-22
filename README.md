@@ -58,7 +58,7 @@ yarn install
 yarn run package-linux/macos/windows (choose version for your OS)
 ```
 
-## Building ad4min
+## Building ad4m launcher
 
 ```
 yarn install

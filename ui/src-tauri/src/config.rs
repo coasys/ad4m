@@ -7,7 +7,7 @@ pub fn data_path() -> PathBuf {
 }
 
 pub fn log_path() -> PathBuf {
-    data_path().join("ad4min.log")
+    data_path().join("ad4m.log")
 }
 
 pub fn binary_path() -> PathBuf {

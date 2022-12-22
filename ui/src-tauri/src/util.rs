@@ -35,15 +35,15 @@ pub fn find_and_kill_processes(name: &str) {
 pub fn create_main_window(app: &AppHandle<Wry>) {
     let url = app_url();
 
-    let new_ad4min_window = WindowBuilder::new(app, "AD4MIN", WindowUrl::App(url.into()))
+    let new_ad4m_window = WindowBuilder::new(app, "AD4M", WindowUrl::App(url.into()))
         .center()
         .focused(true)
         .inner_size(1000.0, 700.0)
-        .title("AD4MIN");
+        .title("AD4M");
 
-    let _ = new_ad4min_window.build();
+    let _ = new_ad4m_window.build();
 
-    let tray_window = app.get_window("AD4MIN").unwrap();
+    let tray_window = app.get_window("AD4M").unwrap();
     let _ = tray_window.set_decorations(false);
     let _ = tray_window.set_always_on_top(true);
     //let _ = tray_window.move_window(Position::TrayCenter);

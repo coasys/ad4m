@@ -74,7 +74,7 @@ fn main() {
     
     save_executor_port(free_port);
 
-    find_and_kill_processes("ad4m");
+    find_and_kill_processes("ad4m-host");
 
     find_and_kill_processes("holochain");
 
@@ -124,7 +124,7 @@ fn main() {
                 open_logs_folder();
             });
 
-            let (mut rx, _child) = Command::new_sidecar("ad4m")
+            let (mut rx, _child) = Command::new_sidecar("ad4m-host")
             .expect("Failed to create ad4m command")
             .args([
                 "serve",
@@ -160,7 +160,7 @@ fn main() {
                             }
 
                             if let Ok(true) = main.is_visible() {
-                                log_error(&main, "There was an error with AD4MIN. Restarting may fix this, otherwise please contact the AD4M team for support.");
+                                log_error(&main, "There was an error with the AD4M Launcher. Restarting may fix this, otherwise please contact the AD4M team for support.");
                             }
 
                             log::info!("Terminated {:?}", line);
@@ -211,12 +211,12 @@ fn main() {
 }
 
 fn get_main_window(handle: &AppHandle) -> Window {
-    let main = handle.get_window("AD4MIN");
+    let main = handle.get_window("AD4M");
     if let Some(window) = main {
         window
     } else {
         create_main_window(handle);
-        let main = handle.get_window("AD4MIN");                
+        let main = handle.get_window("AD4M");                
         main.expect("Couldn't get main window right after creating it")
     }
 }

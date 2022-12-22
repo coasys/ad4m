@@ -1,4 +1,4 @@
-# AD4MIN
+# AD4M Launcher
 
 A desktop application to handle the running and administration of an AD4M user.
 

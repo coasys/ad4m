@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
         Domain::Neighbourhoods { command } => neighbourhoods::run(ad4m_client, command).await?,
         Domain::Runtime { command } => runtime::run(ad4m_client, command).await?,
         Domain::Log => {
-            let file = executor_data_path().join("ad4min.log");
+            let file = executor_data_path().join("ad4m.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {
                 format!(
                     "Could not read log file `{}`!\nIs AD4M executor running?",
