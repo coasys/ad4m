@@ -33,7 +33,7 @@
   "homepage": "https://ad4m.dev",
   "dependencies": {
     "@apollo/client": "3.6.9",
-    "@holochain/client": "0.3.2",
+    "@holochain/client": "0.11.3",
     "@types/jest": "^26.0.14",
     "class-validator": "^0.13.1",
     "express": "^4.18.1",
