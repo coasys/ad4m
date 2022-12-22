@@ -465,4 +465,19 @@ export class PerspectiveProxy {
             return result.map(x => x.Class)
         }
     }
+
+    /** Takes a JS class (its constructor) and assumes that it was decorated by
+     * the @subjectClass etc. decorators. It then tests if there is a subject class
+     * already present in the perspective's SDNA that matches the given class.
+     * If there is no such class, it gets the JS class's SDNA by calling its
+     * static generateSDNA() function and adds it to the perspective's SDNA.
+     */
+    async ensureSDNASubjectClass(jsClass: any): Promise<void> {
+        if((await this.subjectClassesByTemplate(new jsClass)).length > 0) {
+            return
+        }
+        
+        await this.addSdna(jsClass.generateSDNA())
+    }
+
 }
