@@ -57,6 +57,10 @@ export default function Start({
           Connect to a remote host
         </button>
       </div>
+
+      <div class="text-center">
+          <a _target="blank" href="https://ad4m.dev">Learn more about AD4M</a>
+      </div>
     </div>
   `;
 }
