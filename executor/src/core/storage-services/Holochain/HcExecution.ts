@@ -112,6 +112,16 @@ export async function runHolochain(resourcePath: string, conductorConfigPath: st
             },
         }
     );
+
+    //Log holochain process stdout to out
+    hcProcess.stdout.on('data', (data) => {
+        console.log(`${data}`);
+    });
+    //Log holochain process stderr to out
+    hcProcess.stderr.on('data', (data) => {
+        console.log(`${data}`);
+    });
+
     let isReady = new Promise((resolve, reject) => {
         hcProcess.stdout.on('data', (data) => {
             if (data.includes("Conductor ready")) {
@@ -145,15 +155,6 @@ export async function runHolochain(resourcePath: string, conductorConfigPath: st
     process.on("SIGINT", function () {
         hcProcess.kill("SIGINT");
         process.exit();
-    });
-
-    //Log holochain process stdout to out
-    hcProcess.stdout.on('data', (data) => {
-        console.log(`${data}`);
-    });
-    //Log holochain process stderr to out
-    hcProcess.stderr.on('data', (data) => {
-        console.log(`${data}`);
     });
 
     await isReady;
