@@ -49,7 +49,9 @@ const App = () => {
           "*": {
             fontFamily: "comfortaa !important",
           },
-
+          ".mantine-AppShell-main": {
+            width: "100%",
+          },
           ".mantine-Stack-root": {
             display: "block",
             width: "100%",

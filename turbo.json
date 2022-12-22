@@ -36,15 +36,15 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
-    "ad4min#build-linux": {
+    "ad4m-launcher#build-linux": {
       "dependsOn": ["ad4m-host#package-linux"],
       "outputs": ["dist/**"]
     },
-    "ad4min#build-macos": {
+    "ad4m-launcher#build-macos": {
       "dependsOn": ["ad4m-host#package-macos"],
       "outputs": ["dist/**"]
     },
-    "ad4min#build-windows": {
+    "ad4m-launcher#build-windows": {
       "dependsOn": ["ad4m-host#package-windows"],
       "outputs": ["dist/**"]
     }
