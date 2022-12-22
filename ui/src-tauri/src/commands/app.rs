@@ -19,7 +19,7 @@ pub fn close_main_window(app_handle: tauri::AppHandle) {
 
 #[tauri::command]
 pub fn clear_state(app_handle: tauri::AppHandle) {
-  find_and_kill_processes("ad4m");
+  find_and_kill_processes("ad4m-host");
 
   find_and_kill_processes("holochain");
 
