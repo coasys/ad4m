@@ -63,6 +63,10 @@ fn main() {
     if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
         let _ = remove_dir_all(data_path());
     }
+
+    if data_path().join("ad4m").join("ipfs").join("repo.lock").exists() {
+        let _ = remove_dir_all(data_path().join("ad4m").join("ipfs").join("repo.lock"));
+    }
     
     if let Err(err) = setup_logs() {
         println!("Error setting up the logs: {:?}", err);

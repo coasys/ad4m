@@ -32,12 +32,13 @@ function Profile() {
   } = useContext(AgentContext);
 
   const {
-    state: { url, did },
+    state: { url, did, isInitialized },
   } = useContext(Ad4minContext);
 
   const [password, setPassword] = useState("");
   const [showProfileInfo, setShowProfileInfo] = useState(false);
   const [lockAgentModalOpen, setLockAgentModalOpen] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [profile, setProfile] = useState({
     firstName: "",
     lastName: "",
@@ -54,6 +55,15 @@ function Profile() {
       setProfile(profile);
     }
   }, [url]);
+
+  // @ts-ignore
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      if (isInitialized) {
+        lockAgent(password);
+      }
+    }
+  };
 
   useEffect(() => {
     fetchCurrentAgentProfile();
@@ -105,12 +115,26 @@ function Profile() {
           <j-input
             placeholder="Password"
             label="Input your passphrase"
+            type={showPassword ? "text" : "password"}
             size="lg"
             required
             onInput={onPasswordChange}
-          ></j-input>
+            onKeyDown={onKeyDown}
+            autovalidate
+          >
+            <j-button
+              onClick={() => setShowPassword(!showPassword)}
+              slot="end"
+              variant="link"
+              square
+            >
+              <j-icon
+                name={showPassword ? "eye-slash" : "eye"}
+                size="sm"
+              ></j-icon>
+            </j-button>
+          </j-input>
           <j-box p="200"></j-box>
-          <j-flex>
             <j-button
               variant="primary"
               onClick={() => lockAgent(password)}
@@ -118,7 +142,6 @@ function Profile() {
             >
               Lock agent
             </j-button>
-          </j-flex>
         </j-box>
       </j-modal>
       <j-modal

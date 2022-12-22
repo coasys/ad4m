@@ -1,6 +1,6 @@
 import PerspectivismCore from "./core/PerspectivismCore";
 import create from "./core/PerspectivismCore";
-import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, agentLanguageAlias, neighbourhoodLanguageAlias, perspectiveLanguageAlias } from "./core/Config"
+import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, agentLanguageAlias, neighbourhoodLanguageAlias, perspectiveLanguageAlias, ad4mExecutorVersion } from "./core/Config"
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
@@ -154,6 +154,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     
 
     console.log("\x1b[2m", 
+      "AD4M executor starting with version: ", ad4mExecutorVersion, "\n",
       "Starting ad4m core with path:", appDataPath, "\n", 
       "=> AD4M core language addresses: languageLanguage bundle (hidden) + ", systemLanguages.slice(1, systemLanguages.length), "\n",
       "Languages to be preloaded, as supplied by appLangAliases", preloadLanguages, "\n",
