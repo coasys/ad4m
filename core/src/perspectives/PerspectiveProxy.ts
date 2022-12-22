@@ -417,7 +417,7 @@ export class PerspectiveProxy {
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
         // Collect all string properties of the object in a list
-        let properties = Object.keys(obj).filter(key => typeof obj[key] === "string")
+        let properties = Object.keys(obj).filter(key => !Array.isArray(obj[key]))
 
         // Collect all collections of the object in a list
         let collections = Object.keys(obj).filter(key => Array.isArray(obj[key]))
