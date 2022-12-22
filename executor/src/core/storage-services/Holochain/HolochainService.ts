@@ -303,37 +303,37 @@ export default class HolochainService {
             } catch(e) {
                 console.error("HolochainService: ERROR activating app", lang, " - ", e)
             }
+        } 
 
-            // 3. For each cell of the app create a new signing key
-            for (const data of cellIDsAndZomeCalls) {
-                const {cellId, zomeCalls} = data;
+
+    
+        const app_infos = await this.#appWebsocket!.appInfo({installed_app_id: lang})
+        if (app_infos) {
+            const { cell_info } = app_infos;
+            Object.values(cell_info).forEach(async value => {
+                const cellId = ("Provisioned" in value[0]) ? value[0].Provisioned.cell_id : (("Cloned" in value [0]) ? value[0].Cloned.cell_id : undefined);
+                if (cellId === undefined) {
+                    console.error("HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected", value);
+                    return;
+                }
+
                 //Create new signing keys for cell
                 try {
-                    await authorizeNewSigningKeyPair(this.#adminWebsocket!, cellId, zomeCalls);
+                    await authorizeNewSigningKeyPair(this.#adminWebsocket!, cellId, dnas[0].zomeCalls);
                 } catch (e) {
                     console.error("Got error when trying to generate key pair", e);
                     return;
                 }
-            }
-        }
 
-        //Register the callback to the cell internally
-        if (callback != undefined) {
-            //Check for apps matching this language address and register the signal callbacks
-            console.log("HolochainService: setting holochains signal callback for language", lang);
-            const app_infos = await this.#appWebsocket!.appInfo({installed_app_id: lang})
-            if (app_infos) {
-                const { cell_info } = app_infos;
-                Object.values(cell_info).forEach(async value => {
-                    const cellId = ("Provisioned" in value[0]) ? value[0].Provisioned.cell_id : (("Cloned" in value [0]) ? value[0].Cloned.cell_id : undefined);
-                    if (cellId === undefined) {
-                        console.error("HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected", value);
-                        return;
-                    }
+
+                //Register the callback to the cell internally
+                if (callback != undefined) {
+                    //Check for apps matching this language address and register the signal callbacks
+                    console.log("HolochainService: setting holochains signal callback for language", lang);
                     this.#signalCallbacks.push([cellId, callback, lang]);
-                })
-            }
-        };
+                }
+            })
+        }
     }
 
     async removeDnaForLang(lang: string) {
