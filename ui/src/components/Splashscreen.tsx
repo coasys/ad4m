@@ -66,7 +66,7 @@ export default function Splashscreen() {
       <div id="error" className={classes.error}>
         <div className={classes.errorFlex}>
           <j-text variant="heading-lg">Whoops, something broke! 😅</j-text>
-          <j-text variant="ingress">To help us fix this, please click the button below to open your AD4M data folder. Please then send the ad4min.log file found there to us on Discord.</j-text>
+          <j-text variant="ingress">To help us fix this, please click the button below to open your AD4M data folder. Please then send the ad4m.log file found there to us on Discord.</j-text>
           <j-button variant="primary" onClick={copyFile}>{copied ? "Opened" : "Open Logs"}</j-button>
         </div>
       </div>
