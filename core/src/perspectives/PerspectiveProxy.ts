@@ -224,14 +224,16 @@ export class PerspectiveProxy {
     async setSingleTarget(link: Link) {
         const query = new LinkQuery({source: link.source, predicate: link.predicate})
         const foundLinks = await this.get(query)
+        const removals = [];
         for(const l of foundLinks){
             delete l.__typename
             delete l.data.__typename
             delete l.proof.__typename
-            await this.remove(l)
+            removals.push(l);
         }
-            
-        await this.add(link)
+        const additions = [link];
+
+        await this.linkMutations({additions, removals})
     }
 
     /** Returns all the Social DNA flows defined in this perspective */
