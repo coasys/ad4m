@@ -18,6 +18,7 @@ import { Ad4minContext } from "../context/Ad4minContext";
 import PackageInfo from "../../package.json";
 import Logo from "./Logo";
 import Profile from "./Profile";
+import { AgentProvider } from "../context/AgentContext";
 
 type Props = {
   did: String;
@@ -117,7 +118,9 @@ const Navigation = ({ did, opened, setOpened }: Props) => {
             <a href="https://ad4m.dev" target="_blank">
               <Logo height={30} width={31} />
             </a>
-            <Profile />
+            <AgentProvider>
+              <Profile />
+            </AgentProvider>
           </j-flex>
         </div>
         <div className={classes.linkContainer}>
