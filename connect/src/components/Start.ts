@@ -59,7 +59,7 @@ export default function Start({
       </div>
 
       <div class="text-center">
-          <a _target="blank" href="https://ad4m.dev">Learn more about AD4M</a>
+          <a class="button button--link" _target="blank" href="https://ad4m.dev">Learn more about AD4M</a>
       </div>
     </div>
   `;
