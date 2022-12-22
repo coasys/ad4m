@@ -331,7 +331,7 @@ export default class AgentService {
             PubSubInstance.EXCEPTION_OCCURRED_TOPIC,
             {
                 title: "Request to authenticate application",
-                message: `${appName} is waiting for authentication, go to ad4min for more information.`,
+                message: `${appName} is waiting for authentication, go to ad4m launcher for more information.`,
                 type: ExceptionType.CapabilityRequested,
                 addon: JSON.stringify(authExtended),
             } as ExceptionInfo
