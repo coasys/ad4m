@@ -27,9 +27,9 @@
     "build-linux": "turbo run build-linux",
     "release": "changeset publish",
 
-    "build-all-macos": "yarn build && yarn package-macos && yarn build-macos",
-    "build-all-linux": "yarn build && yarn package-linux && yarn build-linux",
-    "build-all-windows": "yarn build && yarn package-windows && yarn build-windows",
+    "build-all-macos": "rm -rf target && yarn build && yarn package-macos && cd ui && yarn build-macos",
+    "build-all-linux": "rm -rf target && yarn build && yarn package-linux && cd ui && yarn build-linux",
+    "build-all-windows": "rm -rf target && yarn build && yarn package-windows && cd ui && yarn build-windows",
 
     "docs": "jsdoc -c jsdoc.json",
     "docs:api:jsdoc2md": "jsdoc2md --configure jsdoc.json --partial docs/header.hbs --global-index-format none --files src/**/* > docs-src/api.md",
