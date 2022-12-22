@@ -303,6 +303,15 @@ export class PerspectiveProxy {
         return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
     }
 
+    /** Adds the given Social DNA code to the perspective's SDNA code */
+    async addSdna(sdnaCode: string) {
+        await this.add(new Link({
+            source: "ad4m://self",
+            predicate: "ad4m://has_zome",
+            target: Literal.from(sdnaCode).toUrl()
+        }))
+    }
+
     /** Returns all the Subject classes defined in this perspectives SDNA */
     async subjectClasses(): Promise<string[]> {
         try {
