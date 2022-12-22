@@ -56,14 +56,14 @@ function Profile() {
     }
   }, [url]);
 
-    // @ts-ignore
-    const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-      if (event.key === "Enter") {
-        if (isInitialized) {
-          lockAgent(password);
-        }
+  // @ts-ignore
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      if (isInitialized) {
+        lockAgent(password);
       }
-    };
+    }
+  };
 
   useEffect(() => {
     fetchCurrentAgentProfile();

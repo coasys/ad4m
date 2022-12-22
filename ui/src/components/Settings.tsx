@@ -50,10 +50,11 @@ export const fetchProfile = async (agent: Agent) => {
 const Profile = (props: Props) => {
   const {
     state: { loading },
+    methods: { lockAgent }
   } = useContext(AgentContext);
 
   const {
-    state: { url, did, client, expertMode },
+    state: { url, did, client, expertMode, isInitialized },
     methods: { toggleExpertMode },
   } = useContext(Ad4minContext);
 
@@ -68,6 +69,8 @@ const Profile = (props: Props) => {
   const [qrcodeModal, setQRCodeModal] = useState(false);
 
   const [password, setPassword] = useState("");
+
+  const [showPassword, setShowPassword] = useState(false);
 
   function openLogs() {
     appWindow.emit("copyLogs");
@@ -138,7 +141,14 @@ const Profile = (props: Props) => {
     getProxy().catch(console.error);
   }, []);
 
-  console.log(trustedAgentModalOpen);
+  // @ts-ignore
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      if (isInitialized) {
+        clearAgent(password);
+      }
+    }
+  };
 
   const formatProxy = (proxy: string) => {
     return (
@@ -336,10 +346,25 @@ const Profile = (props: Props) => {
             <j-input
               placeholder="Password"
               label="Input your passphrase to clear agent"
+              type={showPassword ? "text" : "password"}
               size="lg"
               required
               onInput={onPasswordChange}
-            ></j-input>
+              onKeyDown={onKeyDown}
+              autovalidate
+            >
+              <j-button
+                onClick={() => setShowPassword(!showPassword)}
+                slot="end"
+                variant="link"
+                square
+              >
+                <j-icon
+                  name={showPassword ? "eye-slash" : "eye"}
+                  size="sm"
+                ></j-icon>
+              </j-button>
+            </j-input>
             <j-box p="200"></j-box>
             <j-flex>
               <j-button
