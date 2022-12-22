@@ -24,6 +24,7 @@ export interface LanguageContext {
 export class Dna {
     file: Buffer
     nick: string
+    zomeCalls: [string, string][]
 }
 
 export interface HolochainLanguageDelegate {
