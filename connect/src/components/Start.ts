@@ -3,9 +3,9 @@ import { version } from "../../package.json";
 import { detectOS } from "../utils";
 
 function downloadAd4m() {
-  const windowsLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/AD4Min_${version}_x64_en-US.msi`;
-  const macLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/AD4Min_${version}_x64.dmg`;
-  const linuxLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/ad4-min_${version}_amd64.deb`;
+  const windowsLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/AD4M_${version}_x64_en-US.msi`;
+  const macLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/AD4M_${version}_x64.dmg`;
+  const linuxLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/ad4m_${version}_amd64.deb`;
   const OSName = detectOS();
   const link = document.createElement("a");
   console.log({ OSName, link });
