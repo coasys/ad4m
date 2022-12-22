@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, CellId } from '@holochain/client'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, CellId, AppStatusFilter, authorizeNewSigningKeyPair, AgentInfoResponse } from '@holochain/client'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -7,7 +7,6 @@ import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import {stopProcesses, unpackDna, packDna, writeDefaultConductor, runHolochain, ConductorConfiguration} from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
-import { RequestAgentInfoResponse } from '@holochain/client'
 import yaml from 'js-yaml';
 import { AsyncQueue } from './Queue'
 import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
@@ -150,7 +149,8 @@ export default class HolochainService {
                 }
             };
             if (this.#appWebsocket == undefined) {
-                this.#appWebsocket = await AppWebsocket.connect(`ws://127.0.0.1:${this.#appPort}`, 100000, this.handleCallback.bind(this))
+                this.#appWebsocket = await AppWebsocket.connect(`ws://127.0.0.1:${this.#appPort}`, 100000);
+                this.#appWebsocket.on('signal', this.handleCallback.bind(this))
                 console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
             };
             resolveReady!()
@@ -250,62 +250,96 @@ export default class HolochainService {
         }
         const pubKey = await this.pubKeyForLanguage(lang);
         
-        const activeApps = await this.#adminWebsocket!.listActiveApps();
-        //console.log("HolochainService: Found running apps:", activeApps);
+        const activeApps = await (await this.#adminWebsocket!.listApps({status_filter: AppStatusFilter.Enabled})).map((app) => app.installed_app_id);
+        console.warn("HolochainService: Found running apps:", activeApps);
+       
         if(!activeApps.includes(lang)) {
-
-            let installed
+            const cellIDsAndZomeCalls = [] as {cellId: CellId, zomeCalls: [string, string][]}[];
             // 1. install app
             try {
                 console.debug("HolochainService: Installing DNAs for language", lang);
-                // console.debug(dnaFile)
-                // let installedCellIds = await this.#adminWebsocket.listCellIds()
-                // console.debug("HolochainService: Installed cells before:", installedCellIds)
-                // const cellId = HolochainService.dnaID(lang, nick)
-
                 for (let dna of dnas) {
                     //console.log("HolochainService: Installing DNA:", dna, "at data path:", this.#dataPath, "\n");
+                    //Write the dna file to a temporary installation path
                     const p = path.join(this.#dataPath, `${lang}-${dna.nick}.dna`);
                     fs.writeFileSync(p, dna.file);
-                    const hash = await this.#adminWebsocket!.registerDna({
-                        path: p
+                    //Install the app; with on the fly generated app bundle
+                    const installAppResult = await this.#adminWebsocket!.installApp({
+                        installed_app_id: lang, agent_key: pubKey, membrane_proofs: {}, bundle: {
+                            manifest: {
+                                manifest_version: "1",
+                                name: dna.nick,
+                                roles: [{
+                                    name: "main",
+                                    dna: {
+                                        //@ts-ignore
+                                        path: p
+                                    }
+                                }]
+                            },
+                            resources: {}
+                        }
                     })
-                    await this.#adminWebsocket!.installApp({
-                        installed_app_id: lang, agent_key: pubKey, dnas: [{hash: hash, role_id: dna.nick}]
-                    })
+                    //Get the cell info for the installed app
+                    const cell_info = installAppResult.cell_info["main"][0];
+                    const cellId = ("Provisioned" in cell_info) ? cell_info.Provisioned.cell_id : (("Cloned" in cell_info) ? cell_info.Cloned.cell_id : undefined);
+                    if (cellId === undefined) {
+                        console.error("HolochainService: Failed to install DNA, did not get cellId back from installAppResult:", installAppResult);
+                        return;
+                    }
+                    //Keep track of the cellId's and their associated zome calls
+                    cellIDsAndZomeCalls.push({cellId, zomeCalls: dna.zomeCalls});
+                    console.warn("HolochainService: Installed DNA:", dna.nick, " with result:", installAppResult);
                 }
-                installed = true
             } catch(e) {
-                // if(!e.data?.data?.indexOf('AppAlreadyInstalled')) {
-                //     console.error("Error during install of DNA:", e)
-                //     installed = false
-                // } else {
-                console.error(e);
-                installed = false
+                console.error("HolochainService: InstallApp, got error: ", e);
+                return;
             }
-
-            if(!installed)
-                return
 
             // 2. activate app
             try {
-                await this.#adminWebsocket!.activateApp({installed_app_id: lang})
+                const activateResult = await this.#adminWebsocket!.enableApp({installed_app_id: lang})
+                //console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
             } catch(e) {
                 console.error("HolochainService: ERROR activating app", lang, " - ", e)
             }
+
+            // 3. For each cell of the app create a new signing key
+            for (const data of cellIDsAndZomeCalls) {
+                const {cellId, zomeCalls} = data;
+                //Create new signing keys for cell
+                try {
+                    await authorizeNewSigningKeyPair(this.#adminWebsocket!, cellId, zomeCalls);
+                } catch (e) {
+                    console.error("Got error when trying to generate key pair", e);
+                    return;
+                }
+            }
         }
 
+        //Register the callback to the cell internally
         if (callback != undefined) {
+            //Check for apps matching this language address and register the signal callbacks
             console.log("HolochainService: setting holochains signal callback for language", lang);
-            const { cell_data } = await this.#appWebsocket!.appInfo({installed_app_id: lang})
-            this.#signalCallbacks.push([cell_data[0].cell_id, callback, lang]);
+            const app_infos = await this.#appWebsocket!.appInfo({installed_app_id: lang})
+            if (app_infos) {
+                const { cell_info } = app_infos;
+                Object.values(cell_info).forEach(async value => {
+                    const cellId = ("Provisioned" in value[0]) ? value[0].Provisioned.cell_id : (("Cloned" in value [0]) ? value[0].Cloned.cell_id : undefined);
+                    if (cellId === undefined) {
+                        console.error("HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected", value);
+                        return;
+                    }
+                    this.#signalCallbacks.push([cellId, callback, lang]);
+                })
+            }
         };
     }
 
     async removeDnaForLang(lang: string) {
-        const activeApps = await this.#adminWebsocket!.listActiveApps();
-        if(activeApps.includes(lang)) {
-            const app = activeApps.filter(a => a == lang)[0];
+        const activeApps = await (await this.#adminWebsocket!.listApps({})).map((app) => app.installed_app_id);
+        const apps = activeApps.filter(app => app === lang);
+        for (const app of apps) {
             await this.#adminWebsocket!.uninstallApp({installed_app_id: app});
         }
     }
@@ -324,8 +358,10 @@ export default class HolochainService {
             console.error("HolochainService.callZomeFunction: Warning attempting to call zome function when conductor did not start error free...")
         }
         const installed_app_id = lang
-        //console.debug("HolochainService.callZomefunction: getting info for app:", installed_app_id)
+
+        //1. Check for apps with installed_app_id matching this language address
         let infoResult = await this.#appWebsocket!.appInfo({installed_app_id})
+
         let tries = 1
         while(!infoResult && tries < 10) {
             await sleep(500)
@@ -339,24 +375,26 @@ export default class HolochainService {
             throw new Error("No DNA installed")
         }
 
-        //console.debug("HolochainService.callZomefunction: get info result:", infoResult)
-        const { cell_data } = infoResult
-        if(cell_data.length === 0) {
-            console.error("HolochainService: tried to call zome function without any installed cell!")
+        //2. Check that this app has valid cells that we can call
+        // console.debug("HolochainService.callZomefunction: get info result:", infoResult)
+        const { cell_info } = infoResult
+        if(Object.keys(cell_info).length === 0) {
+            console.error("HolochainService: tried to call zome function without any installed cell for given app!")
             return null
         }
 
-        const cell = cell_data.find(c => c.role_id === dnaNick)
-        if(!cell) {
-            const e = new Error(`No DNA with nick '${dnaNick}' found for language ${installed_app_id}`)
+        //3. Get the cellId of the cell with the role "main"
+        let cellInfos = cell_info['main'];
+        if(!cellInfos) {
+            const e = new Error(`No cell role main found for installed app: ${installed_app_id}`)
             console.error(e)
             return e
         }
-
-        //console.debug("HolochainService: found cell", cell);
-        const cell_id = cell.cell_id
+        const cell = ("Provisioned" in cellInfos[0]) ? cellInfos[0].Provisioned : (("Cloned" in cellInfos [0]) ? cellInfos[0].Cloned : undefined)
+        const cell_id = cell!.cell_id;
         const [_dnaHash, provenance] = cell_id
 
+        //4. Call the zome function
         try {
             console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m")
             const result = await this.#appWebsocket!.callZome({
@@ -375,11 +413,11 @@ export default class HolochainService {
         }
     }
 
-    async requestAgentInfos(): Promise<RequestAgentInfoResponse> {
-        return await this.#adminWebsocket!.requestAgentInfo({cell_id: null})
+    async requestAgentInfos(): Promise<AgentInfoResponse> {
+        return await this.#adminWebsocket!.agentInfo({cell_id: null})
     }
 
-    async addAgentInfos(agent_infos: RequestAgentInfoResponse) {
+    async addAgentInfos(agent_infos: AgentInfoResponse) {
         await this.#adminWebsocket!.addAgentInfo({ agent_infos })
     }
 }
