@@ -361,11 +361,11 @@ describe("Integration", () => {
                 addComment(comment: string) {}
 
                 @sdnaOutput
-                static generateSdna(): string { return "" }
+                static generateSDNA(): string { return "" }
             }
 
             it("should generate correct SDNA from a JS class", async () => {
-                let sdna = Todo.generateSdna()
+                let sdna = Todo.generateSDNA()
                 expect(sdna).to.equal(readFileSync("./subject.pl").toString())
             })
 
@@ -431,6 +431,24 @@ describe("Integration", () => {
                 expect(links.length).to.equal(1)
                 let literal = Literal.fromUrl(links[0].data.target).get()
                 expect(literal.data).to.equal("new title")
+            })
+
+            it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
+                expect(await perspective!.getSdna()).to.have.lengthOf(1)
+
+                class Test {
+                    @subjectProperty({through: "test://test_numer"})
+                    number: number = 0
+
+
+                    @sdnaOutput
+                    static generateSDNA(): string { return "" }
+                }
+
+                await perspective!.ensureSDNASubjectClass(Test)
+
+                expect(await perspective!.getSdna()).to.have.lengthOf(2)
+                console.log((await perspective!.getSdna())[1])
             })
         })
     })
