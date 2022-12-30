@@ -518,24 +518,17 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveAddLink: async (parent, args, context, info) => {
-                const { uuid, link } = args
+                const { uuid, link, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLink(link)
-            },
-            //@ts-ignore
-            perspectiveAddLocalLink: async (parent, args, context, info) => {
-                const { uuid, link } = args
-                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
-                const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLocalLinkHandler(link)
+                return await perspective.addLink(link, status)
             },
             //@ts-ignore
             perspectiveAddLinkExpression: async (parent, args, context, info) => {
-                const { uuid, link } = args
+                const { uuid, link, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLink(link)
+                return await perspective.addLink(link, status)
             },
             //@ts-ignore
             perspectiveRemove: (parent, args, context, info) => {
