@@ -4,11 +4,12 @@ import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
-import { PerspectiveProxy } from './PerspectiveProxy';
+import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 
 const LINK_EXPRESSION_FIELDS = `
 author
 timestamp
+status
 data { source, predicate, target }
 proof { valid, invalid, signature, key }
 `
@@ -155,34 +156,22 @@ export class PerspectiveClient {
         }))
     }
 
-    async addLink(uuid: string, link: Link): Promise<LinkExpression> {
+    async addLink(uuid: string, link: Link, status?: LinkStatus): Promise<LinkExpression> {
         const { perspectiveAddLink } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLink($uuid: String!, $link: LinkInput!){
-                perspectiveAddLink(link: $link, uuid: $uuid) {
+            mutation: gql`mutation perspectiveAddLink($uuid: String!, $link: LinkInput!, $status: String){
+                perspectiveAddLink(link: $link, uuid: $uuid, status: $status) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
             }`,
-            variables: { uuid, link }
+            variables: { uuid, link, status }
         }))
         return perspectiveAddLink
     }
 
-    async addLocalLink(uuid: string, link: Link): Promise<LinkExpression> {
-        const { perspectiveAddLocalLink } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLocalLink($uuid: String!, $link: LinkInput!){
-                perspectiveAddLocalLink(link: $link, uuid: $uuid) {
-                    ${LINK_EXPRESSION_FIELDS}
-                }
-            }`,
-            variables: { uuid, link }
-        }))
-        return perspectiveAddLocalLink
-    }
-
-    async addLinkExpression(uuid: string, link: LinkExpressionInput): Promise<LinkExpression> {
+    async addLinkExpression(uuid: string, link: LinkExpressionInput, status?: LinkStatus): Promise<LinkExpression> {
         const { perspectiveAddLinkExpression } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLinkExpression($uuid: String!, $link: LinkExpressionInput!){
-                perspectiveAddLinkExpression(link: $link, uuid: $uuid) {
+            mutation: gql`mutation perspectiveAddLinkExpression($uuid: String!, $link: LinkExpressionInput!, $status: String){
+                perspectiveAddLinkExpression(link: $link, uuid: $uuid, status: $status) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
             }`,

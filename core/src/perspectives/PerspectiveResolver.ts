@@ -5,6 +5,7 @@ import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
 import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from '../PubSub'
+import { LinkStatus } from "./PerspectiveProxy";
 
 const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -87,32 +88,22 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => LinkExpression)
-    perspectiveAddLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @PubSub() pubSub: any): LinkExpression {
+    perspectiveAddLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @Arg('status', { nullable: true, defaultValue: 'shared'}) status: LinkStatus, @PubSub() pubSub: any): LinkExpression {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
         l.proof = testLink.proof
         l.data = link
+        l.status = status
 
         pubSub.publish(LINK_ADDED_TOPIC, { link: l })
         return l
     }
 
     @Mutation(returns => LinkExpression)
-    perspectiveAddLocalLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @PubSub() pubSub: any): LinkExpression {
-        const l = new LinkExpression()
-        l.author = 'did:ad4m:test'
-        l.timestamp = Date.now()
-        l.proof = testLink.proof
-        l.data = link
-
-        pubSub.publish(LINK_ADDED_TOPIC, { link: l })
-        return l
-    }
-
-    @Mutation(returns => LinkExpression)
-    perspectiveAddLinkExpression(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @PubSub() pubSub: any): LinkExpression {
+    perspectiveAddLinkExpression(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @Arg('status', { nullable: true}) status: LinkStatus, @PubSub() pubSub: any): LinkExpression {
         pubSub.publish(LINK_ADDED_TOPIC, { link })
+        link.status = status;
         return link as LinkExpression
     }
  

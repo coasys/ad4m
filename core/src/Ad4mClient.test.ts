@@ -496,14 +496,16 @@ describe('Ad4mClient', () => {
             expect(link.data.source).toBe('root')
             expect(link.data.predicate).toBe('p')
             expect(link.data.target).toBe('lang://Qm123')
+            expect(link.status).toBe('shared')
         })
 
         it('addLocalLink() smoke test', async () => {
-            const link = await ad4mClient.perspective.addLocalLink('00001', {source: 'root', target: 'lang://Qm123', predicate: 'p'})
+            const link = await ad4mClient.perspective.addLink('00001', {source: 'root', target: 'lang://Qm123', predicate: 'p'}, 'local')
             expect(link.author).toBe('did:ad4m:test')
             expect(link.data.source).toBe('root')
             expect(link.data.predicate).toBe('p')
             expect(link.data.target).toBe('lang://Qm123')
+            expect(link.status).toBe('local')
         })
 
         it('addLinkExpression() smoke test', async () => {

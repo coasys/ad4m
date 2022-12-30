@@ -7,6 +7,8 @@ import { Perspective } from "./Perspective";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed"
 
+export type LinkStatus = "shared" | "local"
+
 /** Perspective UI proxy object
  * 
  * Convenience object for UIs to interact with a perspective.
@@ -92,18 +94,13 @@ export class PerspectiveProxy {
     }
 
     /** Adds a link to this perspective */
-    async add(link: Link): Promise<LinkExpression> {
-        return await this.#client.addLink(this.#handle.uuid, link)
-    }
-
-    /** Adds a link to this perspective */
-    async addLocal(link: Link): Promise<LinkExpression> {
-        return await this.#client.addLocalLink(this.#handle.uuid, link)
+    async add(link: Link, status: LinkStatus = 'shared'): Promise<LinkExpression> {
+        return await this.#client.addLink(this.#handle.uuid, link, status)
     }
 
     /** Adds a linkExpression to this perspective */
-    async addLinkExpression(link: LinkExpression): Promise<LinkExpression> {
-        return await this.#client.addLinkExpression(this.#handle.uuid, link)
+    async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared'): Promise<LinkExpression> {
+        return await this.#client.addLinkExpression(this.#handle.uuid, link, status)
     }
 
     async update(oldLink: LinkExpression, newLink: Link) {
