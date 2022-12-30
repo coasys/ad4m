@@ -1,9 +1,7 @@
-use crate::{formatting::*, util::maybe_parse_datetime};
-use ad4m_client::Ad4mClient;
-use anyhow::Result;
+use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
+use ad4m_client::{Ad4mClient, perspective_proxy::PerspectiveProxy};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
-use regex::Regex;
-use rustyline::Editor;
 
 #[derive(Args, Debug)]
 pub struct QueryLinksArgs {
@@ -63,6 +61,24 @@ pub enum PerspectiveFunctions {
 
     /// Interactive Perspective shell based on Prolog/SDNA runtime
     Repl { id: String },
+
+    /// Set Social DNA of given perspective with SDNA code from file
+    SetDna { id: String, file: String },
+
+    /// Get all defined Subject classes
+    SubjectClasses { id: String },
+
+    /// Construct a new Subject instance of given class over given base
+    SubjectConstruct { id: String, class: String, base: String },
+
+    /// Get the value of the subject instance's given property
+    SubjectGetProperty { id: String, base: String, property: String },
+
+    /// Set the value of the subject instance's given property
+    SubjectSetProperty { id: String, base: String, property: String, value: String },
+
+    /// Add the given value to the subject instance's collection
+    SubjectAddCollection { id: String, base: String, collection: String, value: String },
 }
 
 pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>) -> Result<()> {
@@ -160,53 +176,76 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
         }
         PerspectiveFunctions::Repl { id } => {
             //let _ = perspectives::run_watch(cap_token, id);
-            let mut rl = Editor::<()>::new()?;
-            loop {
-                let line = rl.readline("\x1b[97m> ")?;
-                rl.add_history_entry(line.as_str());
-                let line = line.trim().to_string();
-                if line == "exit" {
-                    break;
-                }
-
-                let add_link = Regex::new(
-                    r"add-link\s+(?P<source>\S+)\s+(?P<predicate>\S+)\s+(?P<target>\S+)",
-                )?;
-                let caps = add_link.captures(&line);
-                if let Some(caps) = caps {
-                    let source = caps.name("source").unwrap().as_str().to_string();
-                    let predicate = caps.name("predicate").unwrap().as_str().to_string();
-                    let target = caps.name("target").unwrap().as_str().to_string();
-                    let status = caps.name("status").unwrap().as_str().to_string();
-
-                    let predicate = if predicate == "_" {
-                        None
-                    } else {
-                        Some(predicate)
-                    };
-
-                    let status = if status == "shared" {
-                        None
-                    } else {
-                        Some(predicate)
-                    };
-
-                    ad4m_client
-                        .perspectives
-                        .add_link(id.clone(), source, target, predicate, status)
-                        .await?;
-                    continue;
-                }
-
-                match ad4m_client.perspectives.infer(id.clone(), line).await {
-                    Ok(results) => {
-                        print_prolog_results(results)?;
+            repl_loop(ad4m_client.perspectives.get(id).await?).await?;
+        }
+        PerspectiveFunctions::SetDna { id, file } => {
+            let dna = std::fs::read_to_string(file.clone())
+                .with_context(|| anyhow!("Could not read provided SDNA file {}", file))?;
+            let perspective = ad4m_client.perspectives.get(id).await?;
+            perspective.set_dna(dna).await?;
+            println!("SDNA set successfully");
+        }
+        PerspectiveFunctions::SubjectClasses { id } => {
+            let perspective = ad4m_client.perspectives.get(id).await?;
+            let classes = perspective.subject_classes().await?;
+            println!("{}", classes.join("\n"));
+        }
+        PerspectiveFunctions::SubjectConstruct { id, class, base } => {
+            let perspective = ad4m_client.perspectives.get(id).await?;
+            perspective.create_subject(&class, &base).await?;
+        }
+        PerspectiveFunctions::SubjectGetProperty { id, base, property } => {
+            let perspective = ad4m_client.perspectives.get(id).await?;
+            let classes = perspective.get_subject_classes(&base).await?;
+            for class in &classes {
+                match perspective.get_subject(&class, &base).await {
+                    Ok(subject) => {
+                        let props = subject.get_property_values().await?;
+                        if let Some(value) = props.get(&property) {
+                            println!("{:#?}", value);
+                            return Ok(())
+                        }
                     }
-                    Err(e) => {
-                        println!("\x1b[91m{}", e.root_cause());
-                    }
+                    _ => {}
                 }
             }
+
+            println!("\x1b[91mNone of the found classes have a property '{}'", property);
+            println!("The found classes are: {}", classes.join(", "));
+        }
+        PerspectiveFunctions::SubjectSetProperty { id, base, property, value } => {
+            let perspective = ad4m_client.perspectives.get(id).await?;
+            let classes = perspective.get_subject_classes(&base).await?;
+            for class in &classes {
+                match perspective.get_subject(&class, &base).await {
+                    Ok(subject) => {
+                        if subject.set_property(&property, &value).await.is_ok() {
+                            return Ok(())
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            println!("\x1b[91mNone of the found classes have a property '{}'", property);
+            println!("The found classes are: {}", classes.join(", "));
+        }
+        PerspectiveFunctions::SubjectAddCollection { id, base, collection, value } => {
+            let perspective = ad4m_client.perspectives.get(id).await?;
+            let classes = perspective.get_subject_classes(&base).await?;
+            for class in &classes {
+                match perspective.get_subject(&class, &base).await {
+                    Ok(subject) => {
+                        if subject.add_collection(&collection, &value).await.is_ok() {
+                            return Ok(())
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            println!("\x1b[91mNone of the found classes have a collection '{}'", collection);
+            println!("The found classes are: {}", classes.join(", "));
         }
     }
     Ok(())

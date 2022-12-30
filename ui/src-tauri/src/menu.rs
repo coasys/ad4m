@@ -40,7 +40,7 @@ pub fn handle_menu_event(event_id: &str, _window: &Window<Wry>) {
 
 fn report_issue() {
   tauri::async_runtime::spawn(async move {
-    open::that("https://github.com/perspect3vism/ad4min/issues/new")
+    open::that("https://github.com/perspect3vism/ad4m/issues/new")
       .map_err(|err| format!("Could not open url: {}", err))
   });
 }

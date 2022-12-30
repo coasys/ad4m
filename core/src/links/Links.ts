@@ -25,8 +25,21 @@ export class LinkMutations {
     @Field(type => [LinkInput])
     additions: LinkInput[];
 
+    @Field(type => [LinkExpressionInput])
+    removals: LinkExpressionInput[];
+}
+@ObjectType()
+export class LinkExpressionMutations {
+    @Field(type => [LinkExpression])
+    additions: LinkExpression[];
+
     @Field(type => [LinkExpression])
     removals: LinkExpression[];
+
+    constructor(additions: LinkExpression[], removals: LinkExpression[]) {
+        this.additions = additions
+        this.removals = removals
+    }
 }
 
 @InputType()

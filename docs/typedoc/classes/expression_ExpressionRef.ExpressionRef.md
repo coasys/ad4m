@@ -30,7 +30,7 @@
 
 #### Defined in
 
-[expression/ExpressionRef.ts:14](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionRef.ts#L14)
+[expression/ExpressionRef.ts:14](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionRef.ts#L14)
 
 ## Properties
 
@@ -40,7 +40,7 @@
 
 #### Defined in
 
-[expression/ExpressionRef.ts:12](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionRef.ts#L12)
+[expression/ExpressionRef.ts:12](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionRef.ts#L12)
 
 ___
 
@@ -50,4 +50,4 @@ ___
 
 #### Defined in
 
-[expression/ExpressionRef.ts:9](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/expression/ExpressionRef.ts#L9)
+[expression/ExpressionRef.ts:9](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionRef.ts#L9)

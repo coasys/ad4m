@@ -1,140 +1,178 @@
-import { Anchor, AppShell, Code, createStyles, Group, Navbar, Image, MediaQuery } from '@mantine/core';
-import { useContext, useEffect, useState } from 'react';
-import { Grain, Stack2, User, Settings as SettingsIcon } from 'tabler-icons-react';
-import { Link, Outlet, useNavigate } from 'react-router-dom';
-import { RouteContainer } from './styles';
-import { Ad4minContext } from '../context/Ad4minContext';
-import { version } from '../../package.json'
+import { AppShell, createStyles } from "@mantine/core";
+import { useContext, useEffect } from "react";
+import {
+  Grain,
+  Stack2,
+  User,
+  Settings as SettingsIcon,
+} from "tabler-icons-react";
+import {
+  Link,
+  Outlet,
+  useLocation,
+  useNavigate,
+  useRoutes,
+} from "react-router-dom";
+import { Header, RouteContainer } from "./styles";
+import { Ad4minContext } from "../context/Ad4minContext";
+import PackageInfo from "../../package.json";
+import Logo from "./Logo";
+import Profile from "./Profile";
+import { AgentProvider } from "../context/AgentContext";
 
 type Props = {
-  did: String,
-  opened: boolean,
-  setOpened: (val: boolean) => void
-}
+  did: String;
+  opened: boolean;
+  setOpened: (val: boolean) => void;
+};
 
 const useStyles = createStyles((theme, _params, getRef) => {
-  const icon = getRef('icon');
+  const icon = getRef("icon");
   return {
     header: {
       paddingBottom: theme.spacing.md,
       paddingRight: theme.spacing.md,
       paddingLeft: theme.spacing.md,
       marginBottom: theme.spacing.md * 1.5,
-      borderBottom: `1px solid ${theme.colorScheme === 'dark' ? theme.colors.dark[4] : theme.colors.gray[2]}`,
-      backgroundColor: 'black'
+      borderBottom: `1px solid ${
+        theme.colorScheme === "dark"
+          ? theme.colors.dark[4]
+          : theme.colors.gray[2]
+      }`,
+      backgroundColor: "black",
     },
 
     link: {
       ...theme.fn.focusStyles(),
-      display: 'flex',
-      alignItems: 'center',
-      margin: '6px',
-      textDecoration: 'none',
+      display: "flex",
+      alignItems: "center",
+      textDecoration: "none",
       fontSize: theme.fontSizes.sm,
-      color: theme.colorScheme === 'dark' ? theme.colors.dark[1] : theme.colors.gray[7],
+      color: "var(--j-color-black)",
       padding: `${theme.spacing.xs}px ${theme.spacing.sm}px`,
-      borderRadius: theme.radius.sm,
       fontWeight: 500,
-
-      '&:hover': {
-        backgroundColor: theme.colorScheme === 'dark' ? theme.colors.dark[6] : theme.colors.gray[0],
-        color: theme.colorScheme === 'dark' ? theme.white : theme.black,
-
-        [`& .${icon}`]: {
-          color: theme.colorScheme === 'dark' ? theme.white : theme.black,
-        },
-      },
+      width: "50%",
+      justifyContent: "center",
     },
 
     linkIcon: {
       ref: icon,
-      color: theme.colorScheme === 'dark' ? theme.colors.dark[2] : theme.colors.gray[6],
+      color:
+        theme.colorScheme === "dark"
+          ? theme.colors.dark[2]
+          : theme.colors.gray[6],
       marginRight: theme.spacing.sm,
     },
 
     linkActive: {
-      '&, &:hover': {
-        backgroundColor:
-          theme.colorScheme === 'dark'
-            ? theme.fn.rgba(theme.colors[theme.primaryColor][8], 0.25)
-            : '#fff',
-        color: theme.colorScheme === 'dark' ? theme.white : '#000',
-        [`& .${icon}`]: {
-          color: '#000',
-        },
+      "&, &:hover": {
+        borderBottom: "var(--j-border-width) solid var(--j-color-black)",
+        color: "var(--j-color-black)",
       },
+    },
+
+    linkContainer: {
+      padding: "0 20px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      borderBottom: "1px solid var(--j-color-ui-100)",
     },
   };
 });
 
 const data = [
-  { label: 'Main Settings', link: 'settings', icon: SettingsIcon },
-  { label: 'Agent Profile', link: 'profile', icon: User },
-  { label: 'Language & Expression', link: 'language', icon: Stack2 },
-  { label: 'Perspectives', link: 'perspective', icon: Grain },
-]
+  { label: "Main Settings", link: "settings", icon: SettingsIcon },
+  { label: "Agent Profile", link: "profile", icon: User },
+  { label: "Language & Expression", link: "language", icon: Stack2 },
+  { label: "Perspectives", link: "perspective", icon: Grain },
+];
 
-const Navigation = (props: Props) => {
+const Navigation = ({ did, opened, setOpened }: Props) => {
   const { classes, cx } = useStyles();
-  const [active, setActive] = useState('Agent Profile');
-  const {state: {
-    connected,
-    isUnlocked
-  }} = useContext(Ad4minContext);
+  const {
+    state: { connected, isUnlocked, expertMode, connectedLaoding },
+  } = useContext(Ad4minContext);
 
   let navigate = useNavigate();
+  let location = useLocation();
 
   useEffect(() => {
-    if (!connected) {
-      navigate('/connect');
+    if (!connected && !connectedLaoding) {
+      navigate("/connect");
     } else if (connected && !isUnlocked) {
-      navigate('/login');
+      navigate("/login");
     }
-}, [connected, isUnlocked, navigate])
-
-  const links = data.map((item) => (
-    <Anchor
-      component={Link}
-      className={cx(classes.link, { [classes.linkActive]: item.label === active })}
-      underline={false}
-      to={item.link}
-      key={item.label}
-      onClick={() => {
-        props.setOpened(false)
-        setActive(item.label);
-      }}
-    >
-      <item.icon className={classes.linkIcon} />
-      <span>{item.label}</span>
-    </Anchor>
-
-  ))
+  }, [connected, isUnlocked, navigate, connectedLaoding]);
 
   return (
     <AppShell
       padding={0}
-      style={{width: '100%'}}
+      style={{ width: "100%" }}
       navbarOffsetBreakpoint="sm"
       asideOffsetBreakpoint="sm"
-      navbar={
-        <MediaQuery smallerThan="sm" styles={{ display: !props.opened ? 'none' : 'block', position: !props.opened ? 'relative' : 'fixed' }}>
-          <Navbar height='100vh' width={{ sm: 300 }} hidden={!props.opened} hiddenBreakpoint="sm" p="md" style={{padding: 0, background: 'black'}}>
-            <Navbar.Section grow>
-              <Group className={classes.header} position="apart">
-                <Image src="ad4mlogo_white_angle2_colouremblem.png"></Image>
-                <Code>{version}</Code>
-              </Group>
-              {links}
-            </Navbar.Section>
-          </Navbar>
-        </MediaQuery>
-      }
     >
       <div style={RouteContainer}>
+        <div style={Header}>
+          <j-flex a="center" j="between">
+            <a href="https://ad4m.dev" target="_blank">
+              <Logo height={30} width={31} />
+            </a>
+            <AgentProvider>
+              <Profile />
+            </AgentProvider>
+          </j-flex>
+        </div>
+        <div className={classes.linkContainer}>
+          <Link
+            to="/apps"
+            className={cx(classes.link, {
+              [classes.linkActive]: location.pathname === "/apps",
+            })}
+          >
+            <j-text variant="caption" size="400">
+              Apps
+            </j-text>
+          </Link>
+          {expertMode && (
+            <>
+              <Link
+                to="/language"
+                className={cx(classes.link, {
+                  [classes.linkActive]: location.pathname === "/language",
+                })}
+              >
+                <j-text variant="caption" size="400">
+                  Language
+                </j-text>
+              </Link>
+              <Link
+                to="/perspective"
+                className={cx(classes.link, {
+                  [classes.linkActive]: location.pathname === "/perspective",
+                })}
+              >
+                <j-text variant="caption" size="400">
+                  Perspective
+                </j-text>
+              </Link>
+            </>
+          )}
+          <Link
+            to="/settings"
+            className={cx(classes.link, {
+              [classes.linkActive]: location.pathname === "/settings",
+            })}
+          >
+            <j-text variant="caption" size="400">
+              Settings
+            </j-text>
+          </Link>
+        </div>
         <Outlet />
       </div>
     </AppShell>
-  )
-}
+  );
+};
 
-export default Navigation
+export default Navigation;

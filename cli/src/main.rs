@@ -13,9 +13,11 @@ mod startup;
 mod util;
 
 mod agent;
+mod bootstrap_publish;
 mod languages;
 mod neighbourhoods;
 mod perspectives;
+mod repl;
 mod runtime;
 
 use crate::{agent::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*};
@@ -97,11 +99,8 @@ enum Domain {
     Log,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = ClapApp::parse();
-
-    let executor_url = if let Some(custom_url) = args.executor_url {
+async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
+    let executor_url = if let Some(custom_url) = args.executor_url.clone() {
         custom_url
     } else {
         crate::startup::get_executor_url()?
@@ -124,6 +123,15 @@ async fn main() -> Result<()> {
 
     let ad4m_client = Ad4mClient::new(executor_url, cap_token);
 
+    Ok(ad4m_client)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = ClapApp::parse();
+
+    let ad4m_client = get_ad4m_client(&args).await?;
+
     match args.domain {
         Domain::Agent { command } => agent::run(ad4m_client, command).await?,
         Domain::Languages { command } => languages::run(ad4m_client, command).await?,
@@ -131,7 +139,7 @@ async fn main() -> Result<()> {
         Domain::Neighbourhoods { command } => neighbourhoods::run(ad4m_client, command).await?,
         Domain::Runtime { command } => runtime::run(ad4m_client, command).await?,
         Domain::Log => {
-            let file = executor_data_path().join("ad4min.log");
+            let file = executor_data_path().join("ad4m.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {
                 format!(
                     "Could not read log file `{}`!\nIs AD4M executor running?",

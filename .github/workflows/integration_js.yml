@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: AD4M cli <> AD4M host
+    name: JS Ad4mClient <> AD4M host
     runs-on: macos-latest
     strategy:
       matrix:
@@ -27,6 +27,18 @@ jobs:
         override: true
         toolchain: 1.63.0
 
+    - name: Cache cargo
+      id: cache-cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v1
       with:
@@ -41,12 +53,9 @@ jobs:
     - name: Build AD4M-Host
       run: yarn run package-macos
 
-    - name: Build AD4M cli
-      run: cd cli && cargo build --release
-
-    - name: Run binaries test script
-      run: ./tests/bats/bin/bats tests/binaries.bats
-
-    - name: Run integration test script
-      run: ./tests/bats/bin/bats tests/integration.bats
+    - name: Run tests/js
+      run: |
+        cd tests/js
+        yarn install
+        yarn test
     

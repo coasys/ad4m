@@ -1,0 +1,64 @@
+name: Integration
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: AD4M cli <> AD4M host
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        node-version: [16.x]
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v2
+
+    - name: git init submodule
+      run: git submodule init && git submodule update
+
+    - name: Install Rust stable
+      uses: actions-rs/toolchain@v1
+      with:
+        override: true
+        toolchain: 1.63.0
+
+    - name: Cache cargo
+      id: cache-cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo
+
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
+
+    - name: Yarn Install
+      run: yarn install
+
+    - name: Yarn Build
+      run: yarn build
+
+    - name: Build AD4M-Host
+      run: yarn run package-macos
+
+    - name: Build AD4M cli
+      run: cd cli && cargo build --release
+
+    - name: Run binaries test script
+      run: ./tests/bats/bin/bats tests/binaries.bats
+
+    - name: Run integration test script
+      run: ./tests/bats/bin/bats tests/integration.bats || cat ~/Library/Logs/DiagnosticReports/*
+    

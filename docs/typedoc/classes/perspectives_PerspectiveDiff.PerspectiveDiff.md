@@ -29,7 +29,7 @@
 
 #### Defined in
 
-[perspectives/PerspectiveDiff.ts:8](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveDiff.ts#L8)
+[perspectives/PerspectiveDiff.ts:8](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveDiff.ts#L8)
 
 ___
 
@@ -39,4 +39,4 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveDiff.ts:11](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/perspectives/PerspectiveDiff.ts#L11)
+[perspectives/PerspectiveDiff.ts:11](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveDiff.ts#L11)

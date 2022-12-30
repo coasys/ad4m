@@ -30,7 +30,7 @@
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:38](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L38)
+[runtime/RuntimeResolver.ts:38](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/runtime/RuntimeResolver.ts#L38)
 
 ___
 
@@ -40,7 +40,7 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:40](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L40)
+[runtime/RuntimeResolver.ts:40](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/runtime/RuntimeResolver.ts#L40)
 
 ___
 
@@ -50,4 +50,4 @@ ___
 
 #### Defined in
 
-[runtime/RuntimeResolver.ts:42](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/runtime/RuntimeResolver.ts#L42)
+[runtime/RuntimeResolver.ts:42](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/runtime/RuntimeResolver.ts#L42)

@@ -60,10 +60,12 @@ pub struct AppState {
 }
 
 fn main() {
-    if data_path().exists() {
-        if !data_path().join("ad4m").join("agent.json").exists() {
-            remove_dir_all(data_path());
-        }
+    if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
+        let _ = remove_dir_all(data_path());
+    }
+
+    if data_path().join("ad4m").join("ipfs").join("repo.lock").exists() {
+        let _ = remove_dir_all(data_path().join("ad4m").join("ipfs").join("repo.lock"));
     }
     
     if let Err(err) = setup_logs() {
@@ -76,14 +78,14 @@ fn main() {
     
     save_executor_port(free_port);
 
-    find_and_kill_processes("ad4m");
+    find_and_kill_processes("ad4m-host");
 
     find_and_kill_processes("holochain");
 
     find_and_kill_processes("lair-keystore");
     if !holochain_binary_path().exists() {
         log::info!("init command by copy holochain binary");
-        let status = Command::new_sidecar("ad4m")
+        let status = Command::new_sidecar("ad4m-host")
             .expect("Failed to create ad4m command")
             .args(["init"])
             .status()
@@ -126,7 +128,7 @@ fn main() {
                 open_logs_folder();
             });
 
-            let (mut rx, _child) = Command::new_sidecar("ad4m")
+            let (mut rx, _child) = Command::new_sidecar("ad4m-host")
             .expect("Failed to create ad4m command")
             .args([
                 "serve",
@@ -136,7 +138,7 @@ fn main() {
             .spawn()
             .expect("Failed to spawn ad4m serve");
 
-            let handle = app.handle().clone();
+            let handle = app.handle();
     
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = rx.recv().await {
@@ -162,7 +164,7 @@ fn main() {
                             }
 
                             if let Ok(true) = main.is_visible() {
-                                log_error(&main, "There was an error with AD4MIN. Restarting may fix this, otherwise please contact the AD4M team for support.");
+                                log_error(&main, "There was an error with the AD4M Launcher. Restarting may fix this, otherwise please contact the AD4M team for support.");
                             }
 
                             log::info!("Terminated {:?}", line);
@@ -179,7 +181,7 @@ fn main() {
             on_tray_event(app, &event);
             match event {
                 SystemTrayEvent::LeftClick { position: _, size: _, .. } => {
-                    let window = get_main_window(&app);
+                    let window = get_main_window(app);
                     let _ = window.set_size(Size::Logical(LogicalSize { width: 400.0, height: 700.0 }));
                     let _ = window.set_decorations(false);
                     let _ = window.set_always_on_top(true);
@@ -203,12 +205,9 @@ fn main() {
     match builder_result {
         Ok(builder) => {
             builder.run(|_app_handle, event| {
-                match event {
-                    RunEvent::ExitRequested { api, .. } => {
-                        api.prevent_exit();
-                    },
-                    _ => {}
-                }
+                if let RunEvent::ExitRequested { api, .. } = event {
+                    api.prevent_exit();
+                };
             });
         }
         Err(err) => log::error!("Error building the app: {:?}", err),
@@ -216,12 +215,12 @@ fn main() {
 }
 
 fn get_main_window(handle: &AppHandle) -> Window {
-    let main = handle.get_window("AD4MIN");
+    let main = handle.get_window("AD4M");
     if let Some(window) = main {
         window
     } else {
-        create_main_window(&handle);
-        let main = handle.get_window("AD4MIN");                
+        create_main_window(handle);
+        let main = handle.get_window("AD4M");                
         main.expect("Couldn't get main window right after creating it")
     }
 }

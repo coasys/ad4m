@@ -58,6 +58,13 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return !core.agentService.isUnlocked
             },
             //@ts-ignore
+            agentGetApps: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
+                let apps = await core.agentService.getApps()
+                return apps;
+
+            },
+            //@ts-ignore
             expression: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const url = args.url.toString();
@@ -524,6 +531,13 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return await perspective.addLink(link, status)
             },
             //@ts-ignore
+            perspectiveAddLinks: async (parent, args, context, info) => {
+                const { uuid, links } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
+                const perspective = core.perspectivesController.perspective(uuid)
+                return await perspective.addLinks(links)
+            },
+            //@ts-ignore
             perspectiveAddLinkExpression: async (parent, args, context, info) => {
                 const { uuid, link, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
@@ -545,6 +559,20 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const perspective = core.perspectivesController.perspective(uuid)
                 await perspective.removeLink(link)
                 return true
+            },
+            //@ts-ignore
+            perspectiveRemoveLinks: async (parent, args, context, info) => {
+                const { uuid, links } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
+                const perspective = core.perspectivesController.perspective(uuid)
+                return await perspective.removeLinks(links)
+            },
+            //@ts-ignore
+            perspectiveLinkMutations: async (parent, args, context, info) => {
+                const { uuid, mutations } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
+                const perspective = core.perspectivesController.perspective(uuid)
+                return await perspective.linkMutations(mutations)
             },
             //@ts-ignore
             perspectiveUpdate: (parent, args, context, info) => {

@@ -1,5 +1,8 @@
 import { ApolloClient, gql } from "@apollo/client/core";
-import { Link, LinkExpressionInput, LinkExpression, LinkInput } from "../links/Links";
+import { Expression, ExpressionRendered } from "../expression/Expression";
+import { ExpressionClient } from "../expression/ExpressionClient";
+import { ExpressionRef } from "../expression/ExpressionRef";
+import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
@@ -40,6 +43,7 @@ export class PerspectiveClient {
     #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
     #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
     #perspectiveRemovedCallbacks: UuidCallback[]
+    #expressionClient?: ExpressionClient
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
@@ -52,6 +56,10 @@ export class PerspectiveClient {
             this.subscribePerspectiveUpdated()
             this.subscribePerspectiveRemoved()
         }
+    }
+
+    setExpressionClient(client: ExpressionClient) {
+        this.#expressionClient = client
     }
 
     async all(): Promise<PerspectiveProxy[]> {
@@ -168,6 +176,47 @@ export class PerspectiveClient {
         return perspectiveAddLink
     }
 
+    async addLinks(uuid: string, links: Link[]): Promise<LinkExpression[]> {
+        const { perspectiveAddLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveAddLinks($uuid: String!, $links: [LinkInput!]!){
+                perspectiveAddLinks(links: $links, uuid: $uuid) {
+                    ${LINK_EXPRESSION_FIELDS}
+                }
+            }`,
+            variables: { uuid, links }
+        }))
+        return perspectiveAddLinks
+    }
+
+    async removeLinks(uuid: string, links: LinkExpressionInput[]): Promise<LinkExpression[]> {
+        const { perspectiveRemoveLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveRemoveLinks($uuid: String!, $links: [LinkExpressionInput!]!){
+                perspectiveRemoveLinks(links: $links, uuid: $uuid) {
+                    ${LINK_EXPRESSION_FIELDS}
+                }
+            }`,
+            variables: { uuid, links }
+        }))
+        return perspectiveRemoveLinks
+    }
+
+    async linkMutations(uuid: string, mutations: LinkMutations): Promise<LinkExpressionMutations> {
+        const { perspectiveLinkMutations } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveLinkMutations($uuid: String!, $mutations: LinkMutations!){
+                perspectiveLinkMutations(mutations: $mutations, uuid: $uuid) {
+                    additions {
+                        ${LINK_EXPRESSION_FIELDS}
+                    }
+                    removals {
+                        ${LINK_EXPRESSION_FIELDS}
+                    }
+                }
+            }`,
+            variables: { uuid, mutations }
+        }))
+        return perspectiveLinkMutations
+    }
+
     async addLinkExpression(uuid: string, link: LinkExpressionInput, status?: LinkStatus): Promise<LinkExpression> {
         const { perspectiveAddLinkExpression } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveAddLinkExpression($uuid: String!, $link: LinkExpressionInput!, $status: String){
@@ -213,6 +262,15 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, link }
         }))
+    }
+
+    // ExpressionClient functions, needed for Subjects:
+    async getExpression(expressionURI: string): Promise<ExpressionRendered> {
+        return await this.#expressionClient.get(expressionURI)
+    }
+
+    async createExpression(content: any, languageAddress: string): Promise<string> {
+        return await this.#expressionClient.create(content, languageAddress)
     }
 
     // Subscriptions:

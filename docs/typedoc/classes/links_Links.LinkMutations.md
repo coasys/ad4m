@@ -29,14 +29,14 @@
 
 #### Defined in
 
-[links/Links.ts:25](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/links/Links.ts#L25)
+[links/Links.ts:25](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/links/Links.ts#L25)
 
 ___
 
 ### removals
 
-• **removals**: [`LinkExpression`](links_Links.LinkExpression.md)[]
+• **removals**: [`LinkExpressionInput`](links_Links.LinkExpressionInput.md)[]
 
 #### Defined in
 
-[links/Links.ts:28](https://github.com/perspect3vism/ad4m-executor/blob/5a19b63d/core/src/links/Links.ts#L28)
+[links/Links.ts:28](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/links/Links.ts#L28)

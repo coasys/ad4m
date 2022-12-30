@@ -2,7 +2,7 @@
 
 * [Introduction](README.md)
 * [Getting Started](start.md)
-  * [Install AD4Min](start.md#1-install-ad4min)
+  * [Install AD4Min](start.md#1-install-ad4m-launcher)
   * [Setup app / connect to AD4M](start.md#2-setup-app-to-connect-to-ad4m)
 * [Tutorial](tutorial.md)
   * [Create Perspective](tutorial.md#1-create-a-perspective-and-add-content)

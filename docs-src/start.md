@@ -1,7 +1,7 @@
 # Getting Started
 
-## 1. Install AD4Min
-Download the latest version of AD4Min, the complete AD4M implementation with admin UI from
+## 1. Install AD4M Launcher
+Download the latest version of the AD4M launcher from
 its [GitHub release page](https://github.com/perspect3vism/ad4min/releases) and run/install it.
 
 After successful agent initialization you should see an AD4M system-tray icon which will
@@ -70,10 +70,10 @@ This example requests all which might a good first step when starting to familia
 yourself with AD4M, but should be restricted to what you really need for a production release.
 
 If the user clicks authorize, `ad4m-connect` will connect to the AD4M-executor and request a capability token.
-This will make AD4Min bring up its pop-up window:
+This will make the AD4M launcher bring up its pop-up window:
 ![ad4m-connect-pop-up](images/ad4m-connect-pop-up.png)
 Here the user has to confirm the request to their AD4M instance.
-Next, AD4Min will then show a six-digit random secret code that needs to be entered into the app UI.
+Next, AD4M will then show a six-digit random secret code that needs to be entered into the app UI.
 That way we have safely established that the network agent initiating the capability request (as seen from
 the AD4M-executor) really is the UI the users wants to use.
 

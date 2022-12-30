@@ -1,11 +1,11 @@
 [package]
-name = "ad4min"
-version = "0.0.10"
+name = "ad4m-launcher"
+version = "0.2.7"
 description = "Administration of ad4m services"
 authors = ["Kaichao Sun"]
 license = ""
 repository = ""
-default-run = "ad4min"
+default-run = "ad4m-launcher"
 edition = "2021"
 rust-version = "1.57"
 
@@ -26,12 +26,14 @@ directories = "4.0.1"
 opener = "0.5.0"
 open = "2.0.1"
 sysinfo = "0.23.12"
-tauri = { version = "1.0.5", features = ["api-all", "system-tray"] }
+tauri = { version = "1.2.1", features = ["api-all", "system-tray"] }
 uuid = { version = "0.8", features = ["v4"] }
-localtunnel = "0.0.6"
+localtunnel-client = "0.0.12"
 tokio = { version = "1.19.2", features = ["full"] }
 tauri-plugin-positioner = { version = "1.0", features = ["system-tray"] }
 remove_dir_all = "0.7.0"
+reqwest = { version = "0.11", features = ["json"] }
+ad4m-client = { path = "../../rust-client" }
 
 [features]
 # by default Tauri runs in production mode

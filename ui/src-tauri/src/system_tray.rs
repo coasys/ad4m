@@ -27,9 +27,9 @@ pub fn build_system_tray() -> SystemTray {
 pub fn handle_system_tray_event(app: &AppHandle<Wry>, event_id: String) {
     match event_id.as_str() {
         "toggle_window" => {
-            let ad4min_window = app.get_window("AD4MIN");
+            let ad4m_window = app.get_window("AD4M");
 
-            if let Some(window) = ad4min_window {
+            if let Some(window) = ad4m_window {
                 if let Ok(true) = window.is_visible() {
                     let _ = window.hide();
                 } else {
@@ -38,12 +38,12 @@ pub fn handle_system_tray_event(app: &AppHandle<Wry>, event_id: String) {
                 }
             } else {                
                 create_main_window(app);
-                let main = app.get_window("AD4MIN").unwrap();
+                let main = app.get_window("AD4M").unwrap();
                 main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
             }
         }
         "quit" => {
-            find_and_kill_processes("ad4m");
+            find_and_kill_processes("ad4m-host");
 
             find_and_kill_processes("holochain");
 
