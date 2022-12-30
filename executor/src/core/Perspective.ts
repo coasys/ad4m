@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkStatus } from "@perspect3vism/ad4m"
 import { Link, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -338,30 +338,22 @@ export default class Perspective {
         }
     }
 
-    async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
+    async addLink(link: LinkInput | LinkExpressionInput, status: LinkStatus = 'shared'): Promise<LinkExpression> {
         const linkExpression = this.ensureLinkExpression(link);
-        const diff = {
-            additions: [linkExpression],
-            removals: []
-        } as PerspectiveDiff
-        const addLink = await this.commit(diff);
+        linkExpression.status = status;
 
-        if (!addLink) {
-            this.#db.addPendingDiff(this.uuid, diff);
+        if (status === 'shared') {
+            const diff = {
+                additions: [linkExpression],
+                removals: []
+            } as PerspectiveDiff
+            const addLink = await this.commit(diff);
+    
+            if (!addLink) {
+                this.#db.addPendingDiff(this.uuid, diff);
+            }
         }
 
-        this.addLocalLink(linkExpression)
-        this.#prologNeedsRebuild = true;
-        this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-            perspective: this.plain(),
-            link: linkExpression
-        })
-
-        return linkExpression
-    }
-
-    async addLocalLinkHandler(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
-        const linkExpression = this.ensureLinkExpression(link);
         this.addLocalLink(linkExpression)
         this.#prologNeedsRebuild = true;
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
