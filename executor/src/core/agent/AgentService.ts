@@ -92,7 +92,7 @@ export default class AgentService {
             author: this.#did,
             timestamp,
             data,
-            proof
+            proof,
         } as Expression
 
         return signedExpresssion

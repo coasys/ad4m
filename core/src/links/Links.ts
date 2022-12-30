@@ -61,6 +61,8 @@ export class LinkExpression extends ExpressionGeneric(Link) {
 
 @InputType()
 export class LinkExpressionInput extends ExpressionGenericInput(LinkInput) {
+    hash: () => number;
+
     @Field({ nullable: true, defaultValue: 'shared' })
     status?: LinkStatus;
 };
