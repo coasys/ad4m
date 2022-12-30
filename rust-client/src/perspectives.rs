@@ -12,7 +12,6 @@ use serde_json::Value;
 type DateTime = NaiveDateTime;
 
 use self::add_link::AddLinkPerspectiveAddLink;
-use self::add_local_link::AddLocalLinkPerspectiveAddLocalLink;
 use self::all::AllPerspectives;
 
 #[derive(GraphQLQuery)]
@@ -88,6 +87,7 @@ pub async fn add_link(
     source: String,
     target: String,
     predicate: Option<String>,
+    status: Option<String>
 ) -> Result<AddLinkPerspectiveAddLink> {
     let response_data: add_link::ResponseData = query(
         executor_url,
@@ -99,46 +99,13 @@ pub async fn add_link(
                 target,
                 predicate,
             },
+            status
         }),
     )
     .await
     .with_context(|| "Failed to run perspectives->addLink query")?;
 
     Ok(response_data.perspective_add_link)
-}
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/perspectives.gql",
-    response_derives = "Debug"
-)]
-pub struct AddLocalLink;
-
-pub async fn add_local_link(
-    executor_url: String,
-    cap_token: String,
-    uuid: String,
-    source: String,
-    target: String,
-    predicate: Option<String>,
-) -> Result<AddLocalLinkPerspectiveAddLocalLink> {
-    let response_data: add_local_link::ResponseData = query(
-        executor_url,
-        cap_token,
-        AddLocalLink::build_query(add_local_link::Variables {
-            uuid,
-            link: add_local_link::LinkInput {
-                source,
-                target,
-                predicate,
-            },
-        }),
-    )
-    .await
-    .with_context(|| "Failed to run perspectives->addLocalLink query")?;
-
-    Ok(response_data.perspective_add_local_link)
 }
 
 #[derive(GraphQLQuery)]
@@ -348,6 +315,7 @@ impl PerspectivesClient {
         source: String,
         target: String,
         predicate: Option<String>,
+        status: Option<String>
     ) -> Result<AddLinkPerspectiveAddLink> {
         add_link(
             self.info.executor_url.clone(),
@@ -356,24 +324,7 @@ impl PerspectivesClient {
             source,
             target,
             predicate,
-        )
-        .await
-    }
-
-    pub async fn add_local_link(
-        &self,
-        uid: String,
-        source: String,
-        target: String,
-        predicate: Option<String>,
-    ) -> Result<AddLocalLinkPerspectiveAddLocalLink> {
-        add_local_link(
-            self.info.executor_url.clone(),
-            self.info.cap_token.clone(),
-            uid,
-            source,
-            target,
-            predicate,
+            status
         )
         .await
     }

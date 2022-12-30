@@ -46,6 +46,7 @@ pub enum PerspectiveFunctions {
         source: String,
         target: String,
         predicate: Option<String>,
+        status: Option<String>,
     },
 
     /// Add local link to perspective with given uuid
@@ -120,21 +121,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             source,
             target,
             predicate,
+            status,
         } => {
             ad4m_client
                 .perspectives
-                .add_link(id, source, target, predicate)
-                .await?;
-        }
-        PerspectiveFunctions::AddLocalLink {
-            id,
-            source,
-            target,
-            predicate,
-        } => {
-            ad4m_client
-                .perspectives
-                .add_local_link(id, source, target, predicate)
+                .add_link(id, source, target, predicate, status)
                 .await?;
         }
         PerspectiveFunctions::QueryLinks(args) => {
@@ -194,6 +185,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
                     let source = caps.name("source").unwrap().as_str().to_string();
                     let predicate = caps.name("predicate").unwrap().as_str().to_string();
                     let target = caps.name("target").unwrap().as_str().to_string();
+                    let status = caps.name("status").unwrap().as_str().to_string();
 
                     let predicate = if predicate == "_" {
                         None
@@ -201,9 +193,15 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
                         Some(predicate)
                     };
 
+                    let status = if status == "shared" {
+                        None
+                    } else {
+                        Some(predicate)
+                    };
+
                     ad4m_client
                         .perspectives
-                        .add_link(id.clone(), source, target, predicate)
+                        .add_link(id.clone(), source, target, predicate, status)
                         .await?;
                     continue;
                 }

@@ -37,28 +37,11 @@ mutation Remove($uuid: String!) {
   perspectiveRemove(uuid: $uuid)
 }
 
-mutation AddLink($uuid: String!, $link: LinkInput!) {
-  perspectiveAddLink(link: $link, uuid: $uuid) {
+mutation AddLink($uuid: String!, $link: LinkInput!, $status: String) {
+  perspectiveAddLink(link: $link, uuid: $uuid, status: $status) {
     author
     timestamp
-    data {
-      source
-      predicate
-      target
-    }
-    proof {
-      valid
-      invalid
-      signature
-      key
-    }
-  }
-}
-
-mutation AddLocalLink($uuid: String!, $link: LinkInput!) {
-  perspectiveAddLocalLink(link: $link, uuid: $uuid) {
-    author
-    timestamp
+    status
     data {
       source
       predicate
