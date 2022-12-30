@@ -49,14 +49,6 @@ pub enum PerspectiveFunctions {
         status: Option<String>,
     },
 
-    /// Add local link to perspective with given uuid
-    AddLocalLink {
-        id: String,
-        source: String,
-        target: String,
-        predicate: Option<String>,
-    },
-
     /// Query links from perspective with given uuid
     QueryLinks(QueryLinksArgs),
 

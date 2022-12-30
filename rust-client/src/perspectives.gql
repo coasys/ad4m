@@ -20,6 +20,7 @@ query All {
             signature
             key
           }
+          status
         }
       }
     }
@@ -71,6 +72,7 @@ query QueryLinks($uuid: String!, $query: LinkQuery!) {
       signature
       key
     }
+    status
   }
 }
 
@@ -93,6 +95,7 @@ subscription SubscriptionLinkAdded($uuid: String!) {
       signature
       key
     }
+    status
   }
 }
 
@@ -110,6 +113,7 @@ query Snapshot($uuid: String!) {
         signature
         key
       }
+      status
     }
   }
 }
