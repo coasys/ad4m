@@ -2489,10 +2489,10 @@
     "@hapi/bourne" "2.x.x"
     "@hapi/hoek" "9.x.x"
 
-"@holochain/client@0.11.3":
-  version "0.11.3"
-  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.11.3.tgz#0370656b589cee993e1a1104f73575252d4ebbde"
-  integrity sha512-z/GL1I4em0E/sl4etYQpC4Q1IkyFj6bNbBmA9m+hxvlKXkzCBqic6CAw0fntFbDo/1XwgyOrvqzbz7tkN3JeiA==
+"@holochain/client@0.11.8":
+  version "0.11.8"
+  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.11.8.tgz#d4d6fbffae30872a0e137b0204e3caa196d01538"
+  integrity sha512-LoB2W/TLP3HKezrMdJA6Bm7vfI7f/BOol1ohjCYl9pgTqbDEsG48hPWJzfYvSot0sfEMqdKoTdRjIa7DZmxrxQ==
   dependencies:
     "@holochain/serialization" "^0.1.0-beta-rc.2"
     "@msgpack/msgpack" "^2.7.2"

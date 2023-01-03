@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, CapSecret, AppSignal, CellId, authorizeSigningCredentials, AgentInfoResponse, signZomeCall } from '@holochain/client'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, HoloHash, AppSignal, CellId, authorizeSigningCredentials, AgentInfoResponse, signZomeCall } from '@holochain/client'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -41,6 +41,7 @@ export default class HolochainService {
     #conductorConfigPath?: string
     #signalCallbacks: [CellId, AppSignalCb, string][];
     #queue: AsyncQueue
+    #cellZomeCalls: Map<string, [string, string][]>
 
     constructor(config: HolochainConfiguration) {
         let {
@@ -62,6 +63,7 @@ export default class HolochainService {
         this.#db = low(new FileSync(path.join(dataPath, 'holochain-service.json')))
         this.#db.defaults({pubKeys: []}).write()
         this.#signalCallbacks = [];
+        this.#cellZomeCalls = new Map<string, [string, string][]>();
 
         const holochainAppPort = appPort ? appPort : 1337;
         const holochainAdminPort = adminPort ? adminPort : 2000;
@@ -262,7 +264,7 @@ export default class HolochainService {
                     return {
                         //note; this name value might have to be unique per role across different apps
                         //in which case we should use naming of dna file above
-                        name: dna.nick,
+                        name: `${lang}-${dna.nick}`,
                         dna: {
                             //@ts-ignore
                             path: p
@@ -307,7 +309,7 @@ export default class HolochainService {
 
             Object.keys(languageApp.cell_info).forEach(async roleName => {
                 const cellData = languageApp!.cell_info[roleName];
-                const dnaRef = dnas.find(dna => dna.nick === roleName);
+                const dnaRef = dnas.find(dna => `${lang}-${dna.nick}` === roleName);
 
                 for (const cell of cellData) {
                     const cellId = ("Provisioned" in cell) ? cell.Provisioned.cell_id : (("Cloned" in cell) ? cell.Cloned.cell_id : undefined);
@@ -315,6 +317,8 @@ export default class HolochainService {
                         console.error("HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected", cell);
                         throw new Error("HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected");
                     }
+
+                    this.#cellZomeCalls.set(`${lang}-${dnaRef?.nick!}`, dnaRef!.zomeCalls);
 
                     console.log("Generating signing key pairs", cellId);
                     //Create new signing keys for cell
@@ -371,7 +375,7 @@ export default class HolochainService {
         }
 
         if(!infoResult) {
-            console.error("HolochainService: no installed hApp found during callZomeFunction() for Language:", lang)
+            console.error("HolochainService: no installed hApp found duringf callZomeFunction() for Language:", lang)
             console.error("Did the Language forget to register a DNA?")
             throw new Error("No DNA installed")
         }
@@ -383,8 +387,8 @@ export default class HolochainService {
             return null
         }
 
-        //3. Get the cellId of the cell with the role "main"
-        let cellInfos = infoResult.cell_info[dnaNick];
+        //3. Get the cellId of the cells with matching lang and dna nick
+        let cellInfos = infoResult.cell_info[`${lang}-${dnaNick}`];
         console.debug("Got cell infos", cellInfos);
         if(!cellInfos) {
             const e = new Error(`No cell role main found for installed app: ${installed_app_id}`)
@@ -398,6 +402,14 @@ export default class HolochainService {
         //4. Call the zome function
         try {
             console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, cellInfos, "\x1b[0m")
+            //Find the zome calls required for this cell, and authorize the signing credentials
+            const zomeCalls = this.#cellZomeCalls.get(`${lang}-${dnaNick}`);
+            if (!zomeCalls) {
+                throw new Error("HolochainService: ERROR: No zome calls found for cell_id: " + cell_id);
+            };
+            await authorizeSigningCredentials(this.#adminWebsocket!, cell_id, zomeCalls);
+
+            //Make the zome call
             const signedZomeCall = await signZomeCall({
                 cell_id,
                 zome_name: zomeName,
