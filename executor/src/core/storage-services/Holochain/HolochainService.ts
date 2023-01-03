@@ -241,7 +241,7 @@ export default class HolochainService {
         }
     }
 
-    async ensureInstallDNAforLanguage(lang: string, dnas: Dna[], callback: AppSignalCb | undefined) {
+    async ensureInstallDNAforLanguage(lang: string, dnas: Dna[], callback: AppSignalCb | undefined): Promise<void> {
         await this.#ready
         if (this.#didResolveError) {
             console.error("HolochainService.ensureInstallDNAForLanguage: Warning attempting to install holochain DNA when conductor did not start error free...")

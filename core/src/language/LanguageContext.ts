@@ -28,7 +28,7 @@ export class Dna {
 }
 
 export interface HolochainLanguageDelegate {
-    registerDNAs(dnas: Dna[], holochainSignalCallback?: AppSignalCb);
+    registerDNAs(dnas: Dna[], holochainSignalCallback?: AppSignalCb): Promise<void>;
     call(dnaNick: string, zomeName: string, fnName: string, params: object|string): Promise<any>;
 }
 
