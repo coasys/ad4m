@@ -475,7 +475,22 @@ export default class Ad4mConnect extends LitElement {
     ele.width = "100%";
     ele.style.height = "100vh";
 
+    const cancelBtn = document.createElement("button");
+    cancelBtn.id = "stop-scan";
+    cancelBtn.innerHTML = "<";
+    cancelBtn.style.position = "absolute";
+    cancelBtn.style.top = "0";
+    cancelBtn.style.left = "0";
+    cancelBtn.style.borderRadius = "50%";
+    cancelBtn.style.border = "0";
+    cancelBtn.style.height = "30px";
+    cancelBtn.style.width = "30px";
+    cancelBtn.style.margin = "10px 10px";
+    cancelBtn.style.fontFamily = "inherit";
+    cancelBtn.style.fontSize = "20px";
+
     containerEle.appendChild(ele);
+    containerEle.appendChild(cancelBtn);
     document.body.appendChild(containerEle);
   }
 
@@ -512,6 +527,12 @@ export default class Ad4mConnect extends LitElement {
         aspectRatio: mobileAspectRatio,
       },
     };
+
+    const cancelBtn = document.getElementById("stop-scan");
+    cancelBtn.addEventListener("click", function() {
+      html5QrCode.stop();
+      ele.style.display = "none";
+    })
 
     html5QrCode.start(
       { facingMode: "environment" },
