@@ -58,8 +58,9 @@ network:
       sub_transport:
         type: quic
       proxy_config:
-        type: ${proxyType}
-        proxy_url: "${conductorConfig.proxyUrl}"
+        type: remote_proxy_client_from_bootstrap
+        bootstrap_url: https://bootstrap.holo.host
+        fallback_proxy_url: ~
   tuning_params:
     gossip_strategy: sharded-gossip
     gossip_loop_iteration_delay_ms: '1000'
