@@ -85,7 +85,15 @@ export function subjectProperty(opts: PropertyOptions) {
     };
 }
 
-export function subjectCollection(opts: PropertyOptions) {
+interface WhereOptions {
+    isInstance: any
+}
+interface CollectionOptions {
+    through: string,
+    where?: WhereOptions,
+}
+
+export function subjectCollection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
