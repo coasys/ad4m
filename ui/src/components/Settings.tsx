@@ -321,7 +321,9 @@ const Profile = (props: Props) => {
                 Scan this QR on your phone
               </j-text>
             </j-box>
-            <QRCode value={proxy} />
+            <j-box bg="ui-900" px="900" py="600">
+              <QRCode value={proxy} />
+            </j-box>
           </j-box>
         </j-modal>
       )}

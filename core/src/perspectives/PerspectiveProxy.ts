@@ -224,14 +224,16 @@ export class PerspectiveProxy {
     async setSingleTarget(link: Link) {
         const query = new LinkQuery({source: link.source, predicate: link.predicate})
         const foundLinks = await this.get(query)
+        const removals = [];
         for(const l of foundLinks){
             delete l.__typename
             delete l.data.__typename
             delete l.proof.__typename
-            await this.remove(l)
+            removals.push(l);
         }
-            
-        await this.add(link)
+        const additions = [link];
+
+        await this.linkMutations({additions, removals})
     }
 
     /** Returns all the Social DNA flows defined in this perspective */
@@ -301,6 +303,15 @@ export class PerspectiveProxy {
         }))
 
         return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
+    }
+
+    /** Adds the given Social DNA code to the perspective's SDNA code */
+    async addSdna(sdnaCode: string) {
+        await this.add(new Link({
+            source: "ad4m://self",
+            predicate: "ad4m://has_zome",
+            target: Literal.from(sdnaCode).toUrl()
+        }))
     }
 
     /** Returns all the Subject classes defined in this perspectives SDNA */
@@ -408,7 +419,7 @@ export class PerspectiveProxy {
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
         // Collect all string properties of the object in a list
-        let properties = Object.keys(obj).filter(key => typeof obj[key] === "string")
+        let properties = Object.keys(obj).filter(key => !Array.isArray(obj[key]))
 
         // Collect all collections of the object in a list
         let collections = Object.keys(obj).filter(key => Array.isArray(obj[key]))
@@ -456,4 +467,19 @@ export class PerspectiveProxy {
             return result.map(x => x.Class)
         }
     }
+
+    /** Takes a JS class (its constructor) and assumes that it was decorated by
+     * the @subjectClass etc. decorators. It then tests if there is a subject class
+     * already present in the perspective's SDNA that matches the given class.
+     * If there is no such class, it gets the JS class's SDNA by calling its
+     * static generateSDNA() function and adds it to the perspective's SDNA.
+     */
+    async ensureSDNASubjectClass(jsClass: any): Promise<void> {
+        if((await this.subjectClassesByTemplate(new jsClass)).length > 0) {
+            return
+        }
+        
+        await this.addSdna(jsClass.generateSDNA())
+    }
+
 }
