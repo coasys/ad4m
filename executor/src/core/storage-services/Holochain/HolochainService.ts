@@ -12,7 +12,7 @@ import { AsyncQueue } from './Queue'
 import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
 
 export const bootstrapUrl = "https://bootstrap.holo.host"
-export const kitsuneProxy = "kitsune-proxy://CIW6PxKxsPPlcuvUCbMcKwUpaMSmB7kLD8xyyj4mqcw/kitsune-quic/h/proxy.holochain.org/p/5778/--"
+export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"
 
 export interface HolochainConfiguration {
     conductorPath?: string, 
