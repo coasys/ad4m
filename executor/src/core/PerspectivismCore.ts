@@ -16,7 +16,7 @@ import Signatures from './agent/Signatures'
 import * as PubSub from './graphQL-interface/PubSub'
 import { IPFS as IPFSType } from 'ipfs'
 import fs from 'fs'
-import { RequestAgentInfoResponse } from '@holochain/client'
+import { AgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 import { v4 as uuidv4 } from 'uuid';
@@ -293,11 +293,11 @@ export default class PerspectivismCore {
         return Buffer.from(await this.#holochain!.pubKeyForLanguage(lang))
     }
 
-    async holochainRequestAgentInfos(): Promise<RequestAgentInfoResponse> {
+    async holochainRequestAgentInfos(): Promise<AgentInfoResponse> {
         return await this.#holochain!.requestAgentInfos()
     }
 
-    async holochainAddAgentInfos(agent_infos: RequestAgentInfoResponse) {
+    async holochainAddAgentInfos(agent_infos: AgentInfoResponse) {
         await this.#holochain!.addAgentInfos(agent_infos)
     }
 

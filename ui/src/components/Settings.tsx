@@ -76,8 +76,8 @@ const Profile = (props: Props) => {
     appWindow.emit("copyLogs");
 
     showNotification({
-      message: "Opened logs folder... Please send ad4min.log to support on Discord",
-      autoClose: 30000,
+      message: "Opened logs folder... Please send ad4m.log to support on Discord",
+      autoClose: 20000,
     });
   }
 

@@ -14,7 +14,7 @@ export default class HolochainLanguageDelegate {
         this.#queue = queue
     }
 
-    async registerDNAs(dnas: Dna[], holochainSignalCallback?: AppSignalCb) {
+    async registerDNAs(dnas: Dna[], holochainSignalCallback?: AppSignalCb): Promise<void> {
         return await this.#holochainService.ensureInstallDNAforLanguage(this.#languageHash, dnas, holochainSignalCallback)
     }
 

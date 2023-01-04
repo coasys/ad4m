@@ -24,10 +24,11 @@ export interface LanguageContext {
 export class Dna {
     file: Buffer
     nick: string
+    zomeCalls: [string, string][]
 }
 
 export interface HolochainLanguageDelegate {
-    registerDNAs(dnas: Dna[], holochainSignalCallback?: AppSignalCb);
+    registerDNAs(dnas: Dna[], holochainSignalCallback?: AppSignalCb): Promise<void>;
     call(dnaNick: string, zomeName: string, fnName: string, params: object|string): Promise<any>;
 }
 

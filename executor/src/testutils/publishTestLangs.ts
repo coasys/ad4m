@@ -113,7 +113,7 @@ async function publish() {
     } as OuterConfig)
     
     const ad4mClient = new Ad4mClient(apolloClient(4000));
-    ad4mClient.agent.generate("passphrase");
+    await ad4mClient.agent.generate("passphrase");
     
     await core.waitForAgent();
     core.initControllers()

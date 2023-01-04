@@ -1,18 +1,12 @@
-# Update windows holochain version in github CI as its not using nix
-
 let
-  holonixPath = (import ./nix/sources.nix).holonix;
+  holonixPath = (import ./nix/sources.nix).holonix; # points to the current state of the Holochain repository
   holonix = import (holonixPath) {
-    holochainVersionId = "custom";
-    holochainVersion = import ./holochain_version.nix;
+    holochainVersionId = "main";
   };
   nixpkgs = holonix.pkgs;
-in
-nixpkgs.mkShell {
+in nixpkgs.mkShell {
   inputsFrom = [ holonix.main ];
-  packages = [
-  ];
-  buildInputs = with nixpkgs; [
+  packages = with nixpkgs; [
     binaryen
     nodejs-16_x
     swiProlog

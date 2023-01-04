@@ -75,7 +75,6 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
 
   const platform = os.platform();
   const holochain = platform === 'win32' ? 'holochain.exe' : 'holochain';
-  const lair = platform === 'win32' ? 'lair-keystore.exe' : 'lair-keystore';
   const hc = platform === 'win32' ? 'hc.exe' : 'hc';
 
   if(!hcOnly) {
@@ -83,11 +82,6 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
     const holochaintarget = path.join(binaryPath, holochain);
     await copy(holochainSource, holochaintarget);
     await chmod(holochaintarget, '755');
-  
-    const lairSource = path.join(__dirname, `../temp/binary/${lair}`);
-    const lairTarget = path.join(binaryPath, lair);
-    await copy(lairSource, lairTarget);
-    await chmod(lairTarget, '755');
   }
 
   const hcSource = path.join(__dirname, `../temp/binary/${hc}`);
