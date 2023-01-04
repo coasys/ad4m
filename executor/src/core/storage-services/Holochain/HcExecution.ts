@@ -70,7 +70,7 @@ network:
     gossip_historic_inbound_target_mbps: '100'
     gossip_burst_ratio: '100'
     gossip_peer_on_success_next_gossip_delay_ms: '30000'
-    gossip_peer_on_error_next_gossip_delay_ms: '600000'
+    gossip_peer_on_error_next_gossip_delay_ms: '60000'
     gossip_agent_info_update_interval_ms: '600000'
     gossip_local_sync_delay_ms: '30000'
     gossip_redundancy_target: '100'
