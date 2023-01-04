@@ -2,6 +2,7 @@ import { useState, useContext, useEffect } from "preact/compat";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle, listStyle, MainContainer } from "./styles";
 
+
 const Apps = () => {
   const {
     state: { client },
@@ -35,7 +36,7 @@ const Apps = () => {
                 <a
                   href={app.auth.appUrl}
                   target="_blank"
-                  size="400"
+                  size={400}
                   rel="noreferrer"
                 >
                   <j-text variant="link">{app.auth.appUrl}</j-text>

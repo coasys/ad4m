@@ -5,7 +5,7 @@
   "type": "module",
   "dependencies": {
     "@apollo/client": "=3.6.9",
-    "@junto-foundation/junto-elements": "^0.4.4",
+    "@junto-foundation/junto-elements": "^0.4.5",
     "@mantine/core": "^4.2.4",
     "@mantine/hooks": "^4.2.4",
     "@mantine/modals": "^4.2.4",

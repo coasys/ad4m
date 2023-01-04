@@ -3090,10 +3090,10 @@
     "@jridgewell/resolve-uri" "3.1.0"
     "@jridgewell/sourcemap-codec" "1.4.14"
 
-"@junto-foundation/junto-elements@^0.4.4":
-  version "0.4.4"
-  resolved "https://registry.yarnpkg.com/@junto-foundation/junto-elements/-/junto-elements-0.4.4.tgz#77be74165ba24cea0363c85e89c7691431a779bb"
-  integrity sha512-WEDl2xY109OMlFGoJkxT9GN5c7zHAWnt0iZ+TrpP/cNi9ZbbZA8So1OBmdSaj1yx6jo/KFR08s8buM6KK7E94w==
+"@junto-foundation/junto-elements@^0.4.5":
+  version "0.4.5"
+  resolved "https://registry.yarnpkg.com/@junto-foundation/junto-elements/-/junto-elements-0.4.5.tgz#88c4a3a0786b96acee047781863199810ac45226"
+  integrity sha512-lCbCrqbmOfA3/6zQ4Xil93iA9Pifw87K+nHHHOoSyygsBcYGNqz//euDz4rtp2JMjQzF5nBfMyszJs0L5BeuiQ==
   dependencies:
     "@popperjs/core" "^2.9.2"
     construct-style-sheets-polyfill "^3.1.0"
