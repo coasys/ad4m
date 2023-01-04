@@ -112,7 +112,7 @@ export default class HolochainService {
     }
 
     handleCallback(signal: AppSignal) {
-        console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks", signal);
+        // console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks", signal);
         //console.debug("registered callbacks:", this.#signalCallbacks)
         if (this.#signalCallbacks.length != 0) {
             const signalDna = Buffer.from(signal.data.cellId[0]).toString('hex')
@@ -320,16 +320,6 @@ export default class HolochainService {
 
                     this.#cellZomeCalls.set(`${lang}-${dnaRef?.nick!}`, dnaRef!.zomeCalls);
 
-                    console.log("Generating signing key pairs", cellId);
-                    //Create new signing keys for cell
-                    try {
-                        await authorizeSigningCredentials(this.#adminWebsocket!, cellId, dnaRef!.zomeCalls);
-                    } catch (e) {
-                        console.error("Got error when trying to generate key pair", e);
-                        return;
-                    }
-                    console.log("Completed key pair generation");
-
                     //Register the callback to the cell internally
                     if (callback != undefined) {
                         //Check for apps matching this language address and register the signal callbacks
@@ -381,7 +371,7 @@ export default class HolochainService {
         }
 
         //2. Check that this app has valid cells that we can call
-        console.debug("HolochainService.callZomefunction: get info result:", infoResult)
+        // console.debug("HolochainService.callZomefunction: get info result:", infoResult)
         if(Object.keys(infoResult.cell_info).length === 0) {
             console.error("HolochainService: tried to call zome function without any installed cell for given app!")
             return null
@@ -389,7 +379,6 @@ export default class HolochainService {
 
         //3. Get the cellId of the cells with matching lang and dna nick
         let cellInfos = infoResult.cell_info[`${lang}-${dnaNick}`];
-        console.debug("Got cell infos", cellInfos);
         if(!cellInfos) {
             const e = new Error(`No cell role main found for installed app: ${installed_app_id}`)
             console.error(e)
@@ -401,11 +390,12 @@ export default class HolochainService {
 
         //4. Call the zome function
         try {
-            console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, cellInfos, "\x1b[0m")
+            console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
+
             //Find the zome calls required for this cell, and authorize the signing credentials
             const zomeCalls = this.#cellZomeCalls.get(`${lang}-${dnaNick}`);
             if (!zomeCalls) {
-                throw new Error("HolochainService: ERROR: No zome calls found for cell_id: " + cell_id);
+                throw new Error("HolochainService: ERROR: No zome calls found for cell with role: " + `${lang}-${dnaNick}`);
             };
             await authorizeSigningCredentials(this.#adminWebsocket!, cell_id, zomeCalls);
 
