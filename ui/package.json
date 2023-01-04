@@ -1,6 +1,6 @@
 {
   "name": "ad4m-launcher",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "type": "module",
   "dependencies": {
@@ -41,11 +41,9 @@
     "eject": "vite eject",
     "build": "vite build",
     "build-all": "yarn run build && yarn run tauri -- build -v",
-
     "build-linux": "./scripts/copy-ad4m-host.sh && yarn run build-all",
     "build-macos": "./scripts/copy-ad4m-host.sh && yarn run build-all",
     "build-windows": "powershell -ExecutionPolicy Bypass -File ./scripts/copy-ad4m-host.ps1 && yarn run build-all",
-
     "build-all-linux": "rm -rf ../target && yarn run build-linux",
     "build-all-macos": "rm -rf ../target && yarn run build-macos",
     "build-all-windows": "rm -rf ../target && yarn run build-windows"
