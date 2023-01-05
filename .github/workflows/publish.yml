@@ -52,7 +52,7 @@ jobs:
       run: yarn run build-linux
 
     - name: "Upload built AD4MIN"
-      uses: tauri-apps/tauri-action@v0.3.1
+      uses: tauri-apps/tauri-action@v0.2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
