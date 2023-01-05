@@ -57,6 +57,7 @@ export default class HypercoreService {
         await this.constructDriveSharingSwarm(topic, dataCallback, autoBaseUpdateCallback);
 
         //Share the writer drive and any other drives we know with the sharing swarm
+        //TODO; this should likely be called on an ongoing polling basis
         await this.sendKnownDrives(topic);
 
         //Construct the autobase drive with all hyperdrives we know of
