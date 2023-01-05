@@ -375,19 +375,19 @@ describe("Integration", () => {
                 setTitle(title: string) {}
 
                 //@ts-ignore
-                @subjectCollection({through: "todo://comment"})
+                @subjectCollection({ through: "todo://comment" })
                 comments: string[] = []
                 addComment(comment: string) {}
 
                 //@ts-ignore
-                @subjectCollection({through: "flux://entry_type"})
+                @subjectCollection({ through: "flux://entry_type" })
                 entries: string[] = []
                 addEntry(entry: string) {}
 
                 //@ts-ignore
                 @subjectCollection({
                     through: "flux://entry_type",
-                    where: {isInstance: Message}
+                    where: { isInstance: Message }
                 })
                 messages: string[] = []
 
