@@ -39,7 +39,7 @@ jobs:
     needs: create-release
     steps:
       - name: test
-        run: echo ${{ needs.create-release.outputs.upload_url }}
+        run: echo ${{ needs.create-release.outputs.result }}
 
   build-ad4min-binary:
     strategy:
