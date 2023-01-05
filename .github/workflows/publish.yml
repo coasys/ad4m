@@ -39,24 +39,24 @@ jobs:
     - name: Yarn Install
       run: yarn install
 
-    - name: Build AD4M-Host & build AD4MIN binary (macos-latest)
+    - name: Build AD4M-Host & build AD4M launcher binary (macos-latest)
       if: matrix.platform == 'macos-latest'
       run: yarn run build-macos
 
-    - name: Build AD4M-Host & build AD4MIN binary (windows-latest)
+    - name: Build AD4M-Host & build AD4M launcher binary (windows-latest)
       if: matrix.platform == 'windows-latest'
       run: yarn run build-windows
 
-    - name: Build AD4M-Host & build AD4MIN binary (linux-latest)
+    - name: Build AD4M-Host & build AD4M launcher binary (linux-latest)
       if: matrix.platform == 'ubuntu-latest'
       run: yarn run build-linux
     
-    - name: "Upload built AD4MIN"
+    - name: "Upload built AD4M launcher"
       uses: tauri-apps/tauri-action@v0
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
-        releaseName: "Ad4min v__VERSION__"
+        releaseName: "AD4M launcher v__VERSION__"
         releaseBody: "See the assets to download this version and install."
         projectPath: "./ui"
