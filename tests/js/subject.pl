@@ -21,4 +21,4 @@ collection_getter(c, Base, "entries", List) :- findall(C, triple(Base, "flux://e
 collection_adder(c, "entries", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
 
 collection(c, "messages").
-collection_getter(c, Base, "messages", List) :- findall(C, triple(Base, "flux://entry_type", C), List).
+collection_getter(c, Base, "messages", List) :- setof(C, (triple(Base, "flux://entry_type", C), instance(OtherClass, C), subject_class("Message", OtherClass)), List).
