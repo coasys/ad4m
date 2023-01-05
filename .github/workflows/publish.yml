@@ -2,8 +2,8 @@ name: Publish AD4MIN as a release on GitHub
 
 on:
   push:
-    branches:
-      - 'tuari-upload-release-fix'
+    tags:
+      - 'v*'
 
 jobs:
   create-release:
