@@ -59,6 +59,12 @@ jobs:
     - name: get version
       run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
 
+    - name: Extract version
+      id: extract_version
+      uses: Saionaro/extract-package-version@v1.1.1
+      with:
+        path: ui
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v1
       with:
@@ -87,8 +93,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/ad4m_${{ env.PACKAGE_VERSION }}_amd64.deb
-        asset_name: ad4m_${{ env.PACKAGE_VERSION }}_amd64.deb
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/ad4m_${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_name: ad4m_${{ steps.extract_version.outputs.version }}_amd64.deb
         asset_content_type: application/octet-stream
 
     - name: Upload Release AppImage Asset
@@ -99,8 +105,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/ad4m_${{ env.PACKAGE_VERSION }}_amd64.AppImage
-        asset_name: ad4m_${{ env.PACKAGE_VERSION }}_amd64.AppImage
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/ad4m_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_name: ad4m_${{ steps.extract_version.outputs.version }}_amd64.AppImage
         asset_content_type: application/octet-stream
 
     - name: Upload Release Macos Asset
@@ -111,8 +117,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/dmg/ad4m_${{ env.PACKAGE_VERSION }}_x64.dmg
-        asset_name: ad4m_${{ env.PACKAGE_VERSION }}_x64.dmg
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/dmg/AD4M_${{ steps.extract_version.outputs.version }}_x64.dmg
+        asset_name: AD4M_${{ steps.extract_version.outputs.version }}_x64.dmg
         asset_content_type: application/octet-stream
 
     - name: Upload Release MSI Asset
@@ -123,8 +129,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/msi/ad4m_${{ env.PACKAGE_VERSION }}_x64_en-US.msi
-        asset_name: ad4m_${{ env.PACKAGE_VERSION }}_x64_en-US.msi
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/msi/AD4M_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
+        asset_name: AD4M_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
         asset_content_type: application/octet-stream
 
     # - name: "Upload built AD4MIN"
