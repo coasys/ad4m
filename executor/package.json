@@ -103,6 +103,7 @@
     "apollo-server-core": "^3.10.0",
     "apollo-server-express": "^3.10.0",
     "async-mutex": "^0.3.2",
+    "autobase": "^1.0.0-alpha.8",
     "b4a": "^1.6.1",
     "corestore": "^6.4.0",
     "debounceify": "^1.0.0",
