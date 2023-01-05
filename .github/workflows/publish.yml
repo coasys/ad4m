@@ -3,7 +3,7 @@ name: Publish AD4MIN as a release on GitHub
 on:
   push:
     branches:
-      - 'tauri-upload-release-fix'
+      - 'tuari-upload-release-fix'
 
 jobs:
   build-ad4min-binary:
