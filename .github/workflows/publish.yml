@@ -9,7 +9,7 @@ jobs:
   create-release:
     runs-on: ubuntu-20.04
     outputs:
-      upload_url: ${{ steps.create-release.outputs.result.upload_url }}
+      upload_url: ${{ steps.create-release.outputs.upload_url }}
 
     steps:
       - uses: actions/checkout@v3
