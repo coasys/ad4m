@@ -97,7 +97,7 @@ jobs:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/ad4m_0.2.8_amd64.deb
         asset_name: ad4m_0.2.8_amd64.deb
-        asset_content_type: application/gzip
+        asset_content_type: application/octet-stream
 
     - name: Upload Release AppImage Asset
       id: upload-release-appimage-asset
@@ -108,7 +108,7 @@ jobs:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/ad4m_0.2.8_amd64.AppImage
         asset_name: ad4m_0.2.8_amd64.AppImage
-        asset_content_type: application/gzip
+        asset_content_type: application/octet-stream
 
     # - name: "Upload built AD4MIN"
     #   uses: tauri-apps/tauri-action@v0.3
