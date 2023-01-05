@@ -14,7 +14,7 @@ jobs:
         node-version: [16.x]
 
     runs-on: ${{ matrix.platform }}
-    
+
     steps:
     - name: Fetch source code
       uses: actions/checkout@v2
@@ -50,9 +50,9 @@ jobs:
     - name: Build AD4M-Host & build AD4MIN binary (linux-latest)
       if: matrix.platform == 'ubuntu-latest'
       run: yarn run build-linux
-    
+
     - name: "Upload built AD4MIN"
-      uses: tauri-apps/tauri-action@v0
+      uses: tauri-apps/tauri-action@v0.2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
