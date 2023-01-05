@@ -81,8 +81,8 @@ jobs:
       if: matrix.platform == 'ubuntu-latest'
       run: yarn run build-linux
 
-    - name: Upload Release Asset
-      id: upload-release-asset
+    - name: Upload Release Deb Asset
+      id: upload-release-deb-asset
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,8 +91,8 @@ jobs:
         asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/ad4m_0.2.8_amd64.deb
         asset_name: ad4m_0.2.8_amd64.deb
 
-    - name: Upload Release Asset
-      id: upload-release-asset
+    - name: Upload Release AppImage Asset
+      id: upload-release-appimage-asset
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
