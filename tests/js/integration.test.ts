@@ -479,7 +479,7 @@ describe("Integration", () => {
                 await perspective!.ensureSDNASubjectClass(Test)
 
                 expect(await perspective!.getSdna()).to.have.lengthOf(2)
-                console.log((await perspective!.getSdna())[1])
+                //console.log((await perspective!.getSdna())[1])
             })
 
             it("can constrain collection entries through 'where' clause", async () => {
