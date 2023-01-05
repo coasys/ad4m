@@ -2,15 +2,15 @@ name: Publish AD4MIN as a release on GitHub
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - 'tauri-upload-release-fix'
 
 jobs:
   build-ad4min-binary:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, ubuntu-latest, windows-latest]
+        platform: [ubuntu-latest]
         node-version: [16.x]
 
     runs-on: ${{ matrix.platform }}
