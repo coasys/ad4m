@@ -80,6 +80,7 @@ jobs:
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
+      if: matrix.platform == 'ubuntu-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,6 +92,7 @@ jobs:
 
     - name: Upload Release AppImage Asset
       id: upload-release-appimage-asset
+      if: matrix.platform == 'ubuntu-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -102,6 +104,7 @@ jobs:
 
     - name: Upload Release Macos Asset
       id: upload-release-macos-asset
+      if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -113,6 +116,7 @@ jobs:
 
     - name: Upload Release MSI Asset
       id: upload-release-msi-asset
+      if: matrix.platform == 'windows-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
