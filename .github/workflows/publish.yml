@@ -9,7 +9,7 @@ jobs:
   create-release:
     runs-on: ubuntu-20.04
     outputs:
-      release: ${{ steps.create-release.outputs.result }}
+      upload_url: ${{ steps.create-release.outputs.result.upload_url }}
 
     steps:
       - uses: actions/checkout@v3
@@ -39,7 +39,7 @@ jobs:
     needs: create-release
     steps:
       - name: test
-        run: echo ${{ needs.create-release.outputs.release }}
+        run: echo ${{ needs.create-release.outputs.upload_url }}
 
   build-ad4min-binary:
     strategy:
