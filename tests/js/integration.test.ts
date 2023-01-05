@@ -495,12 +495,12 @@ describe("Integration", () => {
                 expect(entries.length).to.equal(1)
 
                 let messageEntries = await todo.messages
-                expect(entries.length).to.equal(0)
+                expect(messageEntries.length).to.equal(0)
 
                 await perspective!.createSubject(new Message(), messageEntry)
 
                 messageEntries = await todo.messages
-                expect(entries.length).to.equal(1)
+                expect(messageEntries.length).to.equal(1)
             })
         })
     })
