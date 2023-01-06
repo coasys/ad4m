@@ -512,13 +512,10 @@ export default class Perspective {
     }
 
     private getLinksLocal(query: LinkQuery): LinkExpression[] {
-        // console.debug("getLinks 1")
         if(!query || !query.source && !query.predicate && !query.target) {
             //@ts-ignore
             return this.#db.getAllLinks(this.uuid).map(e => e.link)
         }
-
-        // console.debug("getLinks 2")
 
         const reverse = query.fromDate! >= query.untilDate!;
 
@@ -549,7 +546,6 @@ export default class Perspective {
         }
 
         if(query.source) {
-            // console.debug("query.source", query.source)
             //@ts-ignore
             let result = this.#db.getLinksBySource(this.uuid, query.source).map(e => e.link)
             // @ts-ignore
@@ -560,12 +556,9 @@ export default class Perspective {
             if (query.fromDate) result = result.filter(fromDateFilter)
             // @ts-ignore
             if (query.untilDate) result = result.filter(untilDateFilter)
-            // console.debug("result", result)
             result = limitFilter(result);
             return result
         }
-
-        // console.debug("getLinks 3")
 
         if(query.target) {
             //@ts-ignore
@@ -579,8 +572,6 @@ export default class Perspective {
             result = limitFilter(result);
             return result
         }
-
-        // console.debug("getLinks 4")
 
         //@ts-ignore
         let result = this.#db.getAllLinks(this.uuid).map(e => e.link).filter(link => link.data.predicate === query.predicate)
@@ -661,7 +652,10 @@ export default class Perspective {
                 langNames.push(`languageName("${node}", "${lang!.name}").`)
                 exprAddrs.push(`expressionAddress("${node}", "${ref.expression}").`)
             } catch(e) {
-                console.debug("While creating expressionLanguageFacts:", e)
+                //@ts-ignore
+                if (!e.message.includes("Language not found by reference")) {
+                    console.debug("While creating expressionLanguageFacts:", e)
+                }
             }
         }
 
