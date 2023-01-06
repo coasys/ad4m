@@ -212,7 +212,7 @@ export default class Perspective {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
-                    // console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
