@@ -759,11 +759,11 @@ export default class Perspective {
         lines.push(":- dynamic start_action/2.")
         lines.push(":- dynamic action/4.")
 
-        lines.push(":- multifile register_sdna_flow/2.")
-        lines.push(":- multifile flowable/2.")
-        lines.push(":- multifile flow_state/3.")
-        lines.push(":- multifile start_action/2.")
-        lines.push(":- multifile action/4.")
+        lines.push(":- discontiguous register_sdna_flow/2.")
+        lines.push(":- discontiguous flowable/2.")
+        lines.push(":- discontiguous flow_state/3.")
+        lines.push(":- discontiguous start_action/2.")
+        lines.push(":- discontiguous action/4.")
 
         lines.push(":- dynamic subject_class/2.")
         lines.push(":- dynamic constructor/2.")
@@ -774,14 +774,14 @@ export default class Perspective {
         lines.push(":- dynamic collection_getter/4.")
         lines.push(":- dynamic collection_setter/3.")
 
-        lines.push(":- multifile subject_class/2.")
-        lines.push(":- multifile constructor/2.")
-        lines.push(":- multifile instance/2.")
-        lines.push(":- multifile property/2.")
-        lines.push(":- multifile property_getter/4.")
-        lines.push(":- multifile property_setter/3.")
-        lines.push(":- multifile collection_getter/4.")
-        lines.push(":- multifile collection_setter/3.")
+        lines.push(":- discontiguous subject_class/2.")
+        lines.push(":- discontiguous constructor/2.")
+        lines.push(":- discontiguous instance/2.")
+        lines.push(":- discontiguous property/2.")
+        lines.push(":- discontiguous property_getter/4.")
+        lines.push(":- discontiguous property_setter/3.")
+        lines.push(":- discontiguous collection_getter/4.")
+        lines.push(":- discontiguous collection_setter/3.")
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
