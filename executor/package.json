@@ -18,7 +18,9 @@
   "scripts": {
     "build": "tsc",
     "run": "node  --experimental-specifier-resolution=node lib/main.js",
-    "prepare-test": "./scripts/build-test-language.sh && ./scripts/download-binaries-macos.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
+    "prepare-test": "run-script-os",
+    "prepare-test:macos": "./scripts/build-test-language.sh && ./scripts/download-binaries-macos.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
+    "prepare-test:linux": "./scripts/build-test-language.sh && ./scripts/download-binaries-linux.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "prepare-test-no-nix": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
@@ -116,6 +118,7 @@
     "lodash": "^4.17.21",
     "lowdb": "^1.0.0",
     "node-fetch": "^2.6.1",
+    "run-script-os": "^1.1.6",
     "sha256": "^0.2.0",
     "sha3": "^2.1.3",
     "swipl-stdio": "https://github.com/perspect3vism/node-swipl-stdio.git",
