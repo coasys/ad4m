@@ -18,7 +18,7 @@
   "scripts": {
     "build": "tsc",
     "run": "node  --experimental-specifier-resolution=node lib/main.js",
-    "prepare-test": "./scripts/build-test-language.sh && nix-shell --run ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
+    "prepare-test": "./scripts/build-test-language.sh && ./scripts/download-binaries-macos.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "prepare-test-no-nix": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
