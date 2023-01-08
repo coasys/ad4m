@@ -4,13 +4,13 @@
 if [ ! -f "./temp/binary/hc" ]; then
     wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.1.0-beta-rc.1/hc-linux-0.1.0-beta-rc.1
     mv hc-linux-0.1.0-beta-rc.1 ./temp/binary/hc
-    chmod +x hc
+    chmod +x ./temp/binary/hc
 fi
 
 if [ ! -f "./temp/binary/holochain" ]; then
     wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.1.0-beta-rc.1/holochain-linux-0.1.0-beta-rc.1
     mv holochain-linux-0.1.0-beta-rc.1 ./temp/binary/holochain
-    chmod +x holochain
+    chmod +x ./temp/binary/holochain
 fi
 
 if [ ! -f "./temp/swipl/bin/swipl" ]; then
