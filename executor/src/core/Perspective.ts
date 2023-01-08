@@ -638,6 +638,10 @@ export default class Perspective {
             if(link.data.target) nodes.add(link.data.target)
         }
 
+        langAddrs.push(":- multifile languageAddress/2.")
+        langNames.push(":- multifile languageName/2.")  
+        exprAddrs.push(":- multifile expressionAddress/2.")  
+
         for(let node of nodes) {
             //node.replace('\n', '\n\c')
             try {
@@ -712,8 +716,8 @@ export default class Perspective {
         // triple/3
         // link/5
         //-------------------
-        lines.push(":- discontiguous triple/3.")            
-        lines.push(":- discontiguous link/5.")  
+        lines.push(":- multifile triple/3.")            
+        lines.push(":- multifile link/5.")  
 
         for (const link of allLinks) {
             lines.push(this.tripleFact(link));
@@ -725,13 +729,14 @@ export default class Perspective {
         //-------------------
         // reachable/2
         //-------------------
+        lines.push(":- multifile reachable/2.")  
         lines.push("reachable(A,B) :- triple(A,_,B).")
         lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
 
         //-------------------
         // hiddenExpression/1
         //-------------------
-        lines.push(":- discontiguous hiddenExpression/1.")            
+        lines.push(":- multifile hiddenExpression/1.")            
 
 
 
@@ -740,6 +745,21 @@ export default class Perspective {
         //-------------------
         // Social DNA zomes
         //-------------------
+
+        lines.push(":- multifile register_sdna_flow/2.")
+        lines.push(":- multifile flowable/2.")
+        lines.push(":- multifile flow_state/3.")
+        lines.push(":- multifile start_action/2.")
+        lines.push(":- multifile action/4.")
+
+        lines.push(":- multifile subject_class/2.")
+        lines.push(":- multifile constructor/2.")
+        lines.push(":- multifile instance/2.")
+        lines.push(":- multifile property/2.")
+        lines.push(":- multifile property_getter/4.")
+        lines.push(":- multifile property_setter/3.")
+        lines.push(":- multifile collection_getter/4.")
+        lines.push(":- multifile collection_setter/3.")
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
