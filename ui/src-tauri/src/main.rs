@@ -153,7 +153,12 @@ fn main() {
                                 main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
                             }
                         },
-                        CommandEvent::Stderr(line) => log::error!("{}", line),
+                        CommandEvent::Stderr(line) => {
+                            let is_prolog_redefined_line = line.starts_with("Warning: /var") || line.starts_with("Warning:    Redefined") || line.starts_with("Warning:    Previously");
+                            if !is_prolog_redefined_line {
+                                log::error!("{}", line);
+                            }
+                        }
                         CommandEvent::Terminated(line) => {
                             log::info!("Terminated {:?}", line);
                             let main = get_main_window(&handle);
