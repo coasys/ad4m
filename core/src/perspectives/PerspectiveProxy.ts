@@ -8,6 +8,7 @@ import { Literal } from "../Literal";
 import { Subject } from "../subject/Subject";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { ExpressionRendered } from "../expression/Expression";
+import { collectionAdderToName } from "../subject/util";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed"
 
@@ -345,7 +346,7 @@ export class PerspectiveProxy {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
         if(!result.length) {
-            throw "No constructor found for given subject class"
+            throw "No constructor found for given subject class: " + className 
         }
 
         let actions = result.map(x => eval(x.Actions))
@@ -451,10 +452,7 @@ export class PerspectiveProxy {
             query += `, property_setter(c, "${property}", _)`
         }
         for(let addFunction of addFunctions) {
-            // e.g. "addComment" -> "comments"
-            let property = addFunction.substring(3)
-            property = property.charAt(0).toLowerCase() + property.slice(1) + "s"
-            query += `, collection_adder(c, "${property}", _)`
+            query += `, collection_adder(c, "${collectionAdderToName(addFunction)}", _)`
         }
 
         query += "."
