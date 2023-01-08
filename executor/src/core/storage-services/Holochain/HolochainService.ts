@@ -252,7 +252,7 @@ export default class HolochainService {
         
         const activeApps = await this.#adminWebsocket!.listApps({});
         let languageApp = activeApps.find(app => app.installed_app_id === lang);
-        console.warn("HolochainService: Found running apps:", activeApps);
+        //console.warn("HolochainService: Found running apps:", activeApps);
        
         if(!languageApp) {
             // 1. install app
@@ -285,7 +285,7 @@ export default class HolochainService {
                     }
                 })
                 
-                console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
+                //console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
             } catch(e) {
                 console.error("HolochainService: InstallApp, got error: ", e);
                 return;
@@ -295,7 +295,7 @@ export default class HolochainService {
             try {
                 const activateResult = await this.#adminWebsocket!.enableApp({installed_app_id: lang})
                 languageApp = await this.#appWebsocket!.appInfo({installed_app_id: lang});
-                console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
+                //console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
             } catch(e) {
                 console.error("HolochainService: ERROR activating app", lang, " - ", e)
             }
@@ -304,7 +304,7 @@ export default class HolochainService {
         if (languageApp) {
             if ("running" in languageApp.status) {
                 const activateResult = await this.#adminWebsocket!.enableApp({installed_app_id: lang});
-                console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
+                //console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
             }
 
             Object.keys(languageApp.cell_info).forEach(async roleName => {
