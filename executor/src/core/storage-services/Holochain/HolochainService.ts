@@ -390,7 +390,7 @@ export default class HolochainService {
 
         //4. Call the zome function
         try {
-            console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
+            console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
 
             //Find the zome calls required for this cell, and authorize the signing credentials
             const zomeCalls = this.#cellZomeCalls.get(`${lang}-${dnaNick}`);
