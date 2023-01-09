@@ -248,7 +248,7 @@ export default class PerspectivismCore {
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
         await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
 
-        return this.#perspectivesController!.add("", url, neighbourhood);
+        return this.#perspectivesController!.add("", url, neighbourhood, true);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
