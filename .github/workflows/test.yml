@@ -39,6 +39,9 @@ jobs:
     - name: Install dependencies
       run: yarn install
 
+    - name: Debug swipl binary
+      run: cd executor && yarn prepare-test && ls src/tst-tmp && ./src/tst-tmp/swipl --version
+
     - name: Run the tests
       run: yarn test
 
