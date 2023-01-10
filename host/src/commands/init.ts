@@ -7,7 +7,7 @@ import path from 'path';
 import fs from 'fs-extra';
 // @ts-ignore
 import utils from 'util';
-import { CONFIG, getConfig } from '../utils/config';
+import { CONFIG, getConfig, getAd4mHostVersion } from '../utils/config';
 import ReadlineSync from 'readline-sync';
 import os from 'os'
 import { ad4mDataDirectory } from '../ad4mDataDirectory';
@@ -67,6 +67,18 @@ export const builder = (yargs: Argv) =>
 export const handler = async (argv: Arguments<Options>): Promise<void> => {
   const { hcOnly, dataPath = '', networkBootstrapSeed, overrideConfig } = argv;
   const appDataPath = ad4mDataDirectory(dataPath)
+
+  //Check the ad4m data directory exists
+  if (!fs.existsSync(appDataPath)) {
+    //Create the data path
+    fs.mkdirSync(appDataPath, { recursive: true })
+
+    //Create the last-seen-version file
+    const currentVersion = getAd4mHostVersion();
+    const lastSeenFile = path.join(appDataPath, 'last-seen-version');
+    fs.writeFileSync(lastSeenFile, currentVersion);
+  }
+
   const binaryPath = path.join(appDataPath, 'binary')
   
   if(!fs.existsSync(binaryPath)) {

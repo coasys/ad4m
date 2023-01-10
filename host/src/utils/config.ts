@@ -26,3 +26,17 @@ export function getConfig(dataPath = ''): GetConfigReturntype {
     return {}
   }
 }
+
+export function getAd4mHostVersion(): string {
+  const packageJson = path.join(__dirname, `../mainnet_seed.json`);
+  const packageJsonParsed = JSON.parse(fs.readFileSync(packageJson, { encoding: 'utf-8' }));
+  const version = packageJsonParsed["version"];
+  console.log("Got ad4mHost version: ", version);
+  return version;
+}
+
+export function getOldestSupportedVersion(): string {
+  const oldestVersion = fs.readFileSync(path.join(__dirname, `../oldestSupportedVersion.txt`), { encoding: 'utf-8' });
+  console.log("Got oldest supported version: ", oldestVersion);
+  return oldestVersion;
+}
