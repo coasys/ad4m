@@ -140,6 +140,16 @@ export default class AgentResolver {
         return []
     }
 
+    @Mutation(returns => [Apps])
+    agentRemoveApp(@Arg('requestId') requestId: string): [] {
+        return []
+    }
+
+    @Mutation(returns => [Apps])
+    agentRevokeToken(@Arg('requestId') requestId: string): [] {
+        return []
+    }
+
     @Mutation(returns => AgentSignature)
     agentSignMessage(@Arg('message') message: string): AgentSignature {
         return new AgentSignature("test-message-signature", "test-public-key")
