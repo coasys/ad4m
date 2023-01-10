@@ -48,6 +48,7 @@ export type ClientStates =
   | "not_connected"
   | "loading"
   | "disconnected"
+  | "connection-error"
   | "remote_url";
 
 export type ConfigStates = "port" | "url" | "token";
@@ -242,6 +243,9 @@ class Client {
             if (this.isFullyInitialized) {
               this.notifyStateChange("disconnected");
             }
+          },
+          error: (error) => {
+            this.notifyStateChange("connection-error");
           },
         },
       })

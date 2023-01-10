@@ -11,6 +11,7 @@ import AgentLocked from "./components/AgentLocked";
 import RequestCapability from "./components/RequestCapability";
 import InvalidToken from "./components/InvalidToken";
 import VerifyCode from "./components/VerifyCode";
+import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
 import Header from "./components/Header";
 import { ClientStates } from "./core";
 import autoBind from "auto-bind";
@@ -529,10 +530,10 @@ export default class Ad4mConnect extends LitElement {
     };
 
     const cancelBtn = document.getElementById("stop-scan");
-    cancelBtn.addEventListener("click", function() {
+    cancelBtn.addEventListener("click", function () {
       html5QrCode.stop();
       ele.style.display = "none";
-    })
+    });
 
     html5QrCode.start(
       { facingMode: "environment" },
@@ -611,6 +612,8 @@ export default class Ad4mConnect extends LitElement {
         });
       case "disconnected":
         return Disconnected({ connectToPort: this.connectToPort });
+      case "connection-error":
+        return CouldNotMakeRequest();
       case "verify_code":
         return VerifyCode({
           code: this._code,
