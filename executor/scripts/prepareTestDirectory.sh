@@ -12,7 +12,5 @@ rm -f hc
 ln -sf `which hc` hc
 rm -f holochain 
 ln -sf `which holochain` holochain
-rm -f lair-keystore
-ln -sf `which lair-keystore` lair-keystore
 rm -f swipl
 ln -sf `which swipl` swipl

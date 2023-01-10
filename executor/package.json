@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -88,7 +88,7 @@
   },
   "dependencies": {
     "@graphql-tools/schema": "^8.5.1",
-    "@holochain/client": "0.3.2",
+    "@holochain/client": "0.11.8",
     "@noble/secp256k1": "^1.7.0",
     "@perspect3vism/ad4m": "*",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",

@@ -4,8 +4,8 @@
 
 {
     url = "https://github.com/holochain/holochain";
-    rev = "holochain-0.0.161";
-    sha256 = "sha256-xp1DTVrhGEc1CZr6LvBZEYhoOUbUPpg3/mWOj4DDXjI=";
+    rev = "holochain-0.1.0-beta-rc.1";
+    sha256 = "sha256-xp1DTVrhGEc1CZr6LvBFZZhoOUbUPpg3/mWOj4DDXjI=";
     cargoLock = {
         outputHashes = {
         };
@@ -17,21 +17,4 @@
         "kitsune-p2p-proxy"
         "kitsune-p2p-tx2-proxy"
     ];
-
-
-    lair = {
-        url = "https://github.com/holochain/lair";
-        rev = "lair_keystore_api-v0.2.0";
-        sha256 = "sha256-n7nZyZR0Q68Uff7bTSVFtSDLi21CNcyKibOBx55Gasg=";
-
-        binsFilter = [
-            "lair-keystore"
-        ];
-
-
-        cargoLock = {
-            outputHashes = {
-            };
-        };
-    };
 }

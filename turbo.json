@@ -47,6 +47,19 @@
     "ad4m-launcher#build-windows": {
       "dependsOn": ["ad4m-host#package-windows"],
       "outputs": ["dist/**"]
+    },
+
+    "ad4m-launcher#build-all-linux": {
+      "dependsOn": ["ad4m-host#package-linux"],
+      "outputs": ["dist/**"]
+    },
+    "ad4m-launcher#build-all-macos": {
+      "dependsOn": ["ad4m-host#package-macos"],
+      "outputs": ["dist/**"]
+    },
+    "ad4m-launcher#build-all-windows": {
+      "dependsOn": ["ad4m-host#package-windows"],
+      "outputs": ["dist/**"]
     }
   }
 }

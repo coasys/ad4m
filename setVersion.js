@@ -59,3 +59,8 @@ const uiTauri = JSON.parse(fs.readFileSync('ui/src-tauri/tauri.conf.json', 'utf8
 console.log("UI Tauri version: " + uiTauri.package.version + " -> " + VERSION)
 uiTauri.package.version = VERSION
 fs.writeFileSync('ui/src-tauri/tauri.conf.json', JSON.stringify(uiTauri, null, 2) + '\n')
+
+const uiCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), VERSION)
+console.log("UI Cargo version: " + uiCargo.oldVersion + " -> " + VERSION)
+fs.writeFileSync('ui/src-tauri/Cargo.toml', uiCargo.newContent)
+

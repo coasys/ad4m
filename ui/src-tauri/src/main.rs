@@ -82,7 +82,6 @@ fn main() {
 
     find_and_kill_processes("holochain");
 
-    find_and_kill_processes("lair-keystore");
     if !holochain_binary_path().exists() {
         log::info!("init command by copy holochain binary");
         let status = Command::new_sidecar("ad4m-host")

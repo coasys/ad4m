@@ -1,6 +1,6 @@
 {
   "name": "ad4m-host",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Self hosting ad4m service",
   "private": true,
   "bin": {
@@ -27,7 +27,6 @@
       "temp/**/*",
       "temp/binary/hc.exe",
       "temp/binary/holochain.exe",
-      "temp/binary/lair-keystore.exe",
       "mainnet_seed.json",
       "node_modules/leveldown/**/*",
       "../node_modules/classic-level/**/*",

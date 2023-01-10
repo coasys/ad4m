@@ -146,14 +146,12 @@ describe("Integration tests", function () {
 
     after(async () => {
       expect(await isProcessRunning("holochain")).to.be.true;
-      expect(await isProcessRunning("lair-keystore")).to.be.true;
       expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).to.be.true;
 
       await core!.exit();
       await new Promise((resolve)=>setTimeout(resolve, 500))
 
       expect(await isProcessRunning("holochain")).to.be.false;
-      expect(await isProcessRunning("lair-keystore")).to.be.false;
       expect(fs.existsSync(path.join(ipfsRepoPath, "repo.lock"))).to.be.false;
     })
 
