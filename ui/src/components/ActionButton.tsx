@@ -12,10 +12,12 @@ export default function ActionButton({
   icon,
 }: ActionButtonProps) {
   return (
-    <j-tooltip title={title} placement="bottom">
-      <j-button onClick={onClick} square circle size="xl" variant="subtle">
-        <j-icon color={iconColor} size="md" name={icon}></j-icon>
-      </j-button>
-    </j-tooltip>
+    <div >
+      <j-tooltip title={title} placement="bottom">
+        <j-button onClick={onClick} square circle size="xl" variant="subtle">
+          <j-icon color={iconColor} size="md" name={icon}></j-icon>
+        </j-button>
+      </j-tooltip>
+    </div>
   );
 }

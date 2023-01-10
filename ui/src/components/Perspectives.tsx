@@ -11,10 +11,8 @@ import { sanitizeLink } from "../util";
 import {
   badge,
   cardStyle,
-  gridButton,
   listStyle,
   MainContainer,
-  MainHeader,
 } from "./styles";
 import { Trash } from "tabler-icons-react";
 import { useDisclosure } from "@mantine/hooks";
@@ -189,7 +187,7 @@ const Perspectives = (props: Props) => {
 
   return (
     <div style={MainContainer}>
-      <div style={gridButton}>
+      <div class="grid">
         <ActionButton
           title="Add perspective"
           onClick={() => setPerspectiveModalOpen(true)}
