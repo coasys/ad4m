@@ -350,6 +350,9 @@ export default class Ad4mConnect extends LitElement {
   @state()
   private _isMobile = null;
 
+  @state()
+  private _hasClickedDownload = null;
+
   @property({ type: String, reflect: true })
   appname = null;
 
@@ -529,10 +532,10 @@ export default class Ad4mConnect extends LitElement {
     };
 
     const cancelBtn = document.getElementById("stop-scan");
-    cancelBtn.addEventListener("click", function() {
+    cancelBtn.addEventListener("click", function () {
       html5QrCode.stop();
       ele.style.display = "none";
-    })
+    });
 
     html5QrCode.start(
       { facingMode: "environment" },
@@ -570,6 +573,10 @@ export default class Ad4mConnect extends LitElement {
     this._code = code;
   }
 
+  onDownloaded() {
+    this._hasClickedDownload = true;
+  }
+
   verifyCode(code) {
     this._client.verifyCode(code);
   }
@@ -590,6 +597,8 @@ export default class Ad4mConnect extends LitElement {
           scanQrcode: this.scanQrcode,
           connectToPort: this.connectToPort,
           isMobile: this._isMobile,
+          hasClickedDownload: this._hasClickedDownload,
+          onDownloaded: this.onDownloaded,
           changeState: this.changeState,
         });
       case "agent_locked":

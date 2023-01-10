@@ -11,9 +11,7 @@ export default function AgentLocked({ unlockAgent, connectToPort }) {
             continue.
           </p>
         </div>
-        <button class="button" @click=${() => connectToPort()}>
-          Reconnect
-        </button>
+        <button class="button" @click=${() => connectToPort()}>Connect</button>
       </div>
     </div>
   `;
