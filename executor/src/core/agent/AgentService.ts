@@ -314,6 +314,10 @@ export default class AgentService {
 
         return payload.capabilities
     }
+
+    isAd4minCredential(token: string) {
+        return token == this.#adminCredential
+    }
     
     requestCapability(appName: string, appDesc: string, appUrl: string, capabilities: string) {
         let requestId = uuidv4()
@@ -388,7 +392,7 @@ export default class AgentService {
                 apps = []
             }
             
-            fs.writeFileSync(this.#appsFile, JSON.stringify([...apps, this.#requestingAuthInfo]))
+            fs.writeFileSync(this.#appsFile, JSON.stringify([...apps, {...this.#requestingAuthInfo, token: jwt}, ]))
         }
 
         return jwt
@@ -400,6 +404,30 @@ export default class AgentService {
         } catch (e) {
             fs.writeFileSync(this.#appsFile, '[]')
             return []
+        }
+    }
+
+    removeApp(requestId: string) {
+        try {
+            const apps: [] = JSON.parse(fs.readFileSync(this.#appsFile).toString())
+
+            const newApps = apps.filter((app: any) => app.requestId !== requestId)
+
+            fs.writeFileSync(this.#appsFile, JSON.stringify(newApps))
+        } catch (e) {
+            console.error('Error while removing app', e);
+        }
+    }
+
+    revokeAppToken(requestId: string) {
+        try {
+            const apps: [] = JSON.parse(fs.readFileSync(this.#appsFile).toString());
+
+            const newApps = apps.map((app: any) => app.requestId === requestId ? ({...app, revoked: true}) : app);
+
+            fs.writeFileSync(this.#appsFile, JSON.stringify(newApps))
+        } catch (e) {
+            console.error('Error while revoking token', e);
         }
     }
 
