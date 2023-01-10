@@ -186,7 +186,9 @@ class Client {
     } else if (message.includes("signature verification failed")) {
       // wrong agent error
       this.notifyStateChange("invalid_token");
-    } else if (message.includes("Invalid Compact JWS")) {
+    } else if (message.includes("Unauthorized access")) {
+      this.notifyStateChange("invalid_token");
+    }else if (message.includes("Invalid Compact JWS")) {
       this.notifyStateChange("invalid_token");
     } else if (message.includes("JWS Protected Header is invalid")) {
       this.notifyStateChange("invalid_token");
