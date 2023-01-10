@@ -39,9 +39,19 @@ In October/November 2022, these componentes were collected into a mono-repo agai
 
 ## Build
 
+Install Rust by visiting [here](https://www.rust-lang.org/tools/install)
+
+### Fresh build:
+
 ```
 yarn install
-yarn build
+yarn run build-linux/macos/windows (choose version for your OS)
+```
+
+### Subsequent builds
+
+```
+yarn run build-all-linux/macos/windows (choose version for your OS)
 ```
 
 ## Testing
@@ -64,16 +74,3 @@ yarn run package-linux/macos/windows (choose version for your OS)
 yarn install
 yarn run build-linux/macos/windows (choose version for your OS)
 ```
-
-## Publishing
-
-Before making a PR with a set of changes, run the following command on your branch:
-
-```
-yarn changeset
-```
-
-This command will allow you to create a new set of changes, any associate them to given packages, for which you can decide if a major or minor version increment should be made.
-<br>
-
-Once your PR is merged into main, the yarn changeset publish script will be ran and your changes uploaded to npm in accordance with the version detailed in the changeset.
