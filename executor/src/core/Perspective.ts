@@ -103,7 +103,7 @@ export default class Perspective {
                     if (currentRevision) {
                         //Let's check if we have unpublished diffs:
                         const mutations = this.#db.getPendingDiffs(this.uuid);
-                        if(mutations.length > 0) {
+                        if(mutations && mutations.length > 0) {
                             // If we do, collect them...
                             const batchedMutations = {
                                 additions: [],
