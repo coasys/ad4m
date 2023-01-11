@@ -356,7 +356,7 @@ export const RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY: Capability = {
 export const checkTokenAuthorized = (rootConfigPath: string, token: string, isAd4minCredential: boolean) => {
     let apps: any[] = [];
     if (!isAd4minCredential) {
-        if (fs.readFileSync(path.join(rootConfigPath, "apps.json"))) {
+        if (fs.existsSync(path.join(rootConfigPath, "apps.json"))) {
             apps = JSON.parse(fs.readFileSync(path.join(rootConfigPath, "apps.json")).toString())
     
             if (token) {
