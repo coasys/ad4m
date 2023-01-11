@@ -17,7 +17,7 @@
     },
     "bundle": {
       "active": true,
-      "targets": ["deb", "msi", "app", "dmg", "updater"],
+      "targets": ["deb", "msi", "dmg", "updater"],
       "identifier": "dev.ad4m.ad4min",
       "icon": [
         "icons/32x32.png",
