@@ -68,7 +68,6 @@ class Client {
   capabilities: { [x: string]: any }[];
   stateListeners: Function[];
   configListeners: Function[];
-  hasUserInteracted: boolean;
 
   // @fayeed - params
   constructor({
@@ -90,7 +89,6 @@ class Client {
     this.token = token || this.token;
     this.stateListeners = [];
     this.configListeners = [];
-    this.hasUserInteracted = false;
 
     this.buildClient();
 
@@ -146,10 +144,6 @@ class Client {
   }
 
   async connect(url?: string) {
-    console.log("Calling connect");
-
-    this.hasUserInteracted = true;
-
     if (url) {
       this.setUrl(url);
     }
