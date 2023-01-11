@@ -103,7 +103,6 @@ export default class Perspective {
                     if (this.isFastPolling && currentRevision) {
                         this.isFastPolling = false;
                         clearInterval(this.#pollingInterval);
-                        this.#pollingInterval = this.setupPolling(30000);
 
                         //Lets also publish the links we have commited but not pushed since we were not connected
                         const mutations = this.#db.getPendingDiffs(this.uuid);
@@ -118,6 +117,7 @@ export default class Perspective {
                             batchedMutations.removals.push(removal);
                         }
                         await this.callLinksAdapter('commit', batchedMutations);
+                        this.#pollingInterval = this.setupPolling(30000);
                     }
 
                     let links = await this.callLinksAdapter("pull");
