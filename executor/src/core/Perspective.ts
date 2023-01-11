@@ -243,14 +243,25 @@ export default class Perspective {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
-                    let result: string|null = await linksAdapter.currentRevision();
-                    if(typeof(result) == 'string') {
-                        result = result.trim()
-                        if(result.length == 0) {
-                            result = null
-                        }
+                    let currentRevisionString = await linksAdapter.currentRevision();
+
+                    if(!currentRevisionString) {
+                        resolve(null)
+                        return
                     }
-                    resolve(result)
+
+                    if(typeof(currentRevisionString) != 'string') {
+                        //@ts-ignore
+                        currentRevisionString = currentRevisionString.toString()
+                    }
+
+                    currentRevisionString = currentRevisionString.trim()
+                    if(currentRevisionString.length == 0) {
+                        resolve(null)
+                    } else {
+                        resolve(currentRevisionString)
+                    }
+
                 } else {
                     console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
@@ -274,8 +285,7 @@ export default class Perspective {
             canCommit = true;
         } else {
             //We did not create the neighbourhood, so we should check if we already have some data sync'd before making a commit
-            const currentRevision: string|null = await this.getCurrentRevision();
-            if (typeof(currentRevision) == 'string' && currentRevision!.trim().length > 0) {
+            if (await this.getCurrentRevision()) {
                 canCommit = true;
             }
         }
