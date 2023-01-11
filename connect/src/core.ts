@@ -130,7 +130,7 @@ class Client {
   }
 
   setUrl(url: string) {
-    if (this.url === url) return;
+    // if (this.url === url) return;
     this.url = url;
     this.notifyConfigChange("url", url);
     this.buildClient();
@@ -147,6 +147,13 @@ class Client {
     if (url) {
       this.setUrl(url);
     }
+
+    this.notifyStateChange("loading");
+    this.checkConnection();
+  }
+
+  async reconnect() {
+    this.buildClient();
     this.notifyStateChange("loading");
     this.checkConnection();
   }

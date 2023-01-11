@@ -429,6 +429,10 @@ export default class Ad4mConnect extends LitElement {
     this._client.connect();
   }
 
+  reconnect() {
+    this._client.reconnect();
+  }
+
   async connected() {
     try {
       await this.getAd4mClient().agent.status();
@@ -620,7 +624,7 @@ export default class Ad4mConnect extends LitElement {
           appiconpath: this.appiconpath,
         });
       case "disconnected":
-        return Disconnected({ connectToPort: this.connectToPort });
+        return Disconnected({ reconnect: this.reconnect });
       case "connection-error":
         return CouldNotMakeRequest();
       case "verify_code":
