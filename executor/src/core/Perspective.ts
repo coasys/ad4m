@@ -97,9 +97,21 @@ export default class Perspective {
         return setInterval(
             async () => {
                 try {
-                    const currentRevision = await this.getCurrentRevision();
+                    // We should pull first, so that the committing of pending diffs happens on the
+                    // normative top of the shared history
+                    let links = await this.callLinksAdapter("pull");
+                    if (links.additions && links.removals) {
+                        if (links.additions.length > 0 || links.removals.length > 0) {
+                            this.populateLocalLinks(links.additions, links.removals);
+                            this.#prologNeedsRebuild = true
+                            if (this.neighbourhood) {
+                                this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
+                            }
+                        }
+                    }
 
                     // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
+                    const currentRevision = await this.getCurrentRevision();
                     if (currentRevision) {
                         //Let's check if we have unpublished diffs:
                         const mutations = this.#db.getPendingDiffs(this.uuid);
@@ -132,16 +144,6 @@ export default class Perspective {
                         }
                     }
 
-                    let links = await this.callLinksAdapter("pull");
-                    if (links.additions && links.removals) {
-                        if (links.additions.length > 0 || links.removals.length > 0) {
-                            this.populateLocalLinks(links.additions, links.removals);
-                            this.#prologNeedsRebuild = true
-                            if (this.neighbourhood) {
-                                this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
-                            }
-                        }
-                    }
                 } catch (e) {
                     console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
                 }
