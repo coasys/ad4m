@@ -130,7 +130,7 @@ class Client {
   }
 
   setUrl(url: string) {
-    if (this.url === url) return;
+    // if (this.url === url) return;
     this.url = url;
     this.notifyConfigChange("url", url);
     this.buildClient();
@@ -147,6 +147,13 @@ class Client {
     if (url) {
       this.setUrl(url);
     }
+
+    this.notifyStateChange("loading");
+    this.checkConnection();
+  }
+
+  async reconnect() {
+    this.buildClient();
     this.notifyStateChange("loading");
     this.checkConnection();
   }
@@ -193,11 +200,13 @@ class Client {
       this.notifyStateChange("invalid_token");
     } else if (message.includes("Failed to fetch")) {
       // wrong agent error
-      this.notifyStateChange("not_connected");
+      this.notifyStateChange("connection-error");
     } else if (message === "Couldn't find an open port") {
       // show no open port error & ask to retry
       this.setPortSearchState("not_found");
-      this.notifyStateChange("not_connected");
+      this.notifyStateChange("connection-error");
+    } else if (message === "The user aborted a request.") {
+      this.notifyStateChange("connection-error");
     } else {
       this.notifyStateChange("not_connected");
     }
@@ -243,9 +252,6 @@ class Client {
             if (this.isFullyInitialized) {
               this.notifyStateChange("disconnected");
             }
-          },
-          error: (error) => {
-            this.notifyStateChange("connection-error");
           },
         },
       })
