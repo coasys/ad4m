@@ -136,7 +136,6 @@ jobs:
   
   npm-publish:
     runs-on: ubuntu-latest
-    needs: build-launcher-binary
     steps:
       - uses: actions/checkout@v3
       # Setup .npmrc file to publish to npm
@@ -144,13 +143,12 @@ jobs:
         with:
           node-version: '16.x'
           registry-url: 'https://registry.npmjs.org'
-      - run: cd core && npm publish --access public && cd ..
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: cd connect && npm publish --access public && cd ..
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: cd executor && npm publish --access public && cd ..
+      - name: Install deps
+        run: yarn install
+      - name: Build modules
+        run: yarn build
+      - name: Publish modules to NPM
+        run: yarn changeset publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
   
