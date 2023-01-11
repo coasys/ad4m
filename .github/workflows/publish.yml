@@ -1,4 +1,4 @@
-name: Publish AD4MIN as a release on GitHub
+name: Publish AD4M
 
 on:
   push:
@@ -143,13 +143,13 @@ jobs:
         with:
           node-version: '16.x'
           registry-url: 'https://registry.npmjs.org'
-      - run: cd core && npm install && npm publish --access public && cd ..
+      - run: cd core && yarn install && npm publish --access public && cd ..
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: cd connect && npm install && npm publish --access public && cd ..
+      - run: cd connect && yarn install && npm publish --access public && cd ..
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: cd executor && npm install && npm publish --access public && cd ..
+      - run: cd executor && yarn install && npm publish --access public && cd ..
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
   
