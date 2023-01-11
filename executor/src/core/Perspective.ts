@@ -99,25 +99,37 @@ export default class Perspective {
                 try {
                     const currentRevision = await this.getCurrentRevision();
 
-                    //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                    if (this.isFastPolling && currentRevision) {
-                        this.isFastPolling = false;
-                        clearInterval(this.#pollingInterval);
-
-                        //Lets also publish the links we have commited but not pushed since we were not connected
+                    // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
+                    if (currentRevision) {
+                        //Let's check if we have unpublished diffs:
                         const mutations = this.#db.getPendingDiffs(this.uuid);
-                        const batchedMutations = {
-                            additions: [],
-                            removals: []
-                        } as PerspectiveDiff
-                        for (const addition of mutations.additions) {
-                            batchedMutations.additions.push(addition);
+                        if(mutations.length > 0) {
+                            // If we do, collect them...
+                            const batchedMutations = {
+                                additions: [],
+                                removals: []
+                            } as PerspectiveDiff
+                            for(const mutation of mutations) {
+                                for (const addition of mutation.additions) {
+                                    batchedMutations.additions.push(addition);
+                                }
+                                for (const removal of mutation.removals) {
+                                    batchedMutations.removals.push(removal);
+                                }
+                            }
+                           
+                            // ...publish them...
+                            await this.callLinksAdapter('commit', batchedMutations);
+                            // ...and clear the temporary storage
+                            this.#db.clearPendingDiffs()
                         }
-                        for (const removal of mutations.removals) {
-                            batchedMutations.removals.push(removal);
+                        
+                        //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
+                        if(this.isFastPolling) {
+                            this.isFastPolling = false;
+                            clearInterval(this.#pollingInterval);
+                            this.#pollingInterval = this.setupPolling(30000);
                         }
-                        await this.callLinksAdapter('commit', batchedMutations);
-                        this.#pollingInterval = this.setupPolling(30000);
                     }
 
                     let links = await this.callLinksAdapter("pull");
