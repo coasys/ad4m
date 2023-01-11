@@ -40,7 +40,7 @@ export default class HolochainService {
     #didResolveError: boolean
     #conductorConfigPath?: string
     #signalCallbacks: [CellId, AppSignalCb, string][];
-    #queue: AsyncQueue
+    #queue: Map<string, AsyncQueue>
     #cellZomeCalls: Map<string, [string, string][]>
 
     constructor(config: HolochainConfiguration) {
@@ -74,7 +74,7 @@ export default class HolochainService {
         this.#adminPort = holochainAdminPort;
         this.#appPort = holochainAppPort;
         this.#resourcePath = resourcePath;
-        this.#queue = new AsyncQueue();
+        this.#queue = new Map();
 
         if (conductorPath) {
             this.#conductorPath = conductorPath;
@@ -340,7 +340,11 @@ export default class HolochainService {
     }
 
     getDelegateForLanguage(languageHash: string) {
-        return new HolochainLanguageDelegate(languageHash, this, this.#queue)
+        if (!this.#queue.has(languageHash)) {
+            this.#queue.set(languageHash, new AsyncQueue());
+        }
+
+        return new HolochainLanguageDelegate(languageHash, this, this.#queue.get(languageHash)!)
     }
 
     static dnaID(languageHash: string, dnaNick: string) {
