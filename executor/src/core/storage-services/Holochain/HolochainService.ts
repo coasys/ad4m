@@ -252,7 +252,7 @@ export default class HolochainService {
         
         const activeApps = await this.#adminWebsocket!.listApps({});
         let languageApp = activeApps.find(app => app.installed_app_id === lang);
-        console.warn("HolochainService: Found running apps:", activeApps);
+        //console.warn("HolochainService: Found running apps:", activeApps);
        
         if(!languageApp) {
             // 1. install app
@@ -285,7 +285,7 @@ export default class HolochainService {
                     }
                 })
                 
-                console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
+                //console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
             } catch(e) {
                 console.error("HolochainService: InstallApp, got error: ", e);
                 return;
@@ -295,7 +295,7 @@ export default class HolochainService {
             try {
                 const activateResult = await this.#adminWebsocket!.enableApp({installed_app_id: lang})
                 languageApp = await this.#appWebsocket!.appInfo({installed_app_id: lang});
-                console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
+                //console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
             } catch(e) {
                 console.error("HolochainService: ERROR activating app", lang, " - ", e)
             }
@@ -304,7 +304,7 @@ export default class HolochainService {
         if (languageApp) {
             if ("running" in languageApp.status) {
                 const activateResult = await this.#adminWebsocket!.enableApp({installed_app_id: lang});
-                console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
+                //console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
             }
 
             Object.keys(languageApp.cell_info).forEach(async roleName => {
@@ -390,7 +390,7 @@ export default class HolochainService {
 
         //4. Call the zome function
         try {
-            console.debug("\x1b[31m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
+            console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
 
             //Find the zome calls required for this cell, and authorize the signing credentials
             const zomeCalls = this.#cellZomeCalls.get(`${lang}-${dnaNick}`);
@@ -408,7 +408,14 @@ export default class HolochainService {
                 payload
             })
             const result = await this.#appWebsocket!.callZome(signedZomeCall)
-            console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result:", result, "\x1b[0m")
+            if (typeof result === "string") {
+                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result:", result.substring(50), "... \x1b[0m")
+            } else if (typeof result === "object") {
+                let resultString = JSON.stringify(result);
+                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result:", resultString.substring(50), "... \x1b[0m")
+            } else {
+                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result:", result, "\x1b[0m")
+            }
             return result
         } catch(e) {
             console.error("\x1b[31m", "HolochainService: ERROR calling zome function:", e, "\x1b[0m")

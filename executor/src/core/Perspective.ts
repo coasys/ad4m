@@ -212,7 +212,7 @@ export default class Perspective {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
-                    // console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
@@ -512,13 +512,10 @@ export default class Perspective {
     }
 
     private getLinksLocal(query: LinkQuery): LinkExpression[] {
-        // console.debug("getLinks 1")
         if(!query || !query.source && !query.predicate && !query.target) {
             //@ts-ignore
             return this.#db.getAllLinks(this.uuid).map(e => e.link)
         }
-
-        // console.debug("getLinks 2")
 
         const reverse = query.fromDate! >= query.untilDate!;
 
@@ -549,7 +546,6 @@ export default class Perspective {
         }
 
         if(query.source) {
-            // console.debug("query.source", query.source)
             //@ts-ignore
             let result = this.#db.getLinksBySource(this.uuid, query.source).map(e => e.link)
             // @ts-ignore
@@ -560,12 +556,9 @@ export default class Perspective {
             if (query.fromDate) result = result.filter(fromDateFilter)
             // @ts-ignore
             if (query.untilDate) result = result.filter(untilDateFilter)
-            // console.debug("result", result)
             result = limitFilter(result);
             return result
         }
-
-        // console.debug("getLinks 3")
 
         if(query.target) {
             //@ts-ignore
@@ -579,8 +572,6 @@ export default class Perspective {
             result = limitFilter(result);
             return result
         }
-
-        // console.debug("getLinks 4")
 
         //@ts-ignore
         let result = this.#db.getAllLinks(this.uuid).map(e => e.link).filter(link => link.data.predicate === query.predicate)
@@ -647,6 +638,13 @@ export default class Perspective {
             if(link.data.target) nodes.add(link.data.target)
         }
 
+        langAddrs.push(":- dynamic languageAddress/2.")
+        langAddrs.push(":- discontiguous languageAddress/2.")
+        langNames.push(":- dynamic languageName/2.")  
+        langNames.push(":- discontiguous languageName/2.")  
+        exprAddrs.push(":- dynamic expressionAddress/2.")  
+        exprAddrs.push(":- discontiguous expressionAddress/2.")  
+
         for(let node of nodes) {
             //node.replace('\n', '\n\c')
             try {
@@ -661,7 +659,10 @@ export default class Perspective {
                 langNames.push(`languageName("${node}", "${lang!.name}").`)
                 exprAddrs.push(`expressionAddress("${node}", "${ref.expression}").`)
             } catch(e) {
-                console.debug("While creating expressionLanguageFacts:", e)
+                //@ts-ignore
+                if (!e.message.includes("Language not found by reference")) {
+                    console.debug("While creating expressionLanguageFacts:", e)
+                }
             }
         }
 
@@ -718,7 +719,9 @@ export default class Perspective {
         // triple/3
         // link/5
         //-------------------
-        lines.push(":- discontiguous triple/3.")            
+        lines.push(":- dynamic triple/3.")
+        lines.push(":- discontiguous triple/3.")
+        lines.push(":- dynamic link/5.")
         lines.push(":- discontiguous link/5.")  
 
         for (const link of allLinks) {
@@ -731,13 +734,16 @@ export default class Perspective {
         //-------------------
         // reachable/2
         //-------------------
+        lines.push(":- dynamic reachable/2.")
+        lines.push(":- discontiguous reachable/2.")  
         lines.push("reachable(A,B) :- triple(A,_,B).")
         lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
 
         //-------------------
         // hiddenExpression/1
         //-------------------
-        lines.push(":- discontiguous hiddenExpression/1.")            
+        lines.push(":- dynamic hiddenExpression/1.")
+        lines.push(":- discontiguous hiddenExpression/1.")
 
 
 
@@ -746,6 +752,36 @@ export default class Perspective {
         //-------------------
         // Social DNA zomes
         //-------------------
+
+        lines.push(":- dynamic register_sdna_flow/2.")
+        lines.push(":- dynamic flowable/2.")
+        lines.push(":- dynamic flow_state/3.")
+        lines.push(":- dynamic start_action/2.")
+        lines.push(":- dynamic action/4.")
+
+        lines.push(":- discontiguous register_sdna_flow/2.")
+        lines.push(":- discontiguous flowable/2.")
+        lines.push(":- discontiguous flow_state/3.")
+        lines.push(":- discontiguous start_action/2.")
+        lines.push(":- discontiguous action/4.")
+
+        lines.push(":- dynamic subject_class/2.")
+        lines.push(":- dynamic constructor/2.")
+        lines.push(":- dynamic instance/2.")
+        lines.push(":- dynamic property/2.")
+        lines.push(":- dynamic property_getter/4.")
+        lines.push(":- dynamic property_setter/3.")
+        lines.push(":- dynamic collection_getter/4.")
+        lines.push(":- dynamic collection_setter/3.")
+
+        lines.push(":- discontiguous subject_class/2.")
+        lines.push(":- discontiguous constructor/2.")
+        lines.push(":- discontiguous instance/2.")
+        lines.push(":- discontiguous property/2.")
+        lines.push(":- discontiguous property_getter/4.")
+        lines.push(":- discontiguous property_setter/3.")
+        lines.push(":- discontiguous collection_getter/4.")
+        lines.push(":- discontiguous collection_setter/3.")
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
