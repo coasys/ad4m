@@ -67,7 +67,7 @@ export default function Start({
             </div>`
         : html`<div class="text-center">
             <a class="button" target="_blank" @click=${() => connectToPort()}>
-              Reconnect
+              Connect
             </a>
             <p>
               Please click reconnect once you have downloaded and setup your

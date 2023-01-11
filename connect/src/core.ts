@@ -68,6 +68,7 @@ class Client {
   capabilities: { [x: string]: any }[];
   stateListeners: Function[];
   configListeners: Function[];
+  hasUserInteracted: boolean;
 
   // @fayeed - params
   constructor({
@@ -89,6 +90,7 @@ class Client {
     this.token = token || this.token;
     this.stateListeners = [];
     this.configListeners = [];
+    this.hasUserInteracted = false;
 
     this.buildClient();
 
@@ -144,6 +146,10 @@ class Client {
   }
 
   async connect(url?: string) {
+    console.log("Calling connect");
+
+    this.hasUserInteracted = true;
+
     if (url) {
       this.setUrl(url);
     }
@@ -198,6 +204,8 @@ class Client {
       // show no open port error & ask to retry
       this.setPortSearchState("not_found");
       this.notifyStateChange("not_connected");
+    } else if (message === "The user aborted a request.") {
+      this.notifyStateChange("connection-error");
     } else {
       this.notifyStateChange("not_connected");
     }
@@ -243,9 +251,6 @@ class Client {
             if (this.isFullyInitialized) {
               this.notifyStateChange("disconnected");
             }
-          },
-          error: (error) => {
-            this.notifyStateChange("connection-error");
           },
         },
       })
