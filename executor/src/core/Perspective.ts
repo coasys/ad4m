@@ -232,7 +232,7 @@ export default class Perspective {
         })
     }
 
-    private getCurrentRevision(): Promise<String | null> {
+    private getCurrentRevision(): Promise<string | null> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             return Promise.resolve(null)
         }
@@ -243,7 +243,13 @@ export default class Perspective {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
-                    const result = await linksAdapter.currentRevision();
+                    let result: string|null = await linksAdapter.currentRevision();
+                    if(typeof(result) == 'string') {
+                        result = result.trim()
+                        if(result.length == 0) {
+                            result = null
+                        }
+                    }
                     resolve(result)
                 } else {
                     console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
@@ -268,8 +274,8 @@ export default class Perspective {
             canCommit = true;
         } else {
             //We did not create the neighbourhood, so we should check if we already have some data sync'd before making a commit
-            const currentRevision = this.getCurrentRevision();
-            if (currentRevision != null) {
+            const currentRevision: string|null = await this.getCurrentRevision();
+            if (typeof(currentRevision) == 'string' && currentRevision!.trim().length > 0) {
                 canCommit = true;
             }
         }
