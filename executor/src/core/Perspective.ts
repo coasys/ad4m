@@ -121,7 +121,7 @@ export default class Perspective {
                             // ...publish them...
                             await this.callLinksAdapter('commit', batchedMutations);
                             // ...and clear the temporary storage
-                            this.#db.clearPendingDiffs()
+                            this.#db.clearPendingDiffs(this.uuid)
                         }
                         
                         //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
