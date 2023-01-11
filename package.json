@@ -1,6 +1,6 @@
 {
   "name": "ad4m-monorepo",
-  "version": "0.2.0",
+  "version": "0.2.9",
   "workspaces": [
     "core",
     "docs",
@@ -18,7 +18,6 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "test:windows": "turbo run test:windows",
-
     "package-macos": "turbo run package-macos",
     "package-windows": "turbo run package-windows",
     "package-linux": "turbo run package-linux",
@@ -26,11 +25,9 @@
     "build-windows": "turbo run build-windows",
     "build-linux": "turbo run build-linux",
     "release": "changeset publish",
-
     "build-all-macos": "turbo run build-all-macos",
     "build-all-linux": "turbo run build-all-linux",
     "build-all-windows": "turbo run build-all-windows",
-
     "docs": "jsdoc -c jsdoc.json",
     "docs:api:jsdoc2md": "jsdoc2md --configure jsdoc.json --partial docs/header.hbs --global-index-format none --files src/**/* > docs-src/api.md",
     "docs:api:tsconcat": "concat-md --decrease-title-levels --dir-name-as-title docs-src/typedoc > docs-src/api.md",
