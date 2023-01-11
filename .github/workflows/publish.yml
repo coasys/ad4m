@@ -18,6 +18,7 @@ jobs:
         with:
           node-version: 16
       - name: Create Tags From
+        id: create_tag
         uses: jaywcjlove/create-tag-action@v1.3.14
       - name: create release
         id: create-release
