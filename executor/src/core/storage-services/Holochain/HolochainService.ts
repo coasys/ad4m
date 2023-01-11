@@ -413,12 +413,13 @@ export default class HolochainService {
             })
             const result = await this.#appWebsocket!.callZome(signedZomeCall)
             if (typeof result === "string") {
-                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result:", result.substring(50), "... \x1b[0m")
+                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
             } else if (typeof result === "object") {
                 let resultString = JSON.stringify(result);
-                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result:", resultString.substring(50), "... \x1b[0m")
+                let endingLog = resultString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
+                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (object):", resultString.substring(0, 50), endingLog)
             } else {
-                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result:", result, "\x1b[0m")
+                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (other):", result, "\x1b[0m")
             }
             return result
         } catch(e) {

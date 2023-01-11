@@ -97,29 +97,8 @@ export default class Perspective {
         return setInterval(
             async () => {
                 try {
-                    const currentRevision = await this.getCurrentRevision();
-
-                    //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                    if (this.isFastPolling && currentRevision) {
-                        this.isFastPolling = false;
-                        clearInterval(this.#pollingInterval);
-                        this.#pollingInterval = this.setupPolling(30000);
-
-                        //Lets also publish the links we have commited but not pushed since we were not connected
-                        const mutations = this.#db.getPendingDiffs(this.uuid);
-                        const batchedMutations = {
-                            additions: [],
-                            removals: []
-                        } as PerspectiveDiff
-                        for (const addition of mutations.additions) {
-                            batchedMutations.additions.push(addition);
-                        }
-                        for (const removal of mutations.removals) {
-                            batchedMutations.removals.push(removal);
-                        }
-                        await this.callLinksAdapter('commit', batchedMutations);
-                    }
-
+                    // We should pull first, so that the committing of pending diffs happens on the
+                    // normative top of the shared history
                     let links = await this.callLinksAdapter("pull");
                     if (links.additions && links.removals) {
                         if (links.additions.length > 0 || links.removals.length > 0) {
@@ -130,6 +109,41 @@ export default class Perspective {
                             }
                         }
                     }
+
+                    // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
+                    const currentRevision = await this.getCurrentRevision();
+                    if (currentRevision) {
+                        //Let's check if we have unpublished diffs:
+                        const mutations = this.#db.getPendingDiffs(this.uuid);
+                        if(mutations && mutations.length > 0) {
+                            // If we do, collect them...
+                            const batchedMutations = {
+                                additions: [],
+                                removals: []
+                            } as PerspectiveDiff
+                            for(const mutation of mutations) {
+                                for (const addition of mutation.additions) {
+                                    batchedMutations.additions.push(addition);
+                                }
+                                for (const removal of mutation.removals) {
+                                    batchedMutations.removals.push(removal);
+                                }
+                            }
+                           
+                            // ...publish them...
+                            await this.callLinksAdapter('commit', batchedMutations);
+                            // ...and clear the temporary storage
+                            this.#db.clearPendingDiffs(this.uuid)
+                        }
+                        
+                        //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
+                        if(this.isFastPolling) {
+                            this.isFastPolling = false;
+                            clearInterval(this.#pollingInterval);
+                            this.#pollingInterval = this.setupPolling(30000);
+                        }
+                    }
+
                 } catch (e) {
                     console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
                 }
@@ -232,7 +246,7 @@ export default class Perspective {
         })
     }
 
-    private getCurrentRevision(): Promise<String | null> {
+    private getCurrentRevision(): Promise<string | null> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             return Promise.resolve(null)
         }
@@ -243,8 +257,25 @@ export default class Perspective {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
-                    const result = await linksAdapter.currentRevision();
-                    resolve(result)
+                    let currentRevisionString = await linksAdapter.currentRevision();
+
+                    if(!currentRevisionString) {
+                        resolve(null)
+                        return
+                    }
+
+                    if(typeof(currentRevisionString) != 'string') {
+                        //@ts-ignore
+                        currentRevisionString = currentRevisionString.toString()
+                    }
+
+                    currentRevisionString = currentRevisionString.trim()
+                    if(currentRevisionString.length == 0) {
+                        resolve(null)
+                    } else {
+                        resolve(currentRevisionString)
+                    }
+
                 } else {
                     console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
@@ -268,8 +299,7 @@ export default class Perspective {
             canCommit = true;
         } else {
             //We did not create the neighbourhood, so we should check if we already have some data sync'd before making a commit
-            const currentRevision = this.getCurrentRevision();
-            if (currentRevision != null) {
+            if (await this.getCurrentRevision()) {
                 canCommit = true;
             }
         }

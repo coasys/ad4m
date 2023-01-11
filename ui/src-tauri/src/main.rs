@@ -39,7 +39,7 @@ use crate::commands::app::{close_application, close_main_window, clear_state};
 use crate::config::data_path;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
-use crate::util::has_process_running;
+use crate::util::has_processes_running;
 use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
 
 // the payload type must implement `Serialize` and `Clone`.
@@ -61,7 +61,7 @@ pub struct AppState {
 }
 
 fn main() {
-    if has_process_running("AD4M") {
+    if has_processes_running("AD4M") > 1 {
         println!("AD4M is already running");
         return;
     }
