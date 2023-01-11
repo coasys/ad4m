@@ -259,19 +259,12 @@ describe('Ad4mClient', () => {
         })
 
         it('agentRevokeToken() smoke tests', async () => {
-            const oldApps = await ad4mClient.agent.getApps()
-            expect(oldApps.length).toBe(1)
-            expect(oldApps[0].revoked).toBe(false)
-
-            const newApps = await ad4mClient.agent.revokeAppToken('test-request-id')
+            const newApps = await ad4mClient.agent.revokeToken('test-request-id')
             expect(newApps.length).toBe(1)
             expect(newApps[0].revoked).toBe(true)
         })
 
-        it('agentRevokeToken() smoke tests', async () => {
-            const oldApps = await ad4mClient.agent.getApps()
-            expect(oldApps.length).toBe(1)
-
+        it('agentRemoveToken() smoke tests', async () => {
             const newApps = await ad4mClient.agent.removeApp('test-request-id')
             expect(newApps.length).toBe(0)
         })

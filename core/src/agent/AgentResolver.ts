@@ -146,8 +146,31 @@ export default class AgentResolver {
     }
 
     @Mutation(returns => [Apps])
-    agentRevokeToken(@Arg('requestId') requestId: string): [] {
-        return []
+    agentRevokeToken(@Arg('requestId') requestId: string): any[] {
+        return [{
+            revoked: true,
+            requestId: 'test-request-id',
+            auth: {
+                appName: "test-app",
+                appDesc: "-",
+                appUrl: "-",
+                capabilities: [
+                  {
+                    with: {
+                      domain: "*",
+                      pointers: [
+                        "*"
+                      ]
+                    },
+                    can: [
+                      "*"
+                    ]
+                  }
+                ]
+              },
+              token: "test-token",
+              
+        }]
     }
 
     @Mutation(returns => AgentSignature)
