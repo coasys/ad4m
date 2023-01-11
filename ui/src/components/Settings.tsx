@@ -7,7 +7,7 @@ import {
 } from "../constants/triples";
 import { cardStyle, MainContainer } from "./styles";
 import { Ad4minContext } from "../context/Ad4minContext";
-import { buildAd4mClient } from "../util";
+import { buildAd4mClient, copyTextToClipboard } from "../util";
 import { useCallback } from "react";
 import { showNotification } from "@mantine/notifications";
 import { invoke } from "@tauri-apps/api";
@@ -158,7 +158,7 @@ const Profile = (props: Props) => {
   };
 
   const copyProxy = () => {
-    navigator.clipboard.writeText(proxy);
+    copyTextToClipboard(proxy);
     showNotification({
       message: "Proxy endpoint copied to clipboard",
       autoClose: 1000,
@@ -179,7 +179,7 @@ const Profile = (props: Props) => {
   };
 
   const copyUrl = () => {
-    navigator.clipboard.writeText(url);
+    copyTextToClipboard(url);
     showNotification({
       message: "URL copied to clipboard",
       autoClose: 1000,
