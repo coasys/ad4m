@@ -33,16 +33,10 @@ pub fn find_and_kill_processes(name: &str) {
     }
 }
 
-pub fn has_process_running(name: &str) -> bool {
+pub fn has_processes_running(name: &str) -> usize {
     let processes = System::new_all();
     let processes_by_name: Vec<&Process> = processes.processes_by_exact_name(name).collect();
-    let mut running = false;
-
-    for process in processes_by_name {
-        log::info!("Prosses running: {} {}", process.pid(), process.name());
-        running = true;
-    }
-    running
+    processes_by_name.len()
 }
 
 pub fn create_main_window(app: &AppHandle<Wry>) {
