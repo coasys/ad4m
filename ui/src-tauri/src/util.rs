@@ -4,6 +4,7 @@ use crate::menu::open_logs_folder;
 use std::fs::remove_file;
 use std::fs::File;
 use std::io::prelude::*;
+use sysinfo::Process;
 use sysinfo::{ProcessExt, Signal, System, SystemExt};
 use tauri::{AppHandle, Manager, WindowBuilder, WindowEvent, WindowUrl, Wry};
 
@@ -32,6 +33,12 @@ pub fn find_and_kill_processes(name: &str) {
     }
 }
 
+pub fn has_processes_running(name: &str) -> usize {
+    let processes = System::new_all();
+    let processes_by_name: Vec<&Process> = processes.processes_by_exact_name(name).collect();
+    processes_by_name.len()
+}
+
 pub fn create_main_window(app: &AppHandle<Wry>) {
     let url = app_url();
 
@@ -49,7 +56,11 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
     //let _ = tray_window.move_window(Position::TrayCenter);
 
     let _id = tray_window.listen("copyLogs", |event| {
-        log::info!("got window event-name with payload {:?} {:?}", event, event.payload());
+        log::info!(
+            "got window event-name with payload {:?} {:?}",
+            event,
+            event.payload()
+        );
 
         open_logs_folder();
     });
@@ -64,7 +75,6 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
             }
         }
     });
-
 }
 
 pub fn save_executor_port(port: u16) {

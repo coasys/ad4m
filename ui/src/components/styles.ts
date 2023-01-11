@@ -46,16 +46,6 @@ export const listStyle = {
   marginTop: 10,
 };
 
-export const gridButton = {
-  display: "grid",
-  columnGap: "calc(100% - 305px)",
-  rowGap: "30px",
-  gridTemplateColumns: "repeat(3, 79px)",
-  justifyContent: "center",
-  alignItems: "center",
-  padding: "30px 20px 0 20px",
-};
-
 export const badge = {
   width: "fit-content",
   padding: "4px 12px",

@@ -69,6 +69,7 @@ export function instanceQuery(options?: InstanceQueryParams) {
     };
 }
 
+
 interface PropertyOptions {
     through: string;
     initial?: string,
@@ -85,7 +86,15 @@ export function subjectProperty(opts: PropertyOptions) {
     };
 }
 
-export function subjectCollection(opts: PropertyOptions) {
+interface WhereOptions {
+    isInstance: any
+}
+interface CollectionOptions {
+    through: string,
+    where?: WhereOptions,
+}
+
+export function subjectCollection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
@@ -182,10 +191,24 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
         for(let collection in collections) {
             let collectionCode = `collection(c, "${collection}").\n`
 
-            let { through } = collections[collection]
+            let { through, where } = collections[collection]
 
             if(through) {
-                collectionCode += `collection_getter(c, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
+                if(where) {
+                    if(!where.isInstance) {
+                        throw "'where' currently only supports 'isInstance'"
+                    }
+                    let otherClass
+                    if(where.isInstance.name) {
+                        otherClass = where.isInstance.name
+                    } else {
+                        otherClass = where.isInstance
+                    }
+                    collectionCode += `collection_getter(c, Base, "${collection}", List) :- setof(C, (triple(Base, "${through}", C), instance(OtherClass, C), subject_class("${otherClass}", OtherClass)), List).\n`    
+                } else {
+                    collectionCode += `collection_getter(c, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
+                }
+                
                 let adder = obj[collectionToAdderName(collection)]
                 if(typeof adder === "function") {
                     let action = [{

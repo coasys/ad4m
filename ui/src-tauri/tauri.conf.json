@@ -1,7 +1,7 @@
 {
   "package": {
     "productName": "AD4M",
-    "version": "0.2.8"
+    "version": "0.2.9"
   },
   "build": {
     "distDir": "../dist",
@@ -17,7 +17,12 @@
     },
     "bundle": {
       "active": true,
-      "targets": "all",
+      "targets": [
+        "deb",
+        "msi",
+        "dmg",
+        "updater"
+      ],
       "identifier": "dev.ad4m.ad4min",
       "icon": [
         "icons/32x32.png",

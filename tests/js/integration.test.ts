@@ -297,6 +297,25 @@ describe("Integration", () => {
         })
 
         describe("SDNA creation decorators", () => {
+            class Message {
+                //@ts-ignore
+                @subjectProperty({
+                    through: "todo://state", 
+                    initial:"todo://ready",
+                    required: true,
+                    resolve: true,
+                })
+                body: string = ""
+
+                @subjectPropertySetter({
+                    resolveLanguage: 'literal'
+                })
+                setBody(title: string) {}
+
+                @sdnaOutput
+                static generateSDNA(): string { return "" }
+            }
+
             // This class matches the SDNA in ./subject.pl
             // and this test proves the decorators create the exact same SDNA code
             class Todo {
@@ -356,9 +375,21 @@ describe("Integration", () => {
                 setTitle(title: string) {}
 
                 //@ts-ignore
-                @subjectCollection({through: "todo://comment"})
+                @subjectCollection({ through: "todo://comment" })
                 comments: string[] = []
                 addComment(comment: string) {}
+
+                //@ts-ignore
+                @subjectCollection({ through: "flux://entry_type" })
+                entries: string[] = []
+                addEntry(entry: string) {}
+
+                //@ts-ignore
+                @subjectCollection({
+                    through: "flux://entry_type",
+                    where: { isInstance: Message }
+                })
+                messages: string[] = []
 
                 @sdnaOutput
                 static generateSDNA(): string { return "" }
@@ -448,7 +479,28 @@ describe("Integration", () => {
                 await perspective!.ensureSDNASubjectClass(Test)
 
                 expect(await perspective!.getSdna()).to.have.lengthOf(2)
-                console.log((await perspective!.getSdna())[1])
+                //console.log((await perspective!.getSdna())[1])
+            })
+
+            it("can constrain collection entries through 'where' clause", async () => {
+                perspective!.addSdna(Message.generateSDNA())
+                let root = Literal.from("Collection where test").toUrl()
+                let todo = await perspective!.createSubject(new Todo(), root)
+
+                let messageEntry = Literal.from("test message").toUrl()
+
+                await todo.addEntry(messageEntry)
+
+                let entries = await todo.entries
+                expect(entries.length).to.equal(1)
+
+                let messageEntries = await todo.messages
+                expect(messageEntries.length).to.equal(0)
+
+                await perspective!.createSubject(new Message(), messageEntry)
+
+                messageEntries = await todo.messages
+                expect(messageEntries.length).to.equal(1)
             })
         })
     })

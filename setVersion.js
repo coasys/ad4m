@@ -13,6 +13,11 @@ function replaceVersionLine(content, version, prefix = 'version = ', suffix = ''
 const VERSION = process.argv[2]
 console.log("Setting all sub-project versions to: " + VERSION)
 
+const rootRepo = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+console.log("Root repo version: " + rootRepo.version + " -> " + VERSION)
+rootRepo.version = VERSION
+fs.writeFileSync('package.json', JSON.stringify(rootRepo, null, 2) + '\n')
+
 const cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), VERSION)
 console.log("CLI version: " + cli.oldVersion + " -> " + VERSION)
 fs.writeFileSync('cli/Cargo.toml', cli.newContent)
