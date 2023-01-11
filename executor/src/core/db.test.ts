@@ -2,6 +2,7 @@ import { PerspectivismDb } from './db'
 import Memory from 'lowdb/adapters/Memory'
 import { v4 as uuidv4 } from 'uuid';
 import { expect } from "chai";
+import { LinkExpression, PerspectiveDiff } from '@perspect3vism/ad4m';
 
 describe('PerspectivismDb', () => {
     let db: PerspectivismDb | undefined
@@ -162,5 +163,12 @@ describe('PerspectivismDb', () => {
         const result2 = db!.getLinksByTarget(pUUID!, '1')
 
         expect(result2).to.be.deep.equal([])
+    })
+
+    it('can get & remove pendingDiffs()', () => {
+        db?.addPendingDiff(pUUID!, {additions: [], removals: []} as PerspectiveDiff);
+        const get = db?.getPendingDiffs(pUUID!);
+        expect(get?.length).to.be.equal(1);
+        expect(get).to.be.deep.equal([{additions: [], removals: []} as PerspectiveDiff]);
     })
 })
