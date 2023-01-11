@@ -170,5 +170,8 @@ describe('PerspectivismDb', () => {
         const get = db?.getPendingDiffs(pUUID!);
         expect(get?.length).to.be.equal(1);
         expect(get).to.be.deep.equal([{additions: [], removals: []} as PerspectiveDiff]);
+        db!.clearPendingDiffs(pUUID!)
+        const get2 = db?.getPendingDiffs(pUUID!);
+        expect(get2?.length).to.be.equal(0);
     })
 })
