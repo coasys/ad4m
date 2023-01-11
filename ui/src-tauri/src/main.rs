@@ -70,8 +70,9 @@ fn main() {
         let _ = remove_dir_all(data_path());
     }
 
-    if data_path().join("ad4m").join("ipfs").join("repo.lock").exists() {
-        let _ = remove_dir_all(data_path().join("ad4m").join("ipfs").join("repo.lock"));
+    while data_path().join("ad4m").join("ipfs").join("repo.lock").exists() {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        println!("IPFS repo.lock exists, waiting...");
     }
     
     if let Err(err) = setup_logs() {
