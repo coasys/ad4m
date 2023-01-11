@@ -19,14 +19,17 @@ jobs:
           node-version: 16
       - name: Create Tags From
         uses: jaywcjlove/create-tag-action@v1.3.14
+      - name: 'Get Previous tag'
+        id: previoustag
+        uses: "WyriHaximus/github-action-get-previous-tag@v1"
       - name: create release
         id: create-release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: AD4M Launcher ${{ github.ref_name }}
+          tag_name: ${{ steps.previoustag.outputs.tag }}
+          release_name: AD4M Launcher ${{ steps.previoustag.outputs.tag }}
           body: See the assets to download this version and install.
           draft: true
           prerelease: false
@@ -153,6 +156,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
   
   crates-publish:
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
