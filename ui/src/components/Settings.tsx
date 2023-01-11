@@ -5,7 +5,7 @@ import {
   PREDICATE_LASTNAME,
   PREDICATE_USERNAME,
 } from "../constants/triples";
-import { cardStyle, gridButton, MainContainer } from "./styles";
+import { cardStyle, MainContainer } from "./styles";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { buildAd4mClient } from "../util";
 import { useCallback } from "react";
@@ -248,7 +248,7 @@ const Profile = (props: Props) => {
           Expert mode
         </j-toggle>
       </div>
-      <div style={{ ...gridButton, paddingTop: 20 }}>
+      <div class="grid" style={{ paddingTop: 20 }}>
         {showProxy()}
         <ActionButton
           title="Trusted agents"
