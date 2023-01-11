@@ -199,11 +199,11 @@ class Client {
       this.notifyStateChange("invalid_token");
     } else if (message.includes("Failed to fetch")) {
       // wrong agent error
-      this.notifyStateChange("not_connected");
+      this.notifyStateChange("connection-error");
     } else if (message === "Couldn't find an open port") {
       // show no open port error & ask to retry
       this.setPortSearchState("not_found");
-      this.notifyStateChange("not_connected");
+      this.notifyStateChange("connection-error");
     } else if (message === "The user aborted a request.") {
       this.notifyStateChange("connection-error");
     } else {
