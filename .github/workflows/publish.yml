@@ -39,8 +39,9 @@ jobs:
         platform: [ubuntu-latest, macos-latest, windows-latest]
         node-version: [16.x]
 
-    needs: create-release
-    needs: npm-publish
+    needs: 
+      - create-release
+      - npm-publish
 
     runs-on: ${{ matrix.platform }}
 
