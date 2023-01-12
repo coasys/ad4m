@@ -39,7 +39,9 @@ jobs:
         platform: [ubuntu-latest, macos-latest, windows-latest]
         node-version: [16.x]
 
-    needs: create-release
+    needs: 
+      - create-release
+      - npm-publish
 
     runs-on: ${{ matrix.platform }}
 
@@ -146,7 +148,7 @@ jobs:
       - name: Install deps
         run: yarn install
       - name: Build modules
-        run: yarn run build
+        run: yarn run build-libs
       - name: Publish modules to NPM
         run: yarn release
         env:
