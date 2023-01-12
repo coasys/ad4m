@@ -18,8 +18,6 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Security
 
----
-
 ## [0.2.9] - 11/01/2023
 
 ### Added
@@ -46,5 +44,3 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Fix pending commit handling when joining a neighbourhood. This code ensures that a user will not submit commits to a link language until they have received some data in the case where they join a neighbourhood: [#193](https://github.com/perspect3vism/ad4m/pull/193) & [#177](https://github.com/perspect3vism/ad4m/pull/177)
 
 ### Security
-
----

@@ -17,7 +17,20 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 16
-      - name: Create Tags From
+      - name: get version
+        run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
+      - name: Extract release notes
+        id: extract-release-notes
+        uses: ffurrer2/extract-release-notes@v1
+        with:
+          prerelease: true
+      - name: Update changelog (to change unreleased to version number)
+        uses: thomaseizinger/keep-a-changelog-new-release@v1
+        with:
+          tag: $PACKAGE_VERSION
+      - name: Commit the new changelog
+        run: git add CHANGELOG.md && git commit -m "add release to changelog" && git push
+      - name: Create Release Tag
         id: create_tag
         uses: jaywcjlove/create-tag-action@v1.3.14
       - name: create release
@@ -28,9 +41,9 @@ jobs:
         with:
           tag_name: ${{ steps.create_tag.outputs.version }}
           release_name: AD4M Launcher ${{ steps.create_tag.outputs.version }}
-          body: See the assets to download this version and install.
-          draft: true
+          draft: false
           prerelease: false
+          body: ${{ steps.extract-release-notes.outputs.release_notes }}
 
   build-launcher-binary:
     strategy:
