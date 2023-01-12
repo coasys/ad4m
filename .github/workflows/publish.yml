@@ -146,7 +146,7 @@ jobs:
       - name: Install deps
         run: yarn install
       - name: Build modules
-        run: yarn run build
+        run: yarn run build-libs
       - name: Publish modules to NPM
         run: yarn release
         env:
