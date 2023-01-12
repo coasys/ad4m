@@ -149,18 +149,18 @@ jobs:
         run: yarn install
       - name: Build modules
         run: yarn run build-libs
-      - name: Publish core
-        run: cd core && npm publish --access public && cd ..
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish connect
-        run: cd connect && npm publish --access public && cd ..
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish executor
-        run: cd executor && npm publish --access public && cd ..
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: core/package.json
+      - uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: connect/package.json
+      - uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: executor/package.json
       
   
   crates-publish:
