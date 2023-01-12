@@ -152,15 +152,15 @@ jobs:
       - name: Publish core
         run: cd core && npm publish --access public && cd ..
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish connect
         run: cd connect && npm publish --access public && cd ..
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish executor
         run: cd executor && npm publish --access public && cd ..
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       
   
   crates-publish:
