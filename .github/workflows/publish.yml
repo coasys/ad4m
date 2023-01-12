@@ -149,11 +149,22 @@ jobs:
         run: yarn install
       - name: Build modules
         run: yarn run build-libs
-      - name: Publish modules to NPM
-        run: yarn release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish core
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: core/package.json
+      - name: Publish connect
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: connect/package.json
+      - name: Publish executor
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: executor/package.json
+      
   
   crates-publish:
     runs-on: ubuntu-20.04
