@@ -22,20 +22,15 @@ import path from 'path';
 
 function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     const pubsub = PubSub.get()
-    const rootConfigPath = path.join(config.appDataPath, 'ad4m');
     return {
         Query: {
             //@ts-ignore
             agent: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 return core.agentService.agent
             },
             //@ts-ignore
             agentByDID: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 const { did } = args;
                 if (did != core.agentService.did) {
@@ -55,8 +50,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentStatus: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 return core.agentService.dump()
             },
@@ -66,8 +59,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentGetApps: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 let apps = await core.agentService.getApps()
                 return apps;
@@ -75,8 +66,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             expression: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const url = args.url.toString();
                 const ref = parseExprUrl(url)
@@ -90,8 +79,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             expressionMany: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const { urls } = args;
                 const expressionPromises = [];
@@ -111,8 +98,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             expressionRaw: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
@@ -120,8 +105,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             expressionInteractions: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const { url } = args
                 const result = await core.languageController.expressionInteractions(url)
@@ -129,8 +112,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             language: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const lang = await core.languageController.languageByRef({address, name: ""} as LanguageRef) as any
@@ -139,8 +120,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             languageMeta: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const languageExpression = await core.languageController.getLanguageExpression(address)
@@ -163,8 +142,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
             //@ts-ignore
             languageSource: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const languageSource = await core.languageController.getLanguageSource(address)
@@ -176,8 +153,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
             //@ts-ignore
             languages: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 let filter
                 if(args.filter && args.filter !== '') filter = args.filter
@@ -186,16 +161,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspective: (parent, args, context, info) => {
                 const id = args.uuid
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
                 return core.perspectivesController.perspectiveID(id)
             },
             //@ts-ignore
             perspectiveQueryLinks: async (parent, args, context, info) => {
                 const { uuid, query } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 //console.log("querying on", perspective, query, uuid);
@@ -204,8 +175,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveQueryProlog: async (parent, args, context, info) => {
                 const { uuid, query } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return JSON.stringify(await perspective.prologQuery(query))
@@ -213,54 +182,40 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveSnapshot: async (parent, args, context, info) => {
                 const id = args.uuid
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
                 return await core.perspectivesController.perspectiveSnapshot(id)
             },
             //@ts-ignore
             perspectives: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability(["*"]))
                 return core.perspectivesController.allPerspectiveHandles()
             },
             //@ts-ignore
             getTrustedAgents: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
                 return core.runtimeService.getTrustedAgents();
             },
 
             //@ts-ignore
             runtimeKnownLinkLanguageTemplates: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
 
             //@ts-ignore
             runtimeFriends: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_READ_CAPABILITY)
                 return core.runtimeService.friends();
             },
 
             //@ts-ignore
             runtimeHcAgentInfos: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
                 return JSON.stringify(await core.holochainRequestAgentInfos())
             },
 
             //@ts-ignore
             runtimeFriendStatus: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
                 const { did } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
@@ -273,8 +228,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
             //@ts-ignore
             runtimeMessageInbox: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 const dmLang = await core.myDirectMessageLanguage()
@@ -282,8 +235,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             runtimeMessageOutbox: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 return core.runtimeService.getMessagesOutbox(filter)
@@ -302,8 +253,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
         Mutation: {
             //@ts-ignore
             agentRemoveApp: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId } = args;
                 await core.agentService.removeApp(requestId)
@@ -312,8 +261,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentRevokeToken: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId } = args;
                 await core.agentService.revokeAppToken(requestId)
@@ -321,8 +268,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             addTrustedAgents: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
                 const { agents } = args;
                 core.runtimeService.addTrustedAgents(agents);
@@ -330,8 +275,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             deleteTrustedAgents: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
                 const { agents } = args;
                 core.runtimeService.deleteTrustedAgents(agents);
@@ -339,8 +282,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             runtimeAddKnownLinkLanguageTemplates: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY)
                 const { addresses } = args;
                 core.runtimeService.addKnowLinkLanguageTemplates(addresses);
@@ -348,8 +289,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             runtimeRemoveKnownLinkLanguageTemplates: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY)
                 const { addresses } = args;
                 core.runtimeService.removeKnownLinkLanguageTemplates(addresses);
@@ -357,8 +296,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             runtimeAddFriends: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_CREATE_CAPABILITY)
                 const { dids } = args;
                 core.runtimeService.addFriends(dids);
@@ -368,8 +305,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             runtimeRemoveFriends: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_DELETE_CAPABILITY)
                 const { dids } = args;
                 core.runtimeService.removeFriends(dids);
@@ -377,8 +312,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentGenerate: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
@@ -408,8 +341,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentImport: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
                 const { did, didDocument, keystore, passphrase } = args;
                 await core.agentService.initialize(did, didDocument, keystore, passphrase)
@@ -417,16 +348,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentLock: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_LOCK_CAPABILITY)
                 core.agentService.lock(args.passphrase)
                 return core.agentService.dump()
             },
             //@ts-ignore
             agentUnlock: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_UNLOCK_CAPABILITY)
                 let failed = false
                 try {
@@ -468,8 +395,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentUpdateDirectMessageLanguage: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_UPDATE_CAPABILITY)
                 const { directMessageLanguage } = args;
                 let currentAgent = core.agentService.agent;
@@ -482,8 +407,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentUpdatePublicPerspective: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_UPDATE_CAPABILITY)
                 const {perspective} = args;
                 let currentAgent = core.agentService.agent;
@@ -496,8 +419,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentRequestCapability: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { appName, appDesc, appUrl, capabilities } = args;
                 let token = core.agentService.requestCapability(appName, appDesc, appUrl, capabilities);
@@ -505,16 +426,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentPermitCapability: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_PERMIT_CAPABILITY)
                 const { auth } = args;
                 return core.agentService.permitCapability(auth, context.capabilities);
             },
             //@ts-ignore
             agentGenerateJwt: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId, rand } = args;
                 let jwt = await core.agentService.generateJwt(requestId, rand)
@@ -522,8 +439,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentSignMessage: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.AGENT_SIGN_CAPABILITY)
                 const { message } = args;
                 let sig = await core.agentService.signMessage(message)
@@ -531,8 +446,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             expressionCreate: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.EXPRESSION_CREATE_CAPABILITY)
                 const { languageAddress, content } = args
                 const langref = { address: languageAddress } as LanguageRef
@@ -541,8 +454,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             expressionInteract: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.EXPRESSION_UPDATE_CAPABILITY)
                 let { url, interactionCall } = args
                 interactionCall = new InteractionCall(interactionCall.name, JSON.parse(interactionCall.parametersStringified))
@@ -551,16 +462,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             languageApplyTemplateAndPublish: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.LANGUAGE_CREATE_CAPABILITY)
                 const { sourceLanguageHash, templateData } = args;
                 return await core.languageApplyTemplateAndPublish(sourceLanguageHash, JSON.parse(templateData));
             },
             //@ts-ignore
             languagePublish: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.LANGUAGE_CREATE_CAPABILITY)
                 const { languagePath, languageMeta } = args;
                 const expression = await core.languagePublish(languagePath, languageMeta);
@@ -579,8 +486,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             languageRemove: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.LANGUAGE_DELETE_CAPABILITY)
                 const { address } = args
                 try {
@@ -593,8 +498,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             languageWriteSettings: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.LANGUAGE_UPDATE_CAPABILITY)
                 const { languageAddress, settings } = args
                 await core.languageController.putSettings(languageAddress, JSON.parse(settings))
@@ -602,8 +505,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
                 const { url } = args;
                 try{
@@ -616,8 +517,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_CREATE_CAPABILITY)
                 const { linkLanguage, meta, perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -634,8 +533,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveAdd: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.PERSPECTIVE_CREATE_CAPABILITY)
                 const { name } = args;
                 return core.perspectivesController.add(name)
@@ -643,8 +540,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveAddLink: async (parent, args, context, info) => {
                 const { uuid, link } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addLink(link)
@@ -652,8 +547,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveAddLinks: async (parent, args, context, info) => {
                 const { uuid, links } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addLinks(links)
@@ -661,8 +554,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveAddLinkExpression: async (parent, args, context, info) => {
                 const { uuid, link } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addLink(link)
@@ -670,8 +561,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveRemove: (parent, args, context, info) => {
                 const { uuid } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveDeleteCapability([uuid]))
                 core.perspectivesController.remove(uuid)
                 return true
@@ -680,8 +569,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             perspectiveRemoveLink: async (parent, args, context, info) => {
                 // console.log("GQL| removeLink:", args)
                 const { uuid, link } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 await perspective.removeLink(link)
@@ -690,8 +577,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveRemoveLinks: async (parent, args, context, info) => {
                 const { uuid, links } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.removeLinks(links)
@@ -699,8 +584,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveLinkMutations: async (parent, args, context, info) => {
                 const { uuid, mutations } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.linkMutations(mutations)
@@ -708,16 +591,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             perspectiveUpdate: (parent, args, context, info) => {
                 const { uuid, name } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 return core.perspectivesController.update(uuid, name);
             },
             //@ts-ignore
             perspectiveUpdateLink: async (parent, args, context, info) => {
                 const { uuid, oldLink, newLink } = args
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.updateLink(oldLink, newLink)
@@ -731,16 +610,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             runtimeQuit: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_QUIT_CAPABILITY)
                 process.exit(0)
                 return true
             },
             //@ts-ignore
             runtimeHcAddAgentInfos: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
                 const { agentInfos } = args
                 //@ts-ignore
@@ -761,8 +636,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
             //@ts-ignore
             runtimeSetStatus: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_MY_STATUS_UPDATE_CAPABILITY)
                 const { status } = args
                 const dmLang = await core.myDirectMessageLanguage()
@@ -772,8 +645,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
             //@ts-ignore
             runtimeFriendSendMessage: async (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
                 checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_CREATE_CAPABILITY)
                 const { did, message } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
@@ -807,9 +678,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             agentUpdated: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                    checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
-
                     checkCapability(context.capabilities, Auth.AGENT_SUBSCRIBE_CAPABILITY)
                     return pubsub.asyncIterator(PubSub.AGENT_UPDATED)
                 },
@@ -827,9 +695,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             runtimeMessageReceived: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                    checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
-
                     checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY)
                     return pubsub.asyncIterator(PubSub.DIRECT_MESSAGE_RECEIVED)
                 },
@@ -839,9 +704,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             perspectiveAdded: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                    checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
-
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return pubsub.asyncIterator(PubSub.PERSPECTIVE_ADDED_TOPIC)
                 },
@@ -851,9 +713,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             perspectiveLinkAdded: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                    checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
-
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return withFilter(
                         () => pubsub.asyncIterator(PubSub.LINK_ADDED_TOPIC),
@@ -866,9 +725,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             perspectiveLinkRemoved: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                    checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
-
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return withFilter(
                         () => pubsub.asyncIterator(PubSub.LINK_REMOVED_TOPIC),
@@ -881,9 +737,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             perspectiveUpdated: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                    checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
-
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return pubsub.asyncIterator(PubSub.PERSPECTIVE_UPDATED_TOPIC)
                 },
@@ -893,9 +746,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             perspectiveRemoved: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                    checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
-
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC)
                 },
@@ -905,9 +755,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             exceptionOccurred: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
-                const isAd4minCredential =  core.agentService.isAd4minCredential(context.authToken)
-                    checkTokenAuthorized(rootConfigPath, context.authToken, isAd4minCredential)
-
                     checkCapability(context.capabilities, Auth.RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY)
                     return pubsub.asyncIterator(PubSub.EXCEPTION_OCCURRED_TOPIC)
                 },
@@ -1051,6 +898,7 @@ export async function startServer(params: StartServerParams) {
     const resolvers = createResolvers(core, params.config)
     const typeDefs = gql(typeDefsString)
     const schema = makeExecutableSchema({ typeDefs, resolvers });
+    const rootConfigPath = path.join(params.config.appDataPath, 'ad4m');
     
     let serverCleanup: any;
     const server = new ApolloServer({
@@ -1066,6 +914,9 @@ export async function startServer(params: StartServerParams) {
             }
             const capabilities = await core.agentService.getCapabilities(authToken)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
+
+            const isAd4minCredential =  core.agentService.isAdminCredential(authToken)
+            checkTokenAuthorized(rootConfigPath, authToken, isAd4minCredential)
 
             return { capabilities, authToken };
         },
@@ -1121,6 +972,9 @@ export async function startServer(params: StartServerParams) {
             }
             const capabilities = await core.agentService.getCapabilities(authToken)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
+
+            const isAd4minCredential =  core.agentService.isAdminCredential(authToken)
+            checkTokenAuthorized(rootConfigPath, authToken, isAd4minCredential)
 
             return { capabilities, authToken };
         }
