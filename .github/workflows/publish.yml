@@ -149,11 +149,19 @@ jobs:
         run: yarn install
       - name: Build modules
         run: yarn run build-libs
-      - name: Publish modules to NPM
-        run: yarn release
+      - name: Publish core
+        run: cd core && npm publish --access public && cd ..
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish connect
+        run: cd connect && npm publish --access public && cd ..
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish executor
+        run: cd executor && npm publish --access public && cd ..
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      
   
   crates-publish:
     runs-on: ubuntu-20.04
