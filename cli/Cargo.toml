@@ -12,7 +12,7 @@ documentation = "https://docs.ad4m.dev"
 readme = "README.md"
 
 [dependencies]
-ad4m-client = { path = "../rust-client" }
+ad4m-client = { path = "../rust-client", version = "0.2.9-fix2" }
 anyhow = "1.0.65"
 clap = { version = "4.0.8", features = ["derive"] }
 futures = "0.3"
