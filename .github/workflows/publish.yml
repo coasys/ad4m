@@ -149,15 +149,18 @@ jobs:
         run: yarn install
       - name: Build modules
         run: yarn run build-libs
-      - uses: JS-DevTools/npm-publish@v1
+      - name: Publish core
+        uses: JS-DevTools/npm-publish@v1
         with:
           token: ${{ secrets.NPM_TOKEN }}
           package: core/package.json
-      - uses: JS-DevTools/npm-publish@v1
+      - name: Publish connect
+        uses: JS-DevTools/npm-publish@v1
         with:
           token: ${{ secrets.NPM_TOKEN }}
           package: connect/package.json
-      - uses: JS-DevTools/npm-publish@v1
+      - name: Publish executor
+        uses: JS-DevTools/npm-publish@v1
         with:
           token: ${{ secrets.NPM_TOKEN }}
           package: executor/package.json
