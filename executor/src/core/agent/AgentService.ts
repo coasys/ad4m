@@ -315,7 +315,7 @@ export default class AgentService {
         return payload.capabilities
     }
 
-    isAd4minCredential(token: string) {
+    isAdminCredential(token: string) {
         return token == this.#adminCredential
     }
     
