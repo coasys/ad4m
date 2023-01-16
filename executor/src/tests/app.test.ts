@@ -102,7 +102,7 @@ describe("Apps integration tests", () => {
       await agentCore!.exit();
   })
 
-  it("once token issued user can one app", async () => {
+  it("once token issued user can get all authenticated apps", async () => {
       requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]')
       let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
@@ -126,15 +126,43 @@ describe("Apps integration tests", () => {
   
       expect(newApps.length).to.be.equal(1);
       expect(newApps[0].revoked).to.be.equal(true);
+
+      // check if the app can request another token.
+      requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]')
+      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
+      let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
+
+      // @ts-ignore
+      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+  
+      const call = async () => {
+        return await authenticatedAppAd4mClient!.agent.getApps();
+      }
+
+      await expect((await call()).length).to.be.equal(2);
   });
   
   it("can remove apps", async () => {
       const oldApps = await adminAd4mClient!.agent.getApps();
   
-      expect(oldApps.length).to.be.equal(1);
+      expect(oldApps.length).to.be.equal(2);
   
       const newApps = await adminAd4mClient!.agent.removeApp(requestId);
   
-      expect(newApps.length).to.be.equal(0);
+      expect(newApps.length).to.be.equal(1);
+
+      // check if the app can request another token.
+      requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]')
+      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
+      let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
+
+      // @ts-ignore
+      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+
+      const call = async () => {
+          return await authenticatedAppAd4mClient!.agent.getApps();
+      }
+
+      await expect((await call()).length).to.be.equal(2);
   });
 })
