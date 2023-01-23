@@ -10,7 +10,7 @@ import { ExpressionClient } from "../expression/ExpressionClient";
 import { ExpressionRendered } from "../expression/Expression";
 import { collectionAdderToName } from "../subject/util";
 
-type PerspectiveListenerTypes = "link-added" | "link-removed"
+type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
 interface Parameter {
     name: string
@@ -28,6 +28,7 @@ export class PerspectiveProxy {
     #client: PerspectiveClient
     #perspectiveLinkAddedCallbacks: LinkCallback[]
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
+    #perspectiveLinkUpdatedCallbacks: LinkCallback[]
 
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = []
@@ -36,6 +37,7 @@ export class PerspectiveProxy {
         this.#client = ad4m
         this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
         this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
+        this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
     }
 
     async executeAction(actions, expression, parameters: Parameter[]) {
@@ -159,6 +161,8 @@ export class PerspectiveProxy {
             this.#perspectiveLinkAddedCallbacks.push(cb);
         } else if (type === 'link-removed') {
             this.#perspectiveLinkRemovedCallbacks.push(cb);
+        } else if (type === 'link-updated') {
+            this.#perspectiveLinkUpdatedCallbacks.push(cb);
         }
     }
 
@@ -175,6 +179,10 @@ export class PerspectiveProxy {
             const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
 
             this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
+        } else if (type === 'link-updated') {
+            const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
+
+            this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
         }
     }
 
