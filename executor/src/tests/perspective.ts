@@ -231,21 +231,20 @@ export default function perspectiveTests(testContext: TestContext) {
                 await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
                 const linkRemoved = sinon.fake()
                 await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
+                const linkUpdated = sinon.fake()
+                await ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
 
                 const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'root', target: 'lang://123'})
                 expect(linkAdded.calledOnce).to.be.true;
                 expect(linkAdded.getCall(0).args[0]).to.eql(linkExpression)
 
                 const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'root', target: 'lang://456'})
-                expect(linkAdded.calledTwice).to.be.true;
-                expect(linkAdded.getCall(1).args[0]).to.eql(updatedLinkExpression)
-
-                expect(linkRemoved.calledOnce).to.be.true;
-                expect(linkRemoved.getCall(0).args[0]).to.eql(linkExpression)
+                expect(linkUpdated.calledOnce).to.be.true;
+                expect(linkUpdated.getCall(0).args[1]).to.eql(updatedLinkExpression)
 
                 await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
-                expect(linkRemoved.calledTwice).to.be.true;
-                expect(linkRemoved.getCall(1).args[0]).to.eql(updatedLinkExpression)
+                expect(linkRemoved.calledOnce).to.be.true;
+                expect(linkRemoved.getCall(0).args[0]).to.eql(updatedLinkExpression)
             })
 
             it('can run Prolog queries', async () => {
