@@ -480,20 +480,23 @@ export default class Ad4mConnect extends LitElement {
     const ele = document.createElement("div");
     ele.id = "reader";
     // @ts-ignore
-    ele.width = "100%";
+    ele.width = "100vw";
     ele.style.height = "100vh";
 
     const cancelBtn = document.createElement("button");
     cancelBtn.id = "stop-scan";
-    cancelBtn.innerHTML = "<";
+    cancelBtn.innerHTML = "&#10005;";
+    cancelBtn.style.paddingTop = "4px";
+    cancelBtn.style.display = "flex";
+    cancelBtn.style.alignItems = "center";
+    cancelBtn.style.justifyContent = "center";
     cancelBtn.style.position = "absolute";
-    cancelBtn.style.top = "0";
-    cancelBtn.style.left = "0";
+    cancelBtn.style.top = "10px";
+    cancelBtn.style.right = "10px";
     cancelBtn.style.borderRadius = "50%";
     cancelBtn.style.border = "0";
     cancelBtn.style.height = "30px";
     cancelBtn.style.width = "30px";
-    cancelBtn.style.margin = "10px 10px";
     cancelBtn.style.fontFamily = "inherit";
     cancelBtn.style.fontSize = "20px";
 
