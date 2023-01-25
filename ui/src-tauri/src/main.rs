@@ -70,10 +70,16 @@ fn main() {
         let _ = remove_dir_all(data_path());
     }
 
+    let mut waited_seconds = 0;
     while data_path().join("ipfs").join("repo.lock").exists() {
-        println!("IPFS repo.lock exists, removing lock...");
-        let _ = remove_dir_all(data_path().join("ipfs").join("repo.lock"));
-        let _ = remove_dir_all(data_path().join("ipfs").join("datastore").join("LOCK"));
+        println!("IPFS repo.lock exists, waiting...");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        waited_seconds = waited_seconds + 1;
+        if waited_seconds > 10 {
+            println!("Waited long enough, removing lock...");
+            let _ = remove_dir_all(data_path().join("ipfs").join("repo.lock"));
+            let _ = remove_dir_all(data_path().join("ipfs").join("datastore").join("LOCK"));
+        }
     }
     
     if let Err(err) = setup_logs() {
