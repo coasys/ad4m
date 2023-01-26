@@ -117,6 +117,16 @@ export function subjectPropertySetter(opts: PropertySetterOptions) {
     };
 }
 
+function makeRandomPrologAtom(length: number): string {
+    let result = '';
+    let characters = 'abcdefghijklmnopqrstuvwxyz';
+    let charactersLength = characters.length;
+    for (let i = 0; i < length; i++) {
+       result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    return result;
+ }
+
 export function sdnaOutput(target: any, key: string, descriptor: PropertyDescriptor) {
     const originalMethod = descriptor.value;
     if(typeof originalMethod !== "function") {
@@ -128,7 +138,9 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
         let subjectName = target.name
         let obj = new target
 
-        sdna += `subject_class("${subjectName}", c).\n`
+        let uuid = makeRandomPrologAtom(8)
+
+        sdna += `subject_class("${subjectName}", ${uuid}).\n`
 
         let constructorActions = []
         if(obj.subjectConstructor && obj.subjectConstructor.length) {
@@ -143,20 +155,20 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
         let propertiesCode = []
         let properties = obj.__properties || {}
         for(let property in properties) {
-            let propertyCode = `property(c, "${property}").\n`
+            let propertyCode = `property(${uuid}, "${property}").\n`
 
             let { through, initial, required, resolve, resolveLanguage } = properties[property]
 
             if(resolve) {
-                propertyCode += `property_resolve(c, "${property}").\n`
+                propertyCode += `property_resolve(${uuid}, "${property}").\n`
 
                 if(resolveLanguage) {
-                    propertyCode += `property_resolve_language(c, "${property}", "${resolveLanguage}").\n`
+                    propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
                 }
             }
             
             if(through) {
-                propertyCode += `property_getter(c, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
+                propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
 
                 if(required) {
                     instanceConditions.push(`triple(Base, "${through}", _)`)
@@ -170,7 +182,7 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
                         predicate: through,
                         target: "value",
                     }]
-                    propertyCode += `property_setter(c, "${property}", '${stringifyObjectLiteral(action)}').\n`
+                    propertyCode += `property_setter(${uuid}, "${property}", '${stringifyObjectLiteral(action)}').\n`
                 }
             }
 
@@ -189,7 +201,7 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
         let collectionsCode = []
         let collections = obj.__collections || {}
         for(let collection in collections) {
-            let collectionCode = `collection(c, "${collection}").\n`
+            let collectionCode = `collection(${uuid}, "${collection}").\n`
 
             let { through, where } = collections[collection]
 
@@ -204,9 +216,9 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
                     } else {
                         otherClass = where.isInstance
                     }
-                    collectionCode += `collection_getter(c, Base, "${collection}", List) :- setof(C, (triple(Base, "${through}", C), instance(OtherClass, C), subject_class("${otherClass}", OtherClass)), List).\n`    
+                    collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(C, (triple(Base, "${through}", C), instance(OtherClass, C), subject_class("${otherClass}", OtherClass)), List).\n`    
                 } else {
-                    collectionCode += `collection_getter(c, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
+                    collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                 }
                 
                 let adder = obj[collectionToAdderName(collection)]
@@ -217,7 +229,7 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
                         predicate: through,
                         target: "value",
                     }]
-                    collectionCode += `collection_adder(c, "${collection}", '${stringifyObjectLiteral(action)}').\n`
+                    collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(action)}').\n`
                 }
             }
 
@@ -225,9 +237,9 @@ export function sdnaOutput(target: any, key: string, descriptor: PropertyDescrip
         }
 
         let subjectContructorJSONString = stringifyObjectLiteral(constructorActions)
-        sdna += `constructor(c, '${subjectContructorJSONString}').\n`
+        sdna += `constructor(${uuid}, '${subjectContructorJSONString}').\n`
         let instanceConditionProlog = instanceConditions.join(", ")
-        sdna += `instance(c, Base) :- ${instanceConditionProlog}.\n`
+        sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
         sdna += "\n"
         sdna += propertiesCode.join("\n")
         sdna += "\n"

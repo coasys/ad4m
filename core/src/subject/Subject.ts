@@ -22,16 +22,16 @@ export class Subject {
             throw `Not a valid subject instance of ${this.#subjectClass} for ${this.#baseExpression}`
         }
 
-        let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property(c, Property)`)
+        let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property(C, Property)`)
         let properties = results.map(result => result.Property)
         //console.log("Subject properties: " + properties)
         
 
         for(let p of properties) {
-            const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_resolve(c, "${p}")`)
+            const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve(c, "${p}")`)
             Object.defineProperty(this, p, {
                 get: async () => {
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_getter(c, "${this.#baseExpression}", "${p}", Value)`)
+                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
                     if(results && results.length > 0) {
                         let expressionURI = results[0].Value
                         if(resolveExpressionURI) {
@@ -59,7 +59,7 @@ export class Subject {
             if(setter) {
                 const property = setter.Property
                 const actions = eval(setter.Setter)
-                const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_resolve_language(c, "${property}", Language)`)
+                const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${property}", Language)`)
                 let resolveLanguage
                 if(resolveLanguageResults && resolveLanguageResults.length > 0) {
                     resolveLanguage = resolveLanguageResults[0].Language
@@ -89,7 +89,7 @@ export class Subject {
         for(let c of collections) {
             Object.defineProperty(this, c, {
                 get: async () => {
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), collection_getter(c, "${this.#baseExpression}", "${c}", Value)`)
+                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
                     if(results && results.length > 0 && results[0].Value) {
                         return flattenPrologList(eval(results[0].Value))
                     } else {

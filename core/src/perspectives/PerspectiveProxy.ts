@@ -329,7 +329,12 @@ export class PerspectiveProxy {
             return subjectClass
         else { 
             let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
-            return subjectClasses[0]
+            if(subjectClasses[0]) {
+                return subjectClasses[0]
+            } else {
+                //@ts-ignore
+                return subjectClass.__proto__?.constructor?.name
+            }
         }
     }
 
@@ -362,7 +367,7 @@ export class PerspectiveProxy {
     */
     async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
-        return await this.infer(`subject_class("${className}", c), instance(c, "${expression}")`)
+        return await this.infer(`subject_class("${className}", C), instance(C, "${expression}")`)
     }
 
 
@@ -377,7 +382,7 @@ export class PerspectiveProxy {
      */
     async getSubjectProxy<T>(base: string, subjectClass: T): Promise<T> {
         if(!await this.isSubjectInstance(base, subjectClass)) {
-            throw `Expression ${base} is not a subject instance of given class: ${subjectClass}`
+            throw `Expression ${base} is not a subject instance of given class: ${JSON.stringify(subjectClass)}`
         }
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)   
         let subject = new Subject(this, base, className)
@@ -400,7 +405,7 @@ export class PerspectiveProxy {
 
         let instances = []
         for(let className of classes) {
-            let instanceBaseExpressions = await this.infer(`subject_class("${className}", c), instance(c, X)`)
+            let instanceBaseExpressions = await this.infer(`subject_class("${className}", C), instance(C, X)`)
             let newInstances = await Promise.all(instanceBaseExpressions.map(async x => await this.getSubjectProxy(x.X, className) as unknown as T))
             instances = instances.concat(newInstances)
         }
@@ -436,23 +441,23 @@ export class PerspectiveProxy {
         addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("add")))
 
         // Construct query to find all subject classes that have the given properties and collections
-        let query = `subject_class(Class, c)`
+        let query = `subject_class(Class, C)`
 
         for(let property of properties) {
-            query += `, property(c, "${property}")`
+            query += `, property(C, "${property}")`
         }
         for(let collection of collections) {
-            query += `, collection(c, "${collection}")`
+            query += `, collection(C, "${collection}")`
         }
 
         for(let setFunction of setFunctions) {
             // e.g.  "setState" -> "state"
             let property = setFunction.substring(3)
             property = property.charAt(0).toLowerCase() + property.slice(1)
-            query += `, property_setter(c, "${property}", _)`
+            query += `, property_setter(C, "${property}", _)`
         }
         for(let addFunction of addFunctions) {
-            query += `, collection_adder(c, "${collectionAdderToName(addFunction)}", _)`
+            query += `, collection_adder(C, "${collectionAdderToName(addFunction)}", _)`
         }
 
         query += "."
