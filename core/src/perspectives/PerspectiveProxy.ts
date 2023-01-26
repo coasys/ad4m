@@ -33,6 +33,7 @@ export class PerspectiveProxy {
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = []
         this.#perspectiveLinkRemovedCallbacks = []
+        this.#perspectiveLinkUpdatedCallbacks = []
         this.#handle = handle
         this.#client = ad4m
         this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)

@@ -515,14 +515,6 @@ export default class Perspective {
 
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
-        this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
-            perspective,
-            link: oldLink
-        })
-        this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-            perspective,
-            link: newLinkExpression
-        });
         this.#pubsub.publish(PubSub.LINK_UPDATED_TOPIC, {
             perspective,
             oldLink,
