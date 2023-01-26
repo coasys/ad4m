@@ -24,6 +24,7 @@ export default class AgentService {
     #wallet?: object
     #file: string
     #appsFile: string;
+    #apps: AuthInfoExtended[];
     #requestingAuthInfo?: AuthInfoExtended;
     #fileProfile: string
     #agent?: Agent
@@ -41,6 +42,11 @@ export default class AgentService {
         this.#file = path.join(rootConfigPath, "agent.json")
         this.#fileProfile = path.join(rootConfigPath, "agentProfile.json")
         this.#appsFile = path.join(rootConfigPath, "apps.json")
+        try {
+            this.#apps = JSON.parse(fs.readFileSync(this.#appsFile).toString());
+        } catch (e) {
+            this.#apps = []
+        } 
         this.#pubsub = PubSubInstance.get()
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
@@ -385,35 +391,23 @@ export default class AgentService {
         this.#requests.delete(authKey)
 
         if (requestId === this.#requestingAuthInfo?.requestId) {
-            let apps
-            try {
-                apps = JSON.parse(fs.readFileSync(this.#appsFile).toString())
-            } catch(e) {
-                apps = []
-            }
-            
-            fs.writeFileSync(this.#appsFile, JSON.stringify([...apps, {...this.#requestingAuthInfo, token: jwt}, ]))
+            const apps = [...this.#apps, {...this.#requestingAuthInfo, token: jwt}];
+            this.#apps = apps;
+            fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
         }
 
         return jwt
     }
 
     getApps(): AuthInfoExtended[] {
-        try {
-            return JSON.parse(fs.readFileSync(this.#appsFile).toString())
-        } catch (e) {
-            fs.writeFileSync(this.#appsFile, '[]')
-            return []
-        }
+        return this.#apps;
     }
 
     removeApp(requestId: string) {
         try {
-            const apps: [] = JSON.parse(fs.readFileSync(this.#appsFile).toString())
+            this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId)
 
-            const newApps = apps.filter((app: any) => app.requestId !== requestId)
-
-            fs.writeFileSync(this.#appsFile, JSON.stringify(newApps))
+            fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps))
         } catch (e) {
             console.error('Error while removing app', e);
         }
@@ -421,11 +415,9 @@ export default class AgentService {
 
     revokeAppToken(requestId: string) {
         try {
-            const apps: [] = JSON.parse(fs.readFileSync(this.#appsFile).toString());
+            this.#apps = this.#apps.map((app: any) => app.requestId === requestId ? ({...app, revoked: true}) : app);
 
-            const newApps = apps.map((app: any) => app.requestId === requestId ? ({...app, revoked: true}) : app);
-
-            fs.writeFileSync(this.#appsFile, JSON.stringify(newApps))
+            fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps))
         } catch (e) {
             console.error('Error while revoking token', e);
         }

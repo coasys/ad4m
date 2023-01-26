@@ -916,7 +916,7 @@ export async function startServer(params: StartServerParams) {
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
 
             const isAd4minCredential =  core.agentService.isAdminCredential(authToken)
-            checkTokenAuthorized(rootConfigPath, authToken, isAd4minCredential)
+            checkTokenAuthorized(core.agentService.getApps(), authToken, isAd4minCredential)
 
             return { capabilities, authToken };
         },
@@ -974,7 +974,7 @@ export async function startServer(params: StartServerParams) {
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
 
             const isAd4minCredential =  core.agentService.isAdminCredential(authToken)
-            checkTokenAuthorized(rootConfigPath, authToken, isAd4minCredential)
+            checkTokenAuthorized(core.agentService.getApps(), authToken, isAd4minCredential)
 
             return { capabilities, authToken };
         }
