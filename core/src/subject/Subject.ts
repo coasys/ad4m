@@ -52,10 +52,10 @@ export class Subject {
         }
 
 
-        const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), property_setter(c, Property, Setter)`)
+        const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, Property, Setter)`)
         
         //console.log("Subject setters: " + setters.map(setter => setter.Property))
-        for(let setter of setters) {
+        for(let setter of (setters ? setters : [])) {
             if(setter) {
                 const property = setter.Property
                 const actions = eval(setter.Setter)
@@ -83,7 +83,8 @@ export class Subject {
             return result
         }
 
-        let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), collection(c, Collection)`)
+        let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection(C, Collection)`)
+        if(!results2) results2 = []
         let collections = results2.map(result => result.Collection)
 
         for(let c of collections) {
@@ -99,8 +100,9 @@ export class Subject {
             })
         }
 
-        let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", c), collection_adder(c, Collection, Adder)`)
-
+        let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_adder(C, Collection, Adder)`)
+        if(!adders) adders = []
+        
         for(let adder of adders) {
             if(adder) {
                 const collection = adder.Collection
