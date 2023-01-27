@@ -28,7 +28,7 @@ export class Subject {
         
 
         for(let p of properties) {
-            const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve(c, "${p}")`)
+            const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve(C, "${p}")`)
             Object.defineProperty(this, p, {
                 get: async () => {
                     let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
@@ -102,7 +102,7 @@ export class Subject {
 
         let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_adder(C, Collection, Adder)`)
         if(!adders) adders = []
-        
+
         for(let adder of adders) {
             if(adder) {
                 const collection = adder.Collection
