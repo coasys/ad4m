@@ -9,4 +9,8 @@ cp -r ../tests/test-language/build languages/test-language/build
 
 ln -s ../../temp/binary/hc ./hc
 ln -s ../../temp/binary/holochain ./holochain
-ln -s ../../temp/swipl/bin/swipl ./swipl
+#ln -s ../../temp/swipl/bin/swipl ./swipl
+echo '#!/bin/bash' > ./swipl
+echo 'cd ../../temp/swipl/bin' >> ./swipl
+echo './swipl "$@"' >> ./swipl
+chmod +x ./swipl
