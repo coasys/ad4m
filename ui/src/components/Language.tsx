@@ -8,10 +8,8 @@ import ActionButton from "./ActionButton";
 import {
   badge,
   cardStyle,
-  gridButton,
   listStyle,
   MainContainer,
-  MainHeader,
 } from "./styles";
 
 type Props = {
@@ -135,7 +133,7 @@ const Language = (props: Props) => {
 
   return (
     <div style={MainContainer}>
-      <div style={gridButton}>
+      <div class="grid">
         <ActionButton
           title="Publish language"
           onClick={() => setPublishLanguageModalOpen(true)}

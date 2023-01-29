@@ -1,0 +1,50 @@
+# Changelog
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).  
+This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
+
+## [0.2.10] - 12/01/2023
+
+### Added
+ - AD4M version number inside of launcher UI: [#196](https://github.com/perspect3vism/ad4m/pull/196)
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+---
+
+## [0.2.9] - 11/01/2023
+
+### Added
+ - SDNA Collection "where": [#156](https://github.com/perspect3vism/ad4m/pull/156)
+ - Missing build step & rust install process to README
+ - In ad4m-connect show a connection error telling users to check browser shields if we notice requests being blocked: [#185](https://github.com/perspect3vism/ad4m/pull/185) & [#191](https://github.com/perspect3vism/ad4m/pull/191)
+ - Stop scanning button in ad4m-launcher: [#155](https://github.com/perspect3vism/ad4m/pull/155)
+
+### Changed
+ - In ad4m-connect after downloading ad4m-launcher; show connect instead of reconnect text: [#183](https://github.com/perspect3vism/ad4m/pull/183)
+ - Each Holochain DNA now has its own async queue so only DNA specific requests are ran in sync: [#184](https://github.com/perspect3vism/ad4m/pull/184)
+
+### Deprecated
+
+### Removed
+ - .AppImage build targets: [#180](https://github.com/perspect3vism/ad4m/pull/180)
+
+### Fixed
+ - Cleaned up logging output from ad4m-executor & link language: [#160](https://github.com/perspect3vism/ad4m/pull/160)
+ - Wait for ipfs repo.lock before starting ad4m-launcher: [#182](https://github.com/perspect3vism/ad4m/pull/182)
+ - Block spawning multiple ad4m launchers: [#181](https://github.com/perspect3vism/ad4m/pull/181)
+ - Fix copy text on Linux: [#187](https://github.com/perspect3vism/ad4m/pull/187)
+ - Fix UI buttons on Windows: [#188](https://github.com/perspect3vism/ad4m/pull/188)
+ - Fix pending commit handling when joining a neighbourhood. This code ensures that a user will not submit commits to a link language until they have received some data in the case where they join a neighbourhood: [#193](https://github.com/perspect3vism/ad4m/pull/193) & [#177](https://github.com/perspect3vism/ad4m/pull/177)
+
+### Security
+
+---
