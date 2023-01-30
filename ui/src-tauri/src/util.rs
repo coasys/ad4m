@@ -70,8 +70,12 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
         //println!("window event: {:?}", event);
         if let WindowEvent::Focused(f) = event {
             //println!("focused: {}", f);
-            if !f && window_clone.inner_size().unwrap().width == 400 {
-                let _ = window_clone.hide();
+            if let Some(monitor) = window_clone.current_monitor().unwrap() {
+                let final_width = window_clone.inner_size().unwrap().to_logical::<f64>(monitor.scale_factor()).width;
+
+                if !f && final_width == 400.0 {
+                    let _ = window_clone.hide();
+                }
             }
         }
     });
