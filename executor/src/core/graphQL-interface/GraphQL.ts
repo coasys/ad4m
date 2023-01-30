@@ -720,6 +720,18 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 //@ts-ignore
                 resolve: payload => payload?.link
             },
+            perspectiveLinkUpdated: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return withFilter(
+                        () => pubsub.asyncIterator(PubSub.LINK_UPDATED_TOPIC),
+                        (payload, variables) => payload.perspective.uuid === variables.uuid
+                    )(undefined, args)
+                },
+                //@ts-ignore
+                resolve: payload => ({ oldLink: payload?.oldLink, newLink: payload.newLink })
+            },
             perspectiveUpdated: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {

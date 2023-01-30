@@ -68,6 +68,12 @@ export default class Perspective {
             }
         })
 
+        this.#pubsub.subscribe(PubSub.LINK_UPDATED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
+            if (perspective.uuid === this.uuid) {
+                this.#prologNeedsRebuild = true
+            }
+        })
+
         const that = this
 
         process.on("SIGINT", () => {
@@ -509,14 +515,11 @@ export default class Perspective {
 
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
-        this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
-            perspective: perspective,
-            link: oldLink
-        })
-        this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-            perspective: perspective,
-            link: newLinkExpression
-        })
+        this.#pubsub.publish(PubSub.LINK_UPDATED_TOPIC, {
+            perspective,
+            oldLink,
+            newLink: newLinkExpression
+        });
 
         return newLinkExpression
     }

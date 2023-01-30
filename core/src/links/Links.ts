@@ -82,3 +82,17 @@ export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
 export function isLink(l: any): boolean {
     return l && l.source && l.target
 }
+
+@ObjectType()
+export class LinkExpressionUpdated {
+    @Field(type => LinkExpression)
+    oldLink: LinkExpression;
+
+    @Field(type => LinkExpression)
+    newLink: LinkExpression;
+
+    constructor(oldLink: LinkExpression, newLink: LinkExpression) {
+        this.oldLink = oldLink
+        this.newLink = newLink
+    }
+}
