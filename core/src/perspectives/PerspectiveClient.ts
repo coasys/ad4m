@@ -363,4 +363,28 @@ export class PerspectiveClient {
 
         await new Promise<void>(resolve => setTimeout(resolve, 500))
     }
+
+    async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
+        this.#apolloClient.subscribe({
+            query: gql` subscription {
+                perspectiveLinkUpdated(uuid: "${uuid}") { 
+                    oldLink {
+                        ${LINK_EXPRESSION_FIELDS}
+                    } 
+                    newLink {
+                        ${LINK_EXPRESSION_FIELDS}
+                    } 
+                }
+            }   
+        `}).subscribe({
+            next: result => {
+                cb.forEach(c => {
+                    c(result.data.perspectiveLinkUpdated)
+                })
+            },
+            error: (e) => console.error(e)
+        })
+
+        await new Promise<void>(resolve => setTimeout(resolve, 500))
+    }
 }
