@@ -3,7 +3,8 @@ const fs = require('fs')
 function replaceVersionLine(content, version, prefix = 'version = ', suffix = '') {
     const lines = content.split('\n')
     const versionLineIndex = lines.findIndex(line => line.startsWith(prefix))
-    const oldVersion = lines[versionLineIndex].split('"')[1]
+    const scope = lines[versionLineIndex].substring(prefix.length)
+    const oldVersion = scope.split('"')[1]
     const newVersionLine = `${prefix}"${version}"${suffix}` 
     lines[versionLineIndex] = newVersionLine
     const newContent = lines.join('\n')
@@ -13,9 +14,16 @@ function replaceVersionLine(content, version, prefix = 'version = ', suffix = ''
 const VERSION = process.argv[2]
 console.log("Setting all sub-project versions to: " + VERSION)
 
+const rootRepo = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+console.log("Root repo version: " + rootRepo.version + " -> " + VERSION)
+rootRepo.version = VERSION
+fs.writeFileSync('package.json', JSON.stringify(rootRepo, null, 2) + '\n')
+
 const cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), VERSION)
 console.log("CLI version: " + cli.oldVersion + " -> " + VERSION)
-fs.writeFileSync('cli/Cargo.toml', cli.newContent)
+const ad4mClient = replaceVersionLine(cli.newContent, VERSION, `ad4m-client = { path = "../rust-client", version = `, ` }`)
+console.log(`CLI ad4m-client dep: ${ad4mClient.oldVersion} -> ${VERSION}`)
+fs.writeFileSync('cli/Cargo.toml', ad4mClient.newContent)
 
 const connect = JSON.parse(fs.readFileSync('connect/package.json', 'utf8'))
 console.log("Connect version: " + connect.version + " -> " + VERSION)

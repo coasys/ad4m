@@ -26,40 +26,59 @@ function downloadAd4m() {
 export default function Start({
   connectToPort,
   isMobile,
+  hasClickedDownload,
+  onDownloaded,
   changeState,
   scanQrcode,
 }) {
   return html`
     <div class="items">
-      <div class="text-center">
-        ${!isMobile
-          ? html`<a
-              class="button"
-              target="_blank"
-              @click=${() => downloadAd4m()}
-            >
-              Install AD4M
-            </a>`
-          : html`<button class="button" @click=${() => scanQrcode()}>
-              Connect with QR
-            </button> `}
-      </div>
+      ${!hasClickedDownload
+        ? html`<div class="text-center">
+              ${!isMobile
+                ? html`<a
+                    class="button"
+                    target="_blank"
+                    @click=${() => {
+                      downloadAd4m();
+                      onDownloaded();
+                    }}
+                  >
+                    Install AD4M
+                  </a>`
+                : html`<button class="button" @click=${() => scanQrcode()}>
+                    Connect with QR
+                  </button> `}
+            </div>
+            <div class="text-center">
+              <button
+                class="button button--link "
+                @click=${() => connectToPort()}
+              >
+                Reconnect
+              </button>
+              or
+              <button
+                class="button button--link "
+                @click=${() => changeState("remote_url")}
+              >
+                Connect to a remote host
+              </button>
+            </div>`
+        : html`<div class="text-center">
+            <a class="button" target="_blank" @click=${() => connectToPort()}>
+              Connect
+            </a>
+            <p>
+              Please click reconnect once you have downloaded and setup your
+              AD4M agent
+            </p>
+          </div>`}
 
       <div class="text-center">
-        <button class="button button--link " @click=${() => connectToPort()}>
-          Reconnect
-        </button>
-        or
-        <button
-          class="button button--link "
-          @click=${() => changeState("remote_url")}
+        <a class="button button--link" _target="blank" href="https://ad4m.dev"
+          >Learn more about AD4M</a
         >
-          Connect to a remote host
-        </button>
-      </div>
-
-      <div class="text-center">
-          <a class="button button--link" _target="blank" href="https://ad4m.dev">Learn more about AD4M</a>
       </div>
     </div>
   `;

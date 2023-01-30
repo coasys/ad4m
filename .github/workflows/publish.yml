@@ -1,9 +1,9 @@
-name: Publish AD4MIN as a release on GitHub
+name: Publish AD4M
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
 
 jobs:
   create-release:
@@ -17,26 +17,31 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: 16
+      - name: Create Tags From
+        id: create_tag
+        uses: jaywcjlove/create-tag-action@v1.3.14
       - name: create release
         id: create-release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Ad4m Launcher ${{ github.ref_name }}
+          tag_name: ${{ steps.create_tag.outputs.version }}
+          release_name: AD4M Launcher ${{ steps.create_tag.outputs.version }}
           body: See the assets to download this version and install.
           draft: true
           prerelease: false
 
-  build-ad4min-binary:
+  build-launcher-binary:
     strategy:
       fail-fast: false
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
         node-version: [16.x]
 
-    needs: create-release
+    needs: 
+      - create-release
+      - npm-publish
 
     runs-on: ${{ matrix.platform }}
 
@@ -73,15 +78,15 @@ jobs:
     - name: Yarn Install
       run: yarn install
 
-    - name: Build AD4M-Host & build AD4MIN binary (macos-latest)
+    - name: Build AD4M-Host & build Launcher binary (macos-latest)
       if: matrix.platform == 'macos-latest'
       run: yarn run build-macos
 
-    - name: Build AD4M-Host & build AD4MIN binary (windows-latest)
+    - name: Build AD4M-Host & build Launcher binary (windows-latest)
       if: matrix.platform == 'windows-latest'
       run: yarn run build-windows
 
-    - name: Build AD4M-Host & build AD4MIN binary (linux-latest)
+    - name: Build AD4M-Host & build Launcher binary (linux-latest)
       if: matrix.platform == 'ubuntu-latest'
       run: yarn run build-linux
 
@@ -95,18 +100,6 @@ jobs:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/ad4m_${{ steps.extract_version.outputs.version }}_amd64.deb
         asset_name: ad4m_${{ steps.extract_version.outputs.version }}_amd64.deb
-        asset_content_type: application/octet-stream
-
-    - name: Upload Release AppImage Asset
-      id: upload-release-appimage-asset
-      if: matrix.platform == 'ubuntu-latest'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/ad4m_${{ steps.extract_version.outputs.version }}_amd64.AppImage
-        asset_name: ad4m_${{ steps.extract_version.outputs.version }}_amd64.AppImage
         asset_content_type: application/octet-stream
 
     - name: Upload Release Macos Asset
@@ -142,3 +135,61 @@ jobs:
     #     releaseName: "Ad4min v__VERSION__"
     #     releaseBody: "See the assets to download this version and install."
     #     projectPath: "./ui"
+  
+  npm-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      # Setup .npmrc file to publish to npm
+      - name: Use Node.js 16.x
+        uses: actions/setup-node@v1
+        with:
+          node-version: 16.x
+      - name: Install deps
+        run: yarn install
+      - name: Build modules
+        run: yarn run build-libs
+      - name: Publish core
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: core/package.json
+      - name: Publish connect
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: connect/package.json
+      - name: Publish executor
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: executor/package.json
+      
+  
+  crates-publish:
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16.x'
+          cache: 'yarn'
+      - name: Cache cargo
+        id: cache-cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo
+          restore-keys: ${{ runner.os }}-cargo
+      - run: cd core && yarn install && yarn build && cd ..
+      - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
+      - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo workspaces publish --from-git
