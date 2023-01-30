@@ -40,7 +40,7 @@ jobs:
       run: yarn install
 
     - name: Debug swipl binary
-      run: cd executor && ./scripts/download-binaries-linux.sh && ./scripts/prepareTestDirectory.sh && cd src/tst-tmp && ls ../../ && ls ../../temp && ls ../../temp/swipl && ls ../../temp/swipl/bin && ./swipl --version
+      run: cd executor && ./scripts/download-binaries-linux.sh && ./scripts/prepareTestDirectory.sh && cd src/tst-tmp && ls ../../ && ls ../../temp && ls ../../temp/swipl && ls ../../temp/swipl/bin && cat ./swipl && ./swipl --version
 
     - name: Run the tests
       run: yarn test
