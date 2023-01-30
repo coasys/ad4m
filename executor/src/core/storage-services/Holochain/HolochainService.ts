@@ -149,7 +149,7 @@ export default class HolochainService {
                 }
             };
             if (this.#appWebsocket == undefined) {
-                this.#appWebsocket = await AppWebsocket.connect(`ws://127.0.0.1:${this.#appPort}`, 100000);
+                this.#appWebsocket = await AppWebsocket.connect(`ws://127.0.0.1:${this.#appPort}`, 15000);
                 this.#appWebsocket.on('signal', this.handleCallback.bind(this))
                 console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
             };
