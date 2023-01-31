@@ -435,7 +435,7 @@ export default class Perspective {
         linkExpressions.forEach(l => this.removeLocalLink(l))
         this.#prologNeedsRebuild = true;
         for (const link of linkExpressions) {
-            this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+            this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             })
