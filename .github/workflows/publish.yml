@@ -20,14 +20,14 @@ jobs:
       - name: Create Tags From
         id: create_tag
         uses: jaywcjlove/create-tag-action@v1.3.14
-      - name: create release
+      - name: create release ad4m launcher
         id: create-release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
         with:
           tag_name: ${{ steps.create_tag.outputs.version }}
-          release_name: AD4M Launcher ${{ steps.create_tag.outputs.version }}
+          release_name: AD4M Launcher & Host ${{ steps.create_tag.outputs.version }}
           body: See the assets to download this version and install.
           draft: true
           prerelease: false
@@ -102,6 +102,18 @@ jobs:
         asset_name: ad4m_${{ steps.extract_version.outputs.version }}_amd64.deb
         asset_content_type: application/octet-stream
 
+    - name: Upload Release AD4M Host Linux Binary
+      id: upload-release-linux-ad4m-host-binary
+      if: matrix.platform == 'ubuntu-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /home/runner/work/ad4m/ad4m/host/dist/ad4m-linux-x64
+        asset_name: ad4m-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_content_type: application/octet-stream
+
     - name: Upload Release Macos Asset
       id: upload-release-macos-asset
       if: matrix.platform == 'macos-latest'
@@ -114,6 +126,18 @@ jobs:
         asset_name: AD4M_${{ steps.extract_version.outputs.version }}_x64.dmg
         asset_content_type: application/octet-stream
 
+    - name: Upload Release AD4M Host Macos Binary
+      id: upload-release-macos-ad4m-host-binary
+      if: matrix.platform == 'macos-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /home/runner/work/ad4m/ad4m/host/dist/ad4m-macos-x64
+        asset_name: ad4m-macos-${{ steps.extract_version.outputs.version }}-x64
+        asset_content_type: application/octet-stream
+
     - name: Upload Release MSI Asset
       id: upload-release-msi-asset
       if: matrix.platform == 'windows-latest'
@@ -124,6 +148,18 @@ jobs:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: D:\a\ad4m\ad4m\target\release\bundle\msi\AD4M_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
         asset_name: AD4M_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M Host Windows Binary
+      id: upload-release-windows-ad4m-host-binary
+      if: matrix.platform == 'windows-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /home/runner/work/ad4m/ad4m/host/dist/ad4m-windows-x64
+        asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
     # - name: "Upload built AD4MIN"
