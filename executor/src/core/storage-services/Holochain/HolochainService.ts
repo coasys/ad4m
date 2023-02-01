@@ -62,7 +62,6 @@ export default class HolochainService {
         this.#db = low(new FileSync(path.join(dataPath, 'holochain-service.json')))
         this.#db.defaults({pubKeys: []}).write()
         this.#signalCallbacks = [];
-        this.#cellSignatures = new Map();
 
         const holochainAppPort = appPort ? appPort : 1337;
         const holochainAdminPort = adminPort ? adminPort : 2000;
