@@ -230,11 +230,17 @@ export default class Perspective {
             setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
+                const start = Date.now()
                 const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
+                const end = Date.now()
+                console.debug(`NH [${this.sharedUrl}] (${this.name}): Got links adapter in ${end-start}ms`)
                 if(linksAdapter) {
                     console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    const startCall = Date.now()
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
+                    const endCall = Date.now()
+                    console.debug(`NH [${this.sharedUrl}] (${this.name}): Got result in ${endCall-startCall}ms`)
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
@@ -305,9 +311,12 @@ export default class Perspective {
             canCommit = true;
         } else {
             //We did not create the neighbourhood, so we should check if we already have some data sync'd before making a commit
+            const start = Date.now();
             if (await this.getCurrentRevision()) {
                 canCommit = true;
             }
+            const end = Date.now();
+            console.debug(`NH [${this.sharedUrl}] (${this.name}): getCurrentRevision took ${end - start}ms`)
         }
 
         if (canCommit) {
