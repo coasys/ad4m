@@ -322,7 +322,7 @@ export default class HolochainService {
                 for (const cellInfo of cellData) {
                     const cellId = (CellType.Provisioned in cellInfo) ? cellInfo[CellType.Provisioned].cell_id : null
                     if (!cellId) {
-                        throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected: ${cellInfo}`);
+                        throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${cellInfo}`);
                     }
 
                     //Register the callback to the cell internally
@@ -397,7 +397,7 @@ export default class HolochainService {
         const cellId = (CellType.Provisioned in cellInfo) ? cellInfo[CellType.Provisioned].cell_id : null
 
         if (!cellId) {
-            throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected: ${cellInfo}`);
+            throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${cellInfo}`);
         };
 
         const [_dnaHash, provenance] = cellId
