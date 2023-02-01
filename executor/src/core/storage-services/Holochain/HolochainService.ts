@@ -363,21 +363,15 @@ export default class HolochainService {
         }
         const installed_app_id = lang
 
-        const start = Date.now();
         //1. Check for apps with installed_app_id matching this language address
         let infoResult = await this.#appWebsocket!.appInfo({installed_app_id})
-        const end = Date.now();
-        console.log("HolochainService.callZomeFunction: appInfo took", end - start, "ms")
 
-        const startRetries = Date.now();
         let tries = 1
         while(!infoResult && tries < 10) {
             await sleep(500)
             infoResult = await this.#appWebsocket!.appInfo({installed_app_id})
             tries++
         }
-        const endRetries = Date.now();
-        console.log("HolochainService.callZomeFunction: appInfo retries took", endRetries - startRetries, "ms")
 
         if(!infoResult) {
             console.error("HolochainService: no installed hApp found duringf callZomeFunction() for Language:", lang)
@@ -412,7 +406,10 @@ export default class HolochainService {
         try {
             console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
 
+            const now = Date.now();
             await this.generateSigningKeys(cellId);
+            const endGenerateKeys = Date.now();
+            console.log("HolochainService.callZomeFunction: generateSigningKeys took", endGenerateKeys - now, "ms")
 
             const startCall = Date.now();
             const result = await this.#appWebsocket!.callZome({
