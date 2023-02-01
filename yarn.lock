@@ -2277,20 +2277,6 @@
     "@hapi/bourne" "2.x.x"
     "@hapi/hoek" "9.x.x"
 
-"@holochain/client@0.11.8":
-  version "0.11.8"
-  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.11.8.tgz#d4d6fbffae30872a0e137b0204e3caa196d01538"
-  integrity sha512-LoB2W/TLP3HKezrMdJA6Bm7vfI7f/BOol1ohjCYl9pgTqbDEsG48hPWJzfYvSot0sfEMqdKoTdRjIa7DZmxrxQ==
-  dependencies:
-    "@holochain/serialization" "^0.1.0-beta-rc.2"
-    "@msgpack/msgpack" "^2.7.2"
-    "@tauri-apps/api" "^1.2.0"
-    emittery "^1.0.1"
-    isomorphic-ws "^5.0.0"
-    js-base64 "^3.7.3"
-    lodash-es "^4.17.21"
-    tweetnacl "^1.0.3"
-
 "@holochain/client@0.12.0":
   version "0.12.0"
   resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.12.0.tgz#1c9bdc082160badd1439962e8d5f30da6c4089a3"
@@ -2305,7 +2291,7 @@
     lodash-es "^4.17.21"
     tweetnacl "^1.0.3"
 
-"@holochain/serialization@^0.1.0-beta-rc.2", "@holochain/serialization@^0.1.0-beta-rc.3":
+"@holochain/serialization@^0.1.0-beta-rc.3":
   version "0.1.0-beta-rc.3"
   resolved "https://registry.yarnpkg.com/@holochain/serialization/-/serialization-0.1.0-beta-rc.3.tgz#787a785fa48e00f2d168c6d4b45a233c4800cccb"
   integrity sha512-DJx4V2KXHVLciyOGjOYKTM/JLBpBEZ3RsPIRCgf7qmwhQdxXvhi2p+oFFRD51yUT5uC1/MzIVeJCl/R60PwFbw==
