@@ -4,13 +4,13 @@
 
 if [ ! -f "./temp/binary/hc" ]; then
     wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.1.0/hc-darwin-0.1.0
-    mv hc-darwin ./temp/binary/hc
+    mv hc-darwin-0.1.0 ./temp/binary/hc
     chmod +x ./temp/binary/hc
 fi
 
 if [ ! -f "./temp/binary/holochain" ]; then
     wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.1.0/holochain-darwin-0.1.0
-    mv holochain-darwin ./temp/binary/holochain
+    mv holochain-darwin-0.1.0 ./temp/binary/holochain
     chmod +x ./temp/binary/holochain
 fi
 
