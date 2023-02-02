@@ -3,6 +3,7 @@ import { useContext, useEffect, useState } from "react";
 import { AgentContext } from "../context/AgentContext";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { useNavigate } from "react-router-dom";
+import Logo from "./Logo";
 
 const Login = (props: any) => {
   const {
@@ -105,10 +106,15 @@ const Login = (props: any) => {
       {currentIndex === 0 && (
         <div className="slider__slide">
           <div className="slider__slide-content center text-center">
-            <Image
-              style={{ width: "150px", margin: "0 auto" }}
-              src="ad4msquarelogo2_white_colouremblem.png"
-            ></Image>
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
 
             <j-text size="800" color="black">
               P2P Framework Beyond Apps
@@ -148,10 +154,15 @@ const Login = (props: any) => {
       {currentIndex === 1 && (
         <div className="slider__slide">
           <div className="slider__slide-content text-center">
-            <Image
-              style={{ width: "150px", margin: "0 auto" }}
-              src="ad4msquarelogo2_white_colouremblem.png"
-            ></Image>
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
 
             <div>
               <j-text variant="heading">Privacy and Security</j-text>
@@ -184,10 +195,15 @@ const Login = (props: any) => {
       {currentIndex === 2 && (
         <div className="slider__slide">
           <div className="slider__slide-content text-center">
-            <Image
-              style={{ width: "150px", margin: "0 auto" }}
-              src="ad4msquarelogo2_white_colouremblem.png"
-            ></Image>
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
 
             <div>
               <j-text variant="heading">Agent centric</j-text>
@@ -220,10 +236,15 @@ const Login = (props: any) => {
       {currentIndex === 3 && (
         <div className="slider__slide">
           <div className="slider__slide-content text-center">
-            <Image
-              style={{ width: "150px", margin: "0 auto" }}
-              src="ad4msquarelogo2_white_colouremblem.png"
-            ></Image>
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
 
             <div>
               <j-text variant="heading">Censorship free</j-text>
@@ -270,10 +291,15 @@ const Login = (props: any) => {
       {currentIndex === 4 && (
         <div className="slider__slide">
           <div className="slider__slide-content center">
-            <Image
-              style={{ width: "150px", margin: "0 auto" }}
-              src="ad4msquarelogo2_white_colouremblem.png"
-            ></Image>
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
             {currentSignupIndex === 0 && (
               <j-flex direction="column" gap="500" style="width: 100%">
                 <j-input
@@ -369,10 +395,15 @@ const Login = (props: any) => {
       {currentIndex === 5 && (
         <div className="slider__slide" style={{ height: "100vh" }}>
           <div className="slider__slide-content center">
-            <Image
-              style={{ width: "150px", margin: "0 auto" }}
-              src="ad4msquarelogo2_white_colouremblem.png"
-            ></Image>
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
             <j-flex direction="column" gap="500" style="width: 100%">
               <j-input
                 autofocus

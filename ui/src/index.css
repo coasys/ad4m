@@ -16,62 +16,22 @@ html {
   box-sizing: inherit;
 }
 
-code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
-    monospace;
-}
-
-.center {
-  display: grid;
-  place-items: center;
-}
-
-.slider {
-  height: 100vh;
-}
-
-.slider__slide {
-  height: 100%;
-  display: grid;
-  place-items: center;
-  padding-left: var(--j-space-500);
-  padding-right: var(--j-space-500);
-  padding-top: var(--j-space-1000);
-  padding-bottom: var(--j-space-1000);
-}
-
-.slider__slide-content {
-  height: 100%;
-  width: 100%;
-  max-height: 800px;
-  max-width: 500px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: var(--j-space-900);
-  margin: 0 auto;
-  
-}
-
-.slider__slide-content.center {
-  height: auto;
-}
-
-.full-button {
-  display: block;
-  width: 100%;
-}
-
-.text-center {
-  text-align: center;
-}
-
-
 :root {
   --j-color-saturation: 50%;
-  --j-color-subtractor: 110%;
+  --j-color-subtractor: 100%;
   --j-color-multiplier: -1;
   --j-border-width: 3px;
+  --start-color: #a4adff;
+  --end-color: #d273ff;
+  --gradient: linear-gradient(90deg, var(--start-color), var(--end-color));
+}
+
+:root j-button[variant="primary"]::part(base) {
+  background: var(--gradient);
+}
+
+:root j-checkbox[checked]::part(toggle) {
+  background: var(--gradient);
 }
 
 :root j-modal {
@@ -107,4 +67,53 @@ code {
 
 :root j-input.one-time-pass::part(input-field) {
   font-size: var(--j-font-size-800);
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
+    monospace;
+}
+
+.center {
+  display: grid;
+  place-items: center;
+}
+
+.slider {
+  height: 100vh;
+}
+
+.slider__slide {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding-left: var(--j-space-500);
+  padding-right: var(--j-space-500);
+  padding-top: var(--j-space-1000);
+  padding-bottom: var(--j-space-1000);
+}
+
+.slider__slide-content {
+  height: 100%;
+  width: 100%;
+  max-height: 800px;
+  max-width: 500px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--j-space-900);
+  margin: 0 auto;
+}
+
+.slider__slide-content.center {
+  height: auto;
+}
+
+.full-button {
+  display: block;
+  width: 100%;
+}
+
+.text-center {
+  text-align: center;
 }
