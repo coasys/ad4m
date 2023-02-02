@@ -39,8 +39,6 @@ function cleanAd4mData(dataPath: string) {
         const holochainDataPath = path.join(appDataPath, 'ad4m', 'h');
         // Path to languages
         const languagesPath = path.join(appDataPath, 'ad4m', 'languages');
-        // path to perspectives
-        const perspectivesPath = path.join(appDataPath, 'ad4m', 'perspectives.json');
 
         //Delete all the data which may conflict with the new version
         fs.removeSync(binaryPath);
@@ -48,7 +46,6 @@ function cleanAd4mData(dataPath: string) {
         fs.removeSync(bootstrapSeedPath);
         fs.removeSync(holochainDataPath);
         fs.removeSync(languagesPath);
-        fs.removeSync(perspectivesPath);
     }
 }
 
