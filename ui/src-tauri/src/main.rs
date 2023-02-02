@@ -96,6 +96,13 @@ fn main() {
 
     find_and_kill_processes("holochain");
 
+    let prepare = Command::new_sidecar("ad4m-host")
+        .expect("Failed to create ad4m command")
+        .args(["prepare"])
+        .status()
+        .expect("Failed to run ad4m prepare");
+    assert!(prepare.success());
+
     if !holochain_binary_path().exists() {
         log::info!("init command by copy holochain binary");
         let status = Command::new_sidecar("ad4m-host")
