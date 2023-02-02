@@ -31,7 +31,7 @@ const useStyles = createStyles((theme, _params, getRef) => {
   return {
     header: {
       paddingBottom: theme.spacing.md,
-      paddingRight: theme.spacing.md,
+      paddingRight: 0,
       paddingLeft: theme.spacing.md,
       marginBottom: theme.spacing.md * 1.5,
       borderBottom: `1px solid ${
@@ -49,6 +49,7 @@ const useStyles = createStyles((theme, _params, getRef) => {
       textDecoration: "none",
       fontSize: theme.fontSizes.sm,
       color: "var(--j-color-black)",
+      borderBottom: "var(--j-border-width) solid transparent",
       padding: `${theme.spacing.xs}px ${theme.spacing.sm}px`,
       fontWeight: 500,
       width: "50%",
@@ -66,7 +67,7 @@ const useStyles = createStyles((theme, _params, getRef) => {
 
     linkActive: {
       "&, &:hover": {
-        borderBottom: "var(--j-border-width) solid var(--j-color-black)",
+        borderBottom: "var(--j-border-width) solid var(--j-color-primary-600)",
         color: "var(--j-color-black)",
       },
     },
