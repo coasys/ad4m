@@ -1,7 +1,7 @@
 .App {
   display: flex;
   color: white;
-  font-family: comfortaa;
+  font-family: "DM Sans", Helvetica, Arial, sans-serif;
   height: 100vh;
   min-height: 100%;
   width: 100%;

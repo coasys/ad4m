@@ -3,6 +3,35 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).  
 This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
 
+## [0.2.11] - 02/02/2023
+
+### Added
+ - Ability to revoke applications in ad4m launcher
+ - Added more neighbourhood url for perspective log outputs across all functions
+ - Installing neighbourhoods will now check if there is already one installed with that url
+ - Mechanism added for cleaning agents data automatically when releasing a new launcher version incompatible with older ones
+
+### Changed
+ - CI test binaries now use cargo built binaries instead of nix 
+ - Default link language updated to new perspective-diff-sync with simple latest revision link anchors & simple active agent links
+ - Holochain upgraded to 0.1.0
+ - Holochain client upraded to 0.12.0
+ - UI changes to launcher make style more close to ad4m website
+
+### Deprecated
+
+### Removed
+
+### Fixed
+ - IPFS lock causing ad4m launcher to not start
+ - Not being able to click outside the launcher to minimize it
+ - Updating a link now triggers add/remove link signals
+ - No longer calling signedZomeCall() in HolochainService, results in reduced CPU load and function call time
+
+### Security
+
+---
+
 ## [0.2.10] - 12/01/2023
 
 ### Added

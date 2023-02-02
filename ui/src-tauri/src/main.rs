@@ -70,9 +70,16 @@ fn main() {
         let _ = remove_dir_all(data_path());
     }
 
-    while data_path().join("ad4m").join("ipfs").join("repo.lock").exists() {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    let mut waited_seconds = 0;
+    while data_path().join("ipfs").join("repo.lock").exists() {
         println!("IPFS repo.lock exists, waiting...");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        waited_seconds = waited_seconds + 1;
+        if waited_seconds > 10 {
+            println!("Waited long enough, removing lock...");
+            let _ = remove_dir_all(data_path().join("ipfs").join("repo.lock"));
+            let _ = remove_dir_all(data_path().join("ipfs").join("datastore").join("LOCK"));
+        }
     }
     
     if let Err(err) = setup_logs() {
@@ -88,6 +95,13 @@ fn main() {
     find_and_kill_processes("ad4m-host");
 
     find_and_kill_processes("holochain");
+
+    let prepare = Command::new_sidecar("ad4m-host")
+        .expect("Failed to create ad4m command")
+        .args(["prepare"])
+        .status()
+        .expect("Failed to run ad4m prepare");
+    assert!(prepare.success());
 
     if !holochain_binary_path().exists() {
         log::info!("init command by copy holochain binary");

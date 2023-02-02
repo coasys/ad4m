@@ -31,12 +31,18 @@ export const cardStyle = {
   display: "flex",
   alignItems: "center",
   gap: "var(--j-space-500)",
+  border: "1px solid var(--j-color-ui-200)",
   borderRadius: "var(--j-border-radius)",
   textDecoration: "none",
   backgroundColor: "var(--j-color-ui-50)",
   padding: "var(--j-space-500)",
   marginBottom: "var(--j-space-500)",
   position: "relative",
+};
+
+export const linkStyle = {
+  color: "var(--j-color-primary-600)",
+  textDecoration: "underline",
 };
 
 export const listStyle = {
