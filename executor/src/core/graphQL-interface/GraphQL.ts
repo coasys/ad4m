@@ -7,7 +7,7 @@ import {
 import { WebSocketServer } from 'ws';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, LanguageRef, LinkExpression } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -384,6 +384,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                     }
                 }
+
+                await core.agentService.ensureAgentExpression();
 
                 const dump = core.agentService.dump() as any
 

@@ -117,20 +117,24 @@ export default class AgentService {
         this.#agentLanguage = lang
     }
 
-    async storeAgentProfile() {
-        fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent))
-
+    getAgentLanguage(): Language {
         if(!this.#agentLanguage) {
-            console.error("AgentService ERROR: Can't store Agent profile. No AgentLanguage installed.")
-            return
+            throw Error("AgentService ERROR: No agent language on service");
         }
 
         if (!this.#agentLanguage.expressionAdapter) {
-            throw Error("Agent language does not have an expression adapater");
+            throw Error("AgentService ERROR: Agent language does not have an expression adapater");
         }
+        return this.#agentLanguage;
+    }
+
+    async storeAgentProfile() {
+        fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent))
+
+        const agentLanguage = this.getAgentLanguage();
 
         if(this.#agent?.did) {
-            let adapter = this.#agentLanguage.expressionAdapter.putAdapter;
+            let adapter = agentLanguage.expressionAdapter!.putAdapter;
 
             let isPublic = function isPublic(adapter: PublicSharing | ReadOnlyLanguage): adapter is PublicSharing {
                 return (adapter as PublicSharing).createPublic !== undefined;
@@ -144,6 +148,24 @@ export default class AgentService {
                 }
             } catch (e) {
                 throw new Error(`Incompatible putAdapter in AgentLanguage}\nError was: ${e}`)
+            }
+        }
+    }
+
+    async ensureAgentExpression() {
+        const currentAgent = this.#agent;
+        const agentDid = currentAgent?.did;
+        if (!agentDid) throw Error("No agent did found")
+
+        const agentLanguage = this.getAgentLanguage();
+        if (!agentLanguage) {
+            throw Error("Agent language does not have an expression adapter")
+        }
+        const agentExpression = await agentLanguage.expressionAdapter!.get(agentDid);
+
+        if (!agentExpression) {
+            if (currentAgent) {
+                await this.updateAgent(currentAgent);
             }
         }
     }
