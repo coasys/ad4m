@@ -7,10 +7,12 @@ mkdir languages
 mkdir languages/test-language
 cp -r ../tests/test-language/build languages/test-language/build
 
-# Move binaries
-rm -f hc
-ln -sf `which hc` hc
-rm -f holochain 
-ln -sf `which holochain` holochain
-rm -f swipl
-ln -sf `which swipl` swipl
+ln -s ../../temp/binary/hc ./hc
+ln -s ../../temp/binary/holochain ./holochain
+#ln -s ../../temp/swipl/bin/swipl ./swipl
+homedir=`echo "$(cd ../../temp/swipl/lib/swipl; pwd)"`
+echo '#!/bin/bash' > ./swipl
+echo 'cd ../../temp/swipl/bin' >> ./swipl
+echo -n "./swipl --home=${homedir} " >> ./swipl
+echo '"$@"' >> ./swipl
+chmod +x ./swipl

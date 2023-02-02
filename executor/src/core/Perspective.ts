@@ -68,6 +68,12 @@ export default class Perspective {
             }
         })
 
+        this.#pubsub.subscribe(PubSub.LINK_UPDATED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
+            if (perspective.uuid === this.uuid) {
+                this.#prologNeedsRebuild = true
+            }
+        })
+
         const that = this
 
         process.on("SIGINT", () => {
@@ -87,7 +93,7 @@ export default class Perspective {
                 }
             })
         } catch (e) {
-            console.error("Perspective.constructor(): Got error when trying to get current revision and setting polling loop", e);
+            console.error(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to get current revision and setting polling loop: ${e}`);
         }
 
         this.#prologMutex = new Mutex()
@@ -97,29 +103,8 @@ export default class Perspective {
         return setInterval(
             async () => {
                 try {
-                    const currentRevision = await this.getCurrentRevision();
-
-                    //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                    if (this.isFastPolling && currentRevision) {
-                        this.isFastPolling = false;
-                        clearInterval(this.#pollingInterval);
-                        this.#pollingInterval = this.setupPolling(30000);
-
-                        //Lets also publish the links we have commited but not pushed since we were not connected
-                        const mutations = this.#db.getPendingDiffs(this.uuid);
-                        const batchedMutations = {
-                            additions: [],
-                            removals: []
-                        } as PerspectiveDiff
-                        for (const addition of mutations.additions) {
-                            batchedMutations.additions.push(addition);
-                        }
-                        for (const removal of mutations.removals) {
-                            batchedMutations.removals.push(removal);
-                        }
-                        await this.callLinksAdapter('commit', batchedMutations);
-                    }
-
+                    // We should pull first, so that the committing of pending diffs happens on the
+                    // normative top of the shared history
                     let links = await this.callLinksAdapter("pull");
                     if (links.additions && links.removals) {
                         if (links.additions.length > 0 || links.removals.length > 0) {
@@ -130,8 +115,43 @@ export default class Perspective {
                             }
                         }
                     }
+
+                    // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
+                    const currentRevision = await this.getCurrentRevision();
+                    if (currentRevision) {
+                        //Let's check if we have unpublished diffs:
+                        const mutations = this.#db.getPendingDiffs(this.uuid);
+                        if(mutations && mutations.length > 0) {
+                            // If we do, collect them...
+                            const batchedMutations = {
+                                additions: [],
+                                removals: []
+                            } as PerspectiveDiff
+                            for(const mutation of mutations) {
+                                for (const addition of mutation.additions) {
+                                    batchedMutations.additions.push(addition);
+                                }
+                                for (const removal of mutation.removals) {
+                                    batchedMutations.removals.push(removal);
+                                }
+                            }
+                           
+                            // ...publish them...
+                            await this.callLinksAdapter('commit', batchedMutations);
+                            // ...and clear the temporary storage
+                            this.#db.clearPendingDiffs(this.uuid)
+                        }
+                        
+                        //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
+                        if(this.isFastPolling) {
+                            this.isFastPolling = false;
+                            clearInterval(this.#pollingInterval);
+                            this.#pollingInterval = this.setupPolling(30000);
+                        }
+                    }
+
                 } catch (e) {
-                    console.warn("Perspective.constructor(): Got error when trying to pull on linksAdapter", e);
+                    console.warn(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to pull on linksAdapter. Error: ${e}`, e);
                 }
             },
             intervalMs
@@ -166,7 +186,7 @@ export default class Perspective {
             return this.linkToExpression(maybeLink)
         }
 
-        throw new Error("Object is neither Link nor Expression: " + JSON.stringify(maybeLink))
+        throw new Error(`NH [${this.sharedUrl}] (${this.name}): Object is neither Link nor Expression: ${JSON.stringify(maybeLink)}`)
     }
 
     private renderLinksAdapter(): Promise<Ad4mPerspective> {
@@ -175,7 +195,7 @@ export default class Perspective {
             return Promise.resolve(new Ad4mPerspective([]))
         }
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000)
+            setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
@@ -185,12 +205,12 @@ export default class Perspective {
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
-                    console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
+                    console.error(`NH [${this.sharedUrl}] (${this.name}) LinksSharingLanguage`, address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
                     resolve(new Ad4mPerspective([]))
                 }
             } catch(e) {
-                console.error("Error while trying to call links adapter:", e)
+                console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter: ${e}`)
                 reject(e)
             }
         })
@@ -207,18 +227,18 @@ export default class Perspective {
         }
 
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000)
+            setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
             try {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
-                    // console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
-                    console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
+                    console.error(`NH [${this.sharedUrl}] (${this.name}): LinksSharingLanguage`, address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
                     resolve({
                         additions: [],
@@ -226,32 +246,49 @@ export default class Perspective {
                     })
                 }
             } catch(e) {
-                console.error("Error while trying to call links adapter:", e)
+                console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter:`, e)
                 reject(e)
             }
         })
     }
 
-    private getCurrentRevision(): Promise<String | null> {
+    private getCurrentRevision(): Promise<string | null> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             return Promise.resolve(null)
         }
 
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => reject(Error("LinkLanguage took to long to respond, timeout at 20000ms")), 20000);
+            setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000);
             try {
                 const address = this.neighbourhood!.linkLanguage;
                 const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
                 if(linksAdapter) {
-                    const result = await linksAdapter.currentRevision();
-                    resolve(result)
+                    let currentRevisionString = await linksAdapter.currentRevision();
+
+                    if(!currentRevisionString) {
+                        resolve(null)
+                        return
+                    }
+
+                    if(typeof(currentRevisionString) != 'string') {
+                        //@ts-ignore
+                        currentRevisionString = currentRevisionString.toString()
+                    }
+
+                    currentRevisionString = currentRevisionString.trim()
+                    if(currentRevisionString.length == 0) {
+                        resolve(null)
+                    } else {
+                        resolve(currentRevisionString)
+                    }
+
                 } else {
-                    console.error("LinksSharingLanguage", address, "set in perspective '"+this.name+"' not installed!")
+                    console.error(`NH [${this.sharedUrl}] (${this.name}): LinksSharingLanguage`, address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
                     resolve(null)
                 }
             } catch(e) {
-                console.error("Error while trying to call links adapter:", e)
+                console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter: ${e}`)
                 reject(e)
             }
         })
@@ -268,8 +305,7 @@ export default class Perspective {
             canCommit = true;
         } else {
             //We did not create the neighbourhood, so we should check if we already have some data sync'd before making a commit
-            const currentRevision = this.getCurrentRevision();
-            if (currentRevision != null) {
+            if (await this.getCurrentRevision()) {
                 canCommit = true;
             }
         }
@@ -399,7 +435,7 @@ export default class Perspective {
         linkExpressions.forEach(l => this.removeLocalLink(l))
         this.#prologNeedsRebuild = true;
         for (const link of linkExpressions) {
-            this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+            this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             })
@@ -450,7 +486,7 @@ export default class Perspective {
     async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
         const addr = this.findLink(oldLink)
         if (!addr) {
-            throw new Error(`Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
+            throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
         }
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
@@ -479,14 +515,11 @@ export default class Perspective {
 
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
-        this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
-            perspective: perspective,
-            link: oldLink
-        })
-        this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-            perspective: perspective,
-            link: newLinkExpression
-        })
+        this.#pubsub.publish(PubSub.LINK_UPDATED_TOPIC, {
+            perspective,
+            oldLink,
+            newLink: newLinkExpression
+        });
 
         return newLinkExpression
     }
@@ -512,13 +545,10 @@ export default class Perspective {
     }
 
     private getLinksLocal(query: LinkQuery): LinkExpression[] {
-        // console.debug("getLinks 1")
         if(!query || !query.source && !query.predicate && !query.target) {
             //@ts-ignore
             return this.#db.getAllLinks(this.uuid).map(e => e.link)
         }
-
-        // console.debug("getLinks 2")
 
         const reverse = query.fromDate! >= query.untilDate!;
 
@@ -549,7 +579,6 @@ export default class Perspective {
         }
 
         if(query.source) {
-            // console.debug("query.source", query.source)
             //@ts-ignore
             let result = this.#db.getLinksBySource(this.uuid, query.source).map(e => e.link)
             // @ts-ignore
@@ -560,12 +589,9 @@ export default class Perspective {
             if (query.fromDate) result = result.filter(fromDateFilter)
             // @ts-ignore
             if (query.untilDate) result = result.filter(untilDateFilter)
-            // console.debug("result", result)
             result = limitFilter(result);
             return result
         }
-
-        // console.debug("getLinks 3")
 
         if(query.target) {
             //@ts-ignore
@@ -579,8 +605,6 @@ export default class Perspective {
             result = limitFilter(result);
             return result
         }
-
-        // console.debug("getLinks 4")
 
         //@ts-ignore
         let result = this.#db.getAllLinks(this.uuid).map(e => e.link).filter(link => link.data.predicate === query.predicate)
@@ -647,6 +671,13 @@ export default class Perspective {
             if(link.data.target) nodes.add(link.data.target)
         }
 
+        langAddrs.push(":- dynamic languageAddress/2.")
+        langAddrs.push(":- discontiguous languageAddress/2.")
+        langNames.push(":- dynamic languageName/2.")  
+        langNames.push(":- discontiguous languageName/2.")  
+        exprAddrs.push(":- dynamic expressionAddress/2.")  
+        exprAddrs.push(":- discontiguous expressionAddress/2.")  
+
         for(let node of nodes) {
             //node.replace('\n', '\n\c')
             try {
@@ -661,7 +692,10 @@ export default class Perspective {
                 langNames.push(`languageName("${node}", "${lang!.name}").`)
                 exprAddrs.push(`expressionAddress("${node}", "${ref.expression}").`)
             } catch(e) {
-                console.debug("While creating expressionLanguageFacts:", e)
+                //@ts-ignore
+                if (!e.message.includes("Language not found by reference")) {
+                    console.debug("While creating expressionLanguageFacts:", e)
+                }
             }
         }
 
@@ -718,7 +752,9 @@ export default class Perspective {
         // triple/3
         // link/5
         //-------------------
-        lines.push(":- discontiguous triple/3.")            
+        lines.push(":- dynamic triple/3.")
+        lines.push(":- discontiguous triple/3.")
+        lines.push(":- dynamic link/5.")
         lines.push(":- discontiguous link/5.")  
 
         for (const link of allLinks) {
@@ -731,13 +767,16 @@ export default class Perspective {
         //-------------------
         // reachable/2
         //-------------------
+        lines.push(":- dynamic reachable/2.")
+        lines.push(":- discontiguous reachable/2.")  
         lines.push("reachable(A,B) :- triple(A,_,B).")
         lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
 
         //-------------------
         // hiddenExpression/1
         //-------------------
-        lines.push(":- discontiguous hiddenExpression/1.")            
+        lines.push(":- dynamic hiddenExpression/1.")
+        lines.push(":- discontiguous hiddenExpression/1.")
 
 
 
@@ -746,6 +785,36 @@ export default class Perspective {
         //-------------------
         // Social DNA zomes
         //-------------------
+
+        lines.push(":- dynamic register_sdna_flow/2.")
+        lines.push(":- dynamic flowable/2.")
+        lines.push(":- dynamic flow_state/3.")
+        lines.push(":- dynamic start_action/2.")
+        lines.push(":- dynamic action/4.")
+
+        lines.push(":- discontiguous register_sdna_flow/2.")
+        lines.push(":- discontiguous flowable/2.")
+        lines.push(":- discontiguous flow_state/3.")
+        lines.push(":- discontiguous start_action/2.")
+        lines.push(":- discontiguous action/4.")
+
+        lines.push(":- dynamic subject_class/2.")
+        lines.push(":- dynamic constructor/2.")
+        lines.push(":- dynamic instance/2.")
+        lines.push(":- dynamic property/2.")
+        lines.push(":- dynamic property_getter/4.")
+        lines.push(":- dynamic property_setter/3.")
+        lines.push(":- dynamic collection_getter/4.")
+        lines.push(":- dynamic collection_setter/3.")
+
+        lines.push(":- discontiguous subject_class/2.")
+        lines.push(":- discontiguous constructor/2.")
+        lines.push(":- discontiguous instance/2.")
+        lines.push(":- discontiguous property/2.")
+        lines.push(":- discontiguous property_getter/4.")
+        lines.push(":- discontiguous property_setter/3.")
+        lines.push(":- discontiguous collection_getter/4.")
+        lines.push(":- discontiguous collection_setter/3.")
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data

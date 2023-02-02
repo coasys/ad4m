@@ -39,6 +39,7 @@ use crate::commands::app::{close_application, close_main_window, clear_state};
 use crate::config::data_path;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
+use crate::util::has_processes_running;
 use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
 
 // the payload type must implement `Serialize` and `Clone`.
@@ -60,12 +61,25 @@ pub struct AppState {
 }
 
 fn main() {
+    if has_processes_running("AD4M") > 1 {
+        println!("AD4M is already running");
+        return;
+    }
+
     if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
         let _ = remove_dir_all(data_path());
     }
 
-    if data_path().join("ad4m").join("ipfs").join("repo.lock").exists() {
-        let _ = remove_dir_all(data_path().join("ad4m").join("ipfs").join("repo.lock"));
+    let mut waited_seconds = 0;
+    while data_path().join("ipfs").join("repo.lock").exists() {
+        println!("IPFS repo.lock exists, waiting...");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        waited_seconds = waited_seconds + 1;
+        if waited_seconds > 10 {
+            println!("Waited long enough, removing lock...");
+            let _ = remove_dir_all(data_path().join("ipfs").join("repo.lock"));
+            let _ = remove_dir_all(data_path().join("ipfs").join("datastore").join("LOCK"));
+        }
     }
     
     if let Err(err) = setup_logs() {
@@ -153,7 +167,12 @@ fn main() {
                                 main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
                             }
                         },
-                        CommandEvent::Stderr(line) => log::error!("{}", line),
+                        CommandEvent::Stderr(line) => {
+                            let is_prolog_redefined_line = line.starts_with("Warning: /var") || line.starts_with("Warning:    Redefined") || line.starts_with("Warning:    Previously");
+                            if !is_prolog_redefined_line {
+                                log::error!("{}", line);
+                            }
+                        }
                         CommandEvent::Terminated(line) => {
                             log::info!("Terminated {:?}", line);
                             let main = get_main_window(&handle);

@@ -37,12 +37,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 const perspective = await ad4mClient.perspective.byUUID(create.uuid);
                 expect(perspective?.neighbourhood).not.to.be.undefined;
-
-                const join = await ad4mClient.neighbourhood.joinFromUrl(publishPerspective );
-                expect(join.sharedUrl).to.be.equal(publishPerspective);
-                expect(join.neighbourhood).not.to.be.undefined;
-                expect(join.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
-                expect(join.neighbourhood!.meta.links.length).to.be.equal(1);
+                expect(perspective?.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
+                expect(perspective?.neighbourhood!.meta.links.length).to.be.equal(1);
             })
 
             it('can be created by Alice and joined by Bob', async () => {

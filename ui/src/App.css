@@ -1,9 +1,26 @@
 .App {
   display: flex;
   color: white;
-  font-family: comfortaa;
+  font-family: "DM Sans", Helvetica, Arial, sans-serif;
   height: 100vh;
   min-height: 100%;
   width: 100%;
   min-width: 100%;
+}
+
+.grid {
+  display: grid;
+  row-gap: 30px;
+  grid-template-columns: repeat(3, minmax(0, 3fr));
+  justify-content: center;
+  align-items: center;
+  padding: 30px 20px 0 20px;
+}
+
+.grid div:nth-child(3n+3)  {
+  justify-self: end;
+}
+
+.grid div:nth-child(3n+2)  {
+  justify-self: center;
 }

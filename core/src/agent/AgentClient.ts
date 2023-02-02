@@ -24,6 +24,7 @@ const AGENT_SUBITEMS = `
 
 const Apps_FIELDS = `
     requestId
+    revoked
     auth {
         appName
         appDesc
@@ -379,6 +380,31 @@ export class AgentClient {
             }`,
         }))
         return agentGetApps
+    }
+
+    
+    async removeApp(requestId: string): Promise<Apps[]> {
+        const { agentRemoveApp } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation agentRemoveApp($requestId: String!) {
+                agentRemoveApp(requestId: $requestId) {
+                    ${Apps_FIELDS}
+                }
+            }`,
+            variables: {requestId},
+        }))
+        return agentRemoveApp
+    }
+
+    async revokeToken(requestId: string): Promise<Apps[]> {
+        const { agentRevokeToken } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation agentRevokeToken($requestId: String!) {
+                agentRevokeToken(requestId: $requestId) {
+                    ${Apps_FIELDS}
+                }
+            }`,
+            variables: {requestId},
+        }))
+        return agentRevokeToken
     }
 
     async isLocked(): Promise<boolean> {
