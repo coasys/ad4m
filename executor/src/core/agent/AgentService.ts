@@ -118,14 +118,30 @@ export default class AgentService {
     }
 
     getAgentLanguage(): Language {
-        if(!this.#agentLanguage) {
-            throw Error("AgentService ERROR: No agent language on service");
+        if (!this.#agentLanguage) {
+            throw new Error("AgentService ERROR: No agent language")
+        }
+        return this.#agentLanguage
+    }
+
+    async ensureAgentExpression() {
+        const currentAgent = this.agent;
+        const agentDid = currentAgent?.did;
+        if (!agentDid) throw Error("No agent did found")
+
+        const agentLanguage = this.getAgentLanguage();
+
+        if (!agentLanguage.expressionAdapter!) {
+            throw Error("No expression adapter found")
         }
 
-        if (!this.#agentLanguage.expressionAdapter) {
-            throw Error("AgentService ERROR: Agent language does not have an expression adapater");
+        const agentExpression = await agentLanguage.expressionAdapter!.get(agentDid);
+
+        if (!agentExpression) {
+            if (currentAgent) {
+                await this.updateAgent(currentAgent);
+            }
         }
-        return this.#agentLanguage;
     }
 
     async storeAgentProfile() {
@@ -148,24 +164,6 @@ export default class AgentService {
                 }
             } catch (e) {
                 throw new Error(`Incompatible putAdapter in AgentLanguage}\nError was: ${e}`)
-            }
-        }
-    }
-
-    async ensureAgentExpression() {
-        const currentAgent = this.#agent;
-        const agentDid = currentAgent?.did;
-        if (!agentDid) throw Error("No agent did found")
-
-        const agentLanguage = this.getAgentLanguage();
-        if (!agentLanguage) {
-            throw Error("Agent language does not have an expression adapter")
-        }
-        const agentExpression = await agentLanguage.expressionAdapter!.get(agentDid);
-
-        if (!agentExpression) {
-            if (currentAgent) {
-                await this.updateAgent(currentAgent);
             }
         }
     }

@@ -383,6 +383,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                     }
+
+                    await core.agentService.ensureAgentExpression();
                 }
 
                 await core.agentService.ensureAgentExpression();
