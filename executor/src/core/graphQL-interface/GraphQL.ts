@@ -387,8 +387,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     await core.agentService.ensureAgentExpression();
                 }
 
-                await core.agentService.ensureAgentExpression();
-
                 const dump = core.agentService.dump() as any
 
                 if(failed) {
