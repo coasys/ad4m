@@ -130,7 +130,7 @@ function makeRandomPrologAtom(length: number): string {
 
 export function SDNAClass(opts: SDNAClassOptions) {
     return function (target: any) {
-        target.prototype.type = undefined;
+        target.prototype.type = opts.initial;
         target.prototype["__properties"] = target.prototype["__properties"] || {};
         target.prototype["__properties"]['type'] = target.prototype["__properties"]['type'] || {};
         target.prototype["__properties"]['type'] = { ...target.prototype["__properties"]['type'], ...opts }
