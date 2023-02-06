@@ -342,7 +342,7 @@ export class PerspectiveProxy {
                 return subjectClasses[0]
             } else {
                 //@ts-ignore
-                return subjectClass.__proto__?.constructor?.name
+                return subjectClass.className
             }
         }
     }
@@ -433,6 +433,8 @@ export class PerspectiveProxy {
      * @param obj The template object
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
+        // @ts-ignore
+        obj.type = '';
         // Collect all string properties of the object in a list
         let properties = Object.keys(obj).filter(key => !Array.isArray(obj[key]))
 
