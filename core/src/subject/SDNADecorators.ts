@@ -108,7 +108,7 @@ export function subjectCollection(opts: CollectionOptions) {
         const value = key as string
         target[`add${capitalize(value)}`] = () => {}
 
-        Object.defineProperty(target, key, {});
+        Object.defineProperty(target, key, {configurable: true});
     };
 }
 
@@ -131,14 +131,14 @@ function makeRandomPrologAtom(length: number): string {
 export function SDNAClass(opts: SDNAClassOptions) {
     return function (target: any) {
         target.prototype.type = opts.initial;
+        target.type = opts.initial;
         target.prototype["__properties"] = target.prototype["__properties"] || {};
         target.prototype["__properties"]['type'] = target.prototype["__properties"]['type'] || {};
         target.prototype["__properties"]['type'] = { ...target.prototype["__properties"]['type'], ...opts }
-        
         target.generateSDNA = function() {
             let sdna = ""
             let subjectName = target.name
-            let obj = new target()
+            let obj = target.prototype;
     
             let uuid = makeRandomPrologAtom(8)
     
@@ -223,16 +223,13 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }
                     
-                    let adder = obj[collectionToAdderName(collection)]
-                    if(typeof adder === "function") {
-                        let action = [{
-                            action: "addLink",
-                            source: "this",
-                            predicate: through,
-                            target: "value",
-                        }]
-                        collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(action)}').\n`
-                    }
+                    let action = [{
+                        action: "addLink",
+                        source: "this",
+                        predicate: through,
+                        target: "value",
+                    }]
+                    collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(action)}').\n`
                 }
     
                 collectionsCode.push(collectionCode)
@@ -250,6 +247,6 @@ export function SDNAClass(opts: SDNAClassOptions) {
             return sdna
         }
 
-        Object.defineProperty(target, 'type', {});
+        Object.defineProperty(target, 'type', {configurable: true});
     }
 }
