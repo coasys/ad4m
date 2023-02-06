@@ -110,9 +110,11 @@ export class Subject {
                 const collection = adder.Collection
                 const actions = eval(adder.Adder)
                 this[collectionToAdderName(collection)] = async (value: any) => {
-                    //console.log("Setting property: " + property + " to " + value)
-                    //console.log("Actions: " + JSON.stringify(actions))
-                    await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
+                    if (Array.isArray(value)) {
+                        await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value: v}])))
+                    } else {
+                        await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
+                    }
                 }
             }
         }
