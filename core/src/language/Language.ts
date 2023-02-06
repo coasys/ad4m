@@ -57,6 +57,8 @@ export interface Language {
     /** Interface for providing UI components for the settings of this Language */
     readonly settingsUI?: SettingsUI;
 
+    readonly socialOrganismAdapter?: SocialOrganismAdapter;
+
     /** Optional function to make any cleanup/teardown if your language gets deleting in the ad4m-executor */
     readonly teardown?: () => void;
 
@@ -251,4 +253,20 @@ export interface TelepresenceAdapter {
 
     rpcCall(remoteAgentDid: string, call: TelepresenceRpcCall): object;
     registerRpcCallback(callback: TelepresenceRpcCall);
+}
+
+export interface SocialOrganismAdapter {
+    create(organismAddress: string, messageURI: string)
+    concur(organismAddress: string, messageURI: string)
+    reject(organismAddress: string, messageURI: string)
+
+    signatures(organismAddress: string, messageURI: string): Promise<string[]>
+    members(organismAddress: string): Promise<string[]>
+
+    vouchForNewMember(organismAddress: string, newMemberDid: string)
+    rejectNewMember(organismAddress: string, newMemberDid: string)
+
+    newExpressionCallback()
+    newMemberCallback()
+    
 }
