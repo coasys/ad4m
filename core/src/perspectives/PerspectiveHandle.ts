@@ -2,11 +2,11 @@ import { Field, ObjectType } from "type-graphql";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 
 export enum PerspectiveState {
-    Private,
-    NeighbourhoodJoinInitiated,
-    LinkLanguageFailedToInstall,
-    LinkLanguageInstalledButNotSynced,
-    Synced,
+    Private = "Private",
+    NeighbourhoodJoinInitiated = "NeighbourhoodJoinInitiated",
+    LinkLanguageFailedToInstall = "LinkLanguageFailedToInstall",
+    LinkLanguageInstalledButNotSynced = "LinkLanguageInstalledButNotSynced",
+    Synced = "Synced",
 }
 
 // This type is used in the GraphQL interface to reference a mutable
