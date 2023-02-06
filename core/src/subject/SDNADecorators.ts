@@ -1,6 +1,6 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { Subject } from "./Subject";
-import { collectionToAdderName, propertyNameToSetterName, setterNameToPropertyName, stringifyObjectLiteral } from "./util";
+import { capitalize, collectionToAdderName, propertyNameToSetterName, stringifyObjectLiteral } from "./util";
 
 export class PerspectiveAction {
     action: string
@@ -75,14 +75,20 @@ interface PropertyOptions {
     initial?: string,
     required?: boolean,
     resolve?: boolean,
+    resolveLanguage?: string;
 }
 export function subjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
         target["__properties"][key] = { ...target["__properties"][key], ...opts }
+
+        if (opts.resolveLanguage) {
+            const value = key as string
+            target[`set${capitalize(value)}`] = () => {}
+        }
+
         Object.defineProperty(target, key, {});
-        //return descriptor;
     };
 }
 
@@ -98,22 +104,11 @@ export function subjectCollection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
+        
+        const value = key as string
+        target[`add${capitalize(value)}`] = () => {}
+
         Object.defineProperty(target, key, {});
-        //return descriptor;
-    };
-}
-
-interface PropertySetterOptions {
-    resolveLanguage: string;
-}
-
-export function subjectPropertySetter(opts: PropertySetterOptions) {
-    return function <T>(target: T, key: keyof T) {
-        const propertyName = setterNameToPropertyName(key as string)
-        target["__properties"] = target["__properties"] || {};
-        target["__properties"][propertyName] = target["__properties"][propertyName] || {};
-        target["__properties"][propertyName] = { ...target["__properties"][propertyName], ...opts }
-        //return descriptor;
     };
 }
 
@@ -127,126 +122,134 @@ function makeRandomPrologAtom(length: number): string {
     return result;
  }
 
-export function sdnaOutput(target: any, key: string, descriptor: PropertyDescriptor) {
-    const originalMethod = descriptor.value;
-    if(typeof originalMethod !== "function") {
-        throw new Error("sdnaOutput decorator can only be applied to methods");
-    }
+ interface SDNAClassOptions {
+    through: string;
+    initial?: string,
+    required?: boolean,
+}
 
-    descriptor.value = () => {
-        let sdna = ""
-        let subjectName = target.name
-        let obj = new target
-
-        let uuid = makeRandomPrologAtom(8)
-
-        sdna += `subject_class("${subjectName}", ${uuid}).\n`
-
-        let constructorActions = []
-        if(obj.subjectConstructor && obj.subjectConstructor.length) {
-            constructorActions = constructorActions.concat(obj.subjectConstructor)
-        }
-
-        let instanceConditions = []
-        if(obj.isSubjectInstance && obj.isSubjectInstance.length) {
-            instanceConditions = instanceConditions.concat(obj.isSubjectInstance)
-        }
-
-        let propertiesCode = []
-        let properties = obj.__properties || {}
-        for(let property in properties) {
-            let propertyCode = `property(${uuid}, "${property}").\n`
-
-            let { through, initial, required, resolve, resolveLanguage } = properties[property]
-
-            if(resolve) {
-                propertyCode += `property_resolve(${uuid}, "${property}").\n`
-
-                if(resolveLanguage) {
-                    propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
-                }
+export function SDNAClass(opts: SDNAClassOptions) {
+    return function (target: any) {
+        target.prototype.type = undefined;
+        target.prototype["__properties"] = target.prototype["__properties"] || {};
+        target.prototype["__properties"]['type'] = target.prototype["__properties"]['type'] || {};
+        target.prototype["__properties"]['type'] = { ...target.prototype["__properties"]['type'], ...opts }
+        
+        target.generateSDNA = function() {
+            let sdna = ""
+            let subjectName = target.name
+            let obj = new target()
+    
+            let uuid = makeRandomPrologAtom(8)
+    
+            sdna += `subject_class("${subjectName}", ${uuid}).\n`
+    
+            let constructorActions = []
+            if(obj.subjectConstructor && obj.subjectConstructor.length) {
+                constructorActions = constructorActions.concat(obj.subjectConstructor)
             }
-            
-            if(through) {
-                propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
-
-                if(required) {
-                    instanceConditions.push(`triple(Base, "${through}", _)`)
-                }    
-
-                let setter = obj[propertyNameToSetterName(property)]
-                if(typeof setter === "function") {
-                    let action = [{
-                        action: "setSingleTarget",
-                        source: "this",
-                        predicate: through,
-                        target: "value",
-                    }]
-                    propertyCode += `property_setter(${uuid}, "${property}", '${stringifyObjectLiteral(action)}').\n`
-                }
+    
+            let instanceConditions = []
+            if(obj.isSubjectInstance && obj.isSubjectInstance.length) {
+                instanceConditions = instanceConditions.concat(obj.isSubjectInstance)
             }
-
-            propertiesCode.push(propertyCode)
-
-            if(initial) {
-                constructorActions.push({
-                    action: "addLink",
-                    source: "this",
-                    predicate: through,
-                    target: initial,
-                })
-            }
-        }
-
-        let collectionsCode = []
-        let collections = obj.__collections || {}
-        for(let collection in collections) {
-            let collectionCode = `collection(${uuid}, "${collection}").\n`
-
-            let { through, where } = collections[collection]
-
-            if(through) {
-                if(where) {
-                    if(!where.isInstance) {
-                        throw "'where' currently only supports 'isInstance'"
+    
+            let propertiesCode = []
+            let properties = obj.__properties || {}
+            for(let property in properties) {
+                let propertyCode = `property(${uuid}, "${property}").\n`
+    
+                let { through, initial, required, resolve, resolveLanguage } = properties[property]
+    
+                if(resolve) {
+                    propertyCode += `property_resolve(${uuid}, "${property}").\n`
+    
+                    if(resolveLanguage) {
+                        propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
                     }
-                    let otherClass
-                    if(where.isInstance.name) {
-                        otherClass = where.isInstance.name
-                    } else {
-                        otherClass = where.isInstance
-                    }
-                    collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(C, (triple(Base, "${through}", C), instance(OtherClass, C), subject_class("${otherClass}", OtherClass)), List).\n`    
-                } else {
-                    collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                 }
                 
-                let adder = obj[collectionToAdderName(collection)]
-                if(typeof adder === "function") {
-                    let action = [{
+                if(through) {
+                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
+    
+                    if(required) {
+                        instanceConditions.push(`triple(Base, "${through}", _)`)
+                    }    
+    
+                    let setter = obj[propertyNameToSetterName(property)]
+                    if(typeof setter === "function") {
+                        let action = [{
+                            action: "setSingleTarget",
+                            source: "this",
+                            predicate: through,
+                            target: "value",
+                        }]
+                        propertyCode += `property_setter(${uuid}, "${property}", '${stringifyObjectLiteral(action)}').\n`
+                    }
+                }
+    
+                propertiesCode.push(propertyCode)
+    
+                if(initial) {
+                    constructorActions.push({
                         action: "addLink",
                         source: "this",
                         predicate: through,
-                        target: "value",
-                    }]
-                    collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(action)}').\n`
+                        target: initial,
+                    })
                 }
             }
-
-            collectionsCode.push(collectionCode)
+    
+            let collectionsCode = []
+            let collections = obj.__collections || {}
+            for(let collection in collections) {
+                let collectionCode = `collection(${uuid}, "${collection}").\n`
+    
+                let { through, where } = collections[collection]
+    
+                if(through) {
+                    if(where) {
+                        if(!where.isInstance) {
+                            throw "'where' currently only supports 'isInstance'"
+                        }
+                        let otherClass
+                        if(where.isInstance.name) {
+                            otherClass = where.isInstance.name
+                        } else {
+                            otherClass = where.isInstance
+                        }
+                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(C, (triple(Base, "${through}", C), instance(OtherClass, C), subject_class("${otherClass}", OtherClass)), List).\n`    
+                    } else {
+                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
+                    }
+                    
+                    let adder = obj[collectionToAdderName(collection)]
+                    if(typeof adder === "function") {
+                        let action = [{
+                            action: "addLink",
+                            source: "this",
+                            predicate: through,
+                            target: "value",
+                        }]
+                        collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(action)}').\n`
+                    }
+                }
+    
+                collectionsCode.push(collectionCode)
+            }
+    
+            let subjectContructorJSONString = stringifyObjectLiteral(constructorActions)
+            sdna += `constructor(${uuid}, '${subjectContructorJSONString}').\n`
+            let instanceConditionProlog = instanceConditions.join(", ")
+            sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
+            sdna += "\n"
+            sdna += propertiesCode.join("\n")
+            sdna += "\n"
+            sdna += collectionsCode.join("\n")
+    
+            return sdna
         }
 
-        let subjectContructorJSONString = stringifyObjectLiteral(constructorActions)
-        sdna += `constructor(${uuid}, '${subjectContructorJSONString}').\n`
-        let instanceConditionProlog = instanceConditions.join(", ")
-        sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
-        sdna += "\n"
-        sdna += propertiesCode.join("\n")
-        sdna += "\n"
-        sdna += collectionsCode.join("\n")
-
-        return sdna
+        Object.defineProperty(target, 'type', {});
     }
-
-    return descriptor
 }
