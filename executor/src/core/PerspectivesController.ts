@@ -122,10 +122,11 @@ export default class PerspectivesController {
         return perspective
     }
 
-    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean) {
+    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
+        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: perspectiveHandle })
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
         this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
-        this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin));
+        this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin, state));
         this.save()
     }
 
@@ -149,7 +150,7 @@ export default class PerspectivesController {
     update(uuid: string, name: string) {
         let perspective = this.perspective(uuid);
         perspective.name = name;
-        let perspectiveHandle = new PerspectiveHandle(uuid, name);
+        let perspectiveHandle = new PerspectiveHandle(uuid, name, perspective.state);
         perspectiveHandle.sharedUrl = perspective.sharedUrl;
         this.#perspectiveHandles.set(uuid, perspectiveHandle)
         this.save()
