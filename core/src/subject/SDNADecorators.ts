@@ -126,18 +126,21 @@ function makeRandomPrologAtom(length: number): string {
     through: string;
     initial?: string,
     required?: boolean,
+    name: string;
 }
 
 export function SDNAClass(opts: SDNAClassOptions) {
     return function (target: any) {
         target.prototype.type = opts.initial;
         target.type = opts.initial;
+        target.prototype.className = opts.name;
+        target.className = opts.name;
         target.prototype["__properties"] = target.prototype["__properties"] || {};
         target.prototype["__properties"]['type'] = target.prototype["__properties"]['type'] || {};
         target.prototype["__properties"]['type'] = { ...target.prototype["__properties"]['type'], ...opts }
         target.generateSDNA = function() {
             let sdna = ""
-            let subjectName = target.name
+            let subjectName = opts.name
             let obj = target.prototype;
     
             let uuid = makeRandomPrologAtom(8)
@@ -243,7 +246,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
             sdna += propertiesCode.join("\n")
             sdna += "\n"
             sdna += collectionsCode.join("\n")
-    
+
             return sdna
         }
 
