@@ -92,13 +92,46 @@ pub async fn me(executor_url: String, cap_token: String) -> Result<me::MeAgent> 
 )]
 pub struct GetApps;
 
-pub async fn get_apps(executor_url: String, cap_token: String,) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
+pub async fn get_apps(executor_url: String, cap_token: String) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
     let response_data: get_apps::ResponseData =
         query(executor_url, cap_token, GetApps::build_query(get_apps::Variables {}))
             .await
-            .with_context(|| "Failed to run agent->me query")?;
+            .with_context(|| "Failed to run agent->get apps query")?;
     Ok(response_data.agent_get_apps)
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct RevokeToken;
+
+pub async fn revoke_token(executor_url: String, cap_token: String, request_id: String) -> Result<Vec<revoke_token::RevokeTokenAgentRevokeToken>> {
+    let response_data: revoke_token::ResponseData =
+        query(executor_url, cap_token, RevokeToken::build_query(revoke_token::Variables { request_id }))
+            .await
+            .with_context(|| "Failed to run agent->revoke_token query")?;
+    Ok(response_data.agent_revoke_token)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct RemoveApp;
+
+pub async fn remove_app(executor_url: String, cap_token: String, request_id: String) -> Result<Vec<remove_app::RemoveAppAgentRemoveApp>> {
+    let response_data: remove_app::ResponseData =
+        query(executor_url, cap_token, RemoveApp::build_query(remove_app::Variables { request_id }))
+            .await
+            .with_context(|| "Failed to run agent->remove_app query")?;
+    Ok(response_data.agent_remove_app)
+}
+
 
 #[derive(GraphQLQuery)]
 #[graphql(

@@ -12,8 +12,8 @@ export default function Request({ code, changeState, verifyCode, changeCode }) {
       </div>
       <div class="input">
         <label class="input__label">Security code</label>
-
         <input
+          type="tel"
           placeholder="XXXXXX"
           class="input__field"
           value=${code}

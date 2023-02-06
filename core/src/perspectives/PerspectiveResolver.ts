@@ -1,10 +1,10 @@
 import { Arg, Mutation, PubSub, PubSubEngine, Query, Resolver, Subscription } from "type-graphql";
-import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkInput, LinkMutations } from "../links/Links";
+import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkExpressionUpdated, LinkInput, LinkMutations } from "../links/Links";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
-import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from '../PubSub'
+import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from '../PubSub'
 
 const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -192,5 +192,10 @@ export default class PerspectiveResolver {
     @Subscription({topics: LINK_REMOVED_TOPIC, nullable: true})
     perspectiveLinkRemoved(@Arg('uuid') uuid: string): LinkExpression {
         return testLink
+    }
+
+    @Subscription({topics: LINK_UDATED_TOPIC, nullable: true})
+    perspectiveLinkUpdated(@Arg('uuid') uuid: string): LinkExpressionUpdated {
+        return {oldLink: testLink, newLink: testLink}
     }
 }

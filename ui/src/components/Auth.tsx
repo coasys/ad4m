@@ -1,6 +1,7 @@
 import { useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { showNotification } from "@mantine/notifications";
+import { copyTextToClipboard } from "../util";
 
 interface Capability {
   with: Resource;
@@ -58,7 +59,7 @@ const Auth = () => {
   };
 
   const copyCode = () => {
-    navigator.clipboard.writeText(secretCode);
+    copyTextToClipboard(secretCode);
 
     setCopied(true);
 

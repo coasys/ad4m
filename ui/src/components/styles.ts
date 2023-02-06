@@ -31,6 +31,7 @@ export const cardStyle = {
   display: "flex",
   alignItems: "center",
   gap: "var(--j-space-500)",
+  border: "1px solid var(--j-color-ui-200)",
   borderRadius: "var(--j-border-radius)",
   textDecoration: "none",
   backgroundColor: "var(--j-color-ui-50)",
@@ -39,21 +40,16 @@ export const cardStyle = {
   position: "relative",
 };
 
+export const linkStyle = {
+  color: "var(--j-color-primary-600)",
+  textDecoration: "underline",
+};
+
 export const listStyle = {
   overflowY: "scroll",
   padding: 20,
   overflowX: "hidden",
   marginTop: 10,
-};
-
-export const gridButton = {
-  display: "grid",
-  columnGap: "calc(100% - 305px)",
-  rowGap: "30px",
-  gridTemplateColumns: "repeat(3, 79px)",
-  justifyContent: "center",
-  alignItems: "center",
-  padding: "30px 20px 0 20px",
 };
 
 export const badge = {

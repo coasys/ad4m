@@ -1,4 +1,6 @@
 import lodash from "lodash"
+import path from "path"
+import * as fs from 'fs';
 
 export type Capabilities = Capability[]
 export interface Capability {
@@ -349,6 +351,22 @@ export const RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY: Capability = {
         pointers: [WILD_CARD],
     },
     can: [SUBSCRIBE]
+}
+
+export const checkTokenAuthorized = (apps: any[] = [], token: string, isAd4minCredential: boolean) => {
+    if (!isAd4minCredential) {
+        if (apps.length > 0) {
+            if (token) {
+                const app = apps.find(app => app.token === token);
+            
+                if (!app) {
+                    throw Error(`Unauthorized access`)
+                } else if (app.revoked) {
+                    throw Error(`Unauthorized access`)
+                }
+            }
+        }
+    }
 }
 
 export const checkCapability = (capabilities: Capabilities, expected: Capability) => {

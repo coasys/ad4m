@@ -5,6 +5,10 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
+    "build-libs": {
+      "dependsOn": ["@perspect3vism/ad4m#build", "@perspect3vism/ad4m-connect#build", "@perspect3vism/ad4m-executor#build"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
     "lint": {
       "outputs": []
     },

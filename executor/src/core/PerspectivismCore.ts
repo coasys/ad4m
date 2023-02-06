@@ -240,6 +240,11 @@ export default class PerspectivismCore {
     }
 
     async installNeighbourhood(url: Address): Promise<PerspectiveHandle> {
+        const perspectives = this.#perspectivesController!.allPerspectiveHandles();
+        if (perspectives.some(p => p.sharedUrl === url)) {
+            throw Error(`Neighbourhood with URL ${url} already installed`);
+        }
+
         let neighbourHoodExp = await this.languageController.getPerspective(parseExprUrl(url).expression);
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);
@@ -248,7 +253,7 @@ export default class PerspectivismCore {
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
         await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
 
-        return this.#perspectivesController!.add("", url, neighbourhood);
+        return this.#perspectivesController!.add("", url, neighbourhood, true);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {

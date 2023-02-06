@@ -35,6 +35,45 @@ query Me { agent {
 query GetApps {
     agentGetApps {
         requestId
+        revoked
+        auth {
+            appName
+            appDesc
+            appUrl
+            capabilities {
+                with {
+                    domain
+                    pointers
+                }
+                can 
+            }
+        }
+    }
+}
+
+mutation RevokeToken($requestId: String!) {
+    agentRevokeToken(requestId: $requestId) {
+        requestId
+        revoked
+        auth {
+            appName
+            appDesc
+            appUrl
+            capabilities {
+                with {
+                    domain
+                    pointers
+                }
+                can 
+            }
+        }
+    }
+}
+
+mutation RemoveApp($requestId: String!) {
+    agentRemoveApp(requestId: $requestId)  {
+        requestId
+        revoked
         auth {
             appName
             appDesc

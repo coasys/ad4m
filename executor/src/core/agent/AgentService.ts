@@ -24,6 +24,7 @@ export default class AgentService {
     #wallet?: object
     #file: string
     #appsFile: string;
+    #apps: AuthInfoExtended[];
     #requestingAuthInfo?: AuthInfoExtended;
     #fileProfile: string
     #agent?: Agent
@@ -41,6 +42,11 @@ export default class AgentService {
         this.#file = path.join(rootConfigPath, "agent.json")
         this.#fileProfile = path.join(rootConfigPath, "agentProfile.json")
         this.#appsFile = path.join(rootConfigPath, "apps.json")
+        try {
+            this.#apps = JSON.parse(fs.readFileSync(this.#appsFile).toString());
+        } catch (e) {
+            this.#apps = []
+        } 
         this.#pubsub = PubSubInstance.get()
         this.#readyPromise = new Promise(resolve => {
             this.#readyPromiseResolve = resolve
@@ -111,20 +117,40 @@ export default class AgentService {
         this.#agentLanguage = lang
     }
 
+    getAgentLanguage(): Language {
+        if (!this.#agentLanguage) {
+            throw new Error("AgentService ERROR: No agent language")
+        }
+        return this.#agentLanguage
+    }
+
+    async ensureAgentExpression() {
+        const currentAgent = this.agent;
+        const agentDid = currentAgent?.did;
+        if (!agentDid) throw Error("No agent did found")
+
+        const agentLanguage = this.getAgentLanguage();
+
+        if (!agentLanguage.expressionAdapter!) {
+            throw Error("No expression adapter found")
+        }
+
+        const agentExpression = await agentLanguage.expressionAdapter!.get(agentDid);
+
+        if (!agentExpression) {
+            if (currentAgent) {
+                await this.updateAgent(currentAgent);
+            }
+        }
+    }
+
     async storeAgentProfile() {
         fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent))
 
-        if(!this.#agentLanguage) {
-            console.error("AgentService ERROR: Can't store Agent profile. No AgentLanguage installed.")
-            return
-        }
-
-        if (!this.#agentLanguage.expressionAdapter) {
-            throw Error("Agent language does not have an expression adapater");
-        }
+        const agentLanguage = this.getAgentLanguage();
 
         if(this.#agent?.did) {
-            let adapter = this.#agentLanguage.expressionAdapter.putAdapter;
+            let adapter = agentLanguage.expressionAdapter!.putAdapter;
 
             let isPublic = function isPublic(adapter: PublicSharing | ReadOnlyLanguage): adapter is PublicSharing {
                 return (adapter as PublicSharing).createPublic !== undefined;
@@ -314,6 +340,10 @@ export default class AgentService {
 
         return payload.capabilities
     }
+
+    isAdminCredential(token: string) {
+        return token == this.#adminCredential
+    }
     
     requestCapability(appName: string, appDesc: string, appUrl: string, capabilities: string) {
         let requestId = uuidv4()
@@ -381,25 +411,35 @@ export default class AgentService {
         this.#requests.delete(authKey)
 
         if (requestId === this.#requestingAuthInfo?.requestId) {
-            let apps
-            try {
-                apps = JSON.parse(fs.readFileSync(this.#appsFile).toString())
-            } catch(e) {
-                apps = []
-            }
-            
-            fs.writeFileSync(this.#appsFile, JSON.stringify([...apps, this.#requestingAuthInfo]))
+            const apps = [...this.#apps, {...this.#requestingAuthInfo, token: jwt}];
+            this.#apps = apps;
+            fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
         }
 
         return jwt
     }
 
     getApps(): AuthInfoExtended[] {
+        return this.#apps;
+    }
+
+    removeApp(requestId: string) {
         try {
-            return JSON.parse(fs.readFileSync(this.#appsFile).toString())
+            this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId)
+
+            fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps))
         } catch (e) {
-            fs.writeFileSync(this.#appsFile, '[]')
-            return []
+            console.error('Error while removing app', e);
+        }
+    }
+
+    revokeAppToken(requestId: string) {
+        try {
+            this.#apps = this.#apps.map((app: any) => app.requestId === requestId ? ({...app, revoked: true}) : app);
+
+            fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps))
+        } catch (e) {
+            console.error('Error while revoking token', e);
         }
     }
 

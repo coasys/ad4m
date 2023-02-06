@@ -153,6 +153,11 @@ export class PerspectivismDb {
         const key = this.pendingLinkKey(pUUID);
         return this.#db.get(key).value()
     }
+
+    clearPendingDiffs(pUUID: string): void {
+        const key = this.pendingLinkKey(pUUID);
+        this.#db.set(key, []).write()
+    }
 }
 
 export function init(dbFilePath: string): PerspectivismDb {

@@ -35,6 +35,13 @@ export function collectionToAdderName(collection: string): string {
     return `add${capitalize(pluralToSingular(collection))}`
 }
 
+// e.g. "addEntry" -> "entries"
+export function collectionAdderToName(adderName: string): string {
+    let singular = adderName.substring(3)
+    let plural = singularToPlural(singular)
+    return plural.charAt(0).toLowerCase() + plural.slice(1)
+}
+
 
 export function stringifyObjectLiteral(obj) {
     if(Array.isArray(obj)) {

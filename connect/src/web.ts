@@ -11,6 +11,7 @@ import AgentLocked from "./components/AgentLocked";
 import RequestCapability from "./components/RequestCapability";
 import InvalidToken from "./components/InvalidToken";
 import VerifyCode from "./components/VerifyCode";
+import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
 import Header from "./components/Header";
 import { ClientStates } from "./core";
 import autoBind from "auto-bind";
@@ -350,6 +351,9 @@ export default class Ad4mConnect extends LitElement {
   @state()
   private _isMobile = null;
 
+  @state()
+  private _hasClickedDownload = null;
+
   @property({ type: String, reflect: true })
   appname = null;
 
@@ -425,6 +429,10 @@ export default class Ad4mConnect extends LitElement {
     this._client.connect();
   }
 
+  reconnect() {
+    this._client.reconnect();
+  }
+
   async connected() {
     try {
       await this.getAd4mClient().agent.status();
@@ -472,20 +480,23 @@ export default class Ad4mConnect extends LitElement {
     const ele = document.createElement("div");
     ele.id = "reader";
     // @ts-ignore
-    ele.width = "100%";
+    ele.width = "100vw";
     ele.style.height = "100vh";
 
     const cancelBtn = document.createElement("button");
     cancelBtn.id = "stop-scan";
-    cancelBtn.innerHTML = "<";
+    cancelBtn.innerHTML = "&#10005;";
+    cancelBtn.style.paddingTop = "4px";
+    cancelBtn.style.display = "flex";
+    cancelBtn.style.alignItems = "center";
+    cancelBtn.style.justifyContent = "center";
     cancelBtn.style.position = "absolute";
-    cancelBtn.style.top = "0";
-    cancelBtn.style.left = "0";
+    cancelBtn.style.top = "10px";
+    cancelBtn.style.right = "10px";
     cancelBtn.style.borderRadius = "50%";
     cancelBtn.style.border = "0";
     cancelBtn.style.height = "30px";
     cancelBtn.style.width = "30px";
-    cancelBtn.style.margin = "10px 10px";
     cancelBtn.style.fontFamily = "inherit";
     cancelBtn.style.fontSize = "20px";
 
@@ -529,10 +540,10 @@ export default class Ad4mConnect extends LitElement {
     };
 
     const cancelBtn = document.getElementById("stop-scan");
-    cancelBtn.addEventListener("click", function() {
+    cancelBtn.addEventListener("click", function () {
       html5QrCode.stop();
       ele.style.display = "none";
-    })
+    });
 
     html5QrCode.start(
       { facingMode: "environment" },
@@ -570,6 +581,10 @@ export default class Ad4mConnect extends LitElement {
     this._code = code;
   }
 
+  onDownloaded() {
+    this._hasClickedDownload = true;
+  }
+
   verifyCode(code) {
     this._client.verifyCode(code);
   }
@@ -590,6 +605,8 @@ export default class Ad4mConnect extends LitElement {
           scanQrcode: this.scanQrcode,
           connectToPort: this.connectToPort,
           isMobile: this._isMobile,
+          hasClickedDownload: this._hasClickedDownload,
+          onDownloaded: this.onDownloaded,
           changeState: this.changeState,
         });
       case "agent_locked":
@@ -610,7 +627,9 @@ export default class Ad4mConnect extends LitElement {
           appiconpath: this.appiconpath,
         });
       case "disconnected":
-        return Disconnected({ connectToPort: this.connectToPort });
+        return Disconnected({ reconnect: this.reconnect });
+      case "connection-error":
+        return CouldNotMakeRequest();
       case "verify_code":
         return VerifyCode({
           code: this._code,

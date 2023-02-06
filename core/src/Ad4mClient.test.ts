@@ -258,6 +258,17 @@ describe('Ad4mClient', () => {
             expect(jwt).toBe("test-jwt")
         })
 
+        it('agentRevokeToken() smoke tests', async () => {
+            const newApps = await ad4mClient.agent.revokeToken('test-request-id')
+            expect(newApps.length).toBe(1)
+            expect(newApps[0].revoked).toBe(true)
+        })
+
+        it('agentRemoveToken() smoke tests', async () => {
+            const newApps = await ad4mClient.agent.removeApp('test-request-id')
+            expect(newApps.length).toBe(0)
+        })
+
         it('agentIsLocked() smoke tests', async () => {
             const status = await ad4mClient.agent.isLocked()
             expect(status).toBe(false)

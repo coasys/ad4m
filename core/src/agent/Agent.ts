@@ -183,10 +183,18 @@ export class Apps {
     requestId: string;
 
     @Field()
+    token: string;
+
+    @Field({nullable: true})
+    revoked?: boolean
+
+    @Field()
     auth: AuthInfo;
 
-    constructor(requestId: string, auth: AuthInfo) {
+    constructor(requestId: string, auth: AuthInfo, token: string, revoked?: boolean) {
         this.requestId = requestId;
         this.auth = auth;
+        this.token = token;
+        this.revoked = revoked;
     }
 }

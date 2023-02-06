@@ -8,8 +8,9 @@ import { Literal } from "../Literal";
 import { Subject } from "../subject/Subject";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { ExpressionRendered } from "../expression/Expression";
+import { collectionAdderToName } from "../subject/util";
 
-type PerspectiveListenerTypes = "link-added" | "link-removed"
+type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
 interface Parameter {
     name: string
@@ -27,14 +28,17 @@ export class PerspectiveProxy {
     #client: PerspectiveClient
     #perspectiveLinkAddedCallbacks: LinkCallback[]
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
+    #perspectiveLinkUpdatedCallbacks: LinkCallback[]
 
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = []
         this.#perspectiveLinkRemovedCallbacks = []
+        this.#perspectiveLinkUpdatedCallbacks = []
         this.#handle = handle
         this.#client = ad4m
         this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
         this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
+        this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
     }
 
     async executeAction(actions, expression, parameters: Parameter[]) {
@@ -158,6 +162,8 @@ export class PerspectiveProxy {
             this.#perspectiveLinkAddedCallbacks.push(cb);
         } else if (type === 'link-removed') {
             this.#perspectiveLinkRemovedCallbacks.push(cb);
+        } else if (type === 'link-updated') {
+            this.#perspectiveLinkUpdatedCallbacks.push(cb);
         }
     }
 
@@ -174,6 +180,10 @@ export class PerspectiveProxy {
             const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
 
             this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
+        } else if (type === 'link-updated') {
+            const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
+
+            this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
         }
     }
 
@@ -345,7 +355,7 @@ export class PerspectiveProxy {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
         if(!result.length) {
-            throw "No constructor found for given subject class"
+            throw "No constructor found for given subject class: " + className 
         }
 
         let actions = result.map(x => eval(x.Actions))
@@ -451,10 +461,7 @@ export class PerspectiveProxy {
             query += `, property_setter(c, "${property}", _)`
         }
         for(let addFunction of addFunctions) {
-            // e.g. "addComment" -> "comments"
-            let property = addFunction.substring(3)
-            property = property.charAt(0).toLowerCase() + property.slice(1) + "s"
-            query += `, collection_adder(c, "${property}", _)`
+            query += `, collection_adder(c, "${collectionAdderToName(addFunction)}", _)`
         }
 
         query += "."

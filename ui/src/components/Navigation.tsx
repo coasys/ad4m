@@ -31,7 +31,7 @@ const useStyles = createStyles((theme, _params, getRef) => {
   return {
     header: {
       paddingBottom: theme.spacing.md,
-      paddingRight: theme.spacing.md,
+      paddingRight: 0,
       paddingLeft: theme.spacing.md,
       marginBottom: theme.spacing.md * 1.5,
       borderBottom: `1px solid ${
@@ -49,6 +49,7 @@ const useStyles = createStyles((theme, _params, getRef) => {
       textDecoration: "none",
       fontSize: theme.fontSizes.sm,
       color: "var(--j-color-black)",
+      borderBottom: "var(--j-border-width) solid transparent",
       padding: `${theme.spacing.xs}px ${theme.spacing.sm}px`,
       fontWeight: 500,
       width: "50%",
@@ -66,7 +67,7 @@ const useStyles = createStyles((theme, _params, getRef) => {
 
     linkActive: {
       "&, &:hover": {
-        borderBottom: "var(--j-border-width) solid var(--j-color-black)",
+        borderBottom: "var(--j-border-width) solid var(--j-color-primary-600)",
         color: "var(--j-color-black)",
       },
     },
@@ -115,9 +116,12 @@ const Navigation = ({ did, opened, setOpened }: Props) => {
       <div style={RouteContainer}>
         <div style={Header}>
           <j-flex a="center" j="between">
-            <a href="https://ad4m.dev" target="_blank">
-              <Logo height={30} width={31} />
-            </a>
+            <j-flex a="center" gap="400">
+              <a href="https://ad4m.dev" target="_blank">
+                <Logo height={30} width={31} />
+              </a>
+              <j-text variant="caption">v{PackageInfo.version}</j-text>
+            </j-flex>
             <AgentProvider>
               <Profile />
             </AgentProvider>

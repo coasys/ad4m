@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - dev
   pull_request:
 
 jobs:
@@ -12,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        platform: [ubuntu-18.04]
+        platform: [ubuntu-22.04]
         node-version: [16.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
@@ -37,7 +38,7 @@ jobs:
 
     - name: Install dependencies
       run: yarn install
-
+      
     - name: Run the tests
       run: yarn test
 

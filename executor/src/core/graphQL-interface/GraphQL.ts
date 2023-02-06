@@ -7,7 +7,7 @@ import {
 import { WebSocketServer } from 'ws';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, LanguageRef, LinkExpression } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -15,13 +15,13 @@ import * as PubSub from './PubSub'
 import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
 import * as Auth from '../agent/Auth'
-import { checkCapability } from '../agent/Auth'
+import { checkCapability, checkTokenAuthorized } from '../agent/Auth'
 import { withFilter } from 'graphql-subscriptions';
 import { OuterConfig } from '../../main';
+import path from 'path';
 
 function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     const pubsub = PubSub.get()
-
     return {
         Query: {
             //@ts-ignore
@@ -252,6 +252,21 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
         },
         Mutation: {
             //@ts-ignore
+            agentRemoveApp: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
+                const { requestId } = args;
+                await core.agentService.removeApp(requestId)
+                return await core.agentService.getApps();
+
+            },
+            //@ts-ignore
+            agentRevokeToken: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
+                const { requestId } = args;
+                await core.agentService.revokeAppToken(requestId)
+                return await core.agentService.getApps();
+            },
+            //@ts-ignore
             addTrustedAgents: (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
                 const { agents } = args;
@@ -368,6 +383,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                     }
+
+                    await core.agentService.ensureAgentExpression();
                 }
 
                 const dump = core.agentService.dump() as any
@@ -491,7 +508,6 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
-                checkCapability(context.capabilities, Auth.PERSPECTIVE_CREATE_CAPABILITY)
                 const { url } = args;
                 try{
                     return await core.installNeighbourhood(url);
@@ -720,6 +736,18 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 //@ts-ignore
                 resolve: payload => payload?.link
             },
+            perspectiveLinkUpdated: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return withFilter(
+                        () => pubsub.asyncIterator(PubSub.LINK_UPDATED_TOPIC),
+                        (payload, variables) => payload.perspective.uuid === variables.uuid
+                    )(undefined, args)
+                },
+                //@ts-ignore
+                resolve: payload => ({ oldLink: payload?.oldLink, newLink: payload.newLink })
+            },
             perspectiveUpdated: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
@@ -884,6 +912,7 @@ export async function startServer(params: StartServerParams) {
     const resolvers = createResolvers(core, params.config)
     const typeDefs = gql(typeDefsString)
     const schema = makeExecutableSchema({ typeDefs, resolvers });
+    const rootConfigPath = path.join(params.config.appDataPath, 'ad4m');
     
     let serverCleanup: any;
     const server = new ApolloServer({
@@ -900,7 +929,10 @@ export async function startServer(params: StartServerParams) {
             const capabilities = await core.agentService.getCapabilities(authToken)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
 
-            return { capabilities };
+            const isAd4minCredential =  core.agentService.isAdminCredential(authToken)
+            checkTokenAuthorized(core.agentService.getApps(), authToken, isAd4minCredential)
+
+            return { capabilities, authToken };
         },
         plugins: [
             ApolloServerPluginDrainHttpServer({ httpServer }),
@@ -955,7 +987,10 @@ export async function startServer(params: StartServerParams) {
             const capabilities = await core.agentService.getCapabilities(authToken)
             if(!capabilities) throw new AuthenticationError("User capability is empty.")
 
-            return { capabilities };
+            const isAd4minCredential =  core.agentService.isAdminCredential(authToken)
+            checkTokenAuthorized(core.agentService.getApps(), authToken, isAd4minCredential)
+
+            return { capabilities, authToken };
         }
     }, wsServer);
 
