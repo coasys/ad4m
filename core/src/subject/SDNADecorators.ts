@@ -1,6 +1,6 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { Subject } from "./Subject";
-import { capitalize, collectionToAdderName, propertyNameToSetterName, stringifyObjectLiteral } from "./util";
+import { capitalize, propertyNameToSetterName, singularToPlural, stringifyObjectLiteral } from "./util";
 
 export class PerspectiveAction {
     action: string
@@ -229,7 +229,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         predicate: through,
                         target: "value",
                     }]
-                    collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(action)}').\n`
+                    collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(action)}').\n`
                 }
     
                 collectionsCode.push(collectionCode)
