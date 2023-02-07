@@ -150,15 +150,25 @@ export default class PerspectivesController {
     update(uuid: string, name: string) {
         let perspective = this.perspective(uuid);
         perspective.name = name;
+
         let perspectiveHandle = new PerspectiveHandle(uuid, name, perspective.state);
         perspectiveHandle.sharedUrl = perspective.sharedUrl;
         this.#perspectiveHandles.set(uuid, perspectiveHandle)
         this.save()
+
         const instance = this.#perspectiveInstances.get(uuid)
         if(instance) {
             instance.updateFromId(perspective as PerspectiveHandle)
         }
-        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective });
+
+        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: {
+            uuid: perspective.uuid,
+            name: perspective.name,
+            state: perspective.state,
+            sharedUrl: perspective.sharedUrl,
+            neighbourhood: perspective.neighbourhood
+        } as PerspectiveHandle });
+
         return perspective
     }
 }
