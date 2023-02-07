@@ -425,13 +425,13 @@ describe('Ad4mClient', () => {
     })
 
     describe('.neighbourhood', () => {
-        const perspective = new Perspective()
+        const testPerspective = new Perspective()
         const link = new LinkExpression()
         link.author = 'did:method:12345'
         link.timestamp = new Date().toString()
         link.data = new Link({source: 'root', target: 'perspective://Qm34589a3ccc0'})
         link.proof = { signature: 'asdfasdf', key: 'asdfasdf' }
-        perspective.links.push(link)
+        testPerspective.links.push(link)
 
         it('publishFromPerspective() smoke test', async () => {
             const expressionRef = await ad4mClient.neighbourhood.publishFromPerspective('UUID', 'test-link-lang', new Perspective())
@@ -469,18 +469,34 @@ describe('Ad4mClient', () => {
         })
 
         it('setOnlineStatus() smoke test', async () => {
-            const result = await ad4mClient.neighbourhood.setOnlineStatus('01234', perspective)
+            const result = await ad4mClient.neighbourhood.setOnlineStatus('01234', testPerspective)
             expect(result).toBe(true)
         })
 
         it('sendSignal() smoke test', async () => {
-            const result = await ad4mClient.neighbourhood.sendSignal('01234', "did:test:recipient", perspective)
+            const result = await ad4mClient.neighbourhood.sendSignal('01234', "did:test:recipient", testPerspective)
             expect(result).toBe(true)
         })
 
         it('sendBroadcast() smoke test', async () => {
-            const result = await ad4mClient.neighbourhood.sendBroadcast('01234', perspective)
+            const result = await ad4mClient.neighbourhood.sendBroadcast('01234', testPerspective)
             expect(result).toBe(true)
+        })
+
+        it('can be accessed via NeighbourhoodProxy', async () => {
+            const perspective = await ad4mClient.perspective.byUUID('00001')
+            const nh = await perspective.getNeighbourhoodProxy()
+
+            expect(await nh.hasTelepresenceAdapter()).toBe(true)
+            expect(await nh.otherAgents()).toStrictEqual(['did:test:other'])
+            expect((await nh.onlineAgents())[0].did).toStrictEqual('did:test:online')
+            expect(await nh.setOnlineStatus(testPerspective)).toBe(true)
+            expect(await nh.sendSignal('did:test:recipient', testPerspective)).toBe(true)
+            expect(await nh.sendBroadcast(testPerspective)).toBe(true)
+
+            nh.addSignalHandler((perspective) => {
+                //..
+            })
         })
     })
 

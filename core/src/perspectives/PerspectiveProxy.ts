@@ -9,6 +9,7 @@ import { Subject } from "../subject/Subject";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { ExpressionRendered } from "../expression/Expression";
 import { collectionAdderToName } from "../subject/util";
+import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
@@ -487,6 +488,10 @@ export class PerspectiveProxy {
         }
         
         await this.addSdna(jsClass.generateSDNA())
+    }
+
+    getNeighbourhoodProxy(): NeighbourhoodProxy {
+        return this.#client.getNeighbourhoodProxy(this.#handle.uuid)
     }
 
 }

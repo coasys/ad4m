@@ -3,6 +3,8 @@ import { Expression, ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { ExpressionRef } from "../expression/ExpressionRef";
 import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
+import { NeighbourhoodClient } from "../neighbourhood/NeighbourhoodClient";
+import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
@@ -43,6 +45,7 @@ export class PerspectiveClient {
     #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
     #perspectiveRemovedCallbacks: UuidCallback[]
     #expressionClient?: ExpressionClient
+    #neighbourhoodClient?: NeighbourhoodClient
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
@@ -59,6 +62,10 @@ export class PerspectiveClient {
 
     setExpressionClient(client: ExpressionClient) {
         this.#expressionClient = client
+    }
+
+    setNeighbourhoodClient(client: NeighbourhoodClient) {
+        this.#neighbourhoodClient = client
     }
 
     async all(): Promise<PerspectiveProxy[]> {
@@ -386,5 +393,9 @@ export class PerspectiveClient {
         })
 
         await new Promise<void>(resolve => setTimeout(resolve, 500))
+    }
+
+    getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
+        return new NeighbourhoodProxy(this.#neighbourhoodClient, uuid)
     }
 }

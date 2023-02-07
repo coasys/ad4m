@@ -77,7 +77,7 @@ export default class NeighbourhoodResolver {
     }
 
     @Subscription({topics: NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, nullable: true})
-    neighbourhoodSignal(): PerspectiveExpression {
+    neighbourhoodSignal(@Arg('perspectiveUUID') pID: string): PerspectiveExpression {
         return testPerspectiveExpression
     }
 }

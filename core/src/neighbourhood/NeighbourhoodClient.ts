@@ -5,6 +5,7 @@ import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
 import { Perspective } from "../perspectives/Perspective"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import unwrapApolloResult from "../unwrapApolloResult"
+import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 
 export class NeighbourhoodClient {
     #apolloClient: ApolloClient<any>
@@ -106,7 +107,7 @@ export class NeighbourhoodClient {
         return neighbourhoodOnlineAgents
     }
 
-    async setOnlineStatus(perspectiveUUID: string, status: Perspective): Promise<void> {
+    async setOnlineStatus(perspectiveUUID: string, status: Perspective): Promise<boolean> {
         const { neighbourhoodSetOnlineStatus } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation neighbourhoodSetOnlineStatus(
                 $perspectiveUUID: String!,
