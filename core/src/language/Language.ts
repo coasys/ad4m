@@ -233,8 +233,11 @@ export class InteractionCall {
     }
 }
 
+@ObjectType()
 export class OnlineAgent {
+    @Field()
     did: DID
+    @Field()
     status: PerspectiveExpression
 }
 

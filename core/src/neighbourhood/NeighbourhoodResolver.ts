@@ -1,8 +1,21 @@
-import { Arg, Mutation, Resolver } from "type-graphql";
-import { LanguageRef } from "../language/LanguageRef";
-import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
+import { Arg, Mutation, Query, Resolver, Subscription } from "type-graphql";
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle";
-import { PerspectiveInput } from "../perspectives/Perspective";
+import { Perspective, PerspectiveExpression, PerspectiveInput } from "../perspectives/Perspective";
+import { DID } from "../DID";
+import { TEST_AGENT_DID } from "../agent/AgentResolver";
+import { OnlineAgent } from "../language/Language";
+import { testLink } from "../perspectives/PerspectiveResolver";
+import { NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC } from "../PubSub";
+
+const testPerspectiveExpression = new PerspectiveExpression()
+testPerspectiveExpression.author = TEST_AGENT_DID
+testPerspectiveExpression.timestamp = new Date().toISOString()
+testPerspectiveExpression.data = new Perspective([testLink])
+testPerspectiveExpression.proof = {
+    signature: '',
+    key: '',
+    valid: true
+}
 
 /**
  * Resolver classes are used here to define the GraphQL schema 
@@ -28,5 +41,38 @@ export default class NeighbourhoodResolver {
         perspective.sharedUrl = url
         perspective.uuid = "234234234"
         return perspective
+    }
+
+    @Query(returns => [String])
+    neighbourhoodOtherAgents(@Arg('perspectiveUUID') perspectiveUUID: string): DID[] {
+        return ['did:test:other']
+    }
+
+    @Query(returns => [OnlineAgent])
+    neighbourhoodOnlineAgents(@Arg('perspectiveUUID') perspectiveUUID: string): OnlineAgent[] {
+        const onlineAgent = new OnlineAgent()
+        onlineAgent.did = 'did:test:online'
+        onlineAgent.status = testPerspectiveExpression
+        return [onlineAgent]
+    }
+
+    @Mutation()
+    neighbourhoodSetOnlineStatus(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('status') status: PerspectiveInput): boolean {
+        return true
+    }
+
+    @Mutation()
+    neighbourhoodSendSignal(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('remoteAgentDid') recipient: DID, @Arg('payload') signal: PerspectiveInput): boolean {
+        return true
+    }
+
+    @Mutation()
+    neighbourhoodSendBroadcast(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('payload') signal: PerspectiveInput): boolean {
+        return true
+    }
+
+    @Subscription({topics: NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, nullable: true})
+    neighbourhoodSignal(): PerspectiveExpression {
+        return testPerspectiveExpression
     }
 }
