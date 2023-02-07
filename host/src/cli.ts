@@ -34,8 +34,13 @@ import {
   command as initCommand, desc as initDesc,
   builder as initBuilder, handler as initHandler,
 } from './commands/init';
+import {
+  command as prepareCommand, desc as prepareDesc,
+  builder as prepareBuilder, handler as prepareHandler,
+} from './commands/prepare';
 
 yargs(hideBin(process.argv))
+  .command(prepareCommand, prepareDesc, prepareBuilder, prepareHandler)
   .command(initCommand, initDesc, initBuilder, initHandler)
   .command(serveCommand, serveDesc, serveBuilder, serveHandler)
   .command(agentCommand, agentDesc, agentBuilder, agentHandler)

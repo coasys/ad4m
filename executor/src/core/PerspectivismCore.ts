@@ -240,6 +240,11 @@ export default class PerspectivismCore {
     }
 
     async installNeighbourhood(url: Address): Promise<PerspectiveHandle> {
+        const perspectives = this.#perspectivesController!.allPerspectiveHandles();
+        if (perspectives.some(p => p.sharedUrl === url)) {
+            throw Error(`Neighbourhood with URL ${url} already installed`);
+        }
+
         let neighbourHoodExp = await this.languageController.getPerspective(parseExprUrl(url).expression);
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);

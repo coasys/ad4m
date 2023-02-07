@@ -1,7 +1,6 @@
 import { useState, useContext, useEffect } from "preact/compat";
 import { Ad4minContext } from "../context/Ad4minContext";
-import { cardStyle, listStyle, MainContainer } from "./styles";
-
+import { cardStyle, linkStyle, listStyle, MainContainer } from "./styles";
 
 const Apps = () => {
   const {
@@ -24,7 +23,7 @@ const Apps = () => {
     setApps(apps);
 
     setShowModal(false);
-  }
+  };
 
   const revokeToken = async (requestId: string) => {
     const apps = await client!.agent.revokeToken(requestId);
@@ -32,7 +31,7 @@ const Apps = () => {
     setApps(apps);
 
     setShowModal(false);
-  }
+  };
 
   useEffect(() => {
     getApps();
@@ -54,19 +53,22 @@ const Apps = () => {
                 <j-box p="200"></j-box>
                 <j-text size="400">{app.auth.appDesc}</j-text>
                 <a
+                  style={{ ...linkStyle }}
                   href={app.auth.appUrl}
                   target="_blank"
-                  size={400}
                   rel="noreferrer"
                 >
-                  <j-text variant="link">{app.auth.appUrl}</j-text>
+                  {app.auth.appUrl}
                 </a>
               </j-flex>
-              <div style={{position: 'absolute', top: 0, right: 0}}>
-                <j-button variant="link" onClick={() => {
-                  setShowModal(true);
-                  setSelectedRequestId(app.requestId)
-                }}>
+              <div style={{ position: "absolute", top: 0, right: 0 }}>
+                <j-button
+                  variant="link"
+                  onClick={() => {
+                    setShowModal(true);
+                    setSelectedRequestId(app.requestId);
+                  }}
+                >
                   <j-icon name="x" />
                 </j-button>
               </div>
@@ -87,22 +89,25 @@ const Apps = () => {
               </j-text>
             </j-box>
             <j-text>
-              Warning: You can either revoke the apps token which will make sure the app using it doesn't have access to your data but the apps stays in the list or remove the app completely.
+              Warning: You can either revoke the apps token which will make sure
+              the app using it doesn't have access to your data but the apps
+              stays in the list or remove the app completely.
             </j-text>
             <j-box p="200"></j-box>
             <j-box p="200"></j-box>
             <j-flex>
-              {!apps.find(app => app.requestId === selectedRequestId).revoked && 
-              <>              
-                <j-button
-                  variant="primary"
-                  onClick={() => revokeToken(selectedRequestId)}
-                >
-                  Revoke Token
-                </j-button>
-                <j-box px="400"></j-box>
-              </>
-              }
+              {!apps.find((app) => app.requestId === selectedRequestId)
+                .revoked && (
+                <>
+                  <j-button
+                    variant="primary"
+                    onClick={() => revokeToken(selectedRequestId)}
+                  >
+                    Revoke Token
+                  </j-button>
+                  <j-box px="400"></j-box>
+                </>
+              )}
               <j-button
                 variant="primary"
                 onClick={() => removeApps(selectedRequestId)}

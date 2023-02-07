@@ -117,20 +117,40 @@ export default class AgentService {
         this.#agentLanguage = lang
     }
 
+    getAgentLanguage(): Language {
+        if (!this.#agentLanguage) {
+            throw new Error("AgentService ERROR: No agent language")
+        }
+        return this.#agentLanguage
+    }
+
+    async ensureAgentExpression() {
+        const currentAgent = this.agent;
+        const agentDid = currentAgent?.did;
+        if (!agentDid) throw Error("No agent did found")
+
+        const agentLanguage = this.getAgentLanguage();
+
+        if (!agentLanguage.expressionAdapter!) {
+            throw Error("No expression adapter found")
+        }
+
+        const agentExpression = await agentLanguage.expressionAdapter!.get(agentDid);
+
+        if (!agentExpression) {
+            if (currentAgent) {
+                await this.updateAgent(currentAgent);
+            }
+        }
+    }
+
     async storeAgentProfile() {
         fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent))
 
-        if(!this.#agentLanguage) {
-            console.error("AgentService ERROR: Can't store Agent profile. No AgentLanguage installed.")
-            return
-        }
-
-        if (!this.#agentLanguage.expressionAdapter) {
-            throw Error("Agent language does not have an expression adapater");
-        }
+        const agentLanguage = this.getAgentLanguage();
 
         if(this.#agent?.did) {
-            let adapter = this.#agentLanguage.expressionAdapter.putAdapter;
+            let adapter = agentLanguage.expressionAdapter!.putAdapter;
 
             let isPublic = function isPublic(adapter: PublicSharing | ReadOnlyLanguage): adapter is PublicSharing {
                 return (adapter as PublicSharing).createPublic !== undefined;
