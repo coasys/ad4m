@@ -53,17 +53,12 @@ export class PerspectiveProxy {
             if(parameters) {
                 let output = input
                 for(const parameter of parameters) {
-                    console.log('mem 22222', output)
                     output = output.replace(parameter.name, parameter.value)
-                    console.log('mem 3333', output)
                 }
                 return output
             } else
                 return input
         }
-
-        console.log('mem -1', actions, parameters)
-
 
         for(let command of actions) {
             let source = replaceThis(replaceParameters(command.source))
@@ -86,7 +81,6 @@ export class PerspectiveProxy {
                     const links = await this.get(new LinkQuery({ source, predicate }))
                     await this.removeLinks(links);
                     await this.addLinks(parameters.map(p => new Link({source, predicate, target: p.value})))
-                    console.log('mem 0000', parameters, source, predicate, target, links)
                     break;
             }
         }
@@ -368,7 +362,6 @@ export class PerspectiveProxy {
      */
     async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
-        console.log('wow', className, subjectClass)
         let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
         if(!result.length) {
             throw "No constructor found for given subject class: " + className 
@@ -405,7 +398,6 @@ export class PerspectiveProxy {
             throw `Expression ${base} is not a subject instance of given class: ${JSON.stringify(subjectClass)}`
         }
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)   
-        console.log('mem 11111', className)
         let subject = new Subject(this, base, className)
         await subject.init()
         return subject as unknown as T
