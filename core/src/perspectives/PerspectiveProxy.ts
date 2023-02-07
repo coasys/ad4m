@@ -439,7 +439,7 @@ export class PerspectiveProxy {
         let properties = Object.keys(obj).filter(key => !Array.isArray(obj[key]))
 
         // Collect all collections of the object in a list
-        let collections = Object.keys(obj).filter(key => Array.isArray(obj[key]))
+        let collections = Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance')
 
         // Collect all set functions of the object in a list
         let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set"))
@@ -472,9 +472,7 @@ export class PerspectiveProxy {
         }
 
         query += "."
-        //console.log(query)
         let result = await this.infer(query)
-
         if(!result) {
             return []
         } else {
