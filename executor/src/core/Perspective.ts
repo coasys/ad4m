@@ -87,22 +87,24 @@ export default class Perspective {
             clearInterval(this.#pollingInterval);
         });
 
-        // setup polling loop for Perspectives with a linkLanguage
-        try {
-            this.getCurrentRevision().then(revision => {
-                // if revision is null, then we are not connected to the network yet, so we need to poll fast
-                if(!revision && this.createdFromJoin) {
-                    this.isFastPolling = true;
-                    this.updatePerspectiveState(PerspectiveState.LinkLanguageInstalledButNotSynced);
-                    this.#pollingInterval = this.setupPolling(3000);
-                } else {
-                    //Say that we are synced here since we dont have any interface on the link language for deeper gossip information
-                    this.updatePerspectiveState(PerspectiveState.Synced);
-                    this.#pollingInterval = this.setupPolling(30000);
-                }
-            })
-        } catch (e) {
-            console.error(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to get current revision and setting polling loop: ${e}`);
+        if (this.neighbourhood) {
+            // setup polling loop for Perspectives with a linkLanguage
+            try {
+                this.getCurrentRevision().then(revision => {
+                    // if revision is null, then we are not connected to the network yet, so we need to poll fast
+                    if(!revision && this.createdFromJoin) {
+                        this.isFastPolling = true;
+                        this.updatePerspectiveState(PerspectiveState.LinkLanguageInstalledButNotSynced);
+                        this.#pollingInterval = this.setupPolling(3000);
+                    } else {
+                        //Say that we are synced here since we dont have any interface on the link language for deeper gossip information
+                        this.updatePerspectiveState(PerspectiveState.Synced);
+                        this.#pollingInterval = this.setupPolling(30000);
+                    }
+                })
+            } catch (e) {
+                console.error(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to get current revision and setting polling loop: ${e}`);
+            }
         }
 
         this.#prologMutex = new Mutex()
@@ -110,7 +112,15 @@ export default class Perspective {
 
     private updatePerspectiveState(state: PerspectiveState) {
         if (this.state != state) {
-            this.#pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: this })
+            this.#pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { 
+                perspective: {
+                    uuid: this.uuid,
+                    name: this.name,
+                    neighbourhood: this.neighbourhood,
+                    sharedUrl: this.sharedUrl,
+                    state: this.state
+                } as PerspectiveHandle 
+            })
             this.state = state
         }
     }
