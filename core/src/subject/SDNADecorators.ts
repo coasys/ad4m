@@ -107,6 +107,7 @@ export function subjectCollection(opts: CollectionOptions) {
         
         const value = key as string
         target[`add${capitalize(value)}`] = () => {}
+        target[`setCollection${capitalize(value)}`] = () => {}
 
         Object.defineProperty(target, key, {configurable: true});
     };
@@ -232,7 +233,14 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         predicate: through,
                         target: "value",
                     }]
+                    let collectionSetterAction = [{
+                        action: "collectionSetter",
+                        source: "this",
+                        predicate: through,
+                        target: "value",
+                    }]
                     collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(action)}').\n`
+                    collectionCode += `collection_setter(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
                 }
     
                 collectionsCode.push(collectionCode)

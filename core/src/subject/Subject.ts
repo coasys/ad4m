@@ -1,5 +1,5 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { collectionToAdderName, propertyNameToSetterName } from "./util";
+import { collectionSetterToName, collectionToAdderName, collectionToSetterName, propertyNameToSetterName } from "./util";
 
 export class Subject {
     #baseExpression: string;
@@ -112,6 +112,23 @@ export class Subject {
                 this[collectionToAdderName(collection)] = async (value: any) => {
                     if (Array.isArray(value)) {
                         await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value: v}])))
+                    } else {
+                        await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
+                    }
+                }
+            }
+        }
+
+        let collectionSetters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_setter(C, Collection, Setter)`)
+        if(!collectionSetters) collectionSetters = []
+
+        for(let collectionSetter of collectionSetters) {
+            if(collectionSetter) {
+                const collection = collectionSetter.Collection
+                const actions = eval(collectionSetter.Setter)
+                this[collectionToSetterName(collection)] = async (value: any) => {
+                    if (Array.isArray(value)) {
+                        await this.#perspective.executeAction(actions, this.#baseExpression, value.map(v => ({name: "value", value: v})))
                     } else {
                         await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
                     }

@@ -8,7 +8,7 @@ import { Literal } from "../Literal";
 import { Subject } from "../subject/Subject";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { ExpressionRendered } from "../expression/Expression";
-import { collectionAdderToName } from "../subject/util";
+import { collectionAdderToName, collectionSetterToName } from "../subject/util";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
@@ -53,12 +53,16 @@ export class PerspectiveProxy {
             if(parameters) {
                 let output = input
                 for(const parameter of parameters) {
+                    console.log('mem 22222', output)
                     output = output.replace(parameter.name, parameter.value)
+                    console.log('mem 3333', output)
                 }
                 return output
             } else
                 return input
         }
+
+        console.log('mem -1', actions, parameters)
 
 
         for(let command of actions) {
@@ -77,6 +81,12 @@ export class PerspectiveProxy {
                     break;
                 case 'setSingleTarget':
                     await this.setSingleTarget(new Link({source, predicate, target}))
+                    break;
+                case 'collectionSetter':
+                    const links = await this.get(new LinkQuery({ source, predicate }))
+                    await this.removeLinks(links);
+                    await this.addLinks(parameters.map(p => new Link({source, predicate, target: p.value})))
+                    console.log('mem 0000', parameters, source, predicate, target, links)
                     break;
             }
         }
@@ -358,6 +368,7 @@ export class PerspectiveProxy {
      */
     async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        console.log('wow', className, subjectClass)
         let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
         if(!result.length) {
             throw "No constructor found for given subject class: " + className 
@@ -394,6 +405,7 @@ export class PerspectiveProxy {
             throw `Expression ${base} is not a subject instance of given class: ${JSON.stringify(subjectClass)}`
         }
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)   
+        console.log('mem 11111', className)
         let subject = new Subject(this, base, className)
         await subject.init()
         return subject as unknown as T
@@ -442,14 +454,19 @@ export class PerspectiveProxy {
         let collections = Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance')
 
         // Collect all set functions of the object in a list
-        let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set"))
+        let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
         // Add all set functions of the object's prototype to that list
-        setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("set")))
+        setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection")))
 
         // Collect all add functions of the object in a list
         let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("add"))
         // Add all add functions of the object's prototype to that list
         addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("add")))
+
+        // Collect all add functions of the object in a list
+        let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("setCollection"))
+        // Add all add functions of the object's prototype to that list
+        setCollectionFunctions = setCollectionFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("setCollection")))
 
         // Construct query to find all subject classes that have the given properties and collections
         let query = `subject_class(Class, C)`
@@ -470,6 +487,11 @@ export class PerspectiveProxy {
         for(let addFunction of addFunctions) {
             query += `, collection_adder(C, "${collectionAdderToName(addFunction)}", _)`
         }
+        
+        for(let setCollectionFunction of setCollectionFunctions) {
+            query += `, collection_setter(C, "${collectionSetterToName(setCollectionFunction)}", _)`
+        }
+
 
         query += "."
         let result = await this.infer(query)
