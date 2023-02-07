@@ -235,20 +235,15 @@ export class InteractionCall {
 
 export class OnlineAgent {
     did: DID
-    status: string
+    status: PerspectiveExpression
 }
 
-export class TelepresenceRpcCall {
-    fn_name: string
-    params: object
-}
-
-export type TelepresenceRpcCallback = (call: TelepresenceRpcCall) => object;
-
+export type TelepresenceSignalCallback = (payload: PerspectiveExpression) => object;
 export interface TelepresenceAdapter {
-    setOnlineStatus(status: string);
+    setOnlineStatus(status: PerspectiveExpression);
     getOnlineAgents(): [OnlineAgent];
 
-    rpcCall(remoteAgentDid: string, call: TelepresenceRpcCall): object;
-    registerRpcCallback(callback: TelepresenceRpcCall);
+    sendSignal(remoteAgentDid: string, payload: PerspectiveExpression): object;
+    sendBroadcast(payload: PerspectiveExpression): object;
+    registerSignalCallback(callback: TelepresenceSignalCallback);
 }
