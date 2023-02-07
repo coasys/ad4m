@@ -445,6 +445,11 @@ describe('Ad4mClient', () => {
             expect(perspective.name).toBeTruthy()
         })
 
+        it('hasTelepresenceAdapter() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.hasTelepresenceAdapter('01234')
+            expect(result).toBe(true)
+        })
+
         it('otherAgents() smoke test', async () => {
             const agents = await ad4mClient.neighbourhood.otherAgents('01234')
             expect(agents.length).toBe(1)

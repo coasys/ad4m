@@ -71,6 +71,16 @@ export class NeighbourhoodClient {
         return neighbourhoodOtherAgents
     }
 
+    async hasTelepresenceAdapter(perspectiveUUID: string): Promise<boolean> {
+        const { neighbourhoodHasTelepresenceAdapter } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query neighbourhoodHasTelepresenceAdapter($perspectiveUUID: String!) {
+                neighbourhoodHasTelepresenceAdapter(perspectiveUUID: $perspectiveUUID)
+            }`,
+            variables: { perspectiveUUID }
+        }))
+        return neighbourhoodHasTelepresenceAdapter
+    }
+
     async onlineAgents(perspectiveUUID: string): Promise<OnlineAgent[]> {
         const { neighbourhoodOnlineAgents } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query neighbourhoodOnlineAgents($perspectiveUUID: String!) {

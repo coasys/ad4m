@@ -48,6 +48,11 @@ export default class NeighbourhoodResolver {
         return ['did:test:other']
     }
 
+    @Query()
+    neighbourhoodHasTelepresenceAdapter(@Arg('perspectiveUUID') perspectiveUUID: string): boolean {
+        return true
+    }
+
     @Query(returns => [OnlineAgent])
     neighbourhoodOnlineAgents(@Arg('perspectiveUUID') perspectiveUUID: string): OnlineAgent[] {
         const onlineAgent = new OnlineAgent()
