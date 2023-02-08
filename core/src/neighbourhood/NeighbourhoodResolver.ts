@@ -1,11 +1,11 @@
-import { Arg, Mutation, Query, Resolver, Subscription } from "type-graphql";
-import { PerspectiveHandle } from "../perspectives/PerspectiveHandle";
+import { Arg, Mutation, Query, Resolver, Subscription, PubSub } from "type-graphql";
+import { PerspectiveHandle, PerspectiveState } from "../perspectives/PerspectiveHandle";
 import { Perspective, PerspectiveExpression, PerspectiveInput } from "../perspectives/Perspective";
 import { DID } from "../DID";
 import { TEST_AGENT_DID } from "../agent/AgentResolver";
 import { OnlineAgent } from "../language/Language";
 import { testLink } from "../perspectives/PerspectiveResolver";
-import { NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC } from "../PubSub";
+import { NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from "../PubSub";
 
 const testPerspectiveExpression = new PerspectiveExpression()
 testPerspectiveExpression.author = TEST_AGENT_DID
@@ -35,11 +35,13 @@ export default class NeighbourhoodResolver {
     }
 
     @Mutation(returns => PerspectiveHandle)
-    neighbourhoodJoinFromUrl(@Arg('url') url: string): PerspectiveHandle {
+    neighbourhoodJoinFromUrl(@Arg('url') url: string, @PubSub() pubSub: any): PerspectiveHandle {
         const perspective = new PerspectiveHandle
         perspective.name = "test-perspective"
         perspective.sharedUrl = url
         perspective.uuid = "234234234"
+        perspective.state = PerspectiveState.Synced
+        pubSub.publish(PERSPECTIVE_UPDATED_TOPIC, { perspective});
         return perspective
     }
 

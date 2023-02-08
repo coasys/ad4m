@@ -1,9 +1,9 @@
-import { Arg, Mutation, PubSub, PubSubEngine, Query, Resolver, Subscription } from "type-graphql";
+import { Arg, Mutation, PubSub, Query, Resolver, Subscription } from "type-graphql";
 import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkExpressionUpdated, LinkInput, LinkMutations } from "../links/Links";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
-import { PerspectiveHandle } from "./PerspectiveHandle";
+import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from '../PubSub'
 
 export const testLink = new LinkExpression()
@@ -37,6 +37,7 @@ export default class PerspectiveResolver {
         p2.uuid = '00002'
         p2.sharedUrl = 'neighbourhood://Qm12345'
         p2.neighbourhood = new Neighbourhood("language://Qm12345", new Perspective())
+        p2.state = PerspectiveState.Synced
         return [p1, p2]
     }
 
