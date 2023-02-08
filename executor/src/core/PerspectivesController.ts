@@ -59,6 +59,19 @@ export default class PerspectivesController {
                 console.warn(`Could not find perspective for added link with lang: ${lang}`)
             }
         })
+
+        this.#context.languageController!.addTelepresenceSignalObserver((signal: any, lang: LanguageRef) => {
+            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
+            if (perspective) {
+                console.log("PerspectiveController: received telepresence signal...");
+                this.pubsub.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
+                    perspective: perspective.plain(),
+                    signal
+                })
+            } else {
+                console.warn(`Could not find perspective telepresence signal with lang: ${lang}`)
+            }
+        })
     }
 
     private save() {

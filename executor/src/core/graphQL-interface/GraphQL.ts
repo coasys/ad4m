@@ -772,10 +772,13 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return pubsub.asyncIterator(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC)
+                    return withFilter(
+                        () => pubsub.asyncIterator(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC),
+                        (payload, argsInner) => payload.perspective.uuid === argsInner.uuid
+                    )(undefined, args)
                 },
                 //@ts-ignore
-                resolve: payload => payload
+                resolve: payload => payload?.signal
             },
             runtimeMessageReceived: {
                 //@ts-ignore
