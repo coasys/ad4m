@@ -1,4 +1,4 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
+import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
 import fs from "fs";
@@ -80,6 +80,95 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 
                 expect(bobLinks.length).to.be.equal(1)
             })
+
+            describe('with set up and joined NH for Telepresence', async () => {
+                let aliceNH: NeighbourhoodProxy|undefined
+                let bobNH: NeighbourhoodProxy|undefined
+                let aliceDID: string|undefined
+                let bobDID: string|undefined
+
+                before(async () => {
+                    const alice = testContext.alice
+                    const bob = testContext.bob
+
+                    const aliceP1 = await alice.perspective.add("telepresence")
+                    const linkLang = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood for Telepresence"}));
+                    const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
+                    const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+                    const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
+                    await testContext.makeAllNodesKnown()
+                    
+                    aliceNH = aliceP1.getNeighbourhoodProxy()
+                    bobNH = bobP1!.getNeighbourhoodProxy()
+                    aliceDID = (await alice.agent.me()).did
+                    bobDID = (await bob.agent.me()).did
+                })
+
+                it('they see each other in `otherAgents`', async () => {
+                    const aliceAgents = await aliceNH!.otherAgents()
+                    const bobAgents = await bobNH!.otherAgents()
+                    expect(aliceAgents.length).to.be.equal(1)
+                    expect(aliceAgents[0]).to.be.equal(bobDID)
+                    expect(bobAgents.length).to.be.equal(1)
+                    expect(bobAgents[0]).to.be.equal(aliceDID)
+                })
+
+                it('they can set their online status and see each others online status in `onlineAgents`', async () => {
+                    let link = new LinkExpression()
+                    link.author = "did:test";
+                    link.timestamp = new Date().toISOString();
+                    link.data = new Link({source: "src", target: "target", predicate: "pred"});
+                    link.proof = new ExpressionProof("sig", "key");
+                    const testPerspective = new Perspective([link])
+                    await aliceNH!.setOnlineStatus(testPerspective)
+                    await bobNH!.setOnlineStatus(testPerspective)
+                    const aliceOnline = await aliceNH!.onlineAgents()
+                    const bobOnline = await bobNH!.onlineAgents()
+                    expect(aliceOnline.length).to.be.equal(1)
+                    expect(aliceOnline[0].did).to.be.equal(bobDID)
+                    expect(aliceOnline[0].status).to.deep.equal(testPerspective)
+                    
+                    expect(bobOnline.length).to.be.equal(1)
+                    expect(bobOnline[0].did).to.be.equal(aliceDID)
+                    expect(bobOnline[0].status).to.deep.equal(testPerspective)
+                })
+
+                it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
+                    const aliceHandler = jest.fn()
+                    aliceNH!.addSignalHandler(aliceHandler)
+                    const bobHandler = jest.fn()
+                    bobNH!.addSignalHandler(bobHandler)
+
+                    let link = new LinkExpression()
+                    link.author = aliceDID;
+                    link.timestamp = new Date().toISOString();
+                    link.data = new Link({source: "aliace", target: "bob", predicate: "signal"});
+                    link.proof = new ExpressionProof("sig", "key");
+                    const aliceSignal = new Perspective([link])
+
+                    await aliceNH!.sendSignal(bobDID!, aliceSignal)
+
+                    await sleep(1000)
+
+                    expect(bobHandler).toBeCalledTimes(1)
+                    expect(aliceHandler).toBeCalledTimes(0)
+                    expect(bobHandler.mock.calls[0][0].data).to.deep.equal(aliceSignal)
+
+                    let link2 = new LinkExpression()
+                    link2.author = bobDID;
+                    link2.timestamp = new Date().toISOString();
+                    link2.data = new Link({source: "bob", target: "alice", predicate: "signal"});
+                    link2.proof = new ExpressionProof("sig", "key");
+                    const bobSignal = new Perspective([link2])
+
+                    await bobNH!.sendBroadcast(bobSignal)
+
+                    await sleep(1000)
+
+                    expect(aliceHandler).toBeCalledTimes(1)
+                    expect(aliceHandler.mock.calls[0][0].data).to.deep.equal(bobSignal)
+                })
+
         })
     }
 }
