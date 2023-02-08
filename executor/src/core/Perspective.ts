@@ -8,6 +8,7 @@ import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
 import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
+import { DID } from "@perspect3vism/ad4m/lib/src/DID";
 
 type PerspectiveSubscription = {
     perspective: PerspectiveHandle,
@@ -402,6 +403,12 @@ export default class Perspective {
         }
     }
 
+    async othersInNeighbourhood(): Promise<DID[]> {
+        const linksAdapter = await this.getLinksAdapter();
+        if(!linksAdapter) { throw new Error("No links adapter when trying to get others in Neighbourhood") }
+        return await linksAdapter.others();
+    }
+    
     addLocalLink(linkExpression: LinkExpression) {
         let foundLink = this.findLink(linkExpression);
         if (!foundLink) {

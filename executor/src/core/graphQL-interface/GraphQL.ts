@@ -7,7 +7,7 @@ import {
 import { WebSocketServer } from 'ws';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, LanguageRef } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, LanguageRef, PerspectiveState } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -158,6 +158,17 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
             },
+
+            //@ts-ignore
+            neighbourhoodOtherAgents: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
+                const { perspectiveUUID } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                return await perspective.othersInNeighbourhood()
+            },
+
             //@ts-ignore
             perspective: (parent, args, context, info) => {
                 const id = args.uuid

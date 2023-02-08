@@ -222,6 +222,14 @@ export const NEIGHBOURHOOD_READ_CAPABILITY: Capability = {
     can: [READ]
 }
 
+export const NEIGHBOURHOOD_UPDATE_CAPABILITY: Capability = {
+    with: {
+        domain: NEIGHBOURHOOD,
+        pointers: [WILD_CARD],
+    },
+    can: [UPDATE]
+}
+
 // runtime related capabilities
 export const RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY: Capability = {
     with: {
