@@ -40,6 +40,7 @@ export class NeighbourhoodClient {
                     uuid
                     name
                     sharedUrl
+                    state
                     neighbourhood { 
                         linkLanguage 
                         meta { 

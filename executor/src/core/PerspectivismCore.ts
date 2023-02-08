@@ -1,5 +1,5 @@
-import type { Address, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression  } from '@perspect3vism/ad4m'
-import { parseExprUrl, LanguageRef, Neighbourhood } from '@perspect3vism/ad4m'
+import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language  } from '@perspect3vism/ad4m'
+import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
 import * as Db from './db'
@@ -235,7 +235,8 @@ export default class PerspectivismCore {
         //Add shared perspective to original perpspective and then update controller
         perspectiveID.sharedUrl = neighbourhoodUrl
         perspectiveID.neighbourhood = neighbourhood;
-        this.#perspectivesController!.replace(perspectiveID, neighbourhood, false)
+        perspectiveID.state = PerspectiveState.Synced;
+        this.#perspectivesController!.replace(perspectiveID, neighbourhood, false, PerspectiveState.Synced)
         return neighbourhoodUrl
     }
 
@@ -251,9 +252,16 @@ export default class PerspectivismCore {
         };
         console.log("Core.installNeighbourhood(): Got neighbourhood", neighbourHoodExp);
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
-        await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
+        let state = PerspectiveState.NeighbourhoodJoinInitiated;
 
-        return this.#perspectivesController!.add("", url, neighbourhood, true);
+        try {
+            await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
+            state = PerspectiveState.LinkLanguageInstalledButNotSynced;
+        } catch (e) {
+            state = PerspectiveState.LinkLanguageFailedToInstall;
+        }
+
+        return this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
@@ -336,7 +344,7 @@ export default class PerspectivismCore {
         console.log("Agent's direct message language successfully cloned, installed and published!")
     }
 
-    async friendsDirectMessageLanguage(did: string): Promise<Language|null> {
+    async friendsDirectMessageLanguage(did: string): Promise<Language | null> {
         const expression = await this.#languageController!.getAgentLanguage().expressionAdapter?.get(did)! as AgentExpression
         //console.log("AGENT EXPRESSION:", expression)
         if(!expression) return null
