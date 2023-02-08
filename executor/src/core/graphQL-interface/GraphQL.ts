@@ -181,6 +181,18 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
+            neighbourhoodOnlineAgents: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
+                const { perspectiveUUID } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
+                return await telepresenceAdapter!.getOnlineAgents()
+            },
+            
+            //@ts-ignore
             perspective: (parent, args, context, info) => {
                 const id = args.uuid
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
@@ -553,8 +565,47 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     console.error(`Error while trying to publish:`, e)
                     throw e
                 }
-
             },
+
+            //@ts-ignore
+            neighbourhoodSetOnlineStatus: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
+                const { perspectiveUUID, status } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
+                const statusExpression = core.agentService.createSignedExpression(status)
+                return await telepresenceAdapter!.setOnlineStatus(statusExpression)
+            },
+
+            //@ts-ignore
+            neighbourhoodSendSignal: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
+                const { perspectiveUUID, recipient, payload } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
+                const payloadExpression = core.agentService.createSignedExpression(payload)
+                return await telepresenceAdapter!.sendSignal(recipient, payloadExpression)
+            },
+
+            //@ts-ignore
+            neighbourhoodSendBroadcast: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
+                const { perspectiveUUID, payload } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
+                const payloadExpression = core.agentService.createSignedExpression(payload)
+                return await telepresenceAdapter!.sendBroadcast(payloadExpression)
+            },
+
             //@ts-ignore
             perspectiveAdd: (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.PERSPECTIVE_CREATE_CAPABILITY)
