@@ -103,7 +103,9 @@ export default class RuntimeService {
     }
 
     getTrustedAgents(): string[] {
-        return [this.#did!, ...this.#config.trustedAgents, ..._get(this.trustedAgentsPath())]
+        let agents = [this.#did!, ...this.#config.trustedAgents, ..._get(this.trustedAgentsPath())]
+        let dedupAgents = [...new Set(agents)]
+        return dedupAgents
     }
 
     addKnowLinkLanguageTemplates(addresses: string[]): void {
