@@ -767,6 +767,16 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 //@ts-ignore
                 resolve: payload => payload
             },
+
+            neighbourhoodSignal: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC)
+                },
+                //@ts-ignore
+                resolve: payload => payload
+            },
             runtimeMessageReceived: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {

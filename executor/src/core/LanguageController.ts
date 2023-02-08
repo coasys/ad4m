@@ -17,7 +17,7 @@ import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
-
+type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
 interface Services {
     holochainService: HolochainService,
     runtimeService: RuntimeService,
@@ -59,6 +59,7 @@ export default class LanguageController {
     #languageConstructors: Map<string, (context: LanguageContext)=>Language>
     #context: object;
     #linkObservers: LinkObservers[];
+    #telepresenceSignalObservers: TelepresenceSignalObserver[];
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
     #signatures: Signatures;
@@ -80,6 +81,7 @@ export default class LanguageController {
         this.#languages = new Map()
         this.#languageConstructors = new Map()
         this.#linkObservers = []
+        this.#telepresenceSignalObservers = []
         this.pubSub = PubSub.get()
         this.#config = (context as any).config;
     }
@@ -180,6 +182,12 @@ export default class LanguageController {
         })
     }
 
+    callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
+        this.#telepresenceSignalObservers.forEach(o => {
+            o(signal, ref)
+        })
+    }
+
     async loadLanguage(sourceFilePath: string): Promise<{
         language: Language,
         hash: string,
@@ -238,6 +246,12 @@ export default class LanguageController {
             })
         }
 
+        if(language.telepresenceAdapter) {
+            language.telepresenceAdapter.registerSignalCallback((payload: PerspectiveExpression) => {
+                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
+            })
+        }
+
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
@@ -271,6 +285,12 @@ export default class LanguageController {
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name});
+            })
+        }
+
+        if(language.telepresenceAdapter) {
+            language.telepresenceAdapter.registerSignalCallback((payload: PerspectiveExpression) => {
+                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
             })
         }
 
@@ -1042,6 +1062,10 @@ export default class LanguageController {
 
     addLinkObserver(observer: LinkObservers) {
         this.#linkObservers.push(observer)
+    }
+
+    addTelepresenceSignalObserver(observer: TelepresenceSignalObserver) {
+        this.#telepresenceSignalObservers.push(observer)
     }
 
     async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {
