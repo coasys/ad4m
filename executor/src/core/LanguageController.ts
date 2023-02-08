@@ -1,6 +1,6 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective, Literal 
+    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective, Literal, TelepresenceAdapter 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
@@ -1025,7 +1025,19 @@ export default class LanguageController {
         } catch(e) {
             return null
         }
+    }
 
+    async getTelepresenceAdapter(lang: LanguageRef): Promise<TelepresenceAdapter | null> {
+        try {
+            let gotLang = await this.languageByRef(lang)
+            if (gotLang.telepresenceAdapter) {
+                return gotLang.telepresenceAdapter
+            } else {
+                return null
+            }
+        } catch(e) {
+            return null
+        }
     }
 
     addLinkObserver(observer: LinkObservers) {

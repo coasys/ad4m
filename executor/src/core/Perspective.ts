@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter } from "@perspect3vism/ad4m"
 import { Link, linkEqual, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -408,7 +408,17 @@ export default class Perspective {
         if(!linksAdapter) { throw new Error("No links adapter when trying to get others in Neighbourhood") }
         return await linksAdapter.others();
     }
-    
+
+    async getTelepresenceAdapter(): Promise<TelepresenceAdapter | null> {
+        if(!this.getLinksAdapter()) {
+            return null;
+        }
+        const address = this.neighbourhood!.linkLanguage;
+        const telepresenceAdapter = await this.#languageController!.getTelepresenceAdapter({address} as LanguageRef);
+        return telepresenceAdapter
+    }
+
+
     addLocalLink(linkExpression: LinkExpression) {
         let foundLink = this.findLink(linkExpression);
         if (!foundLink) {

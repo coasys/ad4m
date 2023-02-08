@@ -170,6 +170,17 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
+            neighbourhoodHasTelepresenceAdapter: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
+                const { perspectiveUUID } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                return telepresenceAdapter != undefined
+            },
+
+            //@ts-ignore
             perspective: (parent, args, context, info) => {
                 const id = args.uuid
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
