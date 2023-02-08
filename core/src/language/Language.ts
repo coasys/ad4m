@@ -243,10 +243,10 @@ export class OnlineAgent {
 
 export type TelepresenceSignalCallback = (payload: PerspectiveExpression) => object;
 export interface TelepresenceAdapter {
-    setOnlineStatus(status: PerspectiveExpression);
-    getOnlineAgents(): [OnlineAgent];
+    setOnlineStatus(status: PerspectiveExpression): Promise<void>;
+    getOnlineAgents(): Promise<[OnlineAgent]>;
 
-    sendSignal(remoteAgentDid: string, payload: PerspectiveExpression): object;
-    sendBroadcast(payload: PerspectiveExpression): object;
-    registerSignalCallback(callback: TelepresenceSignalCallback);
+    sendSignal(remoteAgentDid: string, payload: PerspectiveExpression): Promise<object>;
+    sendBroadcast(payload: PerspectiveExpression): Promise<object>;
+    registerSignalCallback(callback: TelepresenceSignalCallback): Promise<void>;
 }
