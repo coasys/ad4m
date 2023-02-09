@@ -1,8 +1,7 @@
-import { Arg, Mutation, Resolver } from "type-graphql";
-import { LanguageRef } from "../language/LanguageRef";
-import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
-import { PerspectiveHandle } from "../perspectives/PerspectiveHandle";
+import { Arg, Mutation, Resolver, PubSub } from "type-graphql";
+import { PerspectiveHandle, PerspectiveState } from "../perspectives/PerspectiveHandle";
 import { PerspectiveInput } from "../perspectives/Perspective";
+import { PERSPECTIVE_UPDATED_TOPIC } from "../PubSub";
 
 /**
  * Resolver classes are used here to define the GraphQL schema 
@@ -22,11 +21,13 @@ export default class NeighbourhoodResolver {
     }
 
     @Mutation(returns => PerspectiveHandle)
-    neighbourhoodJoinFromUrl(@Arg('url') url: string): PerspectiveHandle {
+    neighbourhoodJoinFromUrl(@Arg('url') url: string, @PubSub() pubSub: any): PerspectiveHandle {
         const perspective = new PerspectiveHandle
         perspective.name = "test-perspective"
         perspective.sharedUrl = url
         perspective.uuid = "234234234"
+        perspective.state = PerspectiveState.Synced
+        pubSub.publish(PERSPECTIVE_UPDATED_TOPIC, { perspective});
         return perspective
     }
 }

@@ -233,6 +233,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         predicate: through,
                         target: "value",
                     }]
+                    
                     let collectionSetterAction = [{
                         action: "collectionSetter",
                         source: "this",

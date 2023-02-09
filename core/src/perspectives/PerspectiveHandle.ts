@@ -1,6 +1,14 @@
 import { Field, ObjectType } from "type-graphql";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 
+export enum PerspectiveState {
+    Private = "Private",
+    NeighbourhoodJoinInitiated = "NeighbourhoodJoinInitiated",
+    LinkLanguageFailedToInstall = "LinkLanguageFailedToInstall",
+    LinkLanguageInstalledButNotSynced = "LinkLanguageInstalledButNotSynced",
+    Synced = "Synced",
+}
+
 // This type is used in the GraphQL interface to reference a mutable
 // prespective that is implemented locally by the Ad4m runtime.
 // The UUID is used in mutations to identify the perspective that gets mutated.
@@ -10,6 +18,8 @@ export class PerspectiveHandle {
     uuid: string
     @Field()
     name: string
+    @Field()
+    state: PerspectiveState
 
     @Field(type => String, {nullable: true})
     sharedUrl?: string
@@ -17,8 +27,13 @@ export class PerspectiveHandle {
     @Field(type => Neighbourhood, {nullable: true})
     neighbourhood?: Neighbourhood
 
-    constructor(uuid?: string, name?: string) {
+    constructor(uuid?: string, name?: string, state?: PerspectiveState) {
         this.uuid = uuid
         this.name = name
+        if (state) {
+            this.state = state
+        } else {
+            this.state = PerspectiveState.Private
+        }
     }
 }
