@@ -47,13 +47,14 @@ const App = () => {
       <Global
         styles={(theme) => ({
           "*": {
-            fontFamily: "comfortaa !important",
+            fontFamily: `"DM Sans", Helvetica, Arial, sans-serif`,
           },
           ".mantine-AppShell-main": {
             width: "100%",
           },
           ".mantine-Stack-root": {
             display: "block",
+            minHeight: "100%",
             width: "100%",
           },
         })}

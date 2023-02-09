@@ -1,5 +1,5 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations } from "@perspect3vism/ad4m"
-import { Link, linkEqual, LinkQuery } from "@perspect3vism/ad4m";
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter } from "@perspect3vism/ad4m"
+import { Link, linkEqual, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
@@ -14,6 +14,9 @@ type PerspectiveSubscription = {
     link: LinkExpression
 }
 
+const maxRetries = 10;
+const backoffStep = 200;
+
 export default class Perspective {
     name?: string;
     uuid?: string;
@@ -23,6 +26,8 @@ export default class Perspective {
     sharedUrl?: string;
     createdFromJoin: boolean;
     isFastPolling: boolean;
+    state: PerspectiveState = PerspectiveState.Private;
+    retries: number = 0;
 
     #db: any;
     #agent: AgentService;
@@ -35,10 +40,11 @@ export default class Perspective {
     #pollingInterval: any;
     #prologMutex: Mutex
 
-    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood, createdFromJoin?: boolean) {
+    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState) {
         this.updateFromId(id)
         this.createdFromJoin = false;
         this.isFastPolling = false;
+        this.state = state || PerspectiveState.Private;
 
         if (neighbourhood) {
             this.neighbourhood = neighbourhood
@@ -81,22 +87,42 @@ export default class Perspective {
             clearInterval(this.#pollingInterval);
         });
 
-        // setup polling loop for Perspectives with a linkLanguage
-        try {
-            this.getCurrentRevision().then(revision => {
-                // if revision is null, then we are not connected to the network yet, so we need to poll fast
-                if(!revision && this.createdFromJoin) {
-                    this.isFastPolling = true;
-                    this.#pollingInterval = this.setupPolling(3000);
-                } else {
-                    this.#pollingInterval = this.setupPolling(30000);
-                }
-            })
-        } catch (e) {
-            console.error(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to get current revision and setting polling loop: ${e}`);
+        if (this.neighbourhood) {
+            // setup polling loop for Perspectives with a linkLanguage
+            try {
+                this.getCurrentRevision().then(revision => {
+                    // if revision is null, then we are not connected to the network yet, so we need to poll fast
+                    if(!revision && this.createdFromJoin) {
+                        this.isFastPolling = true;
+                        this.updatePerspectiveState(PerspectiveState.LinkLanguageInstalledButNotSynced);
+                        this.#pollingInterval = this.setupPolling(3000);
+                    } else {
+                        //Say that we are synced here since we dont have any interface on the link language for deeper gossip information
+                        this.updatePerspectiveState(PerspectiveState.Synced);
+                        this.#pollingInterval = this.setupPolling(30000);
+                    }
+                })
+            } catch (e) {
+                console.error(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to get current revision and setting polling loop: ${e}`);
+            }
         }
 
         this.#prologMutex = new Mutex()
+    }
+
+    private updatePerspectiveState(state: PerspectiveState) {
+        if (this.state != state) {
+            this.#pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { 
+                perspective: {
+                    uuid: this.uuid,
+                    name: this.name,
+                    neighbourhood: this.neighbourhood,
+                    sharedUrl: this.sharedUrl,
+                    state: this.state
+                } as PerspectiveHandle 
+            })
+            this.state = state
+        }
     }
 
     setupPolling(intervalMs: number) {
@@ -116,9 +142,13 @@ export default class Perspective {
                         }
                     }
 
+                    let madeSync = false;
                     // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
                     const currentRevision = await this.getCurrentRevision();
                     if (currentRevision) {
+                        madeSync = true;
+                        //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
+                        this.updatePerspectiveState(PerspectiveState.Synced);
                         //Let's check if we have unpublished diffs:
                         const mutations = this.#db.getPendingDiffs(this.uuid);
                         if(mutations && mutations.length > 0) {
@@ -143,7 +173,7 @@ export default class Perspective {
                         }
                         
                         //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                        if(this.isFastPolling) {
+                        if(this.isFastPolling && !madeSync) {
                             this.isFastPolling = false;
                             clearInterval(this.#pollingInterval);
                             this.#pollingInterval = this.setupPolling(30000);
@@ -189,23 +219,50 @@ export default class Perspective {
         throw new Error(`NH [${this.sharedUrl}] (${this.name}): Object is neither Link nor Expression: ${JSON.stringify(maybeLink)}`)
     }
 
+    private async getLinksAdapter(): Promise<LinkSyncAdapter | undefined> {
+        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+            //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
+            return undefined;
+        }
+        const address = this.neighbourhood!.linkLanguage;
+
+        try {
+            if (this.state === PerspectiveState.LinkLanguageFailedToInstall) {
+                if (this.retries === maxRetries) {
+                    throw new Error("Perspective.getLinksAdapter: Skipping fetching of linkLanguage since we have tried and failed before...");
+                }
+                console.log("Perspective.getLinksAdapter: Waiting backingoff before trying to fetch linkLanguage again...")
+                await sleep(this.retries * backoffStep);
+            }
+            const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
+            if(linksAdapter) {
+                return linksAdapter;
+            } else {
+                console.error(`NH [${this.sharedUrl}] (${this.name}) LinksSharingLanguage`, address, "set in perspective '"+this.name+"' not installed!")
+                return undefined;
+            }
+        } catch (e) {
+            this.updatePerspectiveState(PerspectiveState.LinkLanguageFailedToInstall);
+            this.retries++;
+            throw e;
+        }
+    }
+
     private renderLinksAdapter(): Promise<Ad4mPerspective> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
             //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve(new Ad4mPerspective([]))
         }
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
             try {
-                const address = this.neighbourhood!.linkLanguage;
-                const linksAdapter = await this.#languageController!.getLinksAdapter({address} as LanguageRef);
+                const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
+                    setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     const result = await linksAdapter.render();
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
-                    console.error(`NH [${this.sharedUrl}] (${this.name}) LinksSharingLanguage`, address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
                     resolve(new Ad4mPerspective([]))
                 }
@@ -227,18 +284,16 @@ export default class Perspective {
         }
 
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
             try {
-                const address = this.neighbourhood!.linkLanguage;
-                const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
+                const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
-                    console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
+                    setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
+                    console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args).substring(0, 50)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
-                    console.error(`NH [${this.sharedUrl}] (${this.name}): LinksSharingLanguage`, address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
                     resolve({
                         additions: [],
@@ -258,11 +313,10 @@ export default class Perspective {
         }
 
         return new Promise(async (resolve, reject) => {
-            setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000);
             try {
-                const address = this.neighbourhood!.linkLanguage;
-                const linksAdapter = await this.#languageController?.getLinksAdapter({address} as LanguageRef);
+                const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
+                    setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000);
                     let currentRevisionString = await linksAdapter.currentRevision();
 
                     if(!currentRevisionString) {
@@ -283,7 +337,6 @@ export default class Perspective {
                     }
 
                 } else {
-                    console.error(`NH [${this.sharedUrl}] (${this.name}): LinksSharingLanguage`, address, "set in perspective '"+this.name+"' not installed!")
                     // TODO: request install
                     resolve(null)
                 }
@@ -435,7 +488,7 @@ export default class Perspective {
         linkExpressions.forEach(l => this.removeLocalLink(l))
         this.#prologNeedsRebuild = true;
         for (const link of linkExpressions) {
-            this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+            this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             })
@@ -878,4 +931,8 @@ export default class Perspective {
         if(this.#prologEngine)
             this.#prologEngine.close()
     }
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

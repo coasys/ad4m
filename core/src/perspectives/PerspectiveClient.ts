@@ -1,7 +1,6 @@
 import { ApolloClient, gql } from "@apollo/client/core";
-import { Expression, ExpressionRendered } from "../expression/Expression";
+import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
-import { ExpressionRef } from "../expression/ExpressionRef";
 import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
@@ -20,6 +19,7 @@ const PERSPECTIVE_HANDLE_FIELDS = `
 uuid
 name
 sharedUrl
+state
 neighbourhood { 
     linkLanguage 
     meta { 

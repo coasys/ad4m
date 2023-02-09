@@ -1,12 +1,11 @@
 import { LinkCallback, PerspectiveClient } from "./PerspectiveClient";
-import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkInput, LinkMutations } from "../links/Links";
+import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
-import { PerspectiveHandle } from './PerspectiveHandle'
+import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
 import { Subject } from "../subject/Subject";
-import { ExpressionClient } from "../expression/ExpressionClient";
 import { ExpressionRendered } from "../expression/Expression";
 import { collectionAdderToName } from "../subject/util";
 
@@ -100,6 +99,11 @@ export class PerspectiveProxy {
     /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
     get neighbourhood(): Neighbourhood|void {
         return this.#handle.neighbourhood
+    }
+
+    /** Returns the state of the perspective **/
+    get state(): PerspectiveState {
+        return this.#handle.state
     }
 
     /** Returns all the links of this perspective that matches the LinkQuery */

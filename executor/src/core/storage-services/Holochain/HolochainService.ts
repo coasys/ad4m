@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, HoloHash, AppSignal, CellId, authorizeSigningCredentials, AgentInfoResponse, signZomeCall } from '@holochain/client'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, encodeHashToBase64, AppSignal, CellId, CellType, setSigningCredentials, AgentInfoResponse, SigningCredentials, generateSigningKeyPair, GrantedFunctionsType, signZomeCall, getSigningCredentials } from '@holochain/client'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -41,7 +41,6 @@ export default class HolochainService {
     #conductorConfigPath?: string
     #signalCallbacks: [CellId, AppSignalCb, string][];
     #queue: Map<string, AsyncQueue>
-    #cellZomeCalls: Map<string, [string, string][]>
 
     constructor(config: HolochainConfiguration) {
         let {
@@ -61,9 +60,8 @@ export default class HolochainService {
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
         this.#dataPath = dataPath
         this.#db = low(new FileSync(path.join(dataPath, 'holochain-service.json')))
-        this.#db.defaults({pubKeys: []}).write()
+        this.#db.defaults({pubKeys: [], signingCredentials: []}).write()
         this.#signalCallbacks = [];
-        this.#cellZomeCalls = new Map<string, [string, string][]>();
 
         const holochainAppPort = appPort ? appPort : 1337;
         const holochainAdminPort = adminPort ? adminPort : 2000;
@@ -115,8 +113,8 @@ export default class HolochainService {
         // console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks", signal);
         //console.debug("registered callbacks:", this.#signalCallbacks)
         if (this.#signalCallbacks.length != 0) {
-            const signalDna = Buffer.from(signal.data.cellId[0]).toString('hex')
-            const signalPubkey = Buffer.from(signal.data.cellId[1]).toString('hex')
+            const signalDna = Buffer.from(signal.cell_id[0]).toString('hex')
+            const signalPubkey = Buffer.from(signal.cell_id[1]).toString('hex')
             //console.debug("Looking for:", signalDna, signalPubkey)
             let callbacks = this.#signalCallbacks.filter(e => {
                 const dna = Buffer.from(e[0][0]).toString('hex')
@@ -149,7 +147,7 @@ export default class HolochainService {
                 }
             };
             if (this.#appWebsocket == undefined) {
-                this.#appWebsocket = await AppWebsocket.connect(`ws://127.0.0.1:${this.#appPort}`, 100000);
+                this.#appWebsocket = await AppWebsocket.connect(`ws://127.0.0.1:${this.#appPort}`, 15000);
                 this.#appWebsocket.on('signal', this.handleCallback.bind(this))
                 console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
             };
@@ -243,6 +241,25 @@ export default class HolochainService {
         }
     }
 
+    private cellIdToB64(cell: CellId): string {
+        return encodeHashToBase64(cell[0]).concat(encodeHashToBase64(cell[1]));
+    }
+
+    private async generateSigningKeys(cell: CellId): Promise<SigningCredentials> {
+        const cellIdB64 = this.cellIdToB64(cell);
+        console.log("generateSigningKeys", cellIdB64)
+
+        const [keyPair, signingKey] = generateSigningKeyPair();
+        const capSecret = await this.#adminWebsocket!.grantSigningKey(cell, {[GrantedFunctionsType.All]: null}, signingKey);
+        const signingCredentials = { capSecret, keyPair, signingKey } as SigningCredentials;
+        //Set the signing credentials in holochain client map
+        setSigningCredentials(cell, signingCredentials);
+
+        //Set the signing credentials in the database
+        this.#db.get("signingCredentials").push({cellId: cellIdB64, signingCredentials: signingCredentials}).write();
+        return signingCredentials;
+    }
+
     async ensureInstallDNAforLanguage(lang: string, dnas: Dna[], callback: AppSignalCb | undefined): Promise<void> {
         await this.#ready
         if (this.#didResolveError) {
@@ -309,16 +326,20 @@ export default class HolochainService {
 
             Object.keys(languageApp.cell_info).forEach(async roleName => {
                 const cellData = languageApp!.cell_info[roleName];
-                const dnaRef = dnas.find(dna => `${lang}-${dna.nick}` === roleName);
 
-                for (const cell of cellData) {
-                    const cellId = ("Provisioned" in cell) ? cell.Provisioned.cell_id : (("Cloned" in cell) ? cell.Cloned.cell_id : undefined);
-                    if (cellId === undefined) {
-                        console.error("HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected", cell);
-                        throw new Error("HolochainService: ERROR: Could not get cellId from cell_info, got StemCell where not expected");
+                for (const cellInfo of cellData) {
+                    const cellId = (CellType.Provisioned in cellInfo) ? cellInfo[CellType.Provisioned].cell_id : null
+                    if (!cellId) {
+                        throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${cellInfo}`);
                     }
 
-                    this.#cellZomeCalls.set(`${lang}-${dnaRef?.nick!}`, dnaRef!.zomeCalls);
+                    const cellIdB64 = this.cellIdToB64(cellId);
+                    const signingCredentials = await this.#db.get("signingKeys").find({cellId: cellIdB64}).value() as SigningCredentials | undefined;
+
+                    if (!signingCredentials) {
+                        console.log("HolochainService: Did not find saved signingCredentials, generating new one...");
+                        await this.generateSigningKeys(cellId);
+                    }
 
                     //Register the callback to the cell internally
                     if (callback != undefined) {
@@ -388,30 +409,52 @@ export default class HolochainService {
             console.error(e)
             return e
         }
-        const cell = ("Provisioned" in cellInfos[0]) ? cellInfos[0].Provisioned : (("Cloned" in cellInfos [0]) ? cellInfos[0].Cloned : undefined)
-        const cell_id = cell!.cell_id;
-        const [_dnaHash, provenance] = cell_id
+        const cellInfo = cellInfos[0];
+        const cellId = (CellType.Provisioned in cellInfo) ? cellInfo[CellType.Provisioned].cell_id : null
+
+        if (!cellId) {
+            throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${cellInfo}`);
+        };
+
+        const [_dnaHash, provenance] = cellId
 
         //4. Call the zome function
         try {
             console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
 
-            //Find the zome calls required for this cell, and authorize the signing credentials
-            const zomeCalls = this.#cellZomeCalls.get(`${lang}-${dnaNick}`);
-            if (!zomeCalls) {
-                throw new Error("HolochainService: ERROR: No zome calls found for cell with role: " + `${lang}-${dnaNick}`);
-            };
-            await authorizeSigningCredentials(this.#adminWebsocket!, cell_id, zomeCalls);
+            //Check that signZomeCall will be able to find the signing credentials
+            const signingKeyExists = getSigningCredentials(cellId);
 
-            //Make the zome call
+            if (!signingKeyExists) {
+                const cellIdB64 = this.cellIdToB64(cellId);
+                //Check if we already have some in the database
+                let signingCredentials = await this.#db.get("signingKeys").find({cellId: cellIdB64}).value() as SigningCredentials | undefined;
+                if (!signingCredentials) {
+                    console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "generating new ones...");
+                    await this.generateSigningKeys(cellId);
+                } else {
+                    console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "but found them in the database, setting them...", signingCredentials);
+                    //We have some but they are not present in the holochain client... set them
+                    setSigningCredentials(cellId, signingCredentials);
+                }
+            }
+
+            const signedZomeCallStart = Date.now();
             const signedZomeCall = await signZomeCall({
-                cell_id,
+                cell_id: cellId,
                 zome_name: zomeName,
                 fn_name: fnName,
                 provenance,
                 payload
-            })
-            const result = await this.#appWebsocket!.callZome(signedZomeCall)
+            });
+            const signedZomeCallEnd = Date.now();
+            console.log("HolochainService.callZomeFunction: signZomeCall took", signedZomeCallEnd - signedZomeCallStart, "ms")
+
+            const startCall = Date.now();
+            const result = await this.#appWebsocket!.callZome(signedZomeCall);
+            const endCall = Date.now();
+            console.log("HolochainService.callZomeFunction: callZome took", endCall - startCall, "ms")
+
             if (typeof result === "string") {
                 console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
             } else if (typeof result === "object") {
