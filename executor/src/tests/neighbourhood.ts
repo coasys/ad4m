@@ -150,8 +150,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await sleep(1000)
 
-                    expect(bobHandler).toBeCalledTimes(1)
-                    expect(aliceHandler).toBeCalledTimes(0)
+                    expect(bobHandler.mock.calls.length).to.be.equal(1)
+                    expect(aliceHandler.mock.calls.length).to.be.equal(0)
                     expect(bobHandler.mock.calls[0][0].data).to.deep.equal(aliceSignal)
 
                     let link2 = new LinkExpression()
@@ -165,7 +165,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await sleep(1000)
 
-                    expect(aliceHandler).toBeCalledTimes(1)
+                    expect(aliceHandler.mock.calls.length).to.be.equal(1)
                     expect(aliceHandler.mock.calls[0][0].data).to.deep.equal(bobSignal)
                 })
 
