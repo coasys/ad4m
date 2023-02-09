@@ -168,7 +168,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     expect(aliceHandler.mock.calls.length).to.be.equal(1)
                     expect(aliceHandler.mock.calls[0][0].data).to.deep.equal(bobSignal)
                 })
-
+            })
         })
     }
 }
