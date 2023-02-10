@@ -7,7 +7,7 @@ import {
 import { WebSocketServer } from 'ws';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, LanguageRef, PerspectiveState } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, LanguageRef, PerspectiveHandle, PerspectiveState } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -19,6 +19,13 @@ import { checkCapability, checkTokenAuthorized } from '../agent/Auth'
 import { withFilter } from 'graphql-subscriptions';
 import { OuterConfig } from '../../main';
 import path from 'path';
+import Perspective from '../Perspective';
+
+function checkLinkLanguageInstalled(perspective: Perspective) {
+    if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
+        throw new Error(`Perspective ${perspective.uuid}/${perspective.name} does not have a LinkLanguage installed. State is: ${perspective.state}`) 
+    }
+}
 
 function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     const pubsub = PubSub.get()
@@ -165,7 +172,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const { perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                checkLinkLanguageInstalled(perspective)
                 return await perspective.othersInNeighbourhood()
             },
 
@@ -175,7 +182,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const { perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 return telepresenceAdapter != undefined
             },
@@ -186,7 +193,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const { perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 return await telepresenceAdapter!.getOnlineAgents()
@@ -573,7 +580,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const { perspectiveUUID, status } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 const statusExpression = core.agentService.createSignedExpression(status)
@@ -586,7 +593,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const { perspectiveUUID, recipient, payload } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 const payloadExpression = core.agentService.createSignedExpression(payload)
@@ -599,7 +606,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const { perspectiveUUID, payload } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
+                checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 const payloadExpression = core.agentService.createSignedExpression(payload)
