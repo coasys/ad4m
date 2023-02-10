@@ -23,4 +23,12 @@ export default class HolochainLanguageDelegate {
             return await this.#holochainService.callZomeFunction(this.#languageHash, dnaNick, zomeName, fnName, params)
         })
     }
+
+    async callAsync(calls: {dnaNick: string, zomeName: string, fnName: string, params: object|string}[]): Promise<any[]> {
+        const promises = [];
+        for (const call of calls) {
+            promises.push(this.#holochainService.callZomeFunction(this.#languageHash, call.dnaNick, call.zomeName, call.fnName, call.params));
+        };
+        return await Promise.all(promises);
+    }
 }
