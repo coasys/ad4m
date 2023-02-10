@@ -51,6 +51,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
+      - run: taskkill /F /IM "rls.exe"
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: 1.63.0
