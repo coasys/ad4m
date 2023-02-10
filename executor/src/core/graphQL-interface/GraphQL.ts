@@ -584,7 +584,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 const statusExpression = core.agentService.createSignedExpression(status)
-                return await telepresenceAdapter!.setOnlineStatus(statusExpression)
+                await telepresenceAdapter!.setOnlineStatus(statusExpression)
+                return true
             },
 
             //@ts-ignore
@@ -597,7 +598,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 const payloadExpression = core.agentService.createSignedExpression(payload)
-                return await telepresenceAdapter!.sendSignal(recipient, payloadExpression)
+                await telepresenceAdapter!.sendSignal(recipient, payloadExpression)
+                return true
             },
 
             //@ts-ignore
@@ -610,7 +612,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 const payloadExpression = core.agentService.createSignedExpression(payload)
-                return await telepresenceAdapter!.sendBroadcast(payloadExpression)
+                await telepresenceAdapter!.sendBroadcast(payloadExpression)
+                return true
             },
 
             //@ts-ignore
