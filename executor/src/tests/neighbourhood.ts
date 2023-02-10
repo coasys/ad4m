@@ -156,7 +156,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     let link = new LinkExpression()
                     link.author = aliceDID;
                     link.timestamp = new Date().toISOString();
-                    link.data = new Link({source: "aliace", target: "bob", predicate: "signal"});
+                    link.data = new Link({source: "alice", target: "bob", predicate: "signal"});
                     link.proof = new ExpressionProof("sig", "key");
                     const aliceSignal = new Perspective([link])
 
