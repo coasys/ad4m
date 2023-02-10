@@ -583,14 +583,14 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             neighbourhoodSendSignal: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
-                const { perspectiveUUID, recipient, payload } = args
+                const { perspectiveUUID, remoteAgentDid, payload } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
                 if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
                 if(perspective.state != PerspectiveState.Synced) {  throw new Error(`Perspective ${perspectiveUUID} is not a (synced) Neighbourhood. State is: ${perspective.state}`) }
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 const payloadExpression = core.agentService.createSignedExpression(payload)
-                return await telepresenceAdapter!.sendSignal(recipient, payloadExpression)
+                return await telepresenceAdapter!.sendSignal(remoteAgentDid, payloadExpression)
             },
 
             //@ts-ignore
