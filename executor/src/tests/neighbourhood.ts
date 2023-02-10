@@ -105,6 +105,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 })
 
                 it('they see each other in `otherAgents`', async () => {
+                    await sleep(1000);
                     const aliceAgents = await aliceNH!.otherAgents()
                     const bobAgents = await bobNH!.otherAgents()
                     expect(aliceAgents.length).to.be.equal(1)
@@ -134,9 +135,22 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 })
 
                 it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
-                    const aliceHandler = jest.fn()
+                    let aliceCalls = 0;
+                    let aliceData = null;
+                    const aliceHandler = async (payload: Perspective) => {
+                        aliceCalls += 1;
+                        //@ts-ignore
+                        aliceData = payload;
+                    };
                     aliceNH!.addSignalHandler(aliceHandler)
-                    const bobHandler = jest.fn()
+
+                    let bobCalls = 0;
+                    let bobData = null;
+                    const bobHandler = async (payload: Perspective) => {
+                        bobCalls += 1;
+                        //@ts-ignore
+                        bobData = payload;
+                    };
                     bobNH!.addSignalHandler(bobHandler)
 
                     let link = new LinkExpression()
@@ -150,9 +164,9 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await sleep(1000)
 
-                    expect(bobHandler.mock.calls.length).to.be.equal(1)
-                    expect(aliceHandler.mock.calls.length).to.be.equal(0)
-                    expect(bobHandler.mock.calls[0][0].data).to.deep.equal(aliceSignal)
+                    expect(bobCalls).to.be.equal(1)
+                    expect(aliceCalls).to.be.equal(0)
+                    expect(bobData).to.deep.equal(aliceSignal)
 
                     let link2 = new LinkExpression()
                     link2.author = bobDID;
@@ -165,8 +179,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await sleep(1000)
 
-                    expect(aliceHandler.mock.calls.length).to.be.equal(1)
-                    expect(aliceHandler.mock.calls[0][0].data).to.deep.equal(bobSignal)
+                    expect(aliceCalls).to.be.equal(1)
+                    expect(aliceData).to.deep.equal(bobSignal)
                 })
             })
         })
