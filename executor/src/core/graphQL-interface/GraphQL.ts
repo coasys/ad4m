@@ -784,7 +784,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
                     return withFilter(
                         () => pubsub.asyncIterator(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC),
-                        (payload, argsInner) => payload.perspective.uuid === argsInner.uuid
+                        (payload, argsInner) => payload.perspective.uuid === argsInner.perspectiveUUID
                     )(undefined, args)
                 },
                 //@ts-ignore
