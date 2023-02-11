@@ -1007,17 +1007,25 @@ export default class LanguageController {
         }
 
         if(expr) {
+            await this.tagExpressionSignatureStatus(expr);
+        }
+
+        return expr
+    }
+
+    async tagExpressionSignatureStatus(expression: Expression) {
+        if(expression) {
             try{
-                if(! await this.#signatures.verify(expr)) {
-                    console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
-                    expr.proof.invalid = true
-                    delete expr.proof.valid
+                if(! await this.#signatures.verify(expression)) {
+                    console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expression)
+                    expression.proof.invalid = true
+                    delete expression.proof.valid
                 } else {
-                    expr.proof.valid = true
-                    delete expr.proof.invalid
+                    expression.proof.valid = true
+                    delete expression.proof.invalid
                 }
             } catch(e) {
-                let errMsg = `Error trying to verify signature for expression: ${expr}`
+                let errMsg = `Error trying to verify signature for expression: ${expression}`
                 console.error(errMsg)
                 console.error(e)
                 this.pubSub.publish(
@@ -1030,8 +1038,6 @@ export default class LanguageController {
                 );
             }
         }
-
-        return expr
     }
 
     async getLinksAdapter(lang: LanguageRef): Promise<LinkSyncAdapter | null> {

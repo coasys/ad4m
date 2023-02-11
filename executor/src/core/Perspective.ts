@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
 import { Link, linkEqual, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -416,6 +416,23 @@ export default class Perspective {
         const address = this.neighbourhood!.linkLanguage;
         const telepresenceAdapter = await this.#languageController!.getTelepresenceAdapter({address} as LanguageRef);
         return telepresenceAdapter
+    }
+
+    async getOnlineAgents(): Promise<OnlineAgent[]> {
+        const telepresenceAdapter = await this.getTelepresenceAdapter()
+        if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${this.sharedUrl} has no Telepresence Adapter.`) }
+        const onlineAgents = await telepresenceAdapter!.getOnlineAgents()
+        for (const onlineAgent of onlineAgents) {
+            if (onlineAgent.status) {
+                await this.#languageController?.tagExpressionSignatureStatus(onlineAgent.status);
+                if (onlineAgent.status.data.links) {
+                    for (const link of onlineAgent.status.data.links) {
+                        await this.#languageController?.tagExpressionSignatureStatus(link);
+                    }
+                }
+            }
+        }
+        return onlineAgents
     }
 
 

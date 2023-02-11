@@ -123,15 +123,17 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     const testPerspective = new Perspective([link])
                     await aliceNH!.setOnlineStatus(testPerspective)
                     await bobNH!.setOnlineStatus(testPerspective)
+
                     const aliceOnline = await aliceNH!.onlineAgents()
                     const bobOnline = await bobNH!.onlineAgents()
                     expect(aliceOnline.length).to.be.equal(1)
                     expect(aliceOnline[0].did).to.be.equal(bobDID)
-                    expect(aliceOnline[0].status).to.deep.equal(testPerspective)
+                    console.log(aliceOnline[0].status);
+                    expect(aliceOnline[0].status.data.links).to.deep.equal(testPerspective.links)
                     
                     expect(bobOnline.length).to.be.equal(1)
                     expect(bobOnline[0].did).to.be.equal(aliceDID)
-                    expect(bobOnline[0].status).to.deep.equal(testPerspective)
+                    expect(bobOnline[0].status.data.links).to.deep.equal(testPerspective.links)
                 })
 
                 it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
@@ -162,11 +164,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await aliceNH!.sendSignal(bobDID!, aliceSignal)
 
-                    await sleep(1000)
+                    await sleep(2000)
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0)
-                    expect(bobData).to.deep.equal(aliceSignal)
+                    //@ts-ignore
+                    expect(bobData.data.links).to.deep.equal(aliceSignal.links)
 
                     let link2 = new LinkExpression()
                     link2.author = bobDID;
@@ -177,10 +180,11 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await bobNH!.sendBroadcast(bobSignal)
 
-                    await sleep(1000)
+                    await sleep(2000)
 
                     expect(aliceCalls).to.be.equal(1)
-                    expect(aliceData).to.deep.equal(bobSignal)
+                    //@ts-ignore
+                    expect(aliceData.data.links).to.deep.equal(bobSignal.links)
                 })
             })
         })

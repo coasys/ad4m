@@ -196,7 +196,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                return await telepresenceAdapter!.getOnlineAgents()
+                return await perspective!.getOnlineAgents();
             },
             
             //@ts-ignore
@@ -787,8 +787,16 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                         (payload, argsInner) => payload.perspective.uuid === argsInner.perspectiveUUID
                     )(undefined, args)
                 },
-                //@ts-ignore
-                resolve: payload => payload?.signal
+                resolve: async (payload: any) => {
+                    await core.languageController?.tagExpressionSignatureStatus(payload?.signal)
+                    if (payload?.signal?.data.links) {
+                        for (const link of payload?.signal.data.links) {
+                            await core.languageController?.tagExpressionSignatureStatus(link);
+                        }
+                    };
+
+                    return payload?.signal
+                }
             },
             runtimeMessageReceived: {
                 //@ts-ignore
