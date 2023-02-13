@@ -1,6 +1,6 @@
 import { DID } from "../DID";
 import { OnlineAgent } from "../language/Language";
-import { Perspective } from "../perspectives/Perspective";
+import { Perspective, PerspectiveExpression } from "../perspectives/Perspective";
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 
 export class NeighbourhoodProxy {
@@ -36,7 +36,7 @@ export class NeighbourhoodProxy {
         return await this.#client.sendBroadcast(this.#pID, payload)
     }
 
-    async addSignalHandler(handler: (payload: Perspective) => object): Promise<void> {
-        return await this.#client.addSignalHandler(this.#pID, handler)
+    async addSignalHandler(handler: (payload: PerspectiveExpression) => void): Promise<void> {
+        await this.#client.addSignalHandler(this.#pID, handler)
     }
 }
