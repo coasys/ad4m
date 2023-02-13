@@ -1,5 +1,5 @@
 use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
-use ad4m_client::{Ad4mClient, perspective_proxy::PerspectiveProxy};
+use ad4m_client::{Ad4mClient};
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 
