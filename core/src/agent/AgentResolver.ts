@@ -4,7 +4,7 @@ import { Agent, AgentSignature, Apps, EntanglementProof, EntanglementProofInput 
 import { AgentStatus } from "./AgentStatus"
 import { AGENT_STATUS_CHANGED, AGENT_UPDATED } from "../PubSub";
 
-const TEST_AGENT_DID = "did:ad4m:test"
+export const TEST_AGENT_DID = "did:ad4m:test"
 
 @Resolver()
 export default class AgentResolver {
