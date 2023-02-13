@@ -107,7 +107,10 @@ export function subjectFlag(opts: FlagOptions) {
             initial: opts.value
         }
 
-        Object.defineProperty(target, key, {});
+        // @ts-ignore
+        target[key] = opts.value;
+
+        Object.defineProperty(target, key, {configurable: true});
     };
 }
 
