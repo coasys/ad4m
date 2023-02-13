@@ -370,6 +370,7 @@ describe("Integration", () => {
 
                 //@ts-ignore
                 @subjectCollection({ through: "todo://comment" })
+                // @ts-ignore
                 comments: string[] = []
 
                 //@ts-ignore
@@ -385,6 +386,7 @@ describe("Integration", () => {
             }
 
             it("should generate correct SDNA from a JS class", async () => {
+                // @ts-ignore
                 let sdna = Todo.generateSDNA()
                 expect(sdna).to.equal(readFileSync("./subject.pl").toString())
             })
@@ -406,6 +408,7 @@ describe("Integration", () => {
                 expect(await todo.comments).to.be.empty
 
                 let comment = Literal.from("new comment").toUrl()
+                // @ts-ignore
                 await todo.addComment(comment)
                 expect(await todo.comments).to.deep.equal([comment])
             })
@@ -443,6 +446,7 @@ describe("Integration", () => {
                 let todo = todos[0]
                 expect(await todo.title).to.equal(undefined)
 
+                // @ts-ignore
                 await todo.setTitle("new title")
                 expect(await todo.title).to.equal("new title")
 
@@ -456,13 +460,12 @@ describe("Integration", () => {
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
                 expect(await perspective!.getSdna()).to.have.lengthOf(1)
 
+                @SDNAClass({
+                    name: "Test"
+                })
                 class Test {
                     @subjectProperty({through: "test://test_numer"})
                     number: number = 0
-
-
-                    @sdnaOutput
-                    static generateSDNA(): string { return "" }
                 }
 
                 await perspective!.ensureSDNASubjectClass(Test)
@@ -472,12 +475,14 @@ describe("Integration", () => {
             })
 
             it("can constrain collection entries through 'where' clause", async () => {
+                // @ts-ignore
                 perspective!.addSdna(Message.generateSDNA())
                 let root = Literal.from("Collection where test").toUrl()
                 let todo = await perspective!.createSubject(new Todo(), root)
 
                 let messageEntry = Literal.from("test message").toUrl()
 
+                // @ts-ignore
                 await todo.addEntry(messageEntry)
 
                 let entries = await todo.entries
