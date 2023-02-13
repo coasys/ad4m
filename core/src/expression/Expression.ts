@@ -25,10 +25,10 @@ export class ExpressionProof {
 
 @InputType()
 export class ExpressionProofInput {
-    @Field()
+    @Field({nullable: true})
     signature: string;
     
-    @Field()
+    @Field({nullable: true})
     key: string;
     
     @Field({nullable: true})
