@@ -1,4 +1,4 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, LanguageMetaInput } from "@perspect3vism/ad4m";
+import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import sleep from "./sleep";
 import fs from "fs";
@@ -16,6 +16,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const create = await ad4mClient!.perspective.add("publish-test");
                 expect(create.name).to.be.equal("publish-test");
                 expect(create.neighbourhood).to.be.null;
+                expect(create.state).to.be.equal(PerspectiveState.Private);
 
                 //Create unique perspective-diff-sync to simulate real scenario
                 const socialContext = await ad4mClient.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's perspective-diff-sync"}));
@@ -39,6 +40,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(perspective?.neighbourhood).not.to.be.undefined;
                 expect(perspective?.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
                 expect(perspective?.neighbourhood!.meta.links.length).to.be.equal(1);
+                expect(perspective?.state).to.be.equal(PerspectiveState.Synced);
             })
 
             it('can be created by Alice and joined by Bob', async () => {
@@ -59,6 +61,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1!.neighbourhood).not.to.be.undefined;;
                 expect(bobP1!.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
                 expect(bobP1!.neighbourhood!.meta.links.length).to.be.equal(0);
+                expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
 
                 await sleep(5000)
 

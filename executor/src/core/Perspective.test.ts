@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
+import { Neighbourhood, LinkQuery, PerspectiveHandle, PerspectiveState } from '@perspect3vism/ad4m'
 import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
 import path from "path";
@@ -61,7 +61,8 @@ describe('Perspective', () => {
             {
                 uuid: uuidv4(),
                 name: "Test Perspective",
-                sharedUrl: undefined
+                sharedUrl: undefined,
+                state: PerspectiveState.Private
             } as PerspectiveHandle,
             //@ts-ignore
             {

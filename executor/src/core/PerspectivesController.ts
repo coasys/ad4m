@@ -3,7 +3,7 @@ import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, Expression, LanguageRef, PerspectiveDiff } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, Expression, LanguageRef, PerspectiveDiff, PerspectiveState } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -107,24 +107,26 @@ export default class PerspectivesController {
         return new Ad4mPerspective(await perspective.getLinks({} as LinkQuery));
     }
 
-    add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean): PerspectiveHandle {
+    add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState): PerspectiveHandle {
         let perspective = {
             uuid: uuidv4(),
             name,
+            state: state || PerspectiveState.Private,
             sharedUrl: sharedUrl,
             neighbourhood: neighbourhood
         } as PerspectiveHandle;
         this.#perspectiveHandles.set(perspective.uuid, perspective)
-        this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood, createdFromJoin))
+        this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood, createdFromJoin, state))
         this.save()
         this.pubsub.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
         return perspective
     }
 
-    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean) {
+    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
+        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: perspectiveHandle })
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
         this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
-        this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin));
+        this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin, state));
         this.save()
     }
 
@@ -148,15 +150,25 @@ export default class PerspectivesController {
     update(uuid: string, name: string) {
         let perspective = this.perspective(uuid);
         perspective.name = name;
-        let perspectiveHandle = new PerspectiveHandle(uuid, name);
+
+        let perspectiveHandle = new PerspectiveHandle(uuid, name, perspective.state);
         perspectiveHandle.sharedUrl = perspective.sharedUrl;
         this.#perspectiveHandles.set(uuid, perspectiveHandle)
         this.save()
+
         const instance = this.#perspectiveInstances.get(uuid)
         if(instance) {
             instance.updateFromId(perspective as PerspectiveHandle)
         }
-        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective });
+
+        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: {
+            uuid: perspective.uuid,
+            name: perspective.name,
+            state: perspective.state,
+            sharedUrl: perspective.sharedUrl,
+            neighbourhood: perspective.neighbourhood
+        } as PerspectiveHandle });
+
         return perspective
     }
 }
