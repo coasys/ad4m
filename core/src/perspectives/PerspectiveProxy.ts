@@ -8,7 +8,6 @@ import { Literal } from "../Literal";
 import { Subject } from "../subject/Subject";
 import { ExpressionRendered } from "../expression/Expression";
 import { collectionAdderToName, collectionSetterToName } from "../subject/util";
-import { collectionAdderToName } from "../subject/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
