@@ -6,7 +6,7 @@ import { Perspective } from "./Perspective";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from '../PubSub'
 
-const testLink = new LinkExpression()
+export const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
 testLink.timestamp = Date.now()
 testLink.data = {

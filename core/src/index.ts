@@ -22,4 +22,6 @@ export * from "./SmartLiteral";
 export * from "./subject/SDNADecorators";
 export * from "./subject/Subject";
 export * from "./neighbourhood/Neighbourhood";
+export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./typeDefs";
+export * from "./DID";

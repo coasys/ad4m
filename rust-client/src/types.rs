@@ -13,8 +13,8 @@ pub struct Link {
 #[derive(Debug)]
 pub struct ExpressionProof {
     pub invalid: Option<bool>,
-    pub key: String,
-    pub signature: String,
+    pub key: Option<String>,
+    pub signature: Option<String>,
     pub valid: Option<bool>,
 }
 

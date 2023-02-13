@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
 import { Link, linkEqual, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -8,6 +8,7 @@ import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
 import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
+import { DID } from "@perspect3vism/ad4m/lib/src/DID";
 
 type PerspectiveSubscription = {
     perspective: PerspectiveHandle,
@@ -401,6 +402,37 @@ export default class Perspective {
             }
         }
     }
+
+    async othersInNeighbourhood(): Promise<DID[]> {
+        const linksAdapter = await this.getLinksAdapter();
+        if(!linksAdapter) { throw new Error("No links adapter when trying to get others in Neighbourhood") }
+        const others = await linksAdapter.others() || []
+        // Filter out nulls
+        return others.filter(o => o)
+    }
+
+    async getTelepresenceAdapter(): Promise<TelepresenceAdapter | null> {
+        if(!this.getLinksAdapter()) {
+            return null;
+        }
+        const address = this.neighbourhood!.linkLanguage;
+        const telepresenceAdapter = await this.#languageController!.getTelepresenceAdapter({address} as LanguageRef);
+        return telepresenceAdapter
+    }
+
+    async getOnlineAgents(): Promise<OnlineAgent[]> {
+        const telepresenceAdapter = await this.getTelepresenceAdapter()
+        if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${this.sharedUrl} has no Telepresence Adapter.`) }
+        const onlineAgents = await telepresenceAdapter!.getOnlineAgents() || []
+        for (const onlineAgent of onlineAgents) {
+            if (onlineAgent.status) {
+                await this.#languageController?.tagPerspectiveExpressionSignatureStatus(onlineAgent.status);
+            }
+        }
+        // Filter out nulls
+        return onlineAgents.filter(o => o)
+    }
+
 
     addLocalLink(linkExpression: LinkExpression) {
         let foundLink = this.findLink(linkExpression);
