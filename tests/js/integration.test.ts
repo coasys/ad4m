@@ -7,8 +7,9 @@ import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
-    instanceQuery, Subject, subjectProperty, subjectPropertySetter,
-    subjectCollection, sdnaOutput,
+    instanceQuery, Subject, subjectProperty,
+    subjectCollection,
+    SDNAClass,
 } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
@@ -297,27 +298,25 @@ describe("Integration", () => {
         })
 
         describe("SDNA creation decorators", () => {
+            @SDNAClass({
+                name: "Message"
+            })
             class Message {
                 //@ts-ignore
                 @subjectProperty({
                     through: "todo://state", 
                     initial:"todo://ready",
                     required: true,
-                    resolve: true,
+                    writable: true,
                 })
                 body: string = ""
-
-                @subjectPropertySetter({
-                    resolveLanguage: 'literal'
-                })
-                setBody(title: string) {}
-
-                @sdnaOutput
-                static generateSDNA(): string { return "" }
             }
 
             // This class matches the SDNA in ./subject.pl
             // and this test proves the decorators create the exact same SDNA code
+            @SDNAClass({
+                name: "Todo"
+            })
             class Todo {
                 // Setting this member "subjectConstructer" allows for adding custom
                 // actions that will be run when a subject is constructed.
@@ -365,24 +364,17 @@ describe("Integration", () => {
                 //@ts-ignore
                 @subjectProperty({
                     through: "todo://has_title",
-                    resolve: true,
+                    writable: true,
                 })
                 title: string = ""
-
-                @subjectPropertySetter({
-                    resolveLanguage: 'literal'
-                })
-                setTitle(title: string) {}
 
                 //@ts-ignore
                 @subjectCollection({ through: "todo://comment" })
                 comments: string[] = []
-                addComment(comment: string) {}
 
                 //@ts-ignore
                 @subjectCollection({ through: "flux://entry_type" })
                 entries: string[] = []
-                addEntry(entry: string) {}
 
                 //@ts-ignore
                 @subjectCollection({
@@ -390,9 +382,6 @@ describe("Integration", () => {
                     where: { isInstance: Message }
                 })
                 messages: string[] = []
-
-                @sdnaOutput
-                static generateSDNA(): string { return "" }
             }
 
             it("should generate correct SDNA from a JS class", async () => {
