@@ -14,7 +14,7 @@ export default function expressionTests(testContext: TestContext) {
                 console.warn(agent);
 
                 expect(agent.proof.valid).to.be.true;
-                expect(agent.proof.invalid).to.be.null;
+                expect(agent.proof.invalid).to.be.false;
             })
 
             it('can getManyExpressions()', async () => {
@@ -129,7 +129,6 @@ export default function expressionTests(testContext: TestContext) {
                 expect(exprRef.language.address).to.be.equal("literal")
 
                 const expr = Literal.fromUrl(addr).get()
-                delete expr.proof.invalid
 
                 expect(expr.data).to.be.equal(TEST_DATA)
 

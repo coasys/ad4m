@@ -1,4 +1,4 @@
-import { Ad4mClient, Link, LinkQuery, PerspectiveProxy } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, PerspectiveState } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import { expect } from "chai";
 import * as sinon from "sinon";
@@ -226,6 +226,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 const pSeenInUpdateCB = perspectiveUpdated.getCall(0).args[0];
                 expect(pSeenInUpdateCB.uuid).to.equal(p1.uuid)
                 expect(pSeenInUpdateCB.name).to.equal(p1.name)
+                expect(pSeenInUpdateCB.state).to.equal(PerspectiveState.Private)
 
                 const linkAdded = sinon.fake()
                 await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])

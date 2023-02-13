@@ -1,6 +1,6 @@
 import { 
     Address, Expression, Language, LanguageContext, 
-    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective, Literal 
+    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective, Literal, TelepresenceAdapter 
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
@@ -17,7 +17,7 @@ import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
-
+type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
 interface Services {
     holochainService: HolochainService,
     runtimeService: RuntimeService,
@@ -60,6 +60,7 @@ export default class LanguageController {
     #languageConstructors: Map<string, (context: LanguageContext)=>Language>
     #context: object;
     #linkObservers: LinkObservers[];
+    #telepresenceSignalObservers: TelepresenceSignalObserver[];
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
     #signatures: Signatures;
@@ -81,6 +82,7 @@ export default class LanguageController {
         this.#languages = new Map()
         this.#languageConstructors = new Map()
         this.#linkObservers = []
+        this.#telepresenceSignalObservers = []
         this.pubSub = PubSub.get()
         this.#config = (context as any).config;
     }
@@ -181,6 +183,12 @@ export default class LanguageController {
         })
     }
 
+    callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
+        this.#telepresenceSignalObservers.forEach(o => {
+            o(signal, ref)
+        })
+    }
+
     async loadLanguage(sourceFilePath: string): Promise<{
         language: Language,
         hash: string,
@@ -239,6 +247,12 @@ export default class LanguageController {
             })
         }
 
+        if(language.telepresenceAdapter) {
+            language.telepresenceAdapter.registerSignalCallback((payload: PerspectiveExpression) => {
+                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
+            })
+        }
+
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
@@ -272,6 +286,13 @@ export default class LanguageController {
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name});
+            })
+        }
+
+        if(language.telepresenceAdapter) {
+            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression) => {
+                await this.tagPerspectiveExpressionSignatureStatus(payload)
+                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
             })
         }
 
@@ -988,17 +1009,25 @@ export default class LanguageController {
         }
 
         if(expr) {
+            await this.tagExpressionSignatureStatus(expr);
+        }
+
+        return expr
+    }
+
+    async tagExpressionSignatureStatus(expression: Expression) {
+        if(expression) {
             try{
-                if(! await this.#signatures.verify(expr)) {
-                    console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
-                    expr.proof.invalid = true
-                    delete expr.proof.valid
+                if(! await this.#signatures.verify(expression)) {
+                    console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expression)
+                    expression.proof.invalid = true
+                    expression.proof.valid = false
                 } else {
-                    expr.proof.valid = true
-                    delete expr.proof.invalid
+                    expression.proof.valid = true
+                    expression.proof.invalid = false
                 }
             } catch(e) {
-                let errMsg = `Error trying to verify signature for expression: ${expr}`
+                let errMsg = `Error trying to verify signature for expression: ${expression}`
                 console.error(errMsg)
                 console.error(e)
                 this.pubSub.publish(
@@ -1011,8 +1040,15 @@ export default class LanguageController {
                 );
             }
         }
+    }
 
-        return expr
+    async tagPerspectiveExpressionSignatureStatus(perspective: PerspectiveExpression) {
+        await this.tagExpressionSignatureStatus(perspective);
+        if (perspective.data.links) {
+            for (const link of perspective.data.links) {
+                await this.tagExpressionSignatureStatus(link);
+            }
+        }
     }
 
     async getLinksAdapter(lang: LanguageRef): Promise<LinkSyncAdapter | null> {
@@ -1026,11 +1062,27 @@ export default class LanguageController {
         } catch(e) {
             return null
         }
+    }
 
+    async getTelepresenceAdapter(lang: LanguageRef): Promise<TelepresenceAdapter | null> {
+        try {
+            let gotLang = await this.languageByRef(lang)
+            if (gotLang.telepresenceAdapter) {
+                return gotLang.telepresenceAdapter
+            } else {
+                return null
+            }
+        } catch(e) {
+            return null
+        }
     }
 
     addLinkObserver(observer: LinkObservers) {
         this.#linkObservers.push(observer)
+    }
+
+    addTelepresenceSignalObserver(observer: TelepresenceSignalObserver) {
+        this.#telepresenceSignalObservers.push(observer)
     }
 
     async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {
