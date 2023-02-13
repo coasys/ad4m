@@ -104,7 +104,8 @@ export function subjectFlag(opts: FlagOptions) {
             ...target["__properties"][key],
             through: opts.through,
             required: true,
-            initial: opts.value
+            initial: opts.value,
+            flag: true
         }
 
         // @ts-ignore
@@ -178,7 +179,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
     
-                let { through, initial, required, resolveLanguage, writable } = properties[property]
+                let { through, initial, required, resolveLanguage, writable, flag } = properties[property]
     
                 if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
@@ -189,7 +190,11 @@ export function SDNAClass(opts: SDNAClassOptions) {
                     propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
     
                     if(required) {
-                        instanceConditions.push(`triple(Base, "${through}", _)`)
+                        if(flag) {
+                            instanceConditions.push(`triple(Base, "${through}", "${initial}")`)
+                        } else {
+                            instanceConditions.push(`triple(Base, "${through}", _)`)    
+                        }
                     }    
                 }
                 

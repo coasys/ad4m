@@ -8,7 +8,7 @@ import { createClient } from "graphql-ws";
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
     instanceQuery, Subject, subjectProperty,
-    subjectCollection,
+    subjectCollection, subjectFlag,
     SDNAClass,
 } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
@@ -304,10 +304,20 @@ describe("Integration", () => {
             })
             class Message {
                 //@ts-ignore
+                @subjectFlag({
+                    through: "ad4m://type",
+                    value: "ad4m://message"
+                })
+                type: string = ""
+
+                //@ts-ignore
+                @instanceQuery()
+                static async all(perspective: PerspectiveProxy): Promise<Message[]> { return [] }
+
+                //@ts-ignore
                 @subjectProperty({
                     through: "todo://state", 
-                    initial:"todo://ready",
-                    required: true,
+                    initial: "todo://ready",
                     writable: true,
                 })
                 body: string = ""
@@ -476,27 +486,53 @@ describe("Integration", () => {
                 //console.log((await perspective!.getSdna())[1])
             })
 
-            it("can constrain collection entries through 'where' clause", async () => {
-                // @ts-ignore
-                perspective!.addSdna(Message.generateSDNA())
-                let root = Literal.from("Collection where test").toUrl()
-                let todo = await perspective!.createSubject(new Todo(), root)
+            describe("with Message subject class registered", () => {
+                before(async () => {
+                    // @ts-ignore
+                    perspective!.addSdna(Message.generateSDNA())
+                })
 
-                let messageEntry = Literal.from("test message").toUrl()
+                it("can find instances through the exact flag link", async() => {
+                    await perspective!.add(new Link({
+                        source: "test://message", 
+                        predicate: "ad4m://type",
+                        target: "ad4m://undefined"
+                    }))
 
-                // @ts-ignore
-                await todo.addEntries(messageEntry)
+                    const first = await Message.all(perspective!)
+                    expect(first.length).to.be.equal(0)
 
-                let entries = await todo.entries
-                expect(entries.length).to.equal(1)
+                    await perspective!.add(new Link({
+                        source: "test://message", 
+                        predicate: "ad4m://type",
+                        target: "ad4m://message"
+                    }))
 
-                let messageEntries = await todo.messages
-                expect(messageEntries.length).to.equal(0)
+                    const second = await Message.all(perspective!)
+                    expect(second.length).to.be.equal(1)
+                })
 
-                await perspective!.createSubject(new Message(), messageEntry)
+                it("can constrain collection entries through 'where' clause", async () => {
+                    let root = Literal.from("Collection where test").toUrl()
+                    let todo = await perspective!.createSubject(new Todo(), root)
+    
+                    let messageEntry = Literal.from("test message").toUrl()
+    
+                    // @ts-ignore
+                    await todo.addEntries(messageEntry)
+    
+                    let entries = await todo.entries
+                    expect(entries.length).to.equal(1)
+    
+                    let messageEntries = await todo.messages
+                    expect(messageEntries.length).to.equal(0)
+    
+                    await perspective!.createSubject(new Message(), messageEntry)
+    
+                    messageEntries = await todo.messages
+                    expect(messageEntries.length).to.equal(1)
+                })
 
-                messageEntries = await todo.messages
-                expect(messageEntries.length).to.equal(1)
             })
         })
     })
