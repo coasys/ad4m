@@ -406,7 +406,9 @@ export default class Perspective {
     async othersInNeighbourhood(): Promise<DID[]> {
         const linksAdapter = await this.getLinksAdapter();
         if(!linksAdapter) { throw new Error("No links adapter when trying to get others in Neighbourhood") }
-        return await linksAdapter.others();
+        const others = await linksAdapter.others() || []
+        // Filter out nulls
+        return others.filter(o => o)
     }
 
     async getTelepresenceAdapter(): Promise<TelepresenceAdapter | null> {
@@ -421,7 +423,7 @@ export default class Perspective {
     async getOnlineAgents(): Promise<OnlineAgent[]> {
         const telepresenceAdapter = await this.getTelepresenceAdapter()
         if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${this.sharedUrl} has no Telepresence Adapter.`) }
-        const onlineAgents = await telepresenceAdapter!.getOnlineAgents()
+        const onlineAgents = await telepresenceAdapter!.getOnlineAgents() || []
         for (const onlineAgent of onlineAgents) {
             if (onlineAgent.status) {
                 await this.#languageController?.tagExpressionSignatureStatus(onlineAgent.status);
@@ -432,6 +434,8 @@ export default class Perspective {
                 }
             }
         }
+        // Filter out nulls
+        return onlineAgents.filter(o => o)
         return onlineAgents
     }
 
