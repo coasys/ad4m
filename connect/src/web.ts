@@ -34,18 +34,14 @@ function detectMob() {
 
 const styles = css`
   :host {
-    --primary-color: #0a33ff;
+    --primary-color: #fff;
+    --heading-color: #fff;
+    --body-color: #a7a7a7;
     --success-color: #52d652;
-    --heading-color: #252525;
-    --body-color: #707070;
-    --background-color: white;
-  }
-
-  .wrapper[theme="dark"] {
-    --primary-color: #4454ee;
-    --heading-color: white;
-    --body-color: #b0adad;
-    --background-color: #141416;
+    --background-color: #000;
+    --start-color: #a4adff;
+    --end-color: #d273ff;
+    --gradient: linear-gradient(90deg, var(--start-color), var(--end-color));
   }
 
   .wrapper {
@@ -78,15 +74,16 @@ const styles = css`
     text-decoration: none;
     cursor: pointer;
     border: 0;
-    background: var(--primary-color);
+    color: var(--background-color);
+    background: var(--gradient);
     height: 50px;
+    font-weight: 600;
     min-width: 100px;
     padding: 0px 30px;
     border-radius: 8px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: white;
     text-align: center;
     font-family: inherit;
     font-size: 15px;
@@ -171,7 +168,7 @@ const styles = css`
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 100px;
+    height: 120px;
     padding: 0 30px;
   }
 
@@ -184,20 +181,38 @@ const styles = css`
     position: relative;
   }
 
-  .dialog__logo svg {
-    margin: 0 auto;
-    width: 100px;
+  .dialog__logo {
     text-align: center;
+    width: 100%;
+    max-width: 50px;
+    margin: 0 auto;
+  }
+
+  .dialog__logo svg {
+    width: 100%;
   }
 
   .dialog__connect-ad4m {
     width: 100px;
     height: 100px;
-    color: var(--primary-color);
-    background: white;
+    background: var(--background-color);
     padding: 20px;
     box-shadow: 0px 4px 7px 0px rgb(0 0 0 / 8%);
     border-radius: 50%;
+    position: relative;
+  }
+
+  .dialog__connect-ad4m:before {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: -1;
+    margin: -2px;
+    border-radius: inherit;
+    background: var(--gradient);
   }
 
   .dialog__connect-app {
@@ -380,9 +395,6 @@ export default class Ad4mConnect extends LitElement {
 
   @property({ type: String, reflect: true })
   openonshortcut;
-
-  @property({ type: String, reflect: true })
-  theme = "light";
 
   connectedCallback() {
     super.connectedCallback();
@@ -648,7 +660,7 @@ export default class Ad4mConnect extends LitElement {
       return null;
     } else {
       return html`
-        <div class="wrapper" theme=${this.theme}>
+        <div class="wrapper">
           <div class="dialog">
             ${Header()}
             <main class="dialog__content">${this.renderViews()}</main>
