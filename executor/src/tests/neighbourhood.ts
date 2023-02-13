@@ -120,6 +120,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     link.timestamp = new Date().toISOString();
                     link.data = new Link({source: "src", target: "target", predicate: "pred"});
                     link.proof = new ExpressionProof("sig", "key");
+                    link.proof.invalid = true;
+                    link.proof.valid = false;
                     const testPerspective = new Perspective([link])
                     await aliceNH!.setOnlineStatus(testPerspective)
                     await bobNH!.setOnlineStatus(testPerspective)
@@ -168,6 +170,9 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0)
+
+                    link.proof.invalid = true;
+                    link.proof.valid = false;
                     //@ts-ignore
                     expect(bobData.data.links).to.deep.equal(aliceSignal.links)
 
@@ -183,6 +188,9 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     await sleep(2000)
 
                     expect(aliceCalls).to.be.equal(1)
+
+                    link2.proof.invalid = true;
+                    link2.proof.valid = false;
                     //@ts-ignore
                     expect(aliceData.data.links).to.deep.equal(bobSignal.links)
                 })

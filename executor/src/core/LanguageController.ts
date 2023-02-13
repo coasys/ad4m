@@ -1020,10 +1020,10 @@ export default class LanguageController {
                 if(! await this.#signatures.verify(expression)) {
                     console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expression)
                     expression.proof.invalid = true
-                    delete expression.proof.valid
+                    expression.proof.valid = false
                 } else {
                     expression.proof.valid = true
-                    delete expression.proof.invalid
+                    expression.proof.invalid = false
                 }
             } catch(e) {
                 let errMsg = `Error trying to verify signature for expression: ${expression}`
