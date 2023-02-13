@@ -5,10 +5,10 @@ import { LanguageRef } from "../language/LanguageRef";
 @ObjectType()
 @InputType()
 export class ExpressionProof {
-    @Field()
+    @Field({nullable: true})
     signature: string;
     
-    @Field()
+    @Field({nullable: true})
     key: string;
     
     @Field({nullable: true})
