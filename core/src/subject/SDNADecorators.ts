@@ -38,11 +38,11 @@ export function instanceQuery(options?: InstanceQueryParams) {
             let instances: T[] = []
             //@ts-ignore
             let subjectClassName = target.name
-            let query = `subject_class("${subjectClassName}", c), instance(c, Instance)`
+            let query = `subject_class("${subjectClassName}", C), instance(C, Instance)`
             if(options && options.where) {
                 for(let prop in options.where) {
                     let value = options.where[prop]
-                    query += `, property_getter(c, Instance, "${prop}", "${value}")`
+                    query += `, property_getter(C, Instance, "${prop}", "${value}")`
                 }
             }
 
