@@ -74,7 +74,7 @@ interface PropertyOptions {
     through: string;
     initial?: string,
     required?: boolean,
-    resolve?: boolean,
+    writable?: boolean,
     resolveLanguage?: string;
 }
 export function subjectProperty(opts: PropertyOptions) {
@@ -83,9 +83,28 @@ export function subjectProperty(opts: PropertyOptions) {
         target["__properties"][key] = target["__properties"][key] || {};
         target["__properties"][key] = { ...target["__properties"][key], ...opts }
 
-        if (opts.resolveLanguage) {
+        if (opts.writable) {
             const value = key as string
             target[`set${capitalize(value)}`] = () => {}
+        }
+
+        Object.defineProperty(target, key, {});
+    };
+}
+
+interface FlagOptions {
+    through: string;
+    value: string;
+}
+export function subjectFlag(opts: FlagOptions) {
+    return function <T>(target: T, key: keyof T) {
+        target["__properties"] = target["__properties"] || {};
+        target["__properties"][key] = target["__properties"][key] || {};
+        target["__properties"][key] = { 
+            ...target["__properties"][key],
+            through: opts.through,
+            required: true,
+            initial: opts.value
         }
 
         Object.defineProperty(target, key, {});
@@ -124,21 +143,14 @@ function makeRandomPrologAtom(length: number): string {
  }
 
  interface SDNAClassOptions {
-    through: string;
-    initial?: string,
-    required?: boolean,
     name: string;
 }
 
 export function SDNAClass(opts: SDNAClassOptions) {
     return function (target: any) {
-        target.prototype.type = opts.initial;
-        target.type = opts.initial;
         target.prototype.className = opts.name;
         target.className = opts.name;
-        target.prototype["__properties"] = target.prototype["__properties"] || {};
-        target.prototype["__properties"]['type'] = target.prototype["__properties"]['type'] || {};
-        target.prototype["__properties"]['type'] = { ...target.prototype["__properties"]['type'], ...opts }
+        
         target.generateSDNA = function() {
             let sdna = ""
             let subjectName = opts.name
@@ -163,14 +175,11 @@ export function SDNAClass(opts: SDNAClassOptions) {
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
     
-                let { through, initial, required, resolve, resolveLanguage } = properties[property]
+                let { through, initial, required, resolveLanguage, writable } = properties[property]
     
-                if(resolve) {
+                if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
-    
-                    if(resolveLanguage) {
-                        propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
-                    }
+                    propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
                 }
                 
                 if(through) {
@@ -179,7 +188,9 @@ export function SDNAClass(opts: SDNAClassOptions) {
                     if(required) {
                         instanceConditions.push(`triple(Base, "${through}", _)`)
                     }    
-    
+                }
+                
+                if (writable) {
                     let setter = obj[propertyNameToSetterName(property)]
                     if(typeof setter === "function") {
                         let action = [{
@@ -191,7 +202,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         propertyCode += `property_setter(${uuid}, "${property}", '${stringifyObjectLiteral(action)}').\n`
                     }
                 }
-    
+
                 propertiesCode.push(propertyCode)
     
                 if(initial) {
