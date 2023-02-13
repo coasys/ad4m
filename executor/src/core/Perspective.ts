@@ -426,17 +426,11 @@ export default class Perspective {
         const onlineAgents = await telepresenceAdapter!.getOnlineAgents() || []
         for (const onlineAgent of onlineAgents) {
             if (onlineAgent.status) {
-                await this.#languageController?.tagExpressionSignatureStatus(onlineAgent.status);
-                if (onlineAgent.status.data.links) {
-                    for (const link of onlineAgent.status.data.links) {
-                        await this.#languageController?.tagExpressionSignatureStatus(link);
-                    }
-                }
+                await this.#languageController?.tagPerspectiveExpressionSignatureStatus(onlineAgent.status);
             }
         }
         // Filter out nulls
         return onlineAgents.filter(o => o)
-        return onlineAgents
     }
 
 

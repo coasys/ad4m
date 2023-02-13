@@ -289,7 +289,8 @@ export default class LanguageController {
         }
 
         if(language.telepresenceAdapter) {
-            language.telepresenceAdapter.registerSignalCallback((payload: PerspectiveExpression) => {
+            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression) => {
+                await this.tagPerspectiveExpressionSignatureStatus(payload)
                 this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
             })
         }
@@ -1036,6 +1037,15 @@ export default class LanguageController {
                         type: ExceptionType.ExpressionIsNotVerified,
                     } as ExceptionInfo
                 );
+            }
+        }
+    }
+
+    async tagPerspectiveExpressionSignatureStatus(perspective: PerspectiveExpression) {
+        await this.tagExpressionSignatureStatus(perspective);
+        if (perspective.data.links) {
+            for (const link of perspective.data.links) {
+                await this.tagExpressionSignatureStatus(link);
             }
         }
     }
