@@ -158,7 +158,7 @@ const Profile = (props: Props) => {
   };
 
   const copyText = (text: string) => {
-    copyTextToClipboard(proxy);
+    copyTextToClipboard(text);
     showNotification({
       message: "Text copied to clipboard",
       autoClose: 1000,
@@ -176,14 +176,6 @@ const Profile = (props: Props) => {
     if (!agentStatus?.isUnlocked) {
       await invoke("clear_state");
     }
-  };
-
-  const copyUrl = () => {
-    copyTextToClipboard(url);
-    showNotification({
-      message: "URL copied to clipboard",
-      autoClose: 1000,
-    });
   };
 
   const setupProxy = async () => {
