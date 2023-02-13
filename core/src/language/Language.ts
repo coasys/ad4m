@@ -43,6 +43,15 @@ export interface Language {
     /** Interface of LinkLanguages for the core implementation of Neighbourhoods */
     readonly linksAdapter?: LinkSyncAdapter;
 
+    /** Additional Interface of LinkLanguages that support telepresence features, 
+     * that is: 
+     *  - seeing who is online and getting a status
+     *  - sending/receiveing p2p signals to other online agents without affecting
+     *    the shared Perspective of the Neighbourhood
+     *  (see TelepresenceAdapter for more details)
+    */
+    readonly telepresenceAdapter?: TelepresenceAdapter;
+
     /** Implementation of a Language that defines and stores Languages*/
     readonly languageAdapter?: LanguageAdapter;
 
@@ -233,22 +242,20 @@ export class InteractionCall {
     }
 }
 
+@ObjectType()
 export class OnlineAgent {
+    @Field()
     did: DID
-    status: string
+    @Field()
+    status: PerspectiveExpression
 }
 
-export class TelepresenceRpcCall {
-    fn_name: string
-    params: object
-}
-
-export type TelepresenceRpcCallback = (call: TelepresenceRpcCall) => object;
-
+export type TelepresenceSignalCallback = (payload: PerspectiveExpression) => void;
 export interface TelepresenceAdapter {
-    setOnlineStatus(status: string);
-    getOnlineAgents(): [OnlineAgent];
+    setOnlineStatus(status: PerspectiveExpression): Promise<void>;
+    getOnlineAgents(): Promise<OnlineAgent[]>;
 
-    rpcCall(remoteAgentDid: string, call: TelepresenceRpcCall): object;
-    registerRpcCallback(callback: TelepresenceRpcCall);
+    sendSignal(remoteAgentDid: string, payload: PerspectiveExpression): Promise<object>;
+    sendBroadcast(payload: PerspectiveExpression): Promise<object>;
+    registerSignalCallback(callback: TelepresenceSignalCallback): Promise<void>;
 }
