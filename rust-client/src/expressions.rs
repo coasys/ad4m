@@ -4,6 +4,7 @@ use crate::{util::query, ClientInfo};
 use anyhow::{Context, Result};
 use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(GraphQLQuery, Debug)]
 #[graphql(
@@ -17,8 +18,9 @@ pub async fn expression_create(
     executor_url: String,
     cap_token: String,
     language_address: String,
-    content: String,
+    content: Value,
 ) -> Result<String> {
+    let content = serde_json::to_string(&content)?;
     let response_data: expression_create::ResponseData = query(
         executor_url,
         cap_token,
@@ -67,7 +69,7 @@ impl ExpressionsClient {
     pub async fn expression_create(
         &self,
         language_address: String,
-        content: String,
+        content: Value,
     ) -> Result<String> {
         expression_create(
             self.info.executor_url.clone(),
