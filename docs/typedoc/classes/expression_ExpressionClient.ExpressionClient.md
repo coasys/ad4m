@@ -37,7 +37,7 @@
 
 #### Defined in
 
-[expression/ExpressionClient.ts:9](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionClient.ts#L9)
+[expression/ExpressionClient.ts:9](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/ExpressionClient.ts#L9)
 
 ## Properties
 
@@ -47,7 +47,7 @@
 
 #### Defined in
 
-[expression/ExpressionClient.ts:7](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionClient.ts#L7)
+[expression/ExpressionClient.ts:7](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/ExpressionClient.ts#L7)
 
 ## Methods
 
@@ -68,7 +68,7 @@
 
 #### Defined in
 
-[expression/ExpressionClient.ts:65](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionClient.ts#L65)
+[expression/ExpressionClient.ts:65](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/ExpressionClient.ts#L65)
 
 ___
 
@@ -88,7 +88,7 @@ ___
 
 #### Defined in
 
-[expression/ExpressionClient.ts:13](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionClient.ts#L13)
+[expression/ExpressionClient.ts:13](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/ExpressionClient.ts#L13)
 
 ___
 
@@ -108,7 +108,7 @@ ___
 
 #### Defined in
 
-[expression/ExpressionClient.ts:34](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionClient.ts#L34)
+[expression/ExpressionClient.ts:34](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/ExpressionClient.ts#L34)
 
 ___
 
@@ -128,7 +128,7 @@ ___
 
 #### Defined in
 
-[expression/ExpressionClient.ts:55](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionClient.ts#L55)
+[expression/ExpressionClient.ts:55](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/ExpressionClient.ts#L55)
 
 ___
 
@@ -149,7 +149,7 @@ ___
 
 #### Defined in
 
-[expression/ExpressionClient.ts:90](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionClient.ts#L90)
+[expression/ExpressionClient.ts:90](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/ExpressionClient.ts#L90)
 
 ___
 
@@ -169,4 +169,4 @@ ___
 
 #### Defined in
 
-[expression/ExpressionClient.ts:76](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/ExpressionClient.ts#L76)
+[expression/ExpressionClient.ts:76](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/ExpressionClient.ts#L76)

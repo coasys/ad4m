@@ -17,8 +17,6 @@
 
 ### Methods
 
-- [decodeSingleQuote](Literal.Literal.md#decodesinglequote)
-- [encodeSingleQuote](Literal.Literal.md#encodesinglequote)
 - [get](Literal.Literal.md#get)
 - [toUrl](Literal.Literal.md#tourl)
 - [from](Literal.Literal.md#from)
@@ -38,7 +36,7 @@
 
 #### Defined in
 
-[Literal.ts:2](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L2)
+[Literal.ts:10](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/Literal.ts#L10)
 
 ___
 
@@ -48,49 +46,9 @@ ___
 
 #### Defined in
 
-[Literal.ts:3](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L3)
+[Literal.ts:11](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/Literal.ts#L11)
 
 ## Methods
-
-### decodeSingleQuote
-
-▸ **decodeSingleQuote**(`input`): `string`
-
-#### Parameters
-
-| Name | Type |
-| :------ | :------ |
-| `input` | `string` |
-
-#### Returns
-
-`string`
-
-#### Defined in
-
-[Literal.ts:25](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L25)
-
-___
-
-### encodeSingleQuote
-
-▸ **encodeSingleQuote**(`input`): `string`
-
-#### Parameters
-
-| Name | Type |
-| :------ | :------ |
-| `input` | `string` |
-
-#### Returns
-
-`string`
-
-#### Defined in
-
-[Literal.ts:19](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L19)
-
-___
 
 ### get
 
@@ -102,7 +60,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:53](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L53)
+[Literal.ts:49](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/Literal.ts#L49)
 
 ___
 
@@ -116,7 +74,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:31](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L31)
+[Literal.ts:27](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/Literal.ts#L27)
 
 ___
 
@@ -136,7 +94,7 @@ ___
 
 #### Defined in
 
-[Literal.ts:13](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L13)
+[Literal.ts:21](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/Literal.ts#L21)
 
 ___
 
@@ -156,4 +114,4 @@ ___
 
 #### Defined in
 
-[Literal.ts:5](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/Literal.ts#L5)
+[Literal.ts:13](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/Literal.ts#L13)

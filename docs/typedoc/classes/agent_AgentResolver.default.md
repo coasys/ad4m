@@ -19,12 +19,15 @@
 - [agentEntanglementProofPreFlight](agent_AgentResolver.default.md#agententanglementproofpreflight)
 - [agentGenerate](agent_AgentResolver.default.md#agentgenerate)
 - [agentGenerateJwt](agent_AgentResolver.default.md#agentgeneratejwt)
+- [agentGetApps](agent_AgentResolver.default.md#agentgetapps)
 - [agentGetEntanglementProofs](agent_AgentResolver.default.md#agentgetentanglementproofs)
 - [agentImport](agent_AgentResolver.default.md#agentimport)
 - [agentIsLocked](agent_AgentResolver.default.md#agentislocked)
 - [agentLock](agent_AgentResolver.default.md#agentlock)
 - [agentPermitCapability](agent_AgentResolver.default.md#agentpermitcapability)
+- [agentRemoveApp](agent_AgentResolver.default.md#agentremoveapp)
 - [agentRequestCapability](agent_AgentResolver.default.md#agentrequestcapability)
+- [agentRevokeToken](agent_AgentResolver.default.md#agentrevoketoken)
 - [agentSignMessage](agent_AgentResolver.default.md#agentsignmessage)
 - [agentStatus](agent_AgentResolver.default.md#agentstatus)
 - [agentStatusChanged](agent_AgentResolver.default.md#agentstatuschanged)
@@ -51,7 +54,7 @@
 
 #### Defined in
 
-[agent/AgentResolver.ts:11](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L11)
+[agent/AgentResolver.ts:11](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L11)
 
 ___
 
@@ -71,7 +74,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:93](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L93)
+[agent/AgentResolver.ts:93](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L93)
 
 ___
 
@@ -91,7 +94,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:62](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L62)
+[agent/AgentResolver.ts:62](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L62)
 
 ___
 
@@ -111,7 +114,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:98](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L98)
+[agent/AgentResolver.ts:98](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L98)
 
 ___
 
@@ -132,7 +135,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:108](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L108)
+[agent/AgentResolver.ts:108](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L108)
 
 ___
 
@@ -153,7 +156,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:21](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L21)
+[agent/AgentResolver.ts:21](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L21)
 
 ___
 
@@ -174,7 +177,21 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:128](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L128)
+[agent/AgentResolver.ts:128](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L128)
+
+___
+
+### agentGetApps
+
+▸ **agentGetApps**(): []
+
+#### Returns
+
+[]
+
+#### Defined in
+
+[agent/AgentResolver.ts:138](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L138)
 
 ___
 
@@ -188,7 +205,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:103](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L103)
+[agent/AgentResolver.ts:103](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L103)
 
 ___
 
@@ -211,7 +228,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:31](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L31)
+[agent/AgentResolver.ts:31](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L31)
 
 ___
 
@@ -225,7 +242,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:133](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L133)
+[agent/AgentResolver.ts:133](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L133)
 
 ___
 
@@ -246,7 +263,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:41](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L41)
+[agent/AgentResolver.ts:41](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L41)
 
 ___
 
@@ -266,7 +283,27 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:123](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L123)
+[agent/AgentResolver.ts:123](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L123)
+
+___
+
+### agentRemoveApp
+
+▸ **agentRemoveApp**(`requestId`): []
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `requestId` | `string` |
+
+#### Returns
+
+[]
+
+#### Defined in
+
+[agent/AgentResolver.ts:143](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L143)
 
 ___
 
@@ -289,7 +326,27 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:113](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L113)
+[agent/AgentResolver.ts:113](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L113)
+
+___
+
+### agentRevokeToken
+
+▸ **agentRevokeToken**(`requestId`): `any`[]
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `requestId` | `string` |
+
+#### Returns
+
+`any`[]
+
+#### Defined in
+
+[agent/AgentResolver.ts:148](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L148)
 
 ___
 
@@ -309,7 +366,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:138](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L138)
+[agent/AgentResolver.ts:176](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L176)
 
 ___
 
@@ -323,7 +380,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:16](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L16)
+[agent/AgentResolver.ts:16](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L16)
 
 ___
 
@@ -337,7 +394,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:88](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L88)
+[agent/AgentResolver.ts:88](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L88)
 
 ___
 
@@ -358,7 +415,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:51](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L51)
+[agent/AgentResolver.ts:51](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L51)
 
 ___
 
@@ -379,7 +436,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:75](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L75)
+[agent/AgentResolver.ts:75](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L75)
 
 ___
 
@@ -400,7 +457,7 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:67](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L67)
+[agent/AgentResolver.ts:67](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L67)
 
 ___
 
@@ -414,4 +471,4 @@ ___
 
 #### Defined in
 
-[agent/AgentResolver.ts:83](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentResolver.ts#L83)
+[agent/AgentResolver.ts:83](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentResolver.ts#L83)

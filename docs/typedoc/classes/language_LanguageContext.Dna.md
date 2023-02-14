@@ -14,6 +14,7 @@
 
 - [file](language_LanguageContext.Dna.md#file)
 - [nick](language_LanguageContext.Dna.md#nick)
+- [zomeCalls](language_LanguageContext.Dna.md#zomecalls)
 
 ## Constructors
 
@@ -29,7 +30,7 @@
 
 #### Defined in
 
-[language/LanguageContext.ts:25](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L25)
+[language/LanguageContext.ts:25](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L25)
 
 ___
 
@@ -39,4 +40,14 @@ ___
 
 #### Defined in
 
-[language/LanguageContext.ts:26](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L26)
+[language/LanguageContext.ts:26](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L26)
+
+___
+
+### zomeCalls
+
+• **zomeCalls**: [`string`, `string`][]
+
+#### Defined in
+
+[language/LanguageContext.ts:27](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L27)

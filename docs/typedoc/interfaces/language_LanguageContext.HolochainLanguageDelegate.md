@@ -9,6 +9,7 @@
 ### Methods
 
 - [call](language_LanguageContext.HolochainLanguageDelegate.md#call)
+- [callAsync](language_LanguageContext.HolochainLanguageDelegate.md#callasync)
 - [registerDNAs](language_LanguageContext.HolochainLanguageDelegate.md#registerdnas)
 
 ## Methods
@@ -16,6 +17,8 @@
 ### call
 
 ▸ **call**(`dnaNick`, `zomeName`, `fnName`, `params`): `Promise`<`any`\>
+
+Makes a single call to a given holochain DNA. Underlying implementation puts these calls into a sync fifo queue
 
 #### Parameters
 
@@ -32,13 +35,38 @@
 
 #### Defined in
 
-[language/LanguageContext.ts:31](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L31)
+[language/LanguageContext.ts:34](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L34)
+
+___
+
+### callAsync
+
+▸ **callAsync**(`calls`, `timeoutMs?`): `Promise`<`any`[]\>
+
+Makes all supplied calls in parallel to the provided holochain dna... Should only be called on read operations to avoid source chain async mutation errors
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `calls` | { `dnaNick`: `string` ; `fnName`: `string` ; `params`: `string` \| `object` ; `zomeName`: `string`  }[] |
+| `timeoutMs?` | `number` |
+
+#### Returns
+
+`Promise`<`any`[]\>
+
+#### Defined in
+
+[language/LanguageContext.ts:36](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L36)
 
 ___
 
 ### registerDNAs
 
-▸ **registerDNAs**(`dnas`, `holochainSignalCallback?`): `any`
+▸ **registerDNAs**(`dnas`, `holochainSignalCallback?`): `Promise`<`void`\>
+
+Installs/registers a given DNA in the ad4m-executor
 
 #### Parameters
 
@@ -49,8 +77,8 @@ ___
 
 #### Returns
 
-`any`
+`Promise`<`void`\>
 
 #### Defined in
 
-[language/LanguageContext.ts:30](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L30)
+[language/LanguageContext.ts:32](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L32)

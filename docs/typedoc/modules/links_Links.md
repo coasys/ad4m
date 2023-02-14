@@ -10,6 +10,7 @@
 - [LinkExpression](../classes/links_Links.LinkExpression.md)
 - [LinkExpressionInput](../classes/links_Links.LinkExpressionInput.md)
 - [LinkExpressionMutations](../classes/links_Links.LinkExpressionMutations.md)
+- [LinkExpressionUpdated](../classes/links_Links.LinkExpressionUpdated.md)
 - [LinkInput](../classes/links_Links.LinkInput.md)
 - [LinkMutations](../classes/links_Links.LinkMutations.md)
 
@@ -36,7 +37,7 @@
 
 #### Defined in
 
-[links/Links.ts:82](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/links/Links.ts#L82)
+[links/Links.ts:82](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/links/Links.ts#L82)
 
 ___
 
@@ -57,4 +58,4 @@ ___
 
 #### Defined in
 
-[links/Links.ts:74](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/links/Links.ts#L74)
+[links/Links.ts:74](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/links/Links.ts#L74)

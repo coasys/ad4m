@@ -35,6 +35,7 @@ For that, implement the linksAdapter interface.
 - [name](language_Language.Language.md#name)
 - [settingsUI](language_Language.Language.md#settingsui)
 - [teardown](language_Language.Language.md#teardown)
+- [telepresenceAdapter](language_Language.Language.md#telepresenceadapter)
 
 ### Methods
 
@@ -51,7 +52,7 @@ Optional adapter for direct messaging between agents
 
 #### Defined in
 
-[language/Language.ts:55](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L55)
+[language/Language.ts:64](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L64)
 
 ___
 
@@ -64,7 +65,7 @@ by address and putting an expression
 
 #### Defined in
 
-[language/Language.ts:38](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L38)
+[language/Language.ts:38](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L38)
 
 ___
 
@@ -76,7 +77,7 @@ Interface for getting UI/web components for rendering Expressions of this Langua
 
 #### Defined in
 
-[language/Language.ts:41](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L41)
+[language/Language.ts:41](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L41)
 
 ___
 
@@ -88,7 +89,7 @@ Optional adapter for getting all Expressions
 
 #### Defined in
 
-[language/Language.ts:52](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L52)
+[language/Language.ts:61](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L61)
 
 ___
 
@@ -100,7 +101,7 @@ Optional adapter for getting Expressions by author
 
 #### Defined in
 
-[language/Language.ts:50](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L50)
+[language/Language.ts:59](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L59)
 
 ___
 
@@ -112,7 +113,7 @@ Implementation of a Language that defines and stores Languages
 
 #### Defined in
 
-[language/Language.ts:47](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L47)
+[language/Language.ts:56](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L56)
 
 ___
 
@@ -124,7 +125,7 @@ Interface of LinkLanguages for the core implementation of Neighbourhoods
 
 #### Defined in
 
-[language/Language.ts:44](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L44)
+[language/Language.ts:44](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L44)
 
 ___
 
@@ -134,7 +135,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:26](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L26)
+[language/Language.ts:26](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L26)
 
 ___
 
@@ -146,7 +147,7 @@ Interface for providing UI components for the settings of this Language
 
 #### Defined in
 
-[language/Language.ts:58](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L58)
+[language/Language.ts:67](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L67)
 
 ___
 
@@ -166,7 +167,24 @@ Optional function to make any cleanup/teardown if your language gets deleting in
 
 #### Defined in
 
-[language/Language.ts:61](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L61)
+[language/Language.ts:70](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L70)
+
+___
+
+### telepresenceAdapter
+
+• `Optional` `Readonly` **telepresenceAdapter**: [`TelepresenceAdapter`](language_Language.TelepresenceAdapter.md)
+
+Additional Interface of LinkLanguages that support telepresence features, 
+that is: 
+ - seeing who is online and getting a status
+ - sending/receiveing p2p signals to other online agents without affecting
+   the shared Perspective of the Neighbourhood
+ (see TelepresenceAdapter for more details)
+
+#### Defined in
+
+[language/Language.ts:53](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L53)
 
 ## Methods
 
@@ -188,7 +206,7 @@ All available interactions this agent could execute on given expression
 
 #### Defined in
 
-[language/Language.ts:64](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L64)
+[language/Language.ts:73](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L73)
 
 ___
 
@@ -211,4 +229,4 @@ expression caching in the ad4m-executor
 
 #### Defined in
 
-[language/Language.ts:31](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L31)
+[language/Language.ts:31](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L31)

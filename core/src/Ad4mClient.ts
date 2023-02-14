@@ -33,6 +33,7 @@ export class Ad4mClient {
         this.#neighbourhoodClient = new NeighbourhoodClient(client)
         this.#perspectiveClient = new PerspectiveClient(client, subscribe)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
+        this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#runtimeClient = new RuntimeClient(client, subscribe)
     }
 

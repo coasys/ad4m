@@ -425,6 +425,14 @@ describe('Ad4mClient', () => {
     })
 
     describe('.neighbourhood', () => {
+        const testPerspective = new Perspective()
+        const link = new LinkExpression()
+        link.author = 'did:method:12345'
+        link.timestamp = new Date().toString()
+        link.data = new Link({source: 'root', target: 'perspective://Qm34589a3ccc0'})
+        link.proof = { signature: 'asdfasdf', key: 'asdfasdf' }
+        testPerspective.links.push(link)
+
         it('publishFromPerspective() smoke test', async () => {
             const expressionRef = await ad4mClient.neighbourhood.publishFromPerspective('UUID', 'test-link-lang', new Perspective())
             expect(expressionRef).toBe('neighbourhood://neighbourhoodAddress')
@@ -435,6 +443,60 @@ describe('Ad4mClient', () => {
             expect(perspective.sharedUrl).toBe('neighbourhood://Qm3sdf3dfwhsafd')
             expect(perspective.uuid).toBeTruthy()
             expect(perspective.name).toBeTruthy()
+        })
+
+        it('hasTelepresenceAdapter() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.hasTelepresenceAdapter('01234')
+            expect(result).toBe(true)
+        })
+
+        it('otherAgents() smoke test', async () => {
+            const agents = await ad4mClient.neighbourhood.otherAgents('01234')
+            expect(agents.length).toBe(1)
+            expect(agents[0]).toBe('did:test:other')
+        })
+
+        it('onlineAgents() smoke test', async () => {
+            const agents = await ad4mClient.neighbourhood.onlineAgents('01234')
+            expect(agents.length).toBe(1)
+            expect(agents[0].did).toBe('did:test:online')
+            const status = agents[0].status
+            expect(status.author).toBe('did:ad4m:test')
+            expect(status.data.links.length).toBe(1)
+            const link = status.data.links[0]
+            expect(link.author).toBe('did:ad4m:test')
+            expect(link.data.source).toBe('root')
+        })
+
+        it('setOnlineStatus() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.setOnlineStatus('01234', testPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('sendSignal() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.sendSignal('01234', "did:test:recipient", testPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('sendBroadcast() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.sendBroadcast('01234', testPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('can be accessed via NeighbourhoodProxy', async () => {
+            const perspective = await ad4mClient.perspective.byUUID('00001')
+            const nh = await perspective.getNeighbourhoodProxy()
+
+            expect(await nh.hasTelepresenceAdapter()).toBe(true)
+            expect(await nh.otherAgents()).toStrictEqual(['did:test:other'])
+            expect((await nh.onlineAgents())[0].did).toStrictEqual('did:test:online')
+            expect(await nh.setOnlineStatus(testPerspective)).toBe(true)
+            expect(await nh.sendSignal('did:test:recipient', testPerspective)).toBe(true)
+            expect(await nh.sendBroadcast(testPerspective)).toBe(true)
+
+            nh.addSignalHandler((perspective) => {
+                //..
+            })
         })
     })
 

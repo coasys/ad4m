@@ -20,4 +20,4 @@
 
 #### Defined in
 
-[SmartLiteral.ts:6](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L6)
+[SmartLiteral.ts:6](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L6)

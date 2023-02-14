@@ -34,7 +34,7 @@
 
 #### Defined in
 
-[language/LanguageMeta.ts:57](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L57)
+[language/LanguageMeta.ts:57](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L57)
 
 ___
 
@@ -44,7 +44,7 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:58](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L58)
+[language/LanguageMeta.ts:58](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L58)
 
 ___
 
@@ -54,7 +54,7 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:56](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L56)
+[language/LanguageMeta.ts:56](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L56)
 
 ___
 
@@ -64,7 +64,7 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:61](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L61)
+[language/LanguageMeta.ts:61](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L61)
 
 ___
 
@@ -74,7 +74,7 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:62](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L62)
+[language/LanguageMeta.ts:62](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L62)
 
 ___
 
@@ -84,7 +84,7 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:60](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L60)
+[language/LanguageMeta.ts:60](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L60)
 
 ___
 
@@ -94,4 +94,4 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:59](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L59)
+[language/LanguageMeta.ts:59](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L59)

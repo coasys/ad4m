@@ -7,7 +7,7 @@ import {
 import { WebSocketServer } from 'ws';
 import { useServer } from 'graphql-ws/lib/use/ws';
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, LanguageRef, LinkExpression } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, LanguageRef, PerspectiveHandle, PerspectiveState } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -19,6 +19,13 @@ import { checkCapability, checkTokenAuthorized } from '../agent/Auth'
 import { withFilter } from 'graphql-subscriptions';
 import { OuterConfig } from '../../main';
 import path from 'path';
+import Perspective from '../Perspective';
+
+function checkLinkLanguageInstalled(perspective: Perspective) {
+    if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
+        throw new Error(`Perspective ${perspective.uuid}/${perspective.name} does not have a LinkLanguage installed. State is: ${perspective.state}`) 
+    }
+}
 
 function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     const pubsub = PubSub.get()
@@ -158,6 +165,40 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
             },
+
+            //@ts-ignore
+            neighbourhoodOtherAgents: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
+                const { perspectiveUUID } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                checkLinkLanguageInstalled(perspective)
+                return await perspective.othersInNeighbourhood()
+            },
+
+            //@ts-ignore
+            neighbourhoodHasTelepresenceAdapter: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
+                const { perspectiveUUID } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                checkLinkLanguageInstalled(perspective)
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                return telepresenceAdapter != undefined
+            },
+
+            //@ts-ignore
+            neighbourhoodOnlineAgents: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
+                const { perspectiveUUID } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                checkLinkLanguageInstalled(perspective)
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
+                return await perspective!.getOnlineAgents();
+            },
+            
             //@ts-ignore
             perspective: (parent, args, context, info) => {
                 const id = args.uuid
@@ -383,6 +424,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                     }
+
+                    await core.agentService.ensureAgentExpression();
                 }
 
                 const dump = core.agentService.dump() as any
@@ -529,8 +572,50 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     console.error(`Error while trying to publish:`, e)
                     throw e
                 }
-
             },
+
+            //@ts-ignore
+            neighbourhoodSetOnlineStatus: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
+                const { perspectiveUUID, status } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                checkLinkLanguageInstalled(perspective)
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
+                const statusExpression = core.agentService.createSignedExpression(status)
+                await telepresenceAdapter!.setOnlineStatus(statusExpression)
+                return true
+            },
+
+            //@ts-ignore
+            neighbourhoodSendSignal: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
+                const { perspectiveUUID, remoteAgentDid, payload } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                checkLinkLanguageInstalled(perspective)
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
+                const payloadExpression = core.agentService.createSignedExpression(payload)
+                await telepresenceAdapter!.sendSignal(remoteAgentDid, payloadExpression)
+                return true
+            },
+
+            //@ts-ignore
+            neighbourhoodSendBroadcast: async (parent, args, context, info) => {
+                checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
+                const { perspectiveUUID, payload } = args
+                const perspective = core.perspectivesController.perspective(perspectiveUUID)
+                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
+                checkLinkLanguageInstalled(perspective)
+                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
+                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
+                const payloadExpression = core.agentService.createSignedExpression(payload)
+                await telepresenceAdapter!.sendBroadcast(payloadExpression)
+                return true
+            },
+
             //@ts-ignore
             perspectiveAdd: (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.PERSPECTIVE_CREATE_CAPABILITY)
@@ -691,6 +776,27 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 },
                 //@ts-ignore
                 resolve: payload => payload
+            },
+
+            neighbourhoodSignal: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return withFilter(
+                        () => pubsub.asyncIterator(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC),
+                        (payload, argsInner) => payload.perspective.uuid === argsInner.perspectiveUUID
+                    )(undefined, args)
+                },
+                resolve: async (payload: any) => {
+                    await core.languageController?.tagExpressionSignatureStatus(payload?.signal)
+                    if (payload?.signal?.data.links) {
+                        for (const link of payload?.signal.data.links) {
+                            await core.languageController?.tagExpressionSignatureStatus(link);
+                        }
+                    };
+
+                    return payload?.signal
+                }
             },
             runtimeMessageReceived: {
                 //@ts-ignore
