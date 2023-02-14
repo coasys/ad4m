@@ -34,6 +34,7 @@
 - [links/Links](modules/links_Links.md)
 - [neighbourhood/Neighbourhood](modules/neighbourhood_Neighbourhood.md)
 - [neighbourhood/NeighbourhoodClient](modules/neighbourhood_NeighbourhoodClient.md)
+- [neighbourhood/NeighbourhoodProxy](modules/neighbourhood_NeighbourhoodProxy.md)
 - [neighbourhood/NeighbourhoodResolver](modules/neighbourhood_NeighbourhoodResolver.md)
 - [perspectives/LinkQuery](modules/perspectives_LinkQuery.md)
 - [perspectives/Perspective](modules/perspectives_Perspective.md)

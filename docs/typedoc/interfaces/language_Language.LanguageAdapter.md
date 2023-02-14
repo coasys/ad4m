@@ -28,4 +28,4 @@
 
 #### Defined in
 
-[language/Language.ts:122](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L122)
+[language/Language.ts:131](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L131)

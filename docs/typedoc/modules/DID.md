@@ -16,4 +16,4 @@
 
 #### Defined in
 
-[DID.ts:1](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/DID.ts#L1)
+[DID.ts:1](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/DID.ts#L1)

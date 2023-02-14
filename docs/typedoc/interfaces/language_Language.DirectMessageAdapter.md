@@ -34,7 +34,7 @@
 
 #### Defined in
 
-[language/Language.ts:189](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L189)
+[language/Language.ts:198](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L198)
 
 ___
 
@@ -54,7 +54,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:188](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L188)
+[language/Language.ts:197](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L197)
 
 ___
 
@@ -68,7 +68,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:181](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L181)
+[language/Language.ts:190](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L190)
 
 ___
 
@@ -88,7 +88,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:185](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L185)
+[language/Language.ts:194](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L194)
 
 ___
 
@@ -108,7 +108,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:184](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L184)
+[language/Language.ts:193](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L193)
 
 ___
 
@@ -128,7 +128,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:187](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L187)
+[language/Language.ts:196](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L196)
 
 ___
 
@@ -142,4 +142,4 @@ ___
 
 #### Defined in
 
-[language/Language.ts:183](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L183)
+[language/Language.ts:192](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L192)

@@ -10,13 +10,47 @@
 
 ### Functions
 
+- [SDNAClass](subject_SDNADecorators.md#sdnaclass)
 - [addLink](subject_SDNADecorators.md#addlink)
 - [hasLink](subject_SDNADecorators.md#haslink)
-- [sdnaOutput](subject_SDNADecorators.md#sdnaoutput)
+- [instanceQuery](subject_SDNADecorators.md#instancequery)
 - [subjectCollection](subject_SDNADecorators.md#subjectcollection)
+- [subjectFlag](subject_SDNADecorators.md#subjectflag)
 - [subjectProperty](subject_SDNADecorators.md#subjectproperty)
 
 ## Functions
+
+### SDNAClass
+
+▸ **SDNAClass**(`opts`): (`target`: `any`) => `void`
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `opts` | `SDNAClassOptions` |
+
+#### Returns
+
+`fn`
+
+▸ (`target`): `void`
+
+##### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `target` | `any` |
+
+##### Returns
+
+`void`
+
+#### Defined in
+
+[subject/SDNADecorators.ts:153](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L153)
+
+___
 
 ### addLink
 
@@ -36,7 +70,7 @@
 
 #### Defined in
 
-[subject/SDNADecorators.ts:10](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L10)
+[subject/SDNADecorators.ts:12](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L12)
 
 ___
 
@@ -56,29 +90,47 @@ ___
 
 #### Defined in
 
-[subject/SDNADecorators.ts:19](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L19)
+[subject/SDNADecorators.ts:21](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L21)
 
 ___
 
-### sdnaOutput
+### instanceQuery
 
-▸ **sdnaOutput**(`target`, `key`, `descriptor`): `PropertyDescriptor`
+▸ **instanceQuery**(`options?`): <T\>(`target`: `T`, `key`: keyof `T`, `descriptor`: `PropertyDescriptor`) => `void`
 
 #### Parameters
 
 | Name | Type |
 | :------ | :------ |
-| `target` | `any` |
-| `key` | `string` |
-| `descriptor` | `PropertyDescriptor` |
+| `options?` | `InstanceQueryParams` |
 
 #### Returns
 
-`PropertyDescriptor`
+`fn`
+
+▸ <`T`\>(`target`, `key`, `descriptor`): `void`
+
+##### Type parameters
+
+| Name |
+| :------ |
+| `T` |
+
+##### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `target` | `T` |
+| `key` | keyof `T` |
+| `descriptor` | `PropertyDescriptor` |
+
+##### Returns
+
+`void`
 
 #### Defined in
 
-[subject/SDNADecorators.ts:46](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L46)
+[subject/SDNADecorators.ts:30](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L30)
 
 ___
 
@@ -90,7 +142,7 @@ ___
 
 | Name | Type |
 | :------ | :------ |
-| `opts` | `PropertyOptions` |
+| `opts` | `CollectionOptions` |
 
 #### Returns
 
@@ -117,7 +169,46 @@ ___
 
 #### Defined in
 
-[subject/SDNADecorators.ts:37](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L37)
+[subject/SDNADecorators.ts:126](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L126)
+
+___
+
+### subjectFlag
+
+▸ **subjectFlag**(`opts`): <T\>(`target`: `T`, `key`: keyof `T`) => `void`
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `opts` | `FlagOptions` |
+
+#### Returns
+
+`fn`
+
+▸ <`T`\>(`target`, `key`): `void`
+
+##### Type parameters
+
+| Name |
+| :------ |
+| `T` |
+
+##### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `target` | `T` |
+| `key` | keyof `T` |
+
+##### Returns
+
+`void`
+
+#### Defined in
+
+[subject/SDNADecorators.ts:99](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L99)
 
 ___
 
@@ -156,4 +247,4 @@ ___
 
 #### Defined in
 
-[subject/SDNADecorators.ts:28](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L28)
+[subject/SDNADecorators.ts:80](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L80)
