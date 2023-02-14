@@ -1,4 +1,4 @@
-use ad4m_client::Ad4mClient;
+use ad4m_client::{Ad4mClient, expressions::expression};
 use anyhow::Result;
 use clap::Subcommand;
 use serde_json::Value;
@@ -30,8 +30,20 @@ pub async fn run(ad4m_client: Ad4mClient, command: ExpressionFunctions) -> Resul
             println!("Expression created with url: {}", expression_url);
         }
         ExpressionFunctions::Get { url } => {
-            let content = ad4m_client.expressions.expression(url).await?;
-            println!("Expression data fetched:\n{:#?}", content);
+            let maybe_content: Option<expression::ExpressionExpression> = ad4m_client.expressions.expression(url.clone()).await?;
+            match maybe_content {
+                Some(content) => {
+                    println!("author: {}", content.author);
+                    println!("timestamp: {}", content.timestamp);
+                    if content.proof.valid.unwrap_or(false) {
+                        println!("signature: ✅");
+                    } else {
+                        println!("signature: ❌");
+                    }
+                    println!("data: {}", content.data)
+                }
+                None => println!("No expression found at url: {}", url),
+            }
         }
     };
     Ok(())
