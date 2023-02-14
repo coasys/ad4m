@@ -1,5 +1,5 @@
 use ad4m_client::{Ad4mClient, expressions::expression};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Subcommand;
 use serde_json::Value;
 
@@ -10,6 +10,9 @@ pub enum ExpressionFunctions {
         content: String,
     },
     Get {
+        url: String,
+    },
+    GetRaw {
         url: String,
     },
 }
@@ -43,6 +46,20 @@ pub async fn run(ad4m_client: Ad4mClient, command: ExpressionFunctions) -> Resul
                     println!("data: {}", content.data)
                 }
                 None => println!("No expression found at url: {}", url),
+            }
+        }
+
+        ExpressionFunctions::GetRaw { url } => {
+            let maybe_content: Option<expression::ExpressionExpression> = ad4m_client.expressions.expression(url.clone()).await?;
+            match maybe_content {
+                Some(content) => {
+                    if let Ok(Value::String(content)) = serde_json::from_str::<Value>(&content.data) {
+                        println!("{}", &content);
+                    } else {
+                        println!("{}", content.data);
+                    }
+                }
+                None => bail!("No expression found at url: {}", url),
             }
         }
     };
