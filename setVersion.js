@@ -72,3 +72,7 @@ const uiCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'u
 console.log("UI Cargo version: " + uiCargo.oldVersion + " -> " + VERSION)
 fs.writeFileSync('ui/src-tauri/Cargo.toml', uiCargo.newContent)
 
+const book = JSON.parse(fs.readFileSync('docs-src/book.json', 'utf8'))
+console.log("Docs version: " + book.variables.ad4mVersion + " -> " + VERSION)
+book.variables.ad4mVersion = VERSION
+fs.writeFileSync('docs-src/book.json', JSON.stringify(book, null, 2) + '\n')
