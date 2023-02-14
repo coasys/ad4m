@@ -3,6 +3,14 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).  
 This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
 
+## [0.2.12-patch-1] - 14/02/2023
+
+### Changed
+ - Sets last supported version to 0.2.12
+
+###
+- Adds new language publishing agent key to trusted agents in boostrap seed
+
 ## [0.2.12] - 14/02/2023
 
 ### Added
