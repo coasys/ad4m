@@ -29,7 +29,7 @@
 
 #### Defined in
 
-[language/LanguageMeta.ts:68](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L68)
+[language/LanguageMeta.ts:68](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L68)
 
 ___
 
@@ -39,4 +39,4 @@ ___
 
 #### Defined in
 
-[language/LanguageMeta.ts:69](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageMeta.ts#L69)
+[language/LanguageMeta.ts:69](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageMeta.ts#L69)

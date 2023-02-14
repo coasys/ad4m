@@ -24,7 +24,7 @@
 
 #### Defined in
 
-[language/LanguageContext.ts:20](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L20)
+[language/LanguageContext.ts:20](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L20)
 
 ___
 
@@ -34,7 +34,7 @@ ___
 
 #### Defined in
 
-[language/LanguageContext.ts:16](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L16)
+[language/LanguageContext.ts:16](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L16)
 
 ___
 
@@ -44,7 +44,7 @@ ___
 
 #### Defined in
 
-[language/LanguageContext.ts:21](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L21)
+[language/LanguageContext.ts:21](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L21)
 
 ___
 
@@ -54,7 +54,7 @@ ___
 
 #### Defined in
 
-[language/LanguageContext.ts:15](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L15)
+[language/LanguageContext.ts:15](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L15)
 
 ___
 
@@ -64,7 +64,7 @@ ___
 
 #### Defined in
 
-[language/LanguageContext.ts:19](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L19)
+[language/LanguageContext.ts:19](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L19)
 
 ___
 
@@ -74,7 +74,7 @@ ___
 
 #### Defined in
 
-[language/LanguageContext.ts:17](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L17)
+[language/LanguageContext.ts:17](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L17)
 
 ___
 
@@ -84,4 +84,4 @@ ___
 
 #### Defined in
 
-[language/LanguageContext.ts:18](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L18)
+[language/LanguageContext.ts:18](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L18)

@@ -12,6 +12,8 @@
 - [EXCEPTION\_OCCURRED\_TOPIC](PubSub.md#exception_occurred_topic)
 - [LINK\_ADDED\_TOPIC](PubSub.md#link_added_topic)
 - [LINK\_REMOVED\_TOPIC](PubSub.md#link_removed_topic)
+- [LINK\_UDATED\_TOPIC](PubSub.md#link_udated_topic)
+- [NEIGHBOURHOOD\_SIGNAL\_RECEIVED\_TOPIC](PubSub.md#neighbourhood_signal_received_topic)
 - [PERSPECTIVE\_ADDED\_TOPIC](PubSub.md#perspective_added_topic)
 - [PERSPECTIVE\_REMOVED\_TOPIC](PubSub.md#perspective_removed_topic)
 - [PERSPECTIVE\_UPDATED\_TOPIC](PubSub.md#perspective_updated_topic)
@@ -25,7 +27,7 @@
 
 #### Defined in
 
-[PubSub.ts:2](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L2)
+[PubSub.ts:2](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L2)
 
 ___
 
@@ -35,7 +37,7 @@ ___
 
 #### Defined in
 
-[PubSub.ts:1](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L1)
+[PubSub.ts:1](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L1)
 
 ___
 
@@ -45,7 +47,7 @@ ___
 
 #### Defined in
 
-[PubSub.ts:3](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L3)
+[PubSub.ts:3](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L3)
 
 ___
 
@@ -55,7 +57,7 @@ ___
 
 #### Defined in
 
-[PubSub.ts:10](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L10)
+[PubSub.ts:11](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L11)
 
 ___
 
@@ -65,7 +67,7 @@ ___
 
 #### Defined in
 
-[PubSub.ts:7](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L7)
+[PubSub.ts:7](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L7)
 
 ___
 
@@ -75,7 +77,27 @@ ___
 
 #### Defined in
 
-[PubSub.ts:8](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L8)
+[PubSub.ts:8](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L8)
+
+___
+
+### LINK\_UDATED\_TOPIC
+
+• `Const` **LINK\_UDATED\_TOPIC**: ``"link-updated-topic"``
+
+#### Defined in
+
+[PubSub.ts:9](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L9)
+
+___
+
+### NEIGHBOURHOOD\_SIGNAL\_RECEIVED\_TOPIC
+
+• `Const` **NEIGHBOURHOOD\_SIGNAL\_RECEIVED\_TOPIC**: ``"neighbourhood-signal-received-topic"``
+
+#### Defined in
+
+[PubSub.ts:12](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L12)
 
 ___
 
@@ -85,7 +107,7 @@ ___
 
 #### Defined in
 
-[PubSub.ts:4](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L4)
+[PubSub.ts:4](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L4)
 
 ___
 
@@ -95,7 +117,7 @@ ___
 
 #### Defined in
 
-[PubSub.ts:6](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L6)
+[PubSub.ts:6](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L6)
 
 ___
 
@@ -105,7 +127,7 @@ ___
 
 #### Defined in
 
-[PubSub.ts:5](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L5)
+[PubSub.ts:5](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L5)
 
 ___
 
@@ -115,4 +137,4 @@ ___
 
 #### Defined in
 
-[PubSub.ts:9](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/PubSub.ts#L9)
+[PubSub.ts:10](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/PubSub.ts#L10)

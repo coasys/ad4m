@@ -33,7 +33,7 @@
 
 #### Defined in
 
-[language/LanguageHandle.ts:10](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageHandle.ts#L10)
+[language/LanguageHandle.ts:10](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageHandle.ts#L10)
 
 ___
 
@@ -43,7 +43,7 @@ ___
 
 #### Defined in
 
-[language/LanguageHandle.ts:19](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageHandle.ts#L19)
+[language/LanguageHandle.ts:19](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageHandle.ts#L19)
 
 ___
 
@@ -53,7 +53,7 @@ ___
 
 #### Defined in
 
-[language/LanguageHandle.ts:16](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageHandle.ts#L16)
+[language/LanguageHandle.ts:16](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageHandle.ts#L16)
 
 ___
 
@@ -63,7 +63,7 @@ ___
 
 #### Defined in
 
-[language/LanguageHandle.ts:7](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageHandle.ts#L7)
+[language/LanguageHandle.ts:7](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageHandle.ts#L7)
 
 ___
 
@@ -73,7 +73,7 @@ ___
 
 #### Defined in
 
-[language/LanguageHandle.ts:13](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageHandle.ts#L13)
+[language/LanguageHandle.ts:13](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageHandle.ts#L13)
 
 ___
 
@@ -83,4 +83,4 @@ ___
 
 #### Defined in
 
-[language/LanguageHandle.ts:22](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageHandle.ts#L22)
+[language/LanguageHandle.ts:22](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageHandle.ts#L22)

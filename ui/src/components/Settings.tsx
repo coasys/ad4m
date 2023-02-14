@@ -157,10 +157,10 @@ const Profile = (props: Props) => {
     );
   };
 
-  const copyProxy = () => {
-    copyTextToClipboard(proxy);
+  const copyText = (text: string) => {
+    copyTextToClipboard(text);
     showNotification({
-      message: "Proxy endpoint copied to clipboard",
+      message: "Text copied to clipboard",
       autoClose: 1000,
     });
   };
@@ -176,14 +176,6 @@ const Profile = (props: Props) => {
     if (!agentStatus?.isUnlocked) {
       await invoke("clear_state");
     }
-  };
-
-  const copyUrl = () => {
-    copyTextToClipboard(url);
-    showNotification({
-      message: "URL copied to clipboard",
-      autoClose: 1000,
-    });
   };
 
   const setupProxy = async () => {
@@ -218,7 +210,7 @@ const Profile = (props: Props) => {
           <>
             <ActionButton
               title="Proxy URL"
-              onClick={copyProxy}
+              onClick={() => copyText(proxy)}
               icon="clipboard"
             />
             <ActionButton
@@ -297,7 +289,7 @@ const Profile = (props: Props) => {
                     <j-button
                       size="xs"
                       variant="transparent"
-                      onClick={() => console.log("wow")}
+                      onClick={() => copyText(e?.did)}
                     >
                       <j-icon size="xs" slot="end" name="clipboard"></j-icon>
                     </j-button>

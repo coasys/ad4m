@@ -30,7 +30,7 @@
 
 #### Defined in
 
-[agent/Agent.ts:123](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/Agent.ts#L123)
+[agent/Agent.ts:123](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/Agent.ts#L123)
 
 ## Properties
 
@@ -40,7 +40,7 @@
 
 #### Defined in
 
-[agent/Agent.ts:121](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/Agent.ts#L121)
+[agent/Agent.ts:121](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/Agent.ts#L121)
 
 ___
 
@@ -50,4 +50,4 @@ ___
 
 #### Defined in
 
-[agent/Agent.ts:118](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/Agent.ts#L118)
+[agent/Agent.ts:118](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/Agent.ts#L118)

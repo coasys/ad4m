@@ -36,7 +36,7 @@
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:36](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L36)
+[perspectives/PerspectiveClient.ts:41](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveClient.ts#L41)
 
 ___
 
@@ -60,7 +60,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:34](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L34)
+[perspectives/PerspectiveClient.ts:39](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveClient.ts#L39)
 
 ___
 
@@ -84,4 +84,4 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveClient.ts:35](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveClient.ts#L35)
+[perspectives/PerspectiveClient.ts:40](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveClient.ts#L40)
