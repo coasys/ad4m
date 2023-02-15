@@ -6,9 +6,22 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+  
+## [0.2.13] - 15/02/2013
+
+### Added
  - Expression "create", "get" and "get-raw" added to cli and rust-client [PR#159](https://github.com/perspect3vism/ad4m/pull/159)
 
 ### Changed
+ - CLI: `ad4m languages generate-boostrap` is now availabel under `ad4m dev generate-bootstrap`
 
 ### Deprecated
 
