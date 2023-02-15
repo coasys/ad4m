@@ -127,6 +127,11 @@ pub async fn start_publishing(
         .await
         .expect("could not unlock agent");
 
+    if let Some(error) = agent.error {
+        println!("Error unlocking agent: {}", error);
+        exit(1);
+    }
+    
     green_ln!("Unlocked agent\n");
 
     let mut languages = vec![];
