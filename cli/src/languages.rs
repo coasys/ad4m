@@ -173,7 +173,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
         }
         LanguageFunctions::Source { address } => {
             let source = ad4m_client.languages.source(address).await?;
-            println!("{}", source);
+            print!("{}", source);
         }
         LanguageFunctions::Remove { address } => {
             ad4m_client.languages.remove(address).await?;
