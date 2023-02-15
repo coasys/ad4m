@@ -45,11 +45,12 @@ const requireModule = async (modulePath: string) => {
 const loadModule = async (modulePath: string) => {
   try {
     return await importModule(modulePath)
-  } catch (e) {
+  } catch (e1) {
     try {
         return await requireModule(modulePath)
-    } catch (e) {
-        throw new ImportError(`Unable to import module ${modulePath}`)
+    } catch (e2) {
+        throw new ImportError(`Unable to import module ${modulePath}. Got error ${e1} when trying to import as es module\n 
+            and error when trying to import as commonjs ${e2}`)
     }
   }
 }

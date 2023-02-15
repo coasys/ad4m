@@ -14,13 +14,16 @@ mod util;
 
 mod agent;
 mod bootstrap_publish;
+mod expression;
 mod languages;
 mod neighbourhoods;
 mod perspectives;
 mod repl;
 mod runtime;
 
-use crate::{agent::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*};
+use crate::{
+    agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
+};
 use ad4m_client::*;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -95,6 +98,11 @@ enum Domain {
         #[command(subcommand)]
         command: RuntimeFunctions,
     },
+    /// Create and get language expressions
+    Expression {
+        #[command(subcommand)]
+        command: ExpressionFunctions,
+    },
     /// Print the executor log
     Log,
 }
@@ -138,6 +146,7 @@ async fn main() -> Result<()> {
         Domain::Perspectives { command } => perspectives::run(ad4m_client, command).await?,
         Domain::Neighbourhoods { command } => neighbourhoods::run(ad4m_client, command).await?,
         Domain::Runtime { command } => runtime::run(ad4m_client, command).await?,
+        Domain::Expression { command } => expression::run(ad4m_client, command).await?,
         Domain::Log => {
             let file = executor_data_path().join("ad4m.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {
