@@ -14,6 +14,7 @@ mod util;
 
 mod agent;
 mod bootstrap_publish;
+mod dev;
 mod expression;
 mod languages;
 mod neighbourhoods;
@@ -22,7 +23,7 @@ mod repl;
 mod runtime;
 
 use crate::{
-    agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
+    agent::*, dev::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
 };
 use ad4m_client::*;
 use anyhow::{Context, Result};
@@ -105,6 +106,10 @@ enum Domain {
     },
     /// Print the executor log
     Log,
+    Dev {
+        #[command(subcommand)]
+        command: DevFunctions,
+    },
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -138,6 +143,11 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
+    if let Domain::Dev { command } = args.domain {
+        dev::run(command).await?;
+        return Ok(());
+    }
+
     let ad4m_client = get_ad4m_client(&args).await?;
 
     match args.domain {
@@ -157,6 +167,7 @@ async fn main() -> Result<()> {
             })?;
             println!("{}", log);
         }
+        Domain::Dev{ command: _ } => unreachable!(),
     }
 
     Ok(())
