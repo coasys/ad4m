@@ -364,11 +364,11 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                   await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
                 }
 
+                await core.waitForAgent();
+                core.initControllers()
+                await core.initLanguages()
 
                 if (!config.languageLanguageOnly) {
-                    await core.waitForAgent();
-                    core.initControllers()
-                    await core.initLanguages()
                     await core.initializeAgentsDirectMessageLanguage()
                 }
 
