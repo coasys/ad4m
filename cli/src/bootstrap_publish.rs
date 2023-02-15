@@ -1,5 +1,5 @@
+use ad4m_client::Ad4mClient;
 use anyhow::Result;
-use clap::Parser;
 use colour::{blue_ln, green_ln};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
@@ -7,8 +7,6 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::sync::mpsc::Sender;
 use std::{fs, process::Stdio};
-
-use crate::{get_ad4m_client, ClapApp};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SeedProto {
@@ -118,15 +116,22 @@ pub async fn start_publishing(
     seed_proto: SeedProto,
     language_language_bundle: String,
 ) {
-    let ad4m_client = get_ad4m_client(&ClapApp::parse())
-        .await
-        .expect("Could not get ad4m client");
+    let ad4m_client = Ad4mClient::new(
+        "http://localhost:4000/graphql".to_string(),
+        "".to_string()
+    );
+
     let agent = ad4m_client
         .agent
         .unlock(passphrase)
         .await
         .expect("could not unlock agent");
 
+    if let Some(error) = agent.error {
+        println!("Error unlocking agent: {}", error);
+        exit(1);
+    }
+    
     green_ln!("Unlocked agent\n");
 
     let mut languages = vec![];

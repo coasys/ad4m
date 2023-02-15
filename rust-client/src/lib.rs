@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use agent::AgentClient;
+use expressions::ExpressionsClient;
 use languages::LanguagesClient;
 use neighbourhoods::NeighbourhoodsClient;
 use perspectives::PerspectivesClient;
@@ -20,6 +21,7 @@ extern crate rustyline;
 extern crate tokio;
 
 pub mod agent;
+pub mod expressions;
 pub mod languages;
 pub mod literal;
 pub mod neighbourhoods;
@@ -35,6 +37,7 @@ pub struct Ad4mClient {
     pub languages: LanguagesClient,
     pub neighbourhoods: NeighbourhoodsClient,
     pub perspectives: PerspectivesClient,
+    pub expressions: ExpressionsClient,
     pub runtime: RuntimeClient,
 }
 
@@ -55,6 +58,7 @@ impl Ad4mClient {
             languages: LanguagesClient::new(info.clone()),
             neighbourhoods: NeighbourhoodsClient::new(info.clone()),
             perspectives: PerspectivesClient::new(info.clone()),
+            expressions: ExpressionsClient::new(info.clone()),
             runtime: RuntimeClient::new(info),
         }
     }
