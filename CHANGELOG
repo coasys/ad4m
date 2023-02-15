@@ -22,6 +22,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Changed
  - CLI: `ad4m languages generate-boostrap` is now availabel under `ad4m dev generate-bootstrap`
+ - Default bootstrap-seed updated
 
 ### Deprecated
 
