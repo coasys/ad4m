@@ -125,7 +125,7 @@ export default function languageTests(testContext: TestContext) {
                 }
 
                 //@ts-ignore
-                expect(error.toString()).to.be.equal(`Error: Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${sourceLanguageMeta}`)
+                expect(error.toString()).to.be.equal(`Error: Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${JSON.stringify(sourceLanguageMeta)}`)
             })
 
             describe('with Bob having added Alice to list of trusted agents', () => {
