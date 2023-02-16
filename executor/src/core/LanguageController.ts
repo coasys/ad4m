@@ -483,7 +483,7 @@ export default class LanguageController {
                     Object.keys(languageMetaData.templateAppliedParams).length == 0 ||
                     !languageMetaData.templateSourceLanguageAddress
                 ) {
-                    let errMsg = `Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${languageMetaData}`
+                    let errMsg = `Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${JSON.stringify(languageMetaData)}`
                     this.pubSub.publish(
                         PubSub.EXCEPTION_OCCURRED_TOPIC,
                         {
