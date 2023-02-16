@@ -14,11 +14,15 @@ property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predic
 
 collection(c, "comments").
 collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
-collection_adder(c, "comments", '[{action: "addLink", source: "this", predicate: "todo://comment", target: "value"}]').
+collection_adder(c, "commentss", '[{action: "addLink", source: "this", predicate: "todo://comment", target: "value"}]').
+collection_setter(c, "commentss", '[{action: "collectionSetter", source: "this", predicate: "todo://comment", target: "value"}]').
 
 collection(c, "entries").
 collection_getter(c, Base, "entries", List) :- findall(C, triple(Base, "flux://entry_type", C), List).
-collection_adder(c, "entries", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_adder(c, "entriess", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_setter(c, "entriess", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
 
 collection(c, "messages").
 collection_getter(c, Base, "messages", List) :- setof(C, (triple(Base, "flux://entry_type", C), instance(OtherClass, C), subject_class("Message", OtherClass)), List).
+collection_adder(c, "messagess", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_setter(c, "messagess", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').

@@ -31,7 +31,7 @@
 
 #### Defined in
 
-[subject/SDNADecorators.ts:4](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L4)
+[subject/SDNADecorators.ts:6](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L6)
 
 ___
 
@@ -41,7 +41,7 @@ ___
 
 #### Defined in
 
-[subject/SDNADecorators.ts:6](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L6)
+[subject/SDNADecorators.ts:8](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L8)
 
 ___
 
@@ -51,7 +51,7 @@ ___
 
 #### Defined in
 
-[subject/SDNADecorators.ts:5](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L5)
+[subject/SDNADecorators.ts:7](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L7)
 
 ___
 
@@ -61,4 +61,4 @@ ___
 
 #### Defined in
 
-[subject/SDNADecorators.ts:7](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/SDNADecorators.ts#L7)
+[subject/SDNADecorators.ts:9](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/SDNADecorators.ts#L9)

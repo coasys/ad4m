@@ -41,4 +41,4 @@
 
 #### Defined in
 
-[language/LanguageContext.ts:34](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageContext.ts#L34)
+[language/LanguageContext.ts:39](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageContext.ts#L39)

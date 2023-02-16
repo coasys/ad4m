@@ -9,3 +9,4 @@ export const LINK_REMOVED_TOPIC = 'link-removed-topic'
 export const LINK_UDATED_TOPIC = 'link-updated-topic'
 export const SIGNAL = "signal"
 export const EXCEPTION_OCCURRED_TOPIC = "exception-occurred-topic"
+export const NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC = "neighbourhood-signal-received-topic"

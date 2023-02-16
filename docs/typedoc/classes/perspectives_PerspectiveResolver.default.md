@@ -26,6 +26,7 @@ For the latter, they return test fixtures.
 - [perspectiveLinkAdded](perspectives_PerspectiveResolver.default.md#perspectivelinkadded)
 - [perspectiveLinkMutations](perspectives_PerspectiveResolver.default.md#perspectivelinkmutations)
 - [perspectiveLinkRemoved](perspectives_PerspectiveResolver.default.md#perspectivelinkremoved)
+- [perspectiveLinkUpdated](perspectives_PerspectiveResolver.default.md#perspectivelinkupdated)
 - [perspectivePublishSnapshot](perspectives_PerspectiveResolver.default.md#perspectivepublishsnapshot)
 - [perspectiveQueryLinks](perspectives_PerspectiveResolver.default.md#perspectivequerylinks)
 - [perspectiveQueryProlog](perspectives_PerspectiveResolver.default.md#perspectivequeryprolog)
@@ -63,7 +64,7 @@ For the latter, they return test fixtures.
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:43](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L43)
+[perspectives/PerspectiveResolver.ts:44](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L44)
 
 ___
 
@@ -84,7 +85,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:68](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L68)
+[perspectives/PerspectiveResolver.ts:69](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L69)
 
 ___
 
@@ -106,7 +107,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:89](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L89)
+[perspectives/PerspectiveResolver.ts:90](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L90)
 
 ___
 
@@ -128,7 +129,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:146](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L146)
+[perspectives/PerspectiveResolver.ts:147](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L147)
 
 ___
 
@@ -150,7 +151,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:101](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L101)
+[perspectives/PerspectiveResolver.ts:102](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L102)
 
 ___
 
@@ -164,7 +165,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:171](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L171)
+[perspectives/PerspectiveResolver.ts:172](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L172)
 
 ___
 
@@ -184,7 +185,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:187](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L187)
+[perspectives/PerspectiveResolver.ts:188](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L188)
 
 ___
 
@@ -206,7 +207,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:139](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L139)
+[perspectives/PerspectiveResolver.ts:140](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L140)
 
 ___
 
@@ -226,7 +227,27 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:192](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L192)
+[perspectives/PerspectiveResolver.ts:193](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L193)
+
+___
+
+### perspectiveLinkUpdated
+
+▸ **perspectiveLinkUpdated**(`uuid`): [`LinkExpressionUpdated`](links_Links.LinkExpressionUpdated.md)
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `uuid` | `string` |
+
+#### Returns
+
+[`LinkExpressionUpdated`](links_Links.LinkExpressionUpdated.md)
+
+#### Defined in
+
+[perspectives/PerspectiveResolver.ts:198](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L198)
 
 ___
 
@@ -246,7 +267,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:53](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L53)
+[perspectives/PerspectiveResolver.ts:54](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L54)
 
 ___
 
@@ -267,7 +288,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:58](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L58)
+[perspectives/PerspectiveResolver.ts:59](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L59)
 
 ___
 
@@ -288,7 +309,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:63](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L63)
+[perspectives/PerspectiveResolver.ts:64](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L64)
 
 ___
 
@@ -309,7 +330,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:82](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L82)
+[perspectives/PerspectiveResolver.ts:83](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L83)
 
 ___
 
@@ -331,7 +352,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:165](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L165)
+[perspectives/PerspectiveResolver.ts:166](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L166)
 
 ___
 
@@ -353,7 +374,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:120](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L120)
+[perspectives/PerspectiveResolver.ts:121](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L121)
 
 ___
 
@@ -367,7 +388,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:182](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L182)
+[perspectives/PerspectiveResolver.ts:183](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L183)
 
 ___
 
@@ -387,7 +408,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:48](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L48)
+[perspectives/PerspectiveResolver.ts:49](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L49)
 
 ___
 
@@ -409,7 +430,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:75](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L75)
+[perspectives/PerspectiveResolver.ts:76](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L76)
 
 ___
 
@@ -432,7 +453,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:152](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L152)
+[perspectives/PerspectiveResolver.ts:153](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L153)
 
 ___
 
@@ -446,7 +467,7 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:177](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L177)
+[perspectives/PerspectiveResolver.ts:178](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L178)
 
 ___
 
@@ -460,4 +481,4 @@ ___
 
 #### Defined in
 
-[perspectives/PerspectiveResolver.ts:30](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/PerspectiveResolver.ts#L30)
+[perspectives/PerspectiveResolver.ts:30](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/PerspectiveResolver.ts#L30)

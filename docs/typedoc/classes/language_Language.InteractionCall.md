@@ -34,7 +34,7 @@
 
 #### Defined in
 
-[language/Language.ts:230](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L230)
+[language/Language.ts:239](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L239)
 
 ## Properties
 
@@ -44,7 +44,7 @@
 
 #### Defined in
 
-[language/Language.ts:222](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L222)
+[language/Language.ts:231](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L231)
 
 ___
 
@@ -54,7 +54,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:224](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L224)
+[language/Language.ts:233](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L233)
 
 ## Accessors
 
@@ -68,4 +68,4 @@ ___
 
 #### Defined in
 
-[language/Language.ts:226](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L226)
+[language/Language.ts:235](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L235)

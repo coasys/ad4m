@@ -1,0 +1,24 @@
+mutation ExpressionCreate($languageAddress: String!, $content: String!) {
+  expressionCreate(languageAddress: $languageAddress, content: $content)
+}
+
+query Expression($url: String!) {
+  expression(url: $url) {
+    author
+    data
+    icon {
+      code
+    }
+    language {
+      address
+      name
+    }
+    proof {
+      invalid
+      key
+      signature
+      valid
+    }
+    timestamp
+  }
+}

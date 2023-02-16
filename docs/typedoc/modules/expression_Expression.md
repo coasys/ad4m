@@ -41,7 +41,7 @@
 
 #### Defined in
 
-[expression/Expression.ts:42](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/Expression.ts#L42)
+[expression/Expression.ts:42](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/Expression.ts#L42)
 
 ___
 
@@ -67,7 +67,7 @@ ___
 
 #### Defined in
 
-[expression/Expression.ts:67](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/Expression.ts#L67)
+[expression/Expression.ts:67](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/Expression.ts#L67)
 
 ___
 
@@ -87,4 +87,4 @@ ___
 
 #### Defined in
 
-[expression/Expression.ts:97](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/expression/Expression.ts#L97)
+[expression/Expression.ts:97](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/expression/Expression.ts#L97)

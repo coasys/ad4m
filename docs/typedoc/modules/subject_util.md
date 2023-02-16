@@ -7,9 +7,13 @@
 ### Functions
 
 - [capitalize](subject_util.md#capitalize)
+- [collectionAdderToName](subject_util.md#collectionaddertoname)
+- [collectionSetterToName](subject_util.md#collectionsettertoname)
 - [collectionToAdderName](subject_util.md#collectiontoaddername)
+- [collectionToSetterName](subject_util.md#collectiontosettername)
 - [pluralToSingular](subject_util.md#pluraltosingular)
 - [propertyNameToSetterName](subject_util.md#propertynametosettername)
+- [setterNameToPropertyName](subject_util.md#setternametopropertyname)
 - [singularToPlural](subject_util.md#singulartoplural)
 - [stringifyObjectLiteral](subject_util.md#stringifyobjectliteral)
 
@@ -31,7 +35,47 @@
 
 #### Defined in
 
-[subject/util.ts:1](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/util.ts#L1)
+[subject/util.ts:1](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L1)
+
+___
+
+### collectionAdderToName
+
+▸ **collectionAdderToName**(`adderName`): `string`
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `adderName` | `string` |
+
+#### Returns
+
+`string`
+
+#### Defined in
+
+[subject/util.ts:39](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L39)
+
+___
+
+### collectionSetterToName
+
+▸ **collectionSetterToName**(`adderName`): `string`
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `adderName` | `string` |
+
+#### Returns
+
+`string`
+
+#### Defined in
+
+[subject/util.ts:45](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L45)
 
 ___
 
@@ -51,7 +95,27 @@ ___
 
 #### Defined in
 
-[subject/util.ts:29](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/util.ts#L29)
+[subject/util.ts:34](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L34)
+
+___
+
+### collectionToSetterName
+
+▸ **collectionToSetterName**(`collection`): `string`
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `collection` | `string` |
+
+#### Returns
+
+`string`
+
+#### Defined in
+
+[subject/util.ts:52](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L52)
 
 ___
 
@@ -71,7 +135,7 @@ ___
 
 #### Defined in
 
-[subject/util.ts:18](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/util.ts#L18)
+[subject/util.ts:23](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L23)
 
 ___
 
@@ -91,7 +155,27 @@ ___
 
 #### Defined in
 
-[subject/util.ts:6](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/util.ts#L6)
+[subject/util.ts:6](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L6)
+
+___
+
+### setterNameToPropertyName
+
+▸ **setterNameToPropertyName**(`setter`): `string`
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `setter` | `string` |
+
+#### Returns
+
+`string`
+
+#### Defined in
+
+[subject/util.ts:11](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L11)
 
 ___
 
@@ -111,7 +195,7 @@ ___
 
 #### Defined in
 
-[subject/util.ts:10](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/util.ts#L10)
+[subject/util.ts:15](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L15)
 
 ___
 
@@ -131,4 +215,4 @@ ___
 
 #### Defined in
 
-[subject/util.ts:33](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/subject/util.ts#L33)
+[subject/util.ts:57](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/subject/util.ts#L57)

@@ -47,7 +47,7 @@ Get push notification when a diff got published
 
 #### Defined in
 
-[language/Language.ts:175](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L175)
+[language/Language.ts:184](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L184)
 
 ___
 
@@ -69,7 +69,7 @@ Publish changes
 
 #### Defined in
 
-[language/Language.ts:172](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L172)
+[language/Language.ts:181](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L181)
 
 ___
 
@@ -85,7 +85,7 @@ What revision are we on now -> what changes are included in output of render()
 
 #### Defined in
 
-[language/Language.ts:163](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L163)
+[language/Language.ts:172](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L172)
 
 ___
 
@@ -102,7 +102,7 @@ Call this to check if there are new changes
 
 #### Defined in
 
-[language/Language.ts:160](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L160)
+[language/Language.ts:169](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L169)
 
 ___
 
@@ -116,7 +116,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:155](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L155)
+[language/Language.ts:164](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L164)
 
 ___
 
@@ -130,7 +130,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:154](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L154)
+[language/Language.ts:163](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L163)
 
 ___
 
@@ -146,7 +146,7 @@ Check for and get new changes
 
 #### Defined in
 
-[language/Language.ts:166](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L166)
+[language/Language.ts:175](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L175)
 
 ___
 
@@ -162,7 +162,7 @@ Returns the full, rendered Perspective at currentRevision
 
 #### Defined in
 
-[language/Language.ts:169](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L169)
+[language/Language.ts:178](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L178)
 
 ___
 
@@ -176,4 +176,4 @@ ___
 
 #### Defined in
 
-[language/Language.ts:153](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L153)
+[language/Language.ts:162](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L162)

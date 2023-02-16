@@ -9,7 +9,7 @@
     "devDependencies": {
         "@apollo/client": "3.6.9",
         "@peculiar/webcrypto": "^1.1.7",
-        "@perspect3vism/ad4m": "file:../../core",
+        "@perspect3vism/ad4m": "link:../../core",
         "@types/chai": "*",
         "@types/chai-as-promised": "*",
         "@types/expect": "*",

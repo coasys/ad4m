@@ -3,6 +3,65 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).  
 This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
 
+## unreleased
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+  
+## [0.2.13] - 15/02/2013
+
+### Added
+ - Expression "create", "get" and "get-raw" added to cli and rust-client [PR#159](https://github.com/perspect3vism/ad4m/pull/159)
+
+### Changed
+ - CLI: `ad4m languages generate-boostrap` is now availabel under `ad4m dev generate-bootstrap`
+ - Default bootstrap-seed updated
+
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Bootstrap seed creation working with cli: `ad4m dev generate-bootstrap` [PR#247](https://github.com/perspect3vism/ad4m/pull/247)
+ 
+
+
+## [0.2.12-patch-1] - 14/02/2023
+
+### Changed
+ - Sets last supported version to 0.2.12
+
+###
+- Adds new language publishing agent key to trusted agents in boostrap seed
+
+## [0.2.12] - 14/02/2023
+
+### Added
+ - Telepresence implementation (real-time signals between agents in Neighbourhoods) ][PR#239](https://github.com/perspect3vism/ad4m/pull/238)
+ - Perspective synchronization state with easing-off retries of LinkLanguage installation and network sync [PR#235](https://github.com/perspect3vism/ad4m/pull/235)
+
+### Changed
+ - SDNA Subject API and decorators improved [PR#229](https://github.com/perspect3vism/ad4m/pull/229)
+ - AD4M connect updated to new style [PR#242](https://github.com/perspect3vism/ad4m/pull/242)
+
+### Deprecated
+
+### Removed
+
+### Fixed
+  - Copy/paste of proxy URL from launcher working now [PR#241](https://github.com/perspect3vism/ad4m/pull/241)
+  - Duplicate entries of trusted agents [also PR#241](https://github.com/perspect3vism/ad4m/pull/241)
+ 
+
+### Security
+
 ## [0.2.11] - 02/02/2023
 
 ### Added

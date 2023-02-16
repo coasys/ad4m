@@ -42,7 +42,7 @@
 
 #### Defined in
 
-[SmartLiteral.ts:23](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L23)
+[SmartLiteral.ts:23](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L23)
 
 ## Properties
 
@@ -52,7 +52,7 @@
 
 #### Defined in
 
-[SmartLiteral.ts:21](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L21)
+[SmartLiteral.ts:21](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L21)
 
 ___
 
@@ -62,7 +62,7 @@ ___
 
 #### Defined in
 
-[SmartLiteral.ts:20](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L20)
+[SmartLiteral.ts:20](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L20)
 
 ## Accessors
 
@@ -76,7 +76,7 @@ ___
 
 #### Defined in
 
-[SmartLiteral.ts:28](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L28)
+[SmartLiteral.ts:28](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L28)
 
 ## Methods
 
@@ -90,7 +90,7 @@ ___
 
 #### Defined in
 
-[SmartLiteral.ts:54](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L54)
+[SmartLiteral.ts:54](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L54)
 
 ___
 
@@ -110,7 +110,7 @@ ___
 
 #### Defined in
 
-[SmartLiteral.ts:67](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L67)
+[SmartLiteral.ts:67](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L67)
 
 ___
 
@@ -131,7 +131,7 @@ ___
 
 #### Defined in
 
-[SmartLiteral.ts:32](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L32)
+[SmartLiteral.ts:32](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L32)
 
 ___
 
@@ -151,7 +151,7 @@ ___
 
 #### Defined in
 
-[SmartLiteral.ts:47](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L47)
+[SmartLiteral.ts:47](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L47)
 
 ___
 
@@ -172,4 +172,4 @@ ___
 
 #### Defined in
 
-[SmartLiteral.ts:39](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/SmartLiteral.ts#L39)
+[SmartLiteral.ts:39](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/SmartLiteral.ts#L39)

@@ -9,81 +9,102 @@
 ### Methods
 
 - [getOnlineAgents](language_Language.TelepresenceAdapter.md#getonlineagents)
-- [registerRpcCallback](language_Language.TelepresenceAdapter.md#registerrpccallback)
-- [rpcCall](language_Language.TelepresenceAdapter.md#rpccall)
+- [registerSignalCallback](language_Language.TelepresenceAdapter.md#registersignalcallback)
+- [sendBroadcast](language_Language.TelepresenceAdapter.md#sendbroadcast)
+- [sendSignal](language_Language.TelepresenceAdapter.md#sendsignal)
 - [setOnlineStatus](language_Language.TelepresenceAdapter.md#setonlinestatus)
 
 ## Methods
 
 ### getOnlineAgents
 
-▸ **getOnlineAgents**(): [[`OnlineAgent`](../classes/language_Language.OnlineAgent.md)]
+▸ **getOnlineAgents**(): `Promise`<[`OnlineAgent`](../classes/language_Language.OnlineAgent.md)[]\>
 
 #### Returns
 
-[[`OnlineAgent`](../classes/language_Language.OnlineAgent.md)]
+`Promise`<[`OnlineAgent`](../classes/language_Language.OnlineAgent.md)[]\>
 
 #### Defined in
 
-[language/Language.ts:250](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L250)
+[language/Language.ts:256](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L256)
 
 ___
 
-### registerRpcCallback
+### registerSignalCallback
 
-▸ **registerRpcCallback**(`callback`): `any`
+▸ **registerSignalCallback**(`callback`): `Promise`<`void`\>
 
 #### Parameters
 
 | Name | Type |
 | :------ | :------ |
-| `callback` | [`TelepresenceRpcCall`](../classes/language_Language.TelepresenceRpcCall.md) |
+| `callback` | [`TelepresenceSignalCallback`](../modules/language_Language.md#telepresencesignalcallback) |
 
 #### Returns
 
-`any`
+`Promise`<`void`\>
 
 #### Defined in
 
-[language/Language.ts:253](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L253)
+[language/Language.ts:260](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L260)
 
 ___
 
-### rpcCall
+### sendBroadcast
 
-▸ **rpcCall**(`remoteAgentDid`, `call`): `object`
+▸ **sendBroadcast**(`payload`): `Promise`<`object`\>
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `payload` | [`PerspectiveExpression`](../classes/perspectives_Perspective.PerspectiveExpression.md) |
+
+#### Returns
+
+`Promise`<`object`\>
+
+#### Defined in
+
+[language/Language.ts:259](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L259)
+
+___
+
+### sendSignal
+
+▸ **sendSignal**(`remoteAgentDid`, `payload`): `Promise`<`object`\>
 
 #### Parameters
 
 | Name | Type |
 | :------ | :------ |
 | `remoteAgentDid` | `string` |
-| `call` | [`TelepresenceRpcCall`](../classes/language_Language.TelepresenceRpcCall.md) |
+| `payload` | [`PerspectiveExpression`](../classes/perspectives_Perspective.PerspectiveExpression.md) |
 
 #### Returns
 
-`object`
+`Promise`<`object`\>
 
 #### Defined in
 
-[language/Language.ts:252](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L252)
+[language/Language.ts:258](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L258)
 
 ___
 
 ### setOnlineStatus
 
-▸ **setOnlineStatus**(`status`): `any`
+▸ **setOnlineStatus**(`status`): `Promise`<`void`\>
 
 #### Parameters
 
 | Name | Type |
 | :------ | :------ |
-| `status` | `string` |
+| `status` | [`PerspectiveExpression`](../classes/perspectives_Perspective.PerspectiveExpression.md) |
 
 #### Returns
 
-`any`
+`Promise`<`void`\>
 
 #### Defined in
 
-[language/Language.ts:249](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L249)
+[language/Language.ts:255](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L255)
