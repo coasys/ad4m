@@ -184,6 +184,7 @@ export default class Ad4mConnect {
       on: {
         error: (e) => {
           this.notifyConnectionChange("not_connected");
+          this.notifyAuthChange("unauthenticated");
         },
         connected: () => {
           this.notifyConnectionChange("connected");
@@ -191,6 +192,7 @@ export default class Ad4mConnect {
         closed: () => {
           if (this.isFullyInitialized) {
             this.notifyConnectionChange("disconnected");
+            this.notifyAuthChange("unauthenticated");
           }
         },
       },

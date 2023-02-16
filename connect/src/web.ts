@@ -444,6 +444,9 @@ export class Ad4mConnectElement extends LitElement {
       const customEvent = new CustomEvent("authstatechange", {
         detail: event,
       });
+      if (event === "locked") {
+        this._isOpen = true;
+      }
       this.dispatchEvent(customEvent);
       this.requestUpdate();
     });
@@ -451,6 +454,9 @@ export class Ad4mConnectElement extends LitElement {
     this._client.on("connectionstatechange", (event: ConnectionStates) => {
       if (event === "connected") {
         this.uiState = "requestcap";
+      }
+      if (event === "disconnected") {
+        this._isOpen = true;
       }
       const customEvent = new CustomEvent("connectionstatechange", {
         detail: event,

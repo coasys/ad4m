@@ -25,7 +25,7 @@ export default function Request({ code, changeState, verifyCode, changeCode }) {
           class="button button--full button--secondary"
           @click=${() => changeState("start")}
         >
-          Cancel
+          Back
         </button>
         <button class="button button--full" @click=${() => verifyCode(code)}>
           Continue

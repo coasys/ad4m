@@ -9,7 +9,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "electron": "^20.0.3",
-    "ad4m-connect": "file:../../"
+    "electron": "^20.0.3"
   }
 }
