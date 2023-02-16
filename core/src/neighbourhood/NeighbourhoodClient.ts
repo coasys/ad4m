@@ -9,6 +9,7 @@ import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 
 export class NeighbourhoodClient {
     #apolloClient: ApolloClient<any>
+    #signalHandlers: Map<string, TelepresenceSignalCallback[]> = new Map()
 
     constructor(client: ApolloClient<any>) {
         this.#apolloClient = client
@@ -161,7 +162,15 @@ export class NeighbourhoodClient {
         return neighbourhoodSendBroadcast
     }
 
-    async addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): Promise<void> {
+    dispatchSignal(perspectiveUUID:string, signal: TelepresenceSignal) {
+        const handlers = this.#signalHandlers.get(perspectiveUUID)
+        if (handlers) {
+            handlers.forEach(handler => handler(signal))
+        }
+    }
+
+    async subscribeToSignals(perspectiveUUID: string): Promise<void> {
+        const that = this
         await this.#apolloClient.subscribe({
             query: gql`subscription neighbourhoodSignal($perspectiveUUID: String!) {
                 neighbourhoodSignal(perspectiveUUID: $perspectiveUUID) {
@@ -183,8 +192,29 @@ export class NeighbourhoodClient {
         }).subscribe({
             next: (result: ApolloQueryResult<any>) => {
                 const { neighbourhoodSignal } = unwrapApolloResult(result)
-                handler(neighbourhoodSignal)
+                that.dispatchSignal(perspectiveUUID, neighbourhoodSignal)
             }
         })
+    }
+
+    async addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): Promise<void> {
+        let handlersForPerspective = this.#signalHandlers.get(perspectiveUUID)
+        if (!handlersForPerspective) {
+            handlersForPerspective = []
+            await this.subscribeToSignals(perspectiveUUID)
+        }
+        handlersForPerspective.push(handler)
+        this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
+    }
+
+    removeSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): void {
+        const handlersForPerspective = this.#signalHandlers.get(perspectiveUUID)
+        if (handlersForPerspective) {
+            const index = handlersForPerspective.indexOf(handler)
+            if (index > -1) {
+                handlersForPerspective.splice(index, 1)
+            }
+        }
+        this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
     }
 }
