@@ -3,26 +3,10 @@ import {
   InMemoryCache,
   NormalizedCacheObject,
 } from "@apollo/client/core";
-import { createClient } from "graphql-ws";
+import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient } from "@perspect3vism/ad4m";
-import { checkPort } from "./utils";
-
-function runBrowser(args: Ad4mConnectOptions): Client {
-  const port =
-    args.port || parseInt(localStorage.getItem("ad4minPort") || "12000");
-  const token = args.token || localStorage.getItem("ad4minToken") || "";
-  const url = args.url || localStorage.getItem("ad4minURL") || "";
-
-  const client = new Client({
-    ...args,
-    port,
-    token,
-    url,
-  });
-
-  return client;
-}
+import { checkPort, connectWebSocket } from "./utils";
 
 export type Ad4mConnectOptions = {
   appName: string;
@@ -34,26 +18,28 @@ export type Ad4mConnectOptions = {
   port?: number;
   token?: string;
   url?: string;
-  onStateChange?: any;
 };
 
-type PortSearchStateType = "na" | "searching" | "found" | "not_found";
+export type AuthStates = "authenticated" | "locked" | "unauthenticated";
 
-export type ClientStates =
-  | "connected_with_capabilities"
-  | "agent_locked"
-  | "invalid_token"
-  | "capabilities_not_matched"
-  | "verify_code"
-  | "not_connected"
-  | "loading"
-  | "disconnected"
-  | "connection-error"
-  | "remote_url";
+export type Event =
+  | "authstatechange"
+  | "connectionstatechange"
+  | "configstatechange";
 
 export type ConfigStates = "port" | "url" | "token";
+export type ConnectionStates =
+  | "connecting"
+  | "connected"
+  | "error"
+  | "port_not_found"
+  | "not_connected"
+  | "disconnected";
 
-class Client {
+export default class Ad4mConnect {
+  authState: AuthStates = "unauthenticated";
+  connectionState: ConnectionStates = "not_connected";
+  wsClient?: WSClient;
   apolloClient?: ApolloClient<NormalizedCacheObject>;
   ad4mClient?: Ad4mClient;
   requestId?: string;
@@ -61,13 +47,15 @@ class Client {
   token: string;
   isFullyInitialized = false;
   port = 12000;
-  portSearchState: PortSearchStateType = "na";
+  capabilities: { [x: string]: any }[] = [];
   appName: string;
   appDesc: string;
   appDomain: string;
-  capabilities: { [x: string]: any }[];
-  stateListeners: Function[];
-  configListeners: Function[];
+  listeners: Record<Event, Function[]> = {
+    ["authstatechange"]: [],
+    ["configstatechange"]: [],
+    ["connectionstatechange"]: [],
+  };
 
   // @fayeed - params
   constructor({
@@ -87,180 +75,129 @@ class Client {
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
     this.token = token || this.token;
-    this.stateListeners = [];
-    this.configListeners = [];
 
-    this.buildClient();
-
-    this.ad4mClient.agent.status().then(() => {
-      this.notifyStateChange("connected_with_capabilities");
-    });
-
-    this.ad4mClient.agent.addAgentStatusChangedListener(() => {
+    setTimeout(() => {
       this.checkConnection();
+    }, 0);
+  }
+
+  private notifyConfigChange(val: ConfigStates, data: string | number) {
+    this.listeners["configstatechange"].forEach((listener) => {
+      listener(val, data);
     });
   }
 
-  onStateChange(listener: (...args: any[]) => void) {
-    this.stateListeners.push(listener);
-  }
-
-  notifyStateChange(val: ClientStates) {
-    this.stateListeners.forEach((listener) => {
+  private notifyConnectionChange(val: ConnectionStates) {
+    if (this.connectionState === val) return;
+    this.connectionState = val;
+    this.listeners["connectionstatechange"].forEach((listener) => {
       listener(val);
     });
   }
 
-  onConfigChange(listener: (...args: any[]) => void) {
-    this.configListeners.push(listener);
-  }
-
-  notifyConfigChange(val: ConfigStates, data: any) {
-    this.configListeners.forEach((listener) => {
-      listener(val, data);
+  private notifyAuthChange(val: AuthStates) {
+    if (this.authState === val) return;
+    this.authState = val;
+    this.listeners["authstatechange"].forEach((listener) => {
+      listener(val);
     });
   }
 
   setPort(port: number) {
     if (this.port === port) return;
-    this.portSearchState = "found";
     this.port = port;
-    this.notifyConfigChange("port", port);
     this.setUrl(`ws://localhost:${this.port}/graphql`);
+    this.notifyConfigChange("port", port);
   }
 
   setUrl(url: string) {
-    // if (this.url === url) return;
+    if (this.url === url) return;
     this.url = url;
     this.notifyConfigChange("url", url);
-    this.buildClient();
   }
 
   setToken(token: string) {
     if (this.token === token) return;
     this.token = token;
-    this.buildClient();
     this.notifyConfigChange("token", token);
+  }
+
+  on(event: Event, cb: Function) {
+    this.listeners[event].push(cb);
   }
 
   async connect(url?: string) {
     if (url) {
       this.setUrl(url);
     }
-
-    this.notifyStateChange("loading");
     this.checkConnection();
   }
 
-  async reconnect() {
-    this.buildClient();
-    this.notifyStateChange("loading");
-    this.checkConnection();
+  async checkConnection() {
+    try {
+      this.notifyConnectionChange("connecting");
+      const res = await connectWebSocket(this.url, 10000);
+      this.buildClient();
+    } catch (e) {
+      this.connectToPort();
+    }
   }
 
   async connectToPort() {
     try {
-      this.notifyStateChange("loading");
-      const port = await checkPort(this.port);
-      if (port) {
-        this.setPort(port);
-        await this.checkConnection();
-      } else {
-        this.setPortSearchState("searching");
-
-        const port = await this.findPort();
-
-        if (port) {
-          this.setPort(port);
-          await this.checkConnection();
-        }
-      }
+      this.notifyConnectionChange("connecting");
+      const port = await this.findPort();
+      this.setPort(port);
+      this.buildClient();
     } catch (error) {
-      this.handleErrorMessage(error.message);
-    }
-  }
-
-  private handleErrorMessage(message) {
-    if (message.includes("Capability is not matched, you have capabilities:")) {
-      // Show wrong capability message.
-      this.notifyStateChange("capabilities_not_matched");
-    } else if (
-      message.includes(
-        "Cannot extractByTags from a ciphered wallet. You must unlock first."
-      )
-    ) {
-      // Show agent is locked message.
-      this.notifyStateChange("agent_locked");
-    } else if (message.includes("signature verification failed")) {
-      // wrong agent error
-      this.notifyStateChange("invalid_token");
-    } else if (message.includes("Unauthorized access")) {
-      this.notifyStateChange("invalid_token");
-    }else if (message.includes("Invalid Compact JWS")) {
-      this.notifyStateChange("invalid_token");
-    } else if (message.includes("JWS Protected Header is invalid")) {
-      this.notifyStateChange("invalid_token");
-    } else if (message.includes("Failed to fetch")) {
-      // wrong agent error
-      this.notifyStateChange("connection-error");
-    } else if (message === "Couldn't find an open port") {
-      // show no open port error & ask to retry
-      this.setPortSearchState("not_found");
-      this.notifyStateChange("connection-error");
-    } else if (message === "The user aborted a request.") {
-      this.notifyStateChange("connection-error");
-    } else {
-      this.notifyStateChange("not_connected");
+      this.notifyConnectionChange("not_connected");
     }
   }
 
   async findPort() {
-    this.notifyStateChange("loading");
+    const ports = [...Array(10).keys()].map((i) => {
+      return checkPort(12000 + i);
+    });
 
-    for (let i = 12000; i <= 12010; i++) {
-      try {
-        const status = await checkPort(i);
-        if (!status) {
-          continue;
-        } else {
-          this.setPort(status);
-          return status;
-        }
-      } catch (e) {
-        this.handleErrorMessage(e.message);
-      }
+    const results = await Promise.all(ports);
+    const result = results.find((port) => port);
+
+    if (result) return result;
+    else {
+      throw Error("Couldn't find an open port");
+    }
+  }
+
+  async buildClient() {
+    if (this.apolloClient) {
+      this.wsClient.terminate();
+      this.apolloClient.stop();
     }
 
-    this.setPortSearchState("not_found");
-
-    throw Error("Couldn't find an open port");
-  }
-
-  setPortSearchState(state: PortSearchStateType) {
-    this.portSearchState = state;
-  }
-
-  buildClient() {
-    const wsLink = new GraphQLWsLink(
-      createClient({
-        url: this.url,
-        connectionParams: {
-          headers: {
-            authorization: this.token,
-          },
+    this.wsClient = createClient({
+      url: this.url,
+      connectionParams: async () => ({
+        headers: {
+          authorization: this.token,
         },
-        on: {
-          closed: () => {
-            if (this.isFullyInitialized) {
-              this.notifyStateChange("disconnected");
-            }
-          },
+      }),
+      on: {
+        error: (e) => {
+          this.notifyConnectionChange("not_connected");
         },
-      })
-    );
+        connected: () => {
+          this.notifyConnectionChange("connected");
+        },
+        closed: () => {
+          if (this.isFullyInitialized) {
+            this.notifyConnectionChange("disconnected");
+          }
+        },
+      },
+    });
 
     this.apolloClient = new ApolloClient({
-      link: wsLink,
+      link: new GraphQLWsLink(this.wsClient),
       cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
       defaultOptions: {
         watchQuery: {
@@ -274,19 +211,26 @@ class Client {
 
     // @ts-ignore
     this.ad4mClient = new Ad4mClient(this.apolloClient);
+
+    this.checkAuth();
+
+    this.ad4mClient.agent.addAgentStatusChangedListener(() => {
+      this.checkAuth();
+    });
   }
 
-  async checkConnection() {
+  async checkAuth() {
     try {
-      await this.ad4mClient.agent.status();
-      this.isFullyInitialized = true;
-      this.notifyStateChange("connected_with_capabilities");
-    } catch (error) {
-      if (error.message === undefined) {
-        this.notifyStateChange("not_connected");
+      const isLocked = await this.ad4mClient.agent.isLocked();
+      if (isLocked) {
+        this.notifyAuthChange("locked");
       } else {
-        this.handleErrorMessage(error.message);
+        const status = await this.ad4mClient.agent.status();
+        this.notifyAuthChange("authenticated");
+        this.isFullyInitialized = true;
       }
+    } catch (error) {
+      this.notifyAuthChange("unauthenticated");
     }
   }
 
@@ -295,44 +239,21 @@ class Client {
       this.setToken(null);
     }
 
-    try {
-      this.requestId = await this.ad4mClient?.agent.requestCapability(
-        this.appName,
-        this.appDesc,
-        this.appDomain,
-        JSON.stringify(this.capabilities)
-      );
-      this.notifyStateChange("verify_code");
-    } catch (e) {
-      this.handleErrorMessage(e.message);
-    }
+    this.requestId = await this.ad4mClient?.agent.requestCapability(
+      this.appName,
+      this.appDesc,
+      this.appDomain,
+      JSON.stringify(this.capabilities)
+    );
   }
 
   async verifyCode(code: string) {
-    try {
-      this.notifyStateChange("loading");
+    const jwt = await this.ad4mClient?.agent.generateJwt(this.requestId!, code);
 
-      const jwt = await this.ad4mClient?.agent.generateJwt(
-        this.requestId!,
-        code
-      );
+    this.setToken(jwt);
 
-      this.setToken(jwt);
+    this.isFullyInitialized = true;
 
-      this.isFullyInitialized = true;
-
-      this.notifyStateChange("connected_with_capabilities");
-    } catch (e) {
-      this.handleErrorMessage(e.message);
-    }
-  }
-}
-
-export function ad4mConnect(args: Ad4mConnectOptions) {
-  if (window === undefined) {
-    console.log("Running ad4m-connect in node.js");
-  } else {
-    console.log("Running ad4m-connect in browser");
-    return runBrowser(args);
+    this.notifyAuthChange("authenticated");
   }
 }

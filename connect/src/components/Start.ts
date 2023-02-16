@@ -24,7 +24,7 @@ function downloadAd4m() {
 }
 
 export default function Start({
-  connectToPort,
+  connect,
   isMobile,
   hasClickedDownload,
   onDownloaded,
@@ -35,8 +35,11 @@ export default function Start({
     <div class="items">
       ${!hasClickedDownload
         ? html`<div class="text-center">
-              ${!isMobile
-                ? html`<a
+              ${isMobile
+                ? html`<button class="button" @click=${() => scanQrcode()}>
+                    Connect with QR
+                  </button> `
+                : html`<a
                     class="button"
                     target="_blank"
                     @click=${() => {
@@ -45,32 +48,26 @@ export default function Start({
                     }}
                   >
                     Install AD4M
-                  </a>`
-                : html`<button class="button" @click=${() => scanQrcode()}>
-                    Connect with QR
-                  </button> `}
+                  </a>`}
             </div>
             <div class="text-center">
-              <button
-                class="button button--link "
-                @click=${() => connectToPort()}
-              >
-                Reconnect
+              <button class="button button--link " @click=${() => connect()}>
+                Try again
               </button>
               or
               <button
                 class="button button--link "
-                @click=${() => changeState("remote_url")}
+                @click=${() => changeState("remoteurl")}
               >
                 Connect to a remote host
               </button>
             </div>`
         : html`<div class="text-center">
-            <a class="button" target="_blank" @click=${() => connectToPort()}>
+            <a class="button" target="_blank" @click=${() => connect()}>
               Connect
             </a>
             <p>
-              Please click reconnect once you have downloaded and setup your
+              Please click try again once you have downloaded and setup your
               AD4M agent
             </p>
           </div>`}

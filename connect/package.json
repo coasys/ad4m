@@ -12,7 +12,7 @@
     "prepare": "run-s build:*",
     "release": "np --no-2fa --no-tests --tag=latest",
     "release:beta": "np --no-2fa --no-tests --tag=beta --any-branch",
-    "dev": "NODE_ENV=dev run-p build:* serve",
+    "dev": "NODE_ENV=dev && vite dev",
     "serve": "npx serve",
     "build": "npm run build:core && npm run build:web && npm run build:electron && npm run build:utils && tsc",
     "build:core": "node scripts/esbuild.js",
@@ -56,6 +56,7 @@
     "electron": "^20.0.3",
     "esbuild-plugin-inline-image": "^0.0.8",
     "html5-qrcode": "^2.2.1",
-    "lit": "^2.3.1"
+    "lit": "^2.3.1",
+    "vite": "^4.1.1"
   }
 }
