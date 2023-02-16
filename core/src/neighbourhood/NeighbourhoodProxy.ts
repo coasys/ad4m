@@ -39,4 +39,8 @@ export class NeighbourhoodProxy {
     async addSignalHandler(handler: (payload: PerspectiveExpression) => void): Promise<void> {
         await this.#client.addSignalHandler(this.#pID, handler)
     }
+
+    removeSignalHandler(handler: (payload: PerspectiveExpression) => void) {
+        this.#client.removeSignalHandler(this.#pID, handler)
+    }
 }

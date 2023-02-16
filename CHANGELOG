@@ -6,7 +6,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
-
+ - Adds ability to remove Telepresence signal handler [PR#251](https://github.com/perspect3vism/ad4m/pull/251)
 ### Changed
 
 ### Deprecated
