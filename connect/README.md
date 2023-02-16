@@ -2,7 +2,9 @@
 
 This package makes it easy for AD4M apps to connect to a local or remote AD4M executor by handling all the complex things like finding the local executor port, requesting and storing a capability token, creating and recreating an Ad4mClient.
 
-![](screenshots/Screenshot_executor_url.png)
+<div style="text-align: center">
+<img src="screenshots/Screenshot_executor_url.png" width="400"></img>
+</div>
 
 ## Installation
 
@@ -14,7 +16,11 @@ This package makes it easy for AD4M apps to connect to a local or remote AD4M ex
 - `appDesc(required)`: Description of the application using ad4m-connect.
 - `appDomain(required)`: Domain of the application using ad4m-connect.
 - `capabilities(required)`: Capabilities requested by the application.
-- `appiconpath`: Icon for the app using ad4m-connect.
+- `appIconPath`: Icon for the app using ad4m-connect.
+- `port`: Port that AD4M is running on.
+- `token`: JWT token if you have one.
+- `url`: The url that we should connect to.
+
 
 ## Events
 
