@@ -35,7 +35,8 @@ import Ad4mConnectUI from "@perspect3vism/ad4m-connect";
 const ui = Ad4mConnectUI({
   appName: "ad4m-connect-example",
   appDesc: "hello",
-  appDomain: "http://localhost:3000",
+  appDomain: "dev.ad4m.connect.example",
+
   appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
   capabilities: [
     {
