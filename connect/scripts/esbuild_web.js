@@ -1,8 +1,7 @@
 const { default: litPlugin } = require("esbuild-plugin-lit");
+const esbuild = require("esbuild");
 
-console.log(process.env.NODE_ENV);
-
-require("esbuild")
+esbuild
   .build({
     entryPoints: ["./src/web.ts"],
     bundle: true,

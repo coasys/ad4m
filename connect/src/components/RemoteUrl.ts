@@ -24,7 +24,7 @@ export default function RemoveUrl({
       <div class="buttons">
         <button
           class="button button--full button--secondary"
-          @click=${() => changeState("not_connected")}
+          @click=${() => changeState("start")}
         >
           Back
         </button>

@@ -1,10 +1,31 @@
 import { Ad4mClient } from "@perspect3vism/ad4m";
-import { ClientStates } from "./core";
+import { AuthStates } from "./core";
 
 function Timeout() {
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 20);
   return controller;
+}
+
+export async function connectWebSocket(url, timeout = 5000) {
+  return Promise.race([
+    new Promise((resolve, reject) => {
+      const websocket = new WebSocket(url);
+
+      websocket.onopen = () => {
+        resolve(websocket);
+      };
+
+      websocket.onerror = (error) => {
+        reject(error);
+      };
+    }),
+    new Promise((resolve, reject) => {
+      setTimeout(() => {
+        reject(new Error("WebSocket connection timed out"));
+      }, timeout);
+    }),
+  ]);
 }
 
 export async function checkPort(port: number) {
@@ -20,7 +41,7 @@ export async function checkPort(port: number) {
       return null;
     }
   } catch (e) {
-    throw e;
+    return null;
   }
 }
 
@@ -42,8 +63,8 @@ export function getAd4mClient(): Promise<Ad4mClient> {
 export function onAuthStateChanged(callback) {
   const el = document.querySelector("ad4m-connect");
 
-  el?.addEventListener("authStateChange", (e: CustomEvent) => {
-    callback(e.detail as ClientStates);
+  el?.addEventListener("authstatechange", (e: CustomEvent) => {
+    callback(e.detail as AuthStates);
   });
 }
 
