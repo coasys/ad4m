@@ -256,9 +256,14 @@ export default class AgentService {
     async unlock(password: string) {
         // @ts-ignore
         this.#wallet.unlock(password)
-        await this.storeAgentProfile()
         this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump())
         this.#readyPromiseResolve!()
+        try {
+            await this.storeAgentProfile()
+        } catch (e) {
+            console.debug("Error when trying to store agent profile during unlock: ", e)
+            console.debug("Continuing anyway...")
+        }
     }
 
     lock(password: string) {
