@@ -3,7 +3,8 @@
     "experimentalDecorators": true,
     "emitDeclarationOnly": true,
     "declaration": true,
-    "outDir": "dist",
+    "outDir": "./dist",
+    "rootDir": "./src",
     "target": "es6",
     "moduleResolution": "Node",
     "resolveJsonModule": true,
@@ -11,7 +12,7 @@
     "types": ["node", "jest"],
     "skipLibCheck": true
   },
-  "include": ["**/*"],
+  "include": ["./src"],
   "exclude": [
     "node_modules/*",
     "**/*.spec.ts",

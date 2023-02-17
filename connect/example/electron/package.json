@@ -9,6 +9,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "electron": "^20.0.3"
+    "electron": "^20.0.3",
+    "@perspect3vism/ad4m-connect": "*"
   }
 }

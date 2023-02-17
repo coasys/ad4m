@@ -170,7 +170,7 @@ export default class Ad4mConnect {
 
   async buildClient() {
     if (this.apolloClient) {
-      this.wsClient.terminate();
+      this.wsClient.dispose();
       this.apolloClient.stop();
     }
 
@@ -217,6 +217,7 @@ export default class Ad4mConnect {
     this.checkAuth();
 
     this.ad4mClient.agent.addAgentStatusChangedListener(() => {
+      console.log("callback called");
       this.checkAuth();
     });
   }
@@ -224,15 +225,25 @@ export default class Ad4mConnect {
   async checkAuth() {
     try {
       const isLocked = await this.ad4mClient.agent.isLocked();
+
       if (isLocked) {
         this.notifyAuthChange("locked");
       } else {
-        const status = await this.ad4mClient.agent.status();
+        await this.ad4mClient.agent.status();
         this.notifyAuthChange("authenticated");
         this.isFullyInitialized = true;
       }
     } catch (error) {
-      this.notifyAuthChange("unauthenticated");
+      console.log(error);
+      // TODO: isLocked throws an error, should just return a boolean. Temp fix
+      if (
+        error.message ===
+        "Socket closed with event 4500 Cannot extractByTags from a ciphered wallet. You must unlock first."
+      ) {
+        this.notifyAuthChange("locked");
+      } else {
+        this.notifyAuthChange("unauthenticated");
+      }
     }
   }
 
@@ -253,9 +264,8 @@ export default class Ad4mConnect {
     const jwt = await this.ad4mClient?.agent.generateJwt(this.requestId!, code);
 
     this.setToken(jwt);
+    this.buildClient();
 
     this.isFullyInitialized = true;
-
-    this.notifyAuthChange("authenticated");
   }
 }

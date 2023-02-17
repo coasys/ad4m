@@ -21,7 +21,6 @@ This package makes it easy for AD4M apps to connect to a local or remote AD4M ex
 - `token`: JWT token if you have one.
 - `url`: The url that we should connect to.
 
-
 ## Events
 
 - `authstatechange`: `authenticated` | `unauthenticated` | `locked`
@@ -31,9 +30,9 @@ This package makes it easy for AD4M apps to connect to a local or remote AD4M ex
 ## In the Browser
 
 ```js
-import Ad4mConnectUI from "@perspect3vism/ad4m-connect/dist/web";
+import Ad4mConnectUI from "@perspect3vism/ad4m-connect";
 
-const ui = new Ad4mConnectUI({
+const ui = Ad4mConnectUI({
   appName: "ad4m-connect-example",
   appDesc: "hello",
   appDomain: "http://localhost:3000",
@@ -57,42 +56,39 @@ ui.addEventListener("authstatechange", (e) => {
 
 ## Usage (from Node / Electron)
 
-```js
-const { ad4mConnect } = require("@perspect3vism/ad4m-connect/dist/electron");
-```
-
-and then just call that function with parameters of your app:
+Call ad4mConnect with parameters of your app:
 
 ```js
+const { ad4mConnect } = require("@perspect3vism/ad4m-connect/electron");
+
 ad4mConnect({
-    // Provide the name of your app to be displayed in the dialog
-    appName: "Perspect3ve",
-    // Provide an icon to be displayed in the dialog as well
-    appIconPath: path.join(__dirname, "graphics", "Logo.png"),
-    // Name the capabilities your app needs
-    // (this is an example with all capabilities)
-    capabilities: [{"with":{"domain":"*","pointers":["*"]},"can":["*"]}],
-    // Provide a directory in which the capability token and the executor
-    // URL will be stored such that future calls won't even open a dialog
-    // but try the token against that URL and resolve immediately
-    // if it works.
-    dataPath: path.join(homedir(), '.perspect3ve')
+  // Provide the name of your app to be displayed in the dialog
+  appName: "Perspect3ve",
+  // Provide an icon to be displayed in the dialog as well
+  appIconPath: path.join(__dirname, "graphics", "Logo.png"),
+  // Name the capabilities your app needs
+  // (this is an example with all capabilities)
+  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+  // Provide a directory in which the capability token and the executor
+  // URL will be stored such that future calls won't even open a dialog
+  // but try the token against that URL and resolve immediately
+  // if it works.
+  dataPath: path.join(homedir(), ".perspect3ve"),
 })
-    .then(({client, capabilityToken, executorUrl}) => {
-        // Retrieved `capabilityToken` and selected `executorUrl` are returned
-        // but all that is really needed is `client` which is a fully setup
-        // (including capability token) and working Ad4mClient.
-        //
-        // Both, the URL and the token have already been stored on disk
-        // in the directory provided as `dataPath`.
-        //
-        // Consequetive calls
-        createWindow(client)
-    })
-    .catch(()=> {
-        console.log("User closed AD4M connection wizard. Exiting...")
-        app.exit(0)
-        process.exit(0)
-    })
-}
+  .then(({ client, capabilityToken, executorUrl }) => {
+    // Retrieved `capabilityToken` and selected `executorUrl` are returned
+    // but all that is really needed is `client` which is a fully setup
+    // (including capability token) and working Ad4mClient.
+    //
+    // Both, the URL and the token have already been stored on disk
+    // in the directory provided as `dataPath`.
+    //
+    // Consequetive calls
+    createWindow(client);
+  })
+  .catch(() => {
+    console.log("User closed AD4M connection wizard. Exiting...");
+    app.exit(0);
+    process.exit(0);
+  });
 ```

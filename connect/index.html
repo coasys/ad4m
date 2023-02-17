@@ -7,15 +7,15 @@
     <title>Document</title>
   </head>
   <body>
-    <h1 id="authstate"></h1>
-    <h1 id="connectionstate"></h1>
+    <h1 id="auth"></h1>
+    <h1 id="connection"></h1>
 
-    <button id="connectButton">Connect with Ad4M</button>
+    <button id="button">Connect with Ad4M</button>
 
     <script type="module">
       import Ad4mConnectUI from "./src/web.ts";
 
-      const ui = new Ad4mConnectUI({
+      const ui = Ad4mConnectUI({
         appName: "ad4m-connect-example",
         appDesc: "hello",
         appDomain: "http://localhost:3000",
@@ -28,19 +28,23 @@
         ],
       });
 
-      connectionstate.innerText = ui.connectionState;
-      authstate.innerText = ui.authState;
+      const authTitle = document.getElementById("auth");
+      const connectionTitle = document.getElementById("connection");
+      const button = document.getElementById("button");
 
-      connectButton.addEventListener("click", () => {
+      connectionTitle.innerText = ui.connectionState;
+      authTitle.innerText = ui.authState;
+
+      button.addEventListener("click", () => {
         ui.connect();
       });
 
       ui.addEventListener("connectionstatechange", (e) => {
-        connectionstate.innerText = ui.connectionState;
+        connectionTitle.innerText = ui.connectionState;
       });
 
       ui.addEventListener("authstatechange", (e) => {
-        authstate.innerText = ui.authState;
+        authTitle.innerText = ui.authState;
       });
     </script>
   </body>

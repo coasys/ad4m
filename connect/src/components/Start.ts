@@ -1,36 +1,20 @@
 import { html } from "lit";
-import { version } from "../../package.json";
-import { detectOS } from "../utils";
-
-function downloadAd4m() {
-  const windowsLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/AD4M_${version}_x64_en-US.msi`;
-  const macLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/AD4M_${version}_x64.dmg`;
-  const linuxLink = `https://github.com/perspect3vism/ad4m/releases/download/v${version}/ad4m_${version}_amd64.deb`;
-  const OSName = detectOS();
-  const link = document.createElement("a");
-  console.log({ OSName, link });
-  if (OSName === "MacOS") {
-    link.setAttribute("href", macLink);
-    link.click();
-  }
-  if (OSName === "UNIX" || OSName === "Linux") {
-    link.setAttribute("href", linuxLink);
-    link.click();
-  }
-  if (OSName === "Windows") {
-    link.setAttribute("href", windowsLink);
-    link.click();
-  }
-}
 
 export default function Start({
   connect,
   isMobile,
   hasClickedDownload,
-  onDownloaded,
   changeState,
+  onDownloaded,
   scanQrcode,
 }) {
+  function clickLink(e: Event) {
+    e.preventDefault();
+    const el = e.currentTarget as HTMLLinkElement;
+    window.open(el.href, "_blank");
+    this.onDownloaded();
+  }
+
   return html`
     <div class="items">
       ${!hasClickedDownload
@@ -42,12 +26,10 @@ export default function Start({
                 : html`<a
                     class="button"
                     target="_blank"
-                    @click=${() => {
-                      downloadAd4m();
-                      onDownloaded();
-                    }}
+                    @click=${clickLink}
+                    href="https://ad4m.dev/download"
                   >
-                    Install AD4M
+                    Download AD4M
                   </a>`}
             </div>
             <div class="text-center">
@@ -64,10 +46,10 @@ export default function Start({
             </div>`
         : html`<div class="text-center">
             <a class="button" target="_blank" @click=${() => connect()}>
-              Connect
+              Connect to AD4M
             </a>
             <p>
-              Please click try again once you have downloaded and setup your
+              Please connect to AD4M once you have downloaded and setup your
               AD4M agent
             </p>
           </div>`}

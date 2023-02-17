@@ -397,19 +397,30 @@ export class Ad4mConnectElement extends LitElement {
   appDomain = null;
 
   @property({ type: String, reflect: true })
-  capabilities = [];
-
-  @property({ type: String, reflect: true })
-  token = null;
-
-  @property({ type: String, reflect: true })
-  port = 12000;
-
-  @property({ type: String, reflect: true })
   appIconPath = null;
 
   @property({ type: String, reflect: true })
-  url = null;
+  capabilities = [];
+
+  // TODO: localstorage doesnt work here
+  @property({ type: String })
+  token = localStorage.getItem("ad4murl") || "";
+
+  // TODO: localstorage doesnt work here
+  @property({ type: String, reflect: true })
+  port = parseInt(localStorage.getItem("ad4mport")) || 12000;
+
+  // TODO: localstorage doesnt work here
+  @property({ type: String, reflect: true })
+  url = localStorage.getItem("ad4murl") || "";
+
+  get authState(): AuthStates {
+    return this._client.authState;
+  }
+
+  get connectionState(): ConnectionStates {
+    return this._client.connectionState;
+  }
 
   connectedCallback() {
     super.connectedCallback();
@@ -425,12 +436,12 @@ export class Ad4mConnectElement extends LitElement {
       capabilities: Array.isArray(this.capabilities)
         ? this.capabilities
         : JSON.parse(this.capabilities),
-      port: this.port || parseInt(localStorage.getItem("ad4mport")),
+      port: this.port || parseInt(localStorage.getItem("ad4mport")) || 12000,
       token: this.token || localStorage.getItem("ad4mtoken"),
       url: this.url || localStorage.getItem("ad4murl"),
     });
 
-    this._client.on("configstatechange", (name: ConfigStates, val) => {
+    this._client.on("configstatechange", (name: any, val) => {
       this[name] = val;
       if (val) {
         localStorage.setItem("ad4m" + name, val);
@@ -469,31 +480,9 @@ export class Ad4mConnectElement extends LitElement {
     this.constructQR();
   }
 
-  get authState(): AuthStates {
-    return this._client.authState;
-  }
-
-  get connectionState(): ConnectionStates {
-    return this._client.connectionState;
-  }
-
   connect() {
     this._isOpen = true;
     this._client.connect();
-  }
-
-  reconnect() {
-    this._isOpen = true;
-    this._client.connect();
-  }
-
-  async connected() {
-    try {
-      await this.getAd4mClient().agent.status();
-      return true;
-    } catch (e) {
-      return false;
-    }
   }
 
   getAd4mClient() {
@@ -640,7 +629,7 @@ export class Ad4mConnectElement extends LitElement {
     if (this.authState === "locked") {
       return AgentLocked({
         unlockAgent: this.unlockAgent,
-        connectToPort: this.connectToPort,
+        reconnect: this.connect,
       });
     }
 
@@ -689,7 +678,7 @@ export class Ad4mConnectElement extends LitElement {
 
     if (this.connectionState === "disconnected") {
       return Disconnected({
-        reconnect: this.reconnect,
+        reconnect: this.connect,
       });
     }
 
@@ -713,13 +702,14 @@ export class Ad4mConnectElement extends LitElement {
   }
 }
 
-export default class Ad4mConnectUI {
-  constructor(props: Ad4mConnectOptions) {
-    const element = document.createElement("ad4m-connect");
-    Object.entries(props).forEach(([key, value]) => {
-      element[key] = value;
-    });
-    document.body.appendChild(element);
-    return element;
-  }
+export default function Ad4mConnectUI(props: Ad4mConnectOptions) {
+  const element = new Ad4mConnectElement();
+
+  Object.entries(props).forEach(([key, value]) => {
+    element[key] = value;
+  });
+
+  document.body.appendChild(element);
+
+  return element;
 }

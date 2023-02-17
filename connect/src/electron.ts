@@ -1,4 +1,4 @@
-import { Ad4mConnectOptions } from "./core";
+import type { Ad4mConnectOptions } from "./core";
 
 const { ipcMain, BrowserWindow } = require("electron");
 const path = require("path");
@@ -17,6 +17,7 @@ function ensureDir(dataPath) {
 
 function setExecutorUrl(executorUrl, dataPath) {
   ensureDir(dataPath);
+  console.log("url in writeFile", executorUrl);
   fs.writeFileSync(path.join(dataPath, EXECUTOR_URL_FILENAME), executorUrl);
 }
 
@@ -98,6 +99,7 @@ export function ad4mConnect(args: Ad4mConnectOptions) {
 
     ipcMain.on("resolve", (event, arg) => {
       let { executorUrl, capabilityToken, client } = arg;
+
       console.log({ executorUrl, capabilityToken });
       setExecutorUrl(executorUrl, dataPath);
       setCapToken(capabilityToken, dataPath);

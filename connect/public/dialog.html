@@ -24,7 +24,7 @@
         capabilities,
       } = ipcRenderer.sendSync("get");
 
-      const ui = new Ad4mConnectUI({
+      const ui = Ad4mConnectUI({
         appName,
         appDesc,
         appDomain,
@@ -36,9 +36,10 @@
 
       ui.addEventListener("authstatechange", (e) => {
         if (ui.authState === "authenticated") {
+          console.log(ui.token);
           ipcRenderer.send("resolve", {
             executorUrl,
-            capabilityToken: ui.token,
+            capabilityToken: ui.token || localStorage.getItem("ad4mtoken"),
           });
         }
       });
