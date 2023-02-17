@@ -6,6 +6,18 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+## [0.2.14] - 17/02/2013
+
+### Added
  - Adds ability to remove Telepresence signal handler [PR#251](https://github.com/perspect3vism/ad4m/pull/251)
 ### Changed
  - "Language not created by trusted agent and is not templated" error is now shown in log and contains the meta information of the failed Language [PR#252](https://github.com/perspect3vism/ad4m/pull/252)
