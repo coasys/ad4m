@@ -396,14 +396,13 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             agentUnlock: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.AGENT_UNLOCK_CAPABILITY)
-                let failed = false
                 try {
                     await core.agentService.unlock(args.passphrase)
                 } catch(e) {
-                    failed = true
+                    console.log("Error unlocking agent: ", e)
                 }
 
-                if(!failed) {
+                if(core.agentService.isUnlocked()) {
                     try {
                         core.perspectivesController;
                         await core.waitForAgent();
@@ -430,7 +429,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
                 const dump = core.agentService.dump() as any
 
-                if(failed) {
+                if(core.agentService.isUnlocked()) {
                     dump.error = "Wrong passphrase"
                 }
 
