@@ -152,6 +152,10 @@ setup() {
 }
 
 @test "can create and get expressions, using note-ipfs language" {
+    skip
+    # Skip for now since publishing note-ipfs language (to production language language)
+    # will overwrite the language meta and cause problems...
+    # TODO: add this test back in once our language language wont' overwrite metas anymore
     wget https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js -O ./tests/note-ipfs.js
     pwd=`pwd`
     publish_output=`./target/release/ad4m -n -e http://localhost:4000/graphql languages publish $pwd/tests/note-ipfs.js -n "note-ipfs" -d "Stores text expressions in IPFS" -p "", -s "https://github.com/perspect3vism/lang-note-ipfs"`
