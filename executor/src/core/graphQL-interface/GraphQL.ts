@@ -424,12 +424,16 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                     }
 
-                    await core.agentService.ensureAgentExpression();
+                    try {
+                        await core.agentService.ensureAgentExpression();    
+                    } catch (e) {
+                        console.log("Error ensuring public agent expression: ", e)
+                    }
                 }
 
                 const dump = core.agentService.dump() as any
 
-                if(core.agentService.isUnlocked()) {
+                if(!core.agentService.isUnlocked()) {
                     dump.error = "Wrong passphrase"
                 }
 
