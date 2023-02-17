@@ -35,6 +35,8 @@ export default function languageTests(testContext: TestContext) {
                     sourceLanguageMeta
                 )
                 expect(sourceLanguage.name).to.be.equal(sourceLanguageMeta.name);
+                // @ts-ignore
+                sourceLanguageMeta.address = sourceLanguage.address;
             })
 
             it('Alice can get the source of her own templated language', async () => {
