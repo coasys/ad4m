@@ -18,88 +18,100 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## [0.2.14] - 17/02/2013
 
 ### Added
- - Adds ability to remove Telepresence signal handler [PR#251](https://github.com/perspect3vism/ad4m/pull/251)
+- Adds ability to remove Telepresence signal handler [PR#251](https://github.com/perspect3vism/ad4m/pull/251)
+- e92b19f (connect): Add typescript types to the build, and use web as default. Separate export for Electron.
+
 ### Changed
- - "Language not created by trusted agent and is not templated" error is now shown in log and contains the meta information of the failed Language [PR#252](https://github.com/perspect3vism/ad4m/pull/252)
+
+- "Language not created by trusted agent and is not templated" error is now shown in log and contains the meta information of the failed Language [PR#252](https://github.com/perspect3vism/ad4m/pull/252)
+- 968da42 (connect): Separate event state into `authstatechange` `connectionstatechange` and `configstatechange` in ad4m-connect
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
- - Startup when unlocking (instead of generating) agent was halted with empty log and "No Perspective controller" errors. Fixed with better error handling during unlock [PR#253](https://github.com/perspect3vism/ad4m/pull/253) and [PR#256](https://github.com/perspect3vism/ad4m/pull/256)
+- Startup when unlocking (instead of generating) agent was halted with empty log and "No Perspective controller" errors. Fixed with better error handling during unlock [PR#253](https://github.com/perspect3vism/ad4m/pull/253) and [PR#256](https://github.com/perspect3vism/ad4m/pull/256)
   
 ## [0.2.13] - 15/02/2013
 
 ### Added
- - Expression "create", "get" and "get-raw" added to cli and rust-client [PR#159](https://github.com/perspect3vism/ad4m/pull/159)
+
+- Expression "create", "get" and "get-raw" added to cli and rust-client [PR#159](https://github.com/perspect3vism/ad4m/pull/159)
 
 ### Changed
- - CLI: `ad4m languages generate-boostrap` is now availabel under `ad4m dev generate-bootstrap`
- - Default bootstrap-seed updated
+
+- CLI: `ad4m languages generate-boostrap` is now availabel under `ad4m dev generate-bootstrap`
+- Default bootstrap-seed updated
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
- - Bootstrap seed creation working with cli: `ad4m dev generate-bootstrap` [PR#247](https://github.com/perspect3vism/ad4m/pull/247)
- 
 
+- Bootstrap seed creation working with cli: `ad4m dev generate-bootstrap` [PR#247](https://github.com/perspect3vism/ad4m/pull/247)
 
 ## [0.2.12-patch-1] - 14/02/2023
 
 ### Changed
- - Sets last supported version to 0.2.12
+
+- Sets last supported version to 0.2.12
 
 ###
+
 - Adds new language publishing agent key to trusted agents in boostrap seed
 
 ## [0.2.12] - 14/02/2023
 
 ### Added
- - Telepresence implementation (real-time signals between agents in Neighbourhoods) ][PR#239](https://github.com/perspect3vism/ad4m/pull/238)
- - Perspective synchronization state with easing-off retries of LinkLanguage installation and network sync [PR#235](https://github.com/perspect3vism/ad4m/pull/235)
+
+- Telepresence implementation (real-time signals between agents in Neighbourhoods) ][PR#239](https://github.com/perspect3vism/ad4m/pull/238)
+- Perspective synchronization state with easing-off retries of LinkLanguage installation and network sync [PR#235](https://github.com/perspect3vism/ad4m/pull/235)
 
 ### Changed
- - SDNA Subject API and decorators improved [PR#229](https://github.com/perspect3vism/ad4m/pull/229)
- - AD4M connect updated to new style [PR#242](https://github.com/perspect3vism/ad4m/pull/242)
+
+- SDNA Subject API and decorators improved [PR#229](https://github.com/perspect3vism/ad4m/pull/229)
+- AD4M connect updated to new style [PR#242](https://github.com/perspect3vism/ad4m/pull/242)
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
-  - Copy/paste of proxy URL from launcher working now [PR#241](https://github.com/perspect3vism/ad4m/pull/241)
-  - Duplicate entries of trusted agents [also PR#241](https://github.com/perspect3vism/ad4m/pull/241)
- 
+
+- Copy/paste of proxy URL from launcher working now [PR#241](https://github.com/perspect3vism/ad4m/pull/241)
+- Duplicate entries of trusted agents [also PR#241](https://github.com/perspect3vism/ad4m/pull/241)
 
 ### Security
 
 ## [0.2.11] - 02/02/2023
 
 ### Added
- - Ability to revoke applications in ad4m launcher
- - Added more neighbourhood url for perspective log outputs across all functions
- - Installing neighbourhoods will now check if there is already one installed with that url
- - Mechanism added for cleaning agents data automatically when releasing a new launcher version incompatible with older ones
+
+- Ability to revoke applications in ad4m launcher
+- Added more neighbourhood url for perspective log outputs across all functions
+- Installing neighbourhoods will now check if there is already one installed with that url
+- Mechanism added for cleaning agents data automatically when releasing a new launcher version incompatible with older ones
 
 ### Changed
- - CI test binaries now use cargo built binaries instead of nix 
- - Default link language updated to new perspective-diff-sync with simple latest revision link anchors & simple active agent links
- - Holochain upgraded to 0.1.0
- - Holochain client upraded to 0.12.0
- - UI changes to launcher make style more close to ad4m website
+
+- CI test binaries now use cargo built binaries instead of nix
+- Default link language updated to new perspective-diff-sync with simple latest revision link anchors & simple active agent links
+- Holochain upgraded to 0.1.0
+- Holochain client upraded to 0.12.0
+- UI changes to launcher make style more close to ad4m website
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
- - IPFS lock causing ad4m launcher to not start
- - Not being able to click outside the launcher to minimize it
- - Updating a link now triggers add/remove link signals
- - No longer calling signedZomeCall() in HolochainService, results in reduced CPU load and function call time
+
+- IPFS lock causing ad4m launcher to not start
+- Not being able to click outside the launcher to minimize it
+- Updating a link now triggers add/remove link signals
+- No longer calling signedZomeCall() in HolochainService, results in reduced CPU load and function call time
 
 ### Security
 
@@ -108,7 +120,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## [0.2.10] - 12/01/2023
 
 ### Added
- - AD4M version number inside of launcher UI: [#196](https://github.com/perspect3vism/ad4m/pull/196)
+
+- AD4M version number inside of launcher UI: [#196](https://github.com/perspect3vism/ad4m/pull/196)
 
 ### Changed
 
@@ -125,27 +138,31 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## [0.2.9] - 11/01/2023
 
 ### Added
- - SDNA Collection "where": [#156](https://github.com/perspect3vism/ad4m/pull/156)
- - Missing build step & rust install process to README
- - In ad4m-connect show a connection error telling users to check browser shields if we notice requests being blocked: [#185](https://github.com/perspect3vism/ad4m/pull/185) & [#191](https://github.com/perspect3vism/ad4m/pull/191)
- - Stop scanning button in ad4m-launcher: [#155](https://github.com/perspect3vism/ad4m/pull/155)
+
+- SDNA Collection "where": [#156](https://github.com/perspect3vism/ad4m/pull/156)
+- Missing build step & rust install process to README
+- In ad4m-connect show a connection error telling users to check browser shields if we notice requests being blocked: [#185](https://github.com/perspect3vism/ad4m/pull/185) & [#191](https://github.com/perspect3vism/ad4m/pull/191)
+- Stop scanning button in ad4m-launcher: [#155](https://github.com/perspect3vism/ad4m/pull/155)
 
 ### Changed
- - In ad4m-connect after downloading ad4m-launcher; show connect instead of reconnect text: [#183](https://github.com/perspect3vism/ad4m/pull/183)
- - Each Holochain DNA now has its own async queue so only DNA specific requests are ran in sync: [#184](https://github.com/perspect3vism/ad4m/pull/184)
+
+- In ad4m-connect after downloading ad4m-launcher; show connect instead of reconnect text: [#183](https://github.com/perspect3vism/ad4m/pull/183)
+- Each Holochain DNA now has its own async queue so only DNA specific requests are ran in sync: [#184](https://github.com/perspect3vism/ad4m/pull/184)
 
 ### Deprecated
 
 ### Removed
- - .AppImage build targets: [#180](https://github.com/perspect3vism/ad4m/pull/180)
+
+- .AppImage build targets: [#180](https://github.com/perspect3vism/ad4m/pull/180)
 
 ### Fixed
- - Cleaned up logging output from ad4m-executor & link language: [#160](https://github.com/perspect3vism/ad4m/pull/160)
- - Wait for ipfs repo.lock before starting ad4m-launcher: [#182](https://github.com/perspect3vism/ad4m/pull/182)
- - Block spawning multiple ad4m launchers: [#181](https://github.com/perspect3vism/ad4m/pull/181)
- - Fix copy text on Linux: [#187](https://github.com/perspect3vism/ad4m/pull/187)
- - Fix UI buttons on Windows: [#188](https://github.com/perspect3vism/ad4m/pull/188)
- - Fix pending commit handling when joining a neighbourhood. This code ensures that a user will not submit commits to a link language until they have received some data in the case where they join a neighbourhood: [#193](https://github.com/perspect3vism/ad4m/pull/193) & [#177](https://github.com/perspect3vism/ad4m/pull/177)
+
+- Cleaned up logging output from ad4m-executor & link language: [#160](https://github.com/perspect3vism/ad4m/pull/160)
+- Wait for ipfs repo.lock before starting ad4m-launcher: [#182](https://github.com/perspect3vism/ad4m/pull/182)
+- Block spawning multiple ad4m launchers: [#181](https://github.com/perspect3vism/ad4m/pull/181)
+- Fix copy text on Linux: [#187](https://github.com/perspect3vism/ad4m/pull/187)
+- Fix UI buttons on Windows: [#188](https://github.com/perspect3vism/ad4m/pull/188)
+- Fix pending commit handling when joining a neighbourhood. This code ensures that a user will not submit commits to a link language until they have received some data in the case where they join a neighbourhood: [#193](https://github.com/perspect3vism/ad4m/pull/193) & [#177](https://github.com/perspect3vism/ad4m/pull/177)
 
 ### Security
 

@@ -23,9 +23,9 @@ export default function Request({ code, changeState, verifyCode, changeCode }) {
       <div class="buttons">
         <button
           class="button button--full button--secondary"
-          @click=${() => changeState("capabilities_not_matched")}
+          @click=${() => changeState("start")}
         >
-          Cancel
+          Back
         </button>
         <button class="button button--full" @click=${() => verifyCode(code)}>
           Continue
