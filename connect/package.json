@@ -43,7 +43,6 @@
     "email": "nicolas@perspect3vism.org"
   },
   "devDependencies": {
-    "@perspect3vism/ad4m-connect": "*",
     "@apollo/client": "3.6.9",
     "@perspect3vism/ad4m": "*",
     "@rollup/plugin-commonjs": "^14.0.0",
