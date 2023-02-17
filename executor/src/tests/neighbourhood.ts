@@ -102,6 +102,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     bobNH = bobP1!.getNeighbourhoodProxy()
                     aliceDID = (await alice.agent.me()).did
                     bobDID = (await bob.agent.me()).did
+                    await sleep(5000)
                 })
 
                 it('they see each other in `otherAgents`', async () => {
