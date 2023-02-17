@@ -15,6 +15,7 @@ import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
+import stringify from 'json-stable-stringify'
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
@@ -483,7 +484,8 @@ export default class LanguageController {
                     Object.keys(languageMetaData.templateAppliedParams).length == 0 ||
                     !languageMetaData.templateSourceLanguageAddress
                 ) {
-                    let errMsg = `Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${languageMetaData}`
+                    let errMsg = `Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${stringify(languageMetaData)}`
+                    console.error(errMsg)
                     this.pubSub.publish(
                         PubSub.EXCEPTION_OCCURRED_TOPIC,
                         {
