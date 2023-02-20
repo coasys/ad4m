@@ -14,7 +14,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Removed
 
 ### Fixed
- - Not slow polling after sync 
+ - Not slow polling after sync [PR#260](https://github.com/perspect3vism/ad4m/pull/260)
 
 ## [0.2.14] - 17/02/2013
 
