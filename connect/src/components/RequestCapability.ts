@@ -14,7 +14,7 @@ export default function CapNotMatchedFirst({
         <h1 class="heading">Authorize ${appname}</h1>
         <p class="body">${appname} want you to grant it these capabilities</p>
         <div>
-          ${JSON.parse(capabilities).map(
+          ${capabilities.map(
             (e) =>
               html`<li>${e.can} => ${e.with.domain}.${e.with.pointers}</li>`
           )}
@@ -38,20 +38,18 @@ export default function CapNotMatchedFirst({
         </div>
         <div class="dialog__connect-ad4m">${Logo()}</div>
       </div>`}
-      <div class="buttons">
-        <button
-          class="button button--full button--secondary"
-          @click=${() => changeState(null)}
-        >
-          Close
-        </button>
-        <button
-          class="button button--full"
-          @click=${() => requestCapability(true)}
-        >
-          Authorize
-        </button>
-      </div>
+      <button
+        class="button button--full"
+        @click=${() => requestCapability(true)}
+      >
+        Authorize
+      </button>
+      <button
+        class="button button--full button--link"
+        @click=${() => changeState("remoteurl")}
+      >
+        Connection settings
+      </button>
     </div>
   `;
 }

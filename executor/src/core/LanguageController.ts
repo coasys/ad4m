@@ -15,6 +15,7 @@ import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
+import stringify from 'json-stable-stringify'
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
@@ -456,8 +457,9 @@ export default class LanguageController {
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
             const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
+            const agentService = (this.#context as LanguageContext).agent as AgentService;
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
-            if (trustedAgents.find((agent) => agent === languageAuthor)) {
+            if (trustedAgents.find((agent) => agent === languageAuthor) || agentService.agent! === languageAuthor) {
                 //Get the language source so we can generate a hash and check against the hash given in the language meta information
                 const languageSource = await this.getLanguageSource(address);
                 if (!languageSource) {
@@ -483,7 +485,8 @@ export default class LanguageController {
                     Object.keys(languageMetaData.templateAppliedParams).length == 0 ||
                     !languageMetaData.templateSourceLanguageAddress
                 ) {
-                    let errMsg = `Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${languageMetaData}`
+                    let errMsg = `Language not created by trusted agent: ${languageAuthor} and is not templated... aborting language install. Language metadata: ${stringify(languageMetaData)}`
+                    console.error(errMsg)
                     this.pubSub.publish(
                         PubSub.EXCEPTION_OCCURRED_TOPIC,
                         {
