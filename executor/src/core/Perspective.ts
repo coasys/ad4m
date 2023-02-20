@@ -174,7 +174,7 @@ export default class Perspective {
                         }
                         
                         //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                        if(this.isFastPolling && !madeSync) {
+                        if(this.isFastPolling && madeSync) {
                             this.isFastPolling = false;
                             clearInterval(this.#pollingInterval);
                             this.#pollingInterval = this.setupPolling(30000);
