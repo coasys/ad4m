@@ -14,6 +14,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 - "Language not created by trusted agent and is not templated" error is now shown in log and contains the meta information of the failed Language [PR#252](https://github.com/perspect3vism/ad4m/pull/252)
 - 968da42 (connect): Separate event state into `authstatechange` `connectionstatechange` and `configstatechange` in ad4m-connect
+- [connect] Updated utils export & made `getAd4mClient` export from web as well.
 
 ### Deprecated
 
