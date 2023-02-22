@@ -24,6 +24,11 @@
       "import": "./dist/core.js",
       "require": "./dist/core.js",
       "type": "module"
+    },
+    "./utils": {
+      "import": "./dist/utils.js",
+      "require": "./dist/utils.js",
+      "type": "module"
     }
   },
   "scripts": {
