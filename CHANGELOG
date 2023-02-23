@@ -14,7 +14,21 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Removed
 
 ### Fixed
+
+## [0.2.15] - 23/02/2013
+
+### Added
+ -  getAd4mClient to web exports in connect [PR#259](https://github.com/perspect3vism/ad4m/pull/259)
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
  - Not slow polling after sync [PR#260](https://github.com/perspect3vism/ad4m/pull/260)
+ - Trusted agent popup not working consistently [PR#261](https://github.com/perspect3vism/ad4m/pull/261)
 
 ## [0.2.14] - 17/02/2013
 
