@@ -80,10 +80,7 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
     deleteAllAd4mData(relativePath);
     const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
     await findAndKillProcess('holochain')
-    await findAndKillProcess('lair-keystore')
-    await findAndKillProcess('ad4m')
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
-
     execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${seedFile} --overrideConfig`, { encoding: 'utf-8' });
 
     logger.info('ad4m-test initialized')
