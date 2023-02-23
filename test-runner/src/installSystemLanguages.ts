@@ -83,14 +83,14 @@ export async function installSystemLanguages(relativePath = '') {
 
     child.stdout.on('data', async (data) => {
       if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain')) {
-        const client = await buildAd4mClient();
+        const client = await buildAd4mClient(4000);
         
         await client.agent.generate('123456789')
       }
 
       if (data.toString().includes('AD4M init complete')) {
         for (const [lang, languageMeta] of Object.entries(languagesToPublish)) {
-          const client = await buildAd4mClient();
+          const client = await buildAd4mClient(4000);
 
           const bundlePath = path.join(__dirname, 'languages', lang, 'build', 'bundle.js')
 

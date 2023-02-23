@@ -11,11 +11,15 @@ declare module globalThis {
     relativePath: string;
     bundle: string;
     meta: string;
-    languageType: string | undefined;
     defaultLangPath: string;
-    port: number;
     ui: boolean;
   };
+  var agents: {
+    client: any;
+    port: any;
+    relativePath: string,
+    languageAddress?: string
+  }[];
   var tests: any[];
   var describe: (desc: string, fn: () => void) => void;
   var it: (desc: string, fn: () => void) => void;
