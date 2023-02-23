@@ -10,7 +10,7 @@ describe("Link", () => {
     
     const link = await agent.addLink({source:"root", predicate: "soic://test", target:"QmYVsrMpiFmV9S7bTWNAkUzSqjRJskQ8g4TWKKwKrHAPqL://QmSsCCtXMDAZXMpyiNLzwjGEU4hLmhG7fphidhEEodQ4Wy"})
 
-    const all1 = await queryLinks({});
+    const all1 = await agent.queryLinks({});
 
     expect(all1.length).toBe(1)
     expect(all1[0].data.source).toBe(link.data.source)
