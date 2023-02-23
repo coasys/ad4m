@@ -4,11 +4,11 @@ import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import WebSocket from 'ws';
 import { createClient } from 'graphql-ws';
 
-export function buildAd4mClient(): Ad4mClient {
+export function buildAd4mClient(port: number): Ad4mClient {
   const token = global.ad4mToken;
 
   const wsLink = new GraphQLWsLink(createClient({
-    url: `ws://localhost:4000/graphql`,
+    url: `ws://localhost:${port}/graphql`,
     webSocketImpl: WebSocket,
     connectionParams: () => {
         return {
