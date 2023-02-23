@@ -15,9 +15,10 @@ import process from 'process';
 import { installSystemLanguages } from './installSystemLanguages.js';
 import { buildAd4mClient } from './client.js';
 import express from 'express'
+import getPort from 'get-port';
 
-async function installLanguage(child: any, binaryPath: string, bundle: string, meta: string, languageType: string, resolve: any, callback?: any) { 
-  const ad4mClient = await buildAd4mClient();
+async function installLanguage(child: any, binaryPath: string, bundle: string, meta: string, languageType: string, resolve: any, port?: number, callback?: any) { 
+  const ad4mClient = await buildAd4mClient(port!);
 
   const { ui } = global.config;
  
@@ -29,7 +30,7 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
       await ad4mClient.runtime.addTrustedAgents([language.author])
 
       global.languageAddress = language.address;
-      
+
       if (languageType === 'linkLanguage') {
         const templateLanguage = await ad4mClient.languages.applyTemplateAndPublish(language.address, JSON.stringify({uid: '123', name: `test-${language.name}`}));
         logger.info(`Published Template Language: `, templateLanguage)
@@ -53,16 +54,18 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
         fs.writeFileSync(path.join(process.cwd(), '/public/constructorIcon.js'), found.constructorIcon?.code!)  
       }
 
-      await callback();
-
       if (!ui) {
-        kill(child.pid!, async () => {
-          await findAndKillProcess('holochain')
-          await findAndKillProcess('lair-keystore')
-          resolve(null);
-        })
+        return {
+          languageAddress: language.address,
+          clear: () => {
+            kill(child.pid!, async () => {
+              await findAndKillProcess('holochain')
+              await findAndKillProcess('lair-keystore')
+              resolve(null);
+            })
+          }
+        }
       }
-
     } catch (err) {
       logger.error(`Error: ${err}`)
     }
@@ -75,22 +78,47 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
   return new Promise(async (resolve, reject) => {
     deleteAllAd4mData(relativePath);
     
-    await installSystemLanguages(relativePath)
+    let binaryPath = path.join(ad4mDataDirectory(`ad4m-test`), 'binary', `ad4m`);
 
-    deleteAllAd4mData(relativePath);
-    const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
+    if (!fs.existsSync(binaryPath)) {
+      await getAd4mHostBinary(`ad4m-test`);
+      binaryPath = path.join(ad4mDataDirectory(`ad4m-test`), 'binary', `ad4m`);
+    }
+
     await findAndKillProcess('holochain')
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
-    execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${seedFile} --overrideConfig`, { encoding: 'utf-8' });
+    const agentSeedFile = path.join(__dirname, `../${relativePath}-bootstrapSeed.json`);
+
+
+    const tempSeedFile = JSON.parse(fs.readFileSync(seedFile).toString())
+
+    if (!fs.pathExistsSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)) {
+      fs.removeSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
+      fs.mkdirSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
+    }
+    if (!fs.pathExistsSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)) {
+      fs.removeSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
+      fs.mkdirSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
+    }
+
+    fs.copySync(tempSeedFile.languageLanguageSettings.storagePath, `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`, { overwrite: true })
+
+    tempSeedFile.languageLanguageSettings.storagePath = `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`
+    tempSeedFile.neighbourhoodLanguageSettings.storagePath = `${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`
+    fs.writeFileSync(agentSeedFile, JSON.stringify(tempSeedFile));
+    
+    execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${agentSeedFile} --overrideConfig`, { encoding: 'utf-8' });
 
     logger.info('ad4m-test initialized')
 
     let child: ChildProcessWithoutNullStreams;
 
+    const ipfsPort = await getPort({port: 14000});
+
     if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--languageLanguageOnly', 'false'])
+      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(),'--languageLanguageOnly', 'false'])
     } else {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--languageLanguageOnly', 'false'])
+      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(), '--languageLanguageOnly', 'false'])
     }
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
@@ -104,7 +132,7 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     child.stdout.on('data', async (data) => {
       if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain')) {
-        const ad4mClient = await buildAd4mClient();
+        const ad4mClient = await buildAd4mClient(port);
 
         const generateAgentResponse = await ad4mClient.agent.generate('123456789');
         const currentAgentDid =  generateAgentResponse.did;
@@ -113,7 +141,9 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       }
       
       if (data.toString().includes('AD4M init complete')) {
-        installLanguage(child, binaryPath, bundle, meta, languageType, resolve, callback);
+        const clear = await installLanguage(child, binaryPath, bundle, meta, languageType, resolve, port, callback);
+
+        resolve(clear);
       }
     });
 
@@ -139,12 +169,6 @@ async function run() {
         describe: 'Relative path to the appdata for ad4m-host to store binaries', 
         alias: 'rp'
       },
-      port: { 
-        type: 'number', 
-        describe: 'Use this port to run ad4m GraphQL service', 
-        default: 4000, 
-        alias: 'p'
-      },
       test: {
         type: 'string',
         describe: 'Runs test on a single file',
@@ -159,12 +183,6 @@ async function run() {
         type: 'string',
         describe: 'Meta information for the language to be installed',
         alias: 'm'
-      },
-      languageType: {
-        type: 'string',
-        describe: 'Is the language a link or expression language',
-        alias: 'lt',
-        choices: ['directMessage', 'linkLanguage', 'expression']
       },
       defaultLangPath: {
         type: 'string',
@@ -214,16 +232,15 @@ async function run() {
     relativePath,
     bundle: args.bundle,
     meta: args.meta,
-    languageType: args.languageType,
     defaultLangPath: args.defaultLangPath,
-    port: args.port,
     ui: args.ui
   }
 
   const files = args.test ? [args.test] : getTestFiles();
 
+
   if (args.ui) {
-    await startServer(relativePath, args.bundle!, args.meta!, args.languageType!, args.port, args.defaultLangPath, () => {
+    await startServer(relativePath, args.bundle!, args.meta!, 'expression', 4000, args.defaultLangPath, () => {
       const app = express();
 
       console.log(process.env.IP)
