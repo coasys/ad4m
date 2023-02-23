@@ -13,3 +13,5 @@ public/constructorIcon.js
 public/icon.js
 ad4m-test.log
 ad4m-test.txt
+!scripts/*.js
+!example/languages/*.js
