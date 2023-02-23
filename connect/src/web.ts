@@ -20,6 +20,7 @@ import VerifyCode from "./components/VerifyCode";
 import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
 import Header from "./components/Header";
 import autoBind from "auto-bind";
+export { getAd4mClient } from "./utils";
 
 function detectMob() {
   const toMatch = [
