@@ -34,7 +34,7 @@ class AgentLinkClass {
     return response;
   }
 
-  async querylink(query: LinkQuery) {
+  async queryLinks(query: LinkQuery) {
     const response = await this.client.perspective.queryLinks(this.perspective, query);
   
     return response;
