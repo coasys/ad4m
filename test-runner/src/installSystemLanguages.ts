@@ -37,11 +37,11 @@ export async function installSystemLanguages(relativePath = '') {
     fs.mkdirSync(path.join(__dirname, 'publishedLanguages'))
     fs.mkdirSync(path.join(__dirname, 'publishedNeighbourhood'))
 
-    let binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m-host-${global.ad4mHostVersion}`);
+    let binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
 
     if (!fs.existsSync(binaryPath)) {
       await getAd4mHostBinary(relativePath);
-      binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m-host-${global.ad4mHostVersion}`);
+      binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
     }
 
     await findAndKillProcess('holochain')
@@ -71,7 +71,6 @@ export async function installSystemLanguages(relativePath = '') {
       child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', '4000', '--languageLanguageOnly', 'true'])
     }
 
-    const client = await buildAd4mClient();
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
 
@@ -84,12 +83,19 @@ export async function installSystemLanguages(relativePath = '') {
 
     child.stdout.on('data', async (data) => {
       if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain')) {
+        const client = await buildAd4mClient();
+        
         await client.agent.generate('123456789')
+      }
 
+      if (data.toString().includes('AD4M init complete')) {
         for (const [lang, languageMeta] of Object.entries(languagesToPublish)) {
+          const client = await buildAd4mClient();
+
           const bundlePath = path.join(__dirname, 'languages', lang, 'build', 'bundle.js')
+
           const language = await client.languages.publish(bundlePath, languageMeta);
-          
+
           if (lang === "agent-expression-store") {
             seed["agentLanguage"] = language.address;
           }
@@ -112,7 +118,6 @@ export async function installSystemLanguages(relativePath = '') {
           await findAndKillProcess('lair-keystore')
           resolve(null);
         })
-
       }
     });
 
@@ -125,7 +130,7 @@ export async function installSystemLanguages(relativePath = '') {
       logger.error(`process error: ${child.pid}`)
       findAndKillProcess('holochain')
       findAndKillProcess('lair-keystore')
-      findAndKillProcess('ad4m-host')
+      findAndKillProcess('ad4m')
       reject()
     });
   });

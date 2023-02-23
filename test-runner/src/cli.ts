@@ -19,10 +19,6 @@ import express from 'express'
 async function installLanguage(child: any, binaryPath: string, bundle: string, meta: string, languageType: string, resolve: any, callback?: any) { 
   const ad4mClient = await buildAd4mClient();
 
-  const generateAgentResponse = await ad4mClient.agent.generate('123456789');
-  const currentAgentDid =  generateAgentResponse.did;
-  logger.info(`Current Agent did: ${currentAgentDid}`);
-
   const { ui } = global.config;
  
   if (bundle && meta) {
@@ -82,13 +78,10 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
     await installSystemLanguages(relativePath)
 
     deleteAllAd4mData(relativePath);
-
-    const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m-host-${global.ad4mHostVersion}`);
-
+    const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
     await findAndKillProcess('holochain')
     await findAndKillProcess('lair-keystore')
-    await findAndKillProcess('ad4m-host')
-
+    await findAndKillProcess('ad4m')
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
 
     execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${seedFile} --overrideConfig`, { encoding: 'utf-8' });
@@ -114,6 +107,15 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     child.stdout.on('data', async (data) => {
       if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain')) {
+        const ad4mClient = await buildAd4mClient();
+
+        const generateAgentResponse = await ad4mClient.agent.generate('123456789');
+        const currentAgentDid =  generateAgentResponse.did;
+        
+        logger.info(`Current Agent did: ${currentAgentDid}`);
+      }
+      
+      if (data.toString().includes('AD4M init complete')) {
         installLanguage(child, binaryPath, bundle, meta, languageType, resolve, callback);
       }
     });
@@ -126,7 +128,7 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       logger.error(`process error: ${child.pid}`)
       findAndKillProcess('holochain')
       findAndKillProcess('lair-keystore')
-      findAndKillProcess('ad4m-host')
+      findAndKillProcess('ad4m')
       reject()
     });
   });
