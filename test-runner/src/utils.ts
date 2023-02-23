@@ -48,7 +48,7 @@ export function getTestFiles() {
 
 function fileExist(binaryPath: string): Promise<string[]> {
   return new Promise((resolve, reject) => {
-    glob(path.join(binaryPath, `ad4m-host*`), (err, file) => {
+    glob(path.join(binaryPath, `ad4m*`), (err, file) => {
       if (err) {
         reject(err)
       }
@@ -59,7 +59,7 @@ function fileExist(binaryPath: string): Promise<string[]> {
 
 export async function getAd4mHostBinary(relativePath: string) {
   return new Promise(async (resolve, reject) => {
-    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m-host/releases/71753984");
+    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/92601411");
     const data: any = await response.json();
     const version = data['name'].replace('v', '');
     global.ad4mHostVersion = version;
@@ -70,9 +70,9 @@ export async function getAd4mHostBinary(relativePath: string) {
     const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary');
 
     const files = await fileExist(binaryPath)
-
+    
     for (const file of files) {
-      if (file === path.join(binaryPath, `ad4m-host-${version}`)) {
+      if (path.normalize(file) === path.normalize(path.join(binaryPath, isWin ? 'ad4m.exe' : `ad4m`))) {
         logger.info('ad4m-host binary found')
         resolve(null);
         return;
@@ -83,23 +83,25 @@ export async function getAd4mHostBinary(relativePath: string) {
 
     logger.info('ad4m-host binary not found, downloading now...')
 
-    const dest = path.join(binaryPath, `ad4m-host-${version}`);
+    let dest = path.join(binaryPath, `ad4m.exe`);
     let download: any;
     await fs.ensureDir(binaryPath);
     
     if (isMac) {
       const link = data.assets.find((e: any) =>
-        e.name.includes("macos")
+        e.name.includes("-macos-")
       ).browser_download_url;
       download = wget.download(link, dest)
     } else if(isWin) {
+      dest = path.join(binaryPath, `ad4m.exe`);
+
       const link = data.assets.find((e: any) =>
-        e.name.includes("windows")
+        e.name.includes("-windows-")
       ).browser_download_url;
       download = wget.download(link, dest)
     } else {
       const link = data.assets.find((e: any) =>
-        e.name.includes("linux")
+        e.name.includes("-linux-")
       ).browser_download_url;
       download = wget.download(link, dest)
     }
@@ -125,16 +127,17 @@ export function ad4mDataDirectory(override?: string) {
 }
 
 export function deleteAllAd4mData(relativePath: string) {
-  const dataPath = ad4mDataDirectory(relativePath)
+  const dataPath = relativePath
 
-  const files = fs.readdirSync(dataPath);
-
+  if (fs.existsSync(dataPath)) {
+    const files = fs.readdirSync(dataPath);
   
-  for (const file of files) {
-    const fileDir = path.join(ad4mDataDirectory(relativePath), './', file);
-    
-    if (file !== 'binary') {
-      fs.removeSync(fileDir);
+    for (const file of files) {
+      const fileDir = path.join(relativePath, './', file);
+      
+      if (file !== 'binary') {
+        fs.removeSync(fileDir);
+      }
     }
   }
 }
