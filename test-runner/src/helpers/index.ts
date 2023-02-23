@@ -3,84 +3,43 @@ import getPort from "get-port";
 import { startServer } from "../cli.js";
 import { buildAd4mClient } from "../client.js";
 
-// * Link Language
-export async function addLink(link: Link) {
-  const { perspective } = global;
-
-  const client = await buildAd4mClient(4000);
-
-  const response = await client.perspective.addLink(perspective, link);
-
-  return response;
-}
-
-export async function removeLink(link: LinkExpression) {
-  const { perspective } = global;
-  
-  const client = await buildAd4mClient(4000);
-
-  const response = await client.perspective.removeLink(perspective, link);
-
-  return response;
-}
-
-export async function updateLink(oldLink: LinkExpression, newLink: Link) {
-  const { perspective } = global;
-  
-  const client = await buildAd4mClient(4000);
-
-  const response = await client.perspective.updateLink(perspective, oldLink, newLink);
-
-  return response;
-}
-
-export async function queryLinks(query: LinkQuery) {
-  const { perspective } = global;
-  
-  const client = await buildAd4mClient(4000);
-
-  const response = await client.perspective.queryLinks(perspective, query);
-
-  return response;
-}
-
-export async function addCallback() {}
-
-// * Expression Language
-export async function createExpression(content: any) {
-  const client = await buildAd4mClient(4000);
-
-  const response = await client.expression.create(content, languageAddress);
-
-  return response;
-}
-
-export async function getExpression(url: string) {
-  const client = await buildAd4mClient(4000);
-
-  const response = await client.expression.get(url);
-  return response;
-}
-
-export async function getByAuthor() {}
-
-// * Direct Message Language
-export async function sendPrivate() {}
-
-export async function inbox() {}
-
 class AgentLinkClass {
-  constructor() {}
+  client: Ad4mClient
+  languageAddress: string
+  perspective: string
+  neighbourhood: string
 
-  async addLink() {}
+  constructor(client: Ad4mClient, languageAddress: string, perspective: string, neighbourhood: string) {
+      this.client = client;
+      this.languageAddress = languageAddress
+      this.neighbourhood = neighbourhood
+      this.perspective = perspective
+  }
 
-  async removeLink() {}
+  async addLink(link: Link) {
+    const response = await this.client.perspective.addLink(this.perspective, link);
+  
+    return response;
+  }
 
-  async updateLink() {}
+  async removeLink(link: LinkExpression) {
+    const response = await this.client.perspective.removeLink(this.perspective, link);
+  
+    return response;
+  }
 
-  async querylink() {}
+  async updateLink(oldLink: LinkExpression, newLink: Link) {
+    const response = await this.client.perspective.updateLink(this.perspective, oldLink, newLink);
+  
+    return response;
+  }
+
+  async querylink(query: LinkQuery) {
+    const response = await this.client.perspective.queryLinks(this.perspective, query);
+  
+    return response;
+  }
 }
-
 
 class AgentExpressionClass {
   client: Ad4mClient
@@ -130,8 +89,31 @@ export async function spawnExpressionAgent() {
   return agent;
 }
 
-function spawnLinkAgent() {
-  const agent = new AgentLinkClass()
+export async function spawnLinkAgent() {
+  const { bundle, meta, defaultLangPath } = global.config;
+
+  const port = await getPort();
+
+  if (!global.agents) {
+    global.agents = []
+  }
+
+  const relativePath = `ad4m-test-${global.agents.length}`;
+
+  const { languageAddress, clear, perspective, neighbourhood } = await startServer(relativePath, bundle!, meta!, 'linkLanguage', port, defaultLangPath);
+  
+  const client = await buildAd4mClient(port);
+  
+  const agent = new AgentLinkClass(client, languageAddress, perspective, neighbourhood);
+
+  global.agents.push({
+      port,
+      relativePath: relativePath,
+      client: agent,
+      languageAddress,
+      perspective, 
+      neighbourhood
+  })
 
   return agent;
 }

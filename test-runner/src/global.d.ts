@@ -18,7 +18,9 @@ declare module globalThis {
     client: any;
     port: any;
     relativePath: string,
-    languageAddress?: string
+    languageAddress?: string,
+    neighbourhood?: string,
+    perspective?: string
   }[];
   var tests: any[];
   var describe: (desc: string, fn: () => void) => void;

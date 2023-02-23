@@ -21,6 +21,10 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
   const ad4mClient = await buildAd4mClient(port!);
 
   const { ui } = global.config;
+
+  let languageAddress;
+  let perspective;
+  let neighbourhood;
  
   if (bundle && meta) {
     try {    
@@ -31,21 +35,44 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
 
       global.languageAddress = language.address;
 
+      languageAddress = language.address;
+
       if (languageType === 'linkLanguage') {
-        const templateLanguage = await ad4mClient.languages.applyTemplateAndPublish(language.address, JSON.stringify({uid: '123', name: `test-${language.name}`}));
-        logger.info(`Published Template Language: `, templateLanguage)
+        const agents = global.agents;
+
+        if (agents.length === 0) {
+          const templateLanguage = await ad4mClient.languages.applyTemplateAndPublish(language.address, JSON.stringify({uid: '123', name: `test-${language.name}`}));
+          logger.info(`Published Template Language: `, templateLanguage)
+    
+          global.languageAddress = templateLanguage.address;
   
-        global.languageAddress = templateLanguage.address;
-
-        const perspective = await ad4mClient.perspective.add('Test perspective');
-        logger.info(`Perspective created: `, perspective)
-      
-        global.perspective = perspective.uuid;
-
-        const neighbourhood = await ad4mClient.neighbourhood.publishFromPerspective(perspective.uuid, templateLanguage.address, JSON.parse('{"links":[]}'));
-        logger.info(`Neighbourhood created: `, neighbourhood)
+          languageAddress = language.address;
+  
+          const createdPerspective = await ad4mClient.perspective.add('Test perspective');
+          logger.info(`Perspective created: `, createdPerspective)
         
-        global.neighnourhood = neighbourhood;
+          global.perspective = createdPerspective.uuid;
+  
+          perspective = createdPerspective.uuid;
+  
+          const createdNeighbourhood = await ad4mClient.neighbourhood.publishFromPerspective(perspective, templateLanguage.address, JSON.parse('{"links":[]}'));
+          logger.info(`Neighbourhood created: `, createdNeighbourhood)
+          
+          global.neighnourhood = createdNeighbourhood;
+  
+          neighbourhood = createdNeighbourhood;
+        } else {
+          const joinedPerspectve = await ad4mClient.neighbourhood.joinFromUrl(global.neighnourhood);
+          logger.info(`Neighbouhood joined: `, joinedPerspectve)
+
+          global.perspective = joinedPerspectve.uuid;
+  
+          perspective = joinedPerspectve.uuid;
+
+          global.neighnourhood = global.neighnourhood;
+  
+          neighbourhood = global.neighnourhood;
+        }
       }
 
       if (ui) {
@@ -56,7 +83,9 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
 
       if (!ui) {
         return {
-          languageAddress: language.address,
+          languageAddress,
+          perspective,
+          neighbourhood,
           clear: () => {
             kill(child.pid!, async () => {
               await findAndKillProcess('holochain')
