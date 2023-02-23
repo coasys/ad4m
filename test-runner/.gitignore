@@ -1,0 +1,15 @@
+node_modules
+yarn.lock
+yarn-error.log
+src/test-temp
+src/test-temp/languages
+test-temp/languages
+build
+example/src
+bootstrapSeed.json
+ad4m.json
+public/client.js
+public/constructorIcon.js
+public/icon.js
+ad4m-test.log
+ad4m-test.txt
