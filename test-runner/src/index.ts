@@ -1,5 +1,7 @@
 import chalk from "chalk";
 import { startServer } from "./cli";
+import { installSystemLanguages } from "./installSystemLanguages";
+import { deleteAllAd4mData } from "./utils";
 
 const beforeEachs: Array<() => void> = [];
 const afterEachs: Array<() => void> = [];
@@ -80,11 +82,15 @@ async function executeTest() {
 
 export async function runtest() {
   for (const test of global.tests) {
-    const { relativePath, bundle, meta, languageType, port, defaultLangPath } = global.config;
+    const { relativePath, bundle, meta, defaultLangPath } = global.config;
 
     currIt = test;
 
-    await startServer(relativePath, bundle!, meta!, languageType!, port, defaultLangPath, executeTest);
+    deleteAllAd4mData(relativePath);
+    
+    await installSystemLanguages(relativePath)
+
+   await executeTest()
   }
 }
 
