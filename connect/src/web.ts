@@ -477,66 +477,20 @@ export class Ad4mConnectElement extends LitElement {
       this.requestUpdate();
     });
 
-    this.loadFont();
-    this.constructQR();
+    loadFont();
+    constructQR();
   }
 
-  connect() {
-    this._isOpen = true;
-    this._client.connect();
+  async connect() {
+    const client = await this._client.connect();
+    if (this.authState !== "authenticated") {
+      this._isOpen = true;
+    }
+    return client;
   }
 
   getAd4mClient() {
-    return this._client.ad4mClient;
-  }
-
-  loadFont() {
-    const link = document.createElement("link");
-    link.rel = "stylesheet";
-    link.type = "text/css";
-    link.crossOrigin = "anonymous";
-    link.href =
-      "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap";
-    document.head.appendChild(link);
-  }
-
-  constructQR() {
-    const containerEle = document.createElement("div");
-    containerEle.id = "camera-id";
-    containerEle.style.position = "absolute";
-    containerEle.style.top = "0";
-    containerEle.style.left = "0";
-    containerEle.style.width = "100vw";
-    containerEle.style.height = "100vh";
-    containerEle.style.zIndex = "10000";
-    containerEle.style.display = "none";
-
-    const ele = document.createElement("div");
-    ele.id = "reader";
-    // @ts-ignore
-    ele.width = "100vw";
-    ele.style.height = "100vh";
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.id = "stop-scan";
-    cancelBtn.innerHTML = "&#10005;";
-    cancelBtn.style.paddingTop = "4px";
-    cancelBtn.style.display = "flex";
-    cancelBtn.style.alignItems = "center";
-    cancelBtn.style.justifyContent = "center";
-    cancelBtn.style.position = "absolute";
-    cancelBtn.style.top = "10px";
-    cancelBtn.style.right = "10px";
-    cancelBtn.style.borderRadius = "50%";
-    cancelBtn.style.border = "0";
-    cancelBtn.style.height = "30px";
-    cancelBtn.style.width = "30px";
-    cancelBtn.style.fontFamily = "inherit";
-    cancelBtn.style.fontSize = "20px";
-
-    containerEle.appendChild(ele);
-    containerEle.appendChild(cancelBtn);
-    document.body.appendChild(containerEle);
+    return this._client.ensureConnection();
   }
 
   scanQrcode() {
@@ -585,6 +539,14 @@ export class Ad4mConnectElement extends LitElement {
     );
   }
 
+  private async unlockAgent(passcode) {
+    await this._client.ad4mClient.agent.unlock(passcode);
+  }
+
+  private verifyCode(code) {
+    this._client.verifyCode(code);
+  }
+
   changeUrl(url) {
     this.setAttribute("url", url);
   }
@@ -602,12 +564,9 @@ export class Ad4mConnectElement extends LitElement {
     }
   }
 
-  connectToPort() {
-    this._client.connectToPort();
-  }
-
-  async unlockAgent(passcode) {
-    await this._client.ad4mClient.agent.unlock(passcode);
+  async isAuthenticated() {
+    await this._client.ensureConnection();
+    return this._client.checkAuth();
   }
 
   changeUIState(state) {
@@ -620,10 +579,6 @@ export class Ad4mConnectElement extends LitElement {
 
   onDownloaded() {
     this._hasClickedDownload = true;
-  }
-
-  verifyCode(code) {
-    this._client.verifyCode(code);
   }
 
   renderViews() {
@@ -713,4 +668,53 @@ export default function Ad4mConnectUI(props: Ad4mConnectOptions) {
   document.body.appendChild(element);
 
   return element;
+}
+
+function loadFont() {
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.type = "text/css";
+  link.crossOrigin = "anonymous";
+  link.href =
+    "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap";
+  document.head.appendChild(link);
+}
+
+function constructQR() {
+  const containerEle = document.createElement("div");
+  containerEle.id = "camera-id";
+  containerEle.style.position = "absolute";
+  containerEle.style.top = "0";
+  containerEle.style.left = "0";
+  containerEle.style.width = "100vw";
+  containerEle.style.height = "100vh";
+  containerEle.style.zIndex = "10000";
+  containerEle.style.display = "none";
+
+  const ele = document.createElement("div");
+  ele.id = "reader";
+  // @ts-ignore
+  ele.width = "100vw";
+  ele.style.height = "100vh";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.id = "stop-scan";
+  cancelBtn.innerHTML = "&#10005;";
+  cancelBtn.style.paddingTop = "4px";
+  cancelBtn.style.display = "flex";
+  cancelBtn.style.alignItems = "center";
+  cancelBtn.style.justifyContent = "center";
+  cancelBtn.style.position = "absolute";
+  cancelBtn.style.top = "10px";
+  cancelBtn.style.right = "10px";
+  cancelBtn.style.borderRadius = "50%";
+  cancelBtn.style.border = "0";
+  cancelBtn.style.height = "30px";
+  cancelBtn.style.width = "30px";
+  cancelBtn.style.fontFamily = "inherit";
+  cancelBtn.style.fontSize = "20px";
+
+  containerEle.appendChild(ele);
+  containerEle.appendChild(cancelBtn);
+  document.body.appendChild(containerEle);
 }
