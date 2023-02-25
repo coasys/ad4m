@@ -26,6 +26,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Removed
 
 ### Fixed
+ - Perspective Diff Sync: calculation of fast_forward_possible fixed, which prevents merge-loops (PR#13)[https://github.com/perspect3vism/perspective-diff-sync/pull/13]
 
 ## [0.2.15] - 23/02/2013
 
