@@ -91,7 +91,7 @@ export default class Perspective {
         if (this.neighbourhood) {
             // setup polling loop for Perspectives with a linkLanguage
             this.setupSyncSingals(1000);
-            this.setupFullRenderSync(20000);
+            //this.setupFullRenderSync(20000);
 
             // Handle join differently so we wait before publishing diffs until we have seen
             // a first foreign revision. Otherwise we will never use snaphshots and make the
