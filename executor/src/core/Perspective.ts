@@ -463,9 +463,9 @@ export default class Perspective {
             return undefined !== list.find(e =>
                 JSON.stringify(e.author) === JSON.stringify(link.author) &&
                 e.timestamp === link.timestamp &&
-                e.source === link.data.source &&
-                e.target === link.data.target &&
-                e.predicate === link.data.predicate
+                e.data.source === link.data.source &&
+                e.data.target === link.data.target &&
+                e.data.predicate === link.data.predicate
                 )
         }
         let linksToCommit = [];
