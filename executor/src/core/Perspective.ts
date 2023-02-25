@@ -89,13 +89,19 @@ export default class Perspective {
         });
 
         if (this.neighbourhood) {
+            // setup polling loop for Perspectives with a linkLanguage
+            this.setupSyncSingals(1000);
+            this.setupFullRenderSync(20000);
+
+            // Handle join differently so we wait before publishing diffs until we have seen
+            // a first foreign revision. Otherwise we will never use snaphshots and make the
+            // diff graph complex.
             if(this.createdFromJoin) {
                 try {
                     this.getCurrentRevision().then(revision => {
                         // if revision is null, then we are not connected to the network yet
                         // Set the state to LinkLanguageInstalledButNotSynced so we will keep
-                        // link additions as pending until we are synced in order
-                        // make use of snapshots
+                        // link additions as pending until we are synced
                         if(!revision) {
                             this.updatePerspectiveState(PerspectiveState.LinkLanguageInstalledButNotSynced);
                             this.setupPendingDiffsPublishing(5000);
@@ -109,10 +115,6 @@ export default class Perspective {
             } else {
                 this.updatePerspectiveState(PerspectiveState.Synced);
             }
-
-            // setup polling loop for Perspectives with a linkLanguage
-            this.setupSyncSingals(1000);
-            this.setupFullRenderSync(20000);
         }
 
         this.#prologMutex = new Mutex()
