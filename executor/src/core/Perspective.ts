@@ -103,7 +103,6 @@ export default class Perspective {
                         // Set the state to LinkLanguageInstalledButNotSynced so we will keep
                         // link additions as pending until we are synced
                         if(!revision) {
-                            this.updatePerspectiveState(PerspectiveState.LinkLanguageInstalledButNotSynced);
                             this.setupPendingDiffsPublishing(5000);
                         } else {
                             this.updatePerspectiveState(PerspectiveState.Synced);
@@ -162,6 +161,14 @@ export default class Perspective {
     async setupPendingDiffsPublishing(intervalMs: number) {
         if(this.state === PerspectiveState.Synced) {
             return
+        }
+
+        if(this.state == PerspectiveState.LinkLanguageFailedToInstall) {
+            try {
+                await this.getLinksAdapter()
+            } catch(e) {
+                console.error(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to install link language: ${e}`);
+            }
         }
         
         if(this.state == PerspectiveState.LinkLanguageInstalledButNotSynced) {
