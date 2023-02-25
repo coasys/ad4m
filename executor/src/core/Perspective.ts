@@ -103,7 +103,7 @@ export default class Perspective {
                         // Set the state to LinkLanguageInstalledButNotSynced so we will keep
                         // link additions as pending until we are synced
                         if(!revision) {
-                            //this.setupPendingDiffsPublishing(5000);
+                            this.setupPendingDiffsPublishing(5000);
                         } else {
                             this.updatePerspectiveState(PerspectiveState.Synced);
                         }
