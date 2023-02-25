@@ -90,7 +90,7 @@ export default class Perspective {
 
         if (this.neighbourhood) {
             // setup polling loop for Perspectives with a linkLanguage
-            this.setupSyncSingals(1000);
+            this.setupSyncSingals(3000);
             //this.setupFullRenderSync(20000);
 
             // Handle join differently so we wait before publishing diffs until we have seen
