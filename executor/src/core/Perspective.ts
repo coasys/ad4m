@@ -159,10 +159,7 @@ export default class Perspective {
     }
 
     async setupPendingDiffsPublishing(intervalMs: number) {
-        if(this.state === PerspectiveState.Synced) {
-            return
-        }
-
+        let pendingGotPublished = false;
         if(this.state == PerspectiveState.LinkLanguageFailedToInstall) {
             try {
                 await this.getLinksAdapter()
@@ -171,38 +168,42 @@ export default class Perspective {
             }
         }
         
-        if(this.state == PerspectiveState.LinkLanguageInstalledButNotSynced) {
-            try {
-                // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
-                if (await this.getCurrentRevision()) {
-                    //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
-                    this.updatePerspectiveState(PerspectiveState.Synced);
-                    //Let's check if we have unpublished diffs:
-                    const mutations = this.#db.getPendingDiffs(this.uuid);
-                    if(mutations && mutations.length > 0) {
-                        // If we do, collect them...
-                        const batchedMutations = {
-                            additions: [],
-                            removals: []
-                        } as PerspectiveDiff
-                        for(const mutation of mutations) {
-                            for (const addition of mutation.additions) {
-                                batchedMutations.additions.push(addition);
-                            }
-                            for (const removal of mutation.removals) {
-                                batchedMutations.removals.push(removal);
-                            }
+        try {
+            // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
+            if (await this.getCurrentRevision()) {
+                //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
+                this.updatePerspectiveState(PerspectiveState.Synced);
+                //Let's check if we have unpublished diffs:
+                const mutations = this.#db.getPendingDiffs(this.uuid);
+                if(mutations && mutations.length > 0) {
+                    // If we do, collect them...
+                    const batchedMutations = {
+                        additions: [],
+                        removals: []
+                    } as PerspectiveDiff
+                    for(const mutation of mutations) {
+                        for (const addition of mutation.additions) {
+                            batchedMutations.additions.push(addition);
                         }
-                        
-                        // ...publish them...
-                        await this.callLinksAdapter('commit', batchedMutations);
-                        // ...and clear the temporary storage
-                        this.#db.clearPendingDiffs(this.uuid)
+                        for (const removal of mutation.removals) {
+                            batchedMutations.removals.push(removal);
+                        }
                     }
+                    
+                    // ...publish them...
+                    await this.callLinksAdapter('commit', batchedMutations);
+                    // ...and clear the temporary storage
+                    this.#db.clearPendingDiffs(this.uuid)
+                    pendingGotPublished = true;
                 }
-            } catch (e) {
-                console.warn(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to repulish pending diffs. Error: ${e}`, e);
             }
+        } catch (e) {
+            console.warn(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to repulish pending diffs. Error: ${e}`, e);
+        }
+
+        if(!pendingGotPublished) {
+            await sleep(intervalMs);
+            this.setupPendingDiffsPublishing(intervalMs);
         }
     }
 
