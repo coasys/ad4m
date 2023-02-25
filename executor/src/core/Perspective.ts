@@ -98,6 +98,7 @@ export default class Perspective {
                         // make use of snapshots
                         if(!revision) {
                             this.updatePerspectiveState(PerspectiveState.LinkLanguageInstalledButNotSynced);
+                            this.setupPendingDiffsPublishing(5000);
                         } else {
                             this.updatePerspectiveState(PerspectiveState.Synced);
                         }
@@ -111,7 +112,6 @@ export default class Perspective {
 
             // setup polling loop for Perspectives with a linkLanguage
             this.setupSyncSingals(1000);
-            this.setupPendingDiffsPublishing(5000);
             this.setupFullRenderSync(20000);
         }
 
