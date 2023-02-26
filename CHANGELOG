@@ -15,6 +15,19 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
 
+## [0.2.16] - 25/02/2013
+### Added
+
+### Changed
+ - Main LinkLanguage (Perspective Diff Sync) refactored to replace global/objective latest-revision with a simple gossip algorithm, where agents broadcast their revision and merge in revision of others as they are gossiped. Improves speed and resilience a lot. [PR#12 in PDiff-Sync](https://github.com/perspect3vism/perspective-diff-sync/pull/12) [PR#271](https://github.com/perspect3vism/ad4m/pull/271)
+
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Perspective Diff Sync: calculation of fast_forward_possible fixed, which prevents merge-loops (PR#13)[https://github.com/perspect3vism/perspective-diff-sync/pull/13]
+
 ## [0.2.15] - 23/02/2013
 
 ### Added
