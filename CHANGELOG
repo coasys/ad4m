@@ -14,6 +14,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Removed
 
 ### Fixed
+- [launcher] Trusted agent popup now works correctly & Fixed language actions [PR#273](https://github.com/perspect3vism/ad4m/pull/273)
 
 ## [0.2.16] - 25/02/2013
 ### Added
