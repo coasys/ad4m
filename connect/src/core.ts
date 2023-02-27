@@ -76,9 +76,14 @@ export default class Ad4mConnect {
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
     this.token = token || this.token;
-    this.ensureConnection().then(() => {
-      this.checkAuth();
-    });
+    this.ensureConnection()
+      .then(() => {
+        this.checkAuth();
+      })
+      .catch(() => {
+        this.notifyConnectionChange("not_connected");
+        this.notifyAuthChange("unauthenticated");
+      });
   }
 
   private notifyConfigChange(val: ConfigStates, data: string | number) {
@@ -127,12 +132,17 @@ export default class Ad4mConnect {
   }
 
   async connect(url?: string) {
-    if (url) {
-      this.setUrl(url);
+    try {
+      if (url) {
+        this.setUrl(url);
+      }
+      const client = await this.ensureConnection();
+      await this.checkAuth();
+      return client;
+    } catch {
+      this.notifyConnectionChange("not_connected");
+      this.notifyAuthChange("unauthenticated");
     }
-    await this.ensureConnection();
-    await this.checkAuth();
-    return this.ad4mClient;
   }
 
   async ensureConnection() {
