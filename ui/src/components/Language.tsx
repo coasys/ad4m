@@ -74,7 +74,7 @@ const Language = (props: Props) => {
   const installLanguage = async () => {
     setLoading(true);
     try {
-      if (languageBundlePath) {
+      if (languageHash) {
         await client!.languages.byAddress(languageHash);
 
         await getLanguages();
@@ -234,13 +234,13 @@ const Language = (props: Props) => {
             <j-flex a="center" gap="200">
               <j-button
                 variant="link"
-                onClick={() => setInstallLanguageModalOpen(false)}
+                onClick={() => setPublishLanguageModalOpen(false)}
               >
                 Cancel
               </j-button>
               <j-button
                 variant="primary"
-                onClick={installLanguage}
+                onClick={publishLanguage}
                 loading={loading}
               >
                 Install
