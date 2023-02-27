@@ -83,7 +83,8 @@ export async function spawnExpressionAgent() {
       port,
       relativePath: relativePath,
       client: agent,
-      languageAddress
+      languageAddress,
+      clear
   })
 
   return agent;
@@ -112,7 +113,8 @@ export async function spawnLinkAgent() {
       client: agent,
       languageAddress,
       perspective, 
-      neighbourhood
+      neighbourhood,
+      clear
   })
 
   return agent;

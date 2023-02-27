@@ -90,6 +90,7 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
             kill(child.pid!, async () => {
               await findAndKillProcess('holochain')
               await findAndKillProcess('lair-keystore')
+              deleteAllAd4mData(relativePath);
               resolve(null);
             })
           }

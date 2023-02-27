@@ -20,7 +20,8 @@ declare module globalThis {
     relativePath: string,
     languageAddress?: string,
     neighbourhood?: string,
-    perspective?: string
+    perspective?: string,
+    clear: () => void
   }[];
   var tests: any[];
   var describe: (desc: string, fn: () => void) => void;

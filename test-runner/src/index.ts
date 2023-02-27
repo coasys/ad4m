@@ -72,25 +72,34 @@ async function executeTest() {
     await before()
   }    
 
+  global.agents = []
+
   await test.func();
 
   for (const after of test.afterEachs) {
     await after()
-  } 
-
+  }   
+  
+  for (const agent of agents) {
+    await agent.clear()
+  }
 }
 
 export async function runtest() {
+  const { relativePath, bundle, meta, defaultLangPath } = global.config;
+  
+  await installSystemLanguages(relativePath)
+
   for (const test of global.tests) {
     const { relativePath, bundle, meta, defaultLangPath } = global.config;
 
     currIt = test;
 
     deleteAllAd4mData(relativePath);
-    
-    await installSystemLanguages(relativePath)
 
-   await executeTest()
+    await executeTest()
+
+    await new Promise(r => setTimeout(r, 10000));
   }
 }
 
