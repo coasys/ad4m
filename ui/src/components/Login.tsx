@@ -95,7 +95,7 @@ const Login = (props: any) => {
     if (!connected && !connectedLaoding) {
       navigate("/connect");
     } else if (connected && isUnlocked) {
-      navigate("/settings");
+      navigate("/apps");
     } else if (isInitialized) {
       setCurrentIndex(5);
     }
