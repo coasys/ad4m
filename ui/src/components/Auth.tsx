@@ -52,12 +52,91 @@ const Auth = () => {
     return (
       <j-flex direction="column" gap="200" a="flex-start">
         {capabilities.map((cap) => (
-          <j-text>{`${cap.can} => ${cap.with.domain}.${cap.with.pointers}`}</j-text>
+          <j-text>{`${mapCanCapToString(cap.can)} ${mapDomainCapToString(cap.with.domain)} with specific access to: ${mapPointerCapToString(cap.with.pointers)}`}</j-text>
         ))}
       </j-flex>
     );
   };
 
+  const mapCanCapToString = (cans: string[]) => {
+    let out = [];
+    for (const can of cans) {
+      switch (can) {
+        case "*":
+          out.push("Access all: ");
+          break;
+        case "READ":
+          out.push("Read your: ");
+          break;
+        case "CREATE":
+          out.push("Create: ");
+          break;
+        case "UPDATE":
+          out.push("Update: ");
+          break;
+        case "DELETE":
+          out.push("Delete: ");
+          break;
+        case "SUBSCRIBE":
+          out.push("Subscribe to: ");
+          break;
+        default:
+          out.push("");
+          break;
+      }
+    }
+    if (out.length > 1) {
+      out = out.map(val => val.replace(": ", ""));
+      out[out.length - 1] = out[out.length - 1] + ": ";
+    }
+    let outString = out.join(" And ");
+    return outString;
+  }
+
+  const mapDomainCapToString = (domain: string) => {
+    switch (domain) {
+      case "*":
+          return "actions";
+      case "agent":
+          return "agent actions";
+      case "expression":
+          return "expressions";
+      case "language":
+          return "languages";
+      case "perspective":
+          return "perspectives";
+      case "neighbourhood":
+          return "neighbourhoods";
+      case "runtime":
+          return "runtime";
+      case "runtime.trusted_agents":
+          return "trusted agents";
+      case "runtime.known_link_languages":
+          return "known link languages";
+      case "runtime.friends":
+        return "friends";
+      case "runtime.messages":
+        return "messages";
+    }
+    return domain;
+  }
+
+  const mapPointerCapToString = (pointers: string[]) => {
+    let out = [];
+    for (const pointer of pointers) {
+      switch (pointer) {
+        case "*":
+          out.push("all");
+          break;
+        default:
+          out.push("unknown");
+          break;
+      }
+    }
+    let outString = out.join(" and ");
+    return outString;
+  }
+        
   const copyCode = () => {
     copyTextToClipboard(secretCode);
 
@@ -105,7 +184,7 @@ const Auth = () => {
               disabled
               value={authInfo.appUrl}
             ></j-input>
-            <j-text>Request for these capabilities,</j-text>
+            <j-text>Wants permissions to: </j-text>
             {showCapabilities(authInfo.capabilities)}
             <j-box p="200"></j-box>
             <j-flex>
