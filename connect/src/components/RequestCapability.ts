@@ -1,5 +1,6 @@
 import { html } from "lit";
 import Logo from "./Logo";
+import { canCapToString, domainCapToString, pointerCapToString } from "@perspect3vism/ad4m";
 
 export default function CapNotMatchedFirst({
   capabilities,
@@ -12,11 +13,12 @@ export default function CapNotMatchedFirst({
     <div class="items">
       <div class="text-center">
         <h1 class="heading">Authorize ${appname}</h1>
-        <p class="body">${appname} want you to grant it these capabilities</p>
+        <p class="body">${appname} want you to grant it these capabilities: </p>
+        <br>
         <div>
           ${capabilities.map(
-            (e) =>
-              html`<li>${e.can} => ${e.with.domain}.${e.with.pointers}</li>`
+            (cap) =>
+              `${canCapToString(cap.can)} ${domainCapToString(cap.with.domain)}, with specific access to: ${pointerCapToString(cap.with.pointers)}`
           )}
         </div>
       </div>
