@@ -7,6 +7,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Added
 
+ - Holochain DHT status logs every 60 seconds [PR#277](https://github.com/perspect3vism/ad4m/pull/277)
+
 ### Changed
 
 ### Deprecated
