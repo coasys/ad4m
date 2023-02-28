@@ -43,6 +43,7 @@ const Apps = () => {
       {apps.length === 0 ? (
         <div>
           <j-text variant="heading">Welcome to AD4M, here you can manage your connected applications</j-text>
+          <j-text>Note: you will also be able to find AD4M in your system tray...</j-text>
           <br></br>
           <j-text variant="heading-sm">You have no apps connected...</j-text>
           <j-text variant="body">Try Flux <a href="https://app.fluxsocial.io"  target="_blank">here</a> to get started</j-text>
