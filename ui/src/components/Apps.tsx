@@ -1,6 +1,7 @@
 import { useState, useContext, useEffect } from "preact/compat";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle, linkStyle, listStyle, MainContainer } from "./styles";
+import { open } from "@tauri-apps/api/shell";
 
 const Apps = () => {
   const {
@@ -38,16 +39,30 @@ const Apps = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  function goToFlux() {
+    open("https://app.fluxsocial.io");
+  }
+
   return (
     <div style={MainContainer}>
       {apps.length === 0 ? (
-        <div>
-          <j-text variant="heading">Welcome to AD4M, here you can manage your connected applications</j-text>
-          <j-text>Note: you will also be able to find AD4M in your system tray...</j-text>
-          <br></br>
-          <j-text variant="heading-sm">You have no apps connected...</j-text>
-          <j-text variant="body">Try Flux <a href="https://app.fluxsocial.io"  target="_blank">here</a> to get started</j-text>
-        </div>
+        <j-box pt="1000" px="800">
+          <j-flex gap="400" direction="column" a="center" j="center">
+            <j-icon color="ui-500" size="xl" name="window-stack"></j-icon>
+            <j-flex direction="column" gap="300" j="center" a="center">
+              <j-text nomargin color="black" size="700" weight="800">
+                No connected apps yet
+              </j-text>
+              <j-text align="center" weight="300" size="500" color="ui-500">
+                Apps that have access to your social data will appear here. You
+                can revoke access at any time.
+              </j-text>
+              <j-button onClick={goToFlux} variant="primary">
+                Try Flux
+              </j-button>
+            </j-flex>
+          </j-flex>
+        </j-box>
       ) : (
         <div style={{ ...listStyle }}>
           {apps.map((app, index) => (
@@ -57,7 +72,9 @@ const Apps = () => {
                   <j-text variant="bold" size="600">
                     {app.auth.appName}
                     &nbsp;&nbsp;
-                    {app.revoked && <j-badge variant="warning">revoked</j-badge>}
+                    {app.revoked && (
+                      <j-badge variant="warning">revoked</j-badge>
+                    )}
                   </j-text>
                   <j-box p="200"></j-box>
                   <j-text size="400">{app.auth.appDesc}</j-text>
@@ -85,7 +102,7 @@ const Apps = () => {
             </div>
           ))}
         </div>
-      )} 
+      )}
       {showModal && (
         <j-modal
           size="fullscreen"
