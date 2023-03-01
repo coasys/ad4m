@@ -12,19 +12,26 @@
 
     <button id="button">Connect with AD4M</button>
 
-
     <script type="module">
       import Ad4mConnectUI from "./src/web.ts";
 
       const ui = Ad4mConnectUI({
-        appName: "ad4m-connect-example",
-        appDesc: "hello",
+        appName: "AD4M Connect Example",
+        appDesc: "A description of the app",
         appDomain: "http://localhost:3000",
         appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
         capabilities: [
           {
             with: { domain: "*", pointers: ["*"] },
             can: ["*"],
+          },
+          {
+            with: { domain: "*", pointers: ["*"] },
+            can: ["WRITE"],
+          },
+          {
+            with: { domain: "expression", pointers: ["*"] },
+            can: ["READ"],
           },
         ],
       });

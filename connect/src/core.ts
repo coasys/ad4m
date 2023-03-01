@@ -12,6 +12,7 @@ export type Ad4mConnectOptions = {
   appName: string;
   appDesc: string;
   appDomain: string;
+  appUrl?: string;
   appIconPath?: string;
   capabilities: { [x: string]: any }[];
   dataPath?: string;
@@ -51,6 +52,7 @@ export default class Ad4mConnect {
   appName: string;
   appDesc: string;
   appDomain: string;
+  appUrl?: string;
   listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
     ["configstatechange"]: [],
@@ -61,6 +63,7 @@ export default class Ad4mConnect {
   constructor({
     appName,
     appDesc,
+    appUrl,
     appDomain,
     capabilities,
     port,
@@ -71,6 +74,7 @@ export default class Ad4mConnect {
     this.appName = appName;
     this.appDesc = appDesc;
     this.appDomain = appDomain;
+    this.appUrl = appUrl;
     this.capabilities = capabilities;
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
@@ -252,12 +256,13 @@ export default class Ad4mConnect {
       this.setToken(null);
     }
 
-    this.requestId = await this.ad4mClient?.agent.requestCapability(
-      this.appName,
-      this.appDesc,
-      this.appDomain,
-      JSON.stringify(this.capabilities)
-    );
+    this.requestId = await this.ad4mClient?.agent.requestCapability({
+      appName: this.appName,
+      appDesc: this.appDesc,
+      appUrl: this.appUrl,
+      appDomain: this.appDomain,
+      capabilities: this.capabilities,
+    });
   }
 
   async verifyCode(code: string) {

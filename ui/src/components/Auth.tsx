@@ -2,11 +2,7 @@ import { useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { showNotification } from "@mantine/notifications";
 import { copyTextToClipboard } from "../util";
-import {
-  canCapToString,
-  domainCapToString,
-  pointerCapToString,
-} from "@perspect3vism/ad4m";
+import { capSentence } from "@perspect3vism/ad4m";
 
 interface Capability {
   with: Resource;
@@ -53,20 +49,6 @@ const Auth = () => {
     setSecretCodeModalOpened(false);
   };
 
-  const showCapabilities = (capabilities: Capability[]) => {
-    return (
-      <j-flex direction="column" gap="200" a="flex-start">
-        {capabilities.map((cap) => (
-          <j-text>{`${canCapToString(cap.can)} ${domainCapToString(
-            cap.with.domain
-          )}, with specific access to: ${pointerCapToString(
-            cap.with.pointers
-          )}`}</j-text>
-        ))}
-      </j-flex>
-    );
-  };
-
   const copyCode = () => {
     copyTextToClipboard(secretCode);
 
@@ -81,6 +63,8 @@ const Auth = () => {
       autoClose: 1000,
     });
   };
+
+  console.log(authInfo);
 
   return (
     <div>
@@ -97,26 +81,18 @@ const Auth = () => {
                   Authorize Capabilities
                 </j-text>
               </j-box>
-              <j-input
-                label="App Name"
-                size="lg"
-                disabled
-                value={authInfo.appName}
-              ></j-input>
-              <j-input
-                label="App Description"
-                size="lg"
-                disabled
-                value={authInfo.appDesc}
-              ></j-input>
-              <j-input
-                label="App URL"
-                size="lg"
-                disabled
-                value={authInfo.appUrl}
-              ></j-input>
-              <j-text>Wants permissions to: </j-text>
-              {showCapabilities(authInfo.capabilities)}
+              <img src={authInfo.appIconPath}></img>
+
+              <j-text variant="heading-sm">{authInfo.appName}</j-text>
+              <j-text variant="lead">{authInfo.appDesc}</j-text>
+              <j-text>{authInfo.appUrl}</j-text>
+
+              <j-text weight="800" size="400" uppercase>
+                Wants permissions to:
+              </j-text>
+              {authInfo.capabilities.map((cap) => {
+                return <li>{capSentence(cap)}</li>;
+              })}
               <j-box p="200"></j-box>
               <j-flex>
                 <j-button variant="link" onClick={closeRequestModal}>

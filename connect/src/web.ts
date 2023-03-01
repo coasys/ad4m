@@ -64,6 +64,18 @@ const styles = css`
     box-sizing: border-box;
   }
 
+  .check-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .check-list li {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
   .items {
     display: flex;
     flex-direction: column;
@@ -108,7 +120,11 @@ const styles = css`
     font-size: 18px;
     font-weight: 600;
     margin: 0;
-    margin-bottom: 15px;
+    margin-bottom: 10px;
+  }
+
+  .heading.nomargin {
+    margin: 0;
   }
 
   .body {
@@ -161,6 +177,8 @@ const styles = css`
     border-radius: 8px;
     width: calc(100vw - 10px);
     max-width: 500px;
+    max-height: 90vh;
+    overflow-y: auto;
   }
 
   @media (min-width: 800px) {
@@ -199,8 +217,8 @@ const styles = css`
   }
 
   .dialog__connect-ad4m {
-    width: 100px;
-    height: 100px;
+    width: 80px;
+    height: 80px;
     background: var(--background-color);
     padding: 20px;
     box-shadow: 0px 4px 7px 0px rgb(0 0 0 / 8%);
@@ -229,8 +247,8 @@ const styles = css`
   .dialog__connect-check:before {
     content: "";
     display: block;
-    width: 120px;
-    border-bottom: 1px dashed var(--body-color);
+    width: 40px;
+    border-bottom: 2px dashed var(--body-color);
     position: absolute;
     left: 50%;
     top: 50%;
@@ -243,6 +261,10 @@ const styles = css`
 
   .text-center {
     text-align: center;
+  }
+
+  .uppercase {
+    text-transform: uppercase;
   }
 
   .dialog__content {
@@ -433,6 +455,7 @@ export class Ad4mConnectElement extends LitElement {
       appName: this.appName,
       appDesc: this.appDesc,
       appDomain: this.appDomain,
+      appUrl: window.location.origin,
       appIconPath: this.appIconPath,
       capabilities: Array.isArray(this.capabilities)
         ? this.capabilities
@@ -626,6 +649,10 @@ export class Ad4mConnectElement extends LitElement {
     this._client.verifyCode(code);
   }
 
+  setOpen(val: boolean) {
+    this._isOpen = val;
+  }
+
   renderViews() {
     if (this.authState === "locked") {
       return AgentLocked({
@@ -673,6 +700,7 @@ export class Ad4mConnectElement extends LitElement {
         requestCapability: this.requestCapability,
         capabilities: this.capabilities,
         appname: this.appName,
+        setOpen: this.setOpen,
         appiconpath: this.appIconPath,
       });
     }
