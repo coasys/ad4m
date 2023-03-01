@@ -8,11 +8,11 @@ This is a testing library for testing languages for ad4m. This package internall
 
 npm:
 
-`npm install ad4m-test`
+`npm install @perspect3vism/ad4m-test`
 
 yarn:
 
-`yarn add ad4m-test`
+`yarn add @perspect3vism/ad4m-test`
 
 ### Write tests
 
@@ -21,18 +21,39 @@ You can write tests like you would with any other testing framework. You can use
 **example**
 
 ```js
-const { createExpression, getExpression } = require('ad4m-test/helpers')
+const { spawnExpressionAgent, spawnLinkAgent } = require('ad4m-test/helpers')
 
 describe("Expression", () => {
   it("Create Expression", async () => {
-    const exp = await createExpression("{\"name\": \"hello world!\"}");
+    const agent = await spawnExpressionAgent()
+
+    const exp = await agent.create("{\"name\": \"hello world!\"}");
 
     expect(exp).not.toBeNull()
 
-    const fetched = await getExpression(exp);
+    const fetched = await agent.get(exp);
 
     expect(fetched).not.toBeNull()
   })
+})
+
+describe("Link", () => {
+  it("Create Link", async () => {
+    const agent = await spawnLinkAgent();
+
+    const all = await agent.queryLinks({});
+
+    expect(all.length).toBe(0)
+    
+    const link = await agent.addLink({source:"root", predicate: "soic://test", target:"QmYVsrMpiFmV9S7bTWNAkUzSqjRJskQ8g4TWKKwKrHAPqL://QmSsCCtXMDAZXMpyiNLzwjGEU4hLmhG7fphidhEEodQ4Wy"})
+
+    const all1 = await agent.queryLinks({});
+
+    expect(all1.length).toBe(1)
+    expect(all1[0].data.source).toBe(link.data.source)
+    expect(all1[0].data.predicate).toBe(link.data.predicate)
+    expect(all1[0].data.target).toBe(link.data.target)
+  });
 })
 ```
 
