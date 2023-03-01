@@ -76,19 +76,13 @@ ad4m-test --ui --bundle languages/sdp.js --meta '{\"name\":\"shortform-expressio
 **Cli params:**
 
 - `relativePath | rp` - Relative path to the appdata for ad4m-host to store binaries
-- `port | p` - Use this port to run ad4m GraphQL service
 - `test | t` - Runs test on a single file
 - `bundle | b` - Language bundle for the language to be tested
 - `meta | m` - Meta information for the language to be installed
-- `languageTye | lt` - Is the language a link or expression language
 - `defaultLangPath | dlp` - Local bulid-in language to be used instead of the packaged ones
 - `hideLogs | hl` - Hide the ad4m-test logs
 - `ui` - Starts a local server with expressionUI loaded for testing.
 
 **Helpers:**
-- `addLink(link: LinkExpression)` - Adds link and returns added link.
-- `removeLink(link: LinkExpression)` - Removes links.
-- `udpateLink(oldLink: LinkExpression, newLink: LinkExpression)` - Updates the old link and return a new one.
-- `queryLinks(query: LinkQuery)` - gets all the link for that perspective.
-- `createExpression(content: any)` - Creates an expression with the supplied content and returns expression url.
-- `getExpression(url: string)` - Fetches the expression from the url passed.
+- `spawnExpressionAgent()` - Spawns a agent that can work with expressions.
+- `spawnLinkAgent()` - Spawns an agent that can work with link and multiple agents are part of same neighbourhood to similify testing.
