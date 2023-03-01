@@ -5,7 +5,7 @@ import {
 } from "@apollo/client/core";
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient, CapabilityInput } from "@perspect3vism/ad4m";
 import { checkPort, connectWebSocket } from "./utils";
 
 export type Ad4mConnectOptions = {
@@ -14,7 +14,7 @@ export type Ad4mConnectOptions = {
   appDomain: string;
   appUrl?: string;
   appIconPath?: string;
-  capabilities: { [x: string]: any }[];
+  capabilities: CapabilityInput[];
   dataPath?: string;
   port?: number;
   token?: string;
@@ -48,7 +48,7 @@ export default class Ad4mConnect {
   token: string;
   isFullyInitialized = false;
   port = 12000;
-  capabilities: { [x: string]: any }[] = [];
+  capabilities: CapabilityInput[] = [];
   appName: string;
   appDesc: string;
   appDomain: string;

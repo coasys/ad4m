@@ -198,3 +198,61 @@ export class Apps {
         this.revoked = revoked;
     }
 }
+
+@InputType()
+export class ResourceInput {
+    @Field()
+    domain: string;
+
+    @Field(type => [String])
+    pointers: string[];
+
+    constructor(domain: string, pointers: string[]) {
+        this.domain = domain;
+        this.pointers = pointers;
+    }
+}
+
+@InputType()
+export class CapabilityInput {
+    @Field(type => ResourceInput)
+    with: ResourceInput;
+
+    @Field(type => [String])
+    can: string[];
+
+    constructor(withF: ResourceInput, can: string[]) {
+        this.with = withF;
+        this.can = can;
+    }
+}
+
+@InputType()
+export class AuthInfoInput {
+    @Field()
+    appName: string;
+
+    @Field()
+    appDesc: string;
+
+    @Field()
+    appDomain: string;
+
+    @Field()
+    appUrl?: string;
+    
+    @Field()
+    appIconPath?: string;
+
+    @Field(type => [CapabilityInput])
+    capabilities?: CapabilityInput[];
+
+    constructor(appName: string, appDesc: string, appDomain: string, appUrl?: string, appIconPath?: string, capabilities?: CapabilityInput[]) {
+        this.appName = appName;
+        this.appDesc = appDesc;
+        this.appUrl = appUrl;
+        this.appDomain = appDomain
+        this.capabilities = capabilities;
+        this.appIconPath = appIconPath;
+    }
+}

@@ -11,6 +11,7 @@ import {
   Agent,
   AgentSignature,
   Apps,
+  AuthInfoInput,
   EntanglementProof,
   EntanglementProofInput,
 } from "./Agent";
@@ -189,11 +190,7 @@ export default class AgentResolver {
 
   @Mutation((returns) => String)
   agentRequestCapability(
-    @Arg("appName") appName: string,
-    @Arg("appDesc") appDesc: string,
-    @Arg("appDomain") appDomain: string,
-    @Arg("appUrl") appUrl: string,
-    @Arg("capabilities") capabilities: string
+    @Arg("authInfo") authInfo: AuthInfoInput
   ): String {
     return "test-request-id";
   }
