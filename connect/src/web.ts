@@ -482,11 +482,9 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   async connect() {
+    this._isOpen = true;
+    this.requestUpdate();
     const client = await this._client.connect();
-    if (this.authState !== "authenticated") {
-      this._isOpen = true;
-      this.requestUpdate();
-    }
     return client;
   }
 
