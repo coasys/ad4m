@@ -36,7 +36,7 @@ const TrustAgent = (props: Props) => {
       <j-modal
         size="fullscreen"
         open={opened}
-        onToggle={(e: any) => e.target.open && closeModal()}
+        onToggle={(e: any) => setOpened(e.target.open)}
       >
         <j-box p="400">
           <j-flex gap="200" direction="column">

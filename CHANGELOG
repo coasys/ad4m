@@ -7,13 +7,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Added
 
-- Adds ability to remove Telepresence signal handler [PR#251](https://github.com/perspect3vism/ad4m/pull/251)
-- e92b19f (connect): Add typescript types to the build, and use web as default. Separate export for Electron.
-
 ### Changed
-
-- "Language not created by trusted agent and is not templated" error is now shown in log and contains the meta information of the failed Language [PR#252](https://github.com/perspect3vism/ad4m/pull/252)
-- 968da42 (connect): Separate event state into `authstatechange` `connectionstatechange` and `configstatechange` in ad4m-connect
 
 ### Deprecated
 
@@ -21,8 +15,53 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
 
-- Startup when unlocking (instead of generating) agent was halted with empty log and "No Perspective controller" errors. Fixed with better error handling during unlock [PR#253](https://github.com/perspect3vism/ad4m/pull/253)
+## [0.2.16] - 25/02/2013
+### Added
 
+### Changed
+ - Main LinkLanguage (Perspective Diff Sync) refactored to replace global/objective latest-revision with a simple gossip algorithm, where agents broadcast their revision and merge in revision of others as they are gossiped. Improves speed and resilience a lot. [PR#12 in PDiff-Sync](https://github.com/perspect3vism/perspective-diff-sync/pull/12) [PR#271](https://github.com/perspect3vism/ad4m/pull/271)
+
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Perspective Diff Sync: calculation of fast_forward_possible fixed, which prevents merge-loops (PR#13)[https://github.com/perspect3vism/perspective-diff-sync/pull/13]
+
+## [0.2.15] - 23/02/2013
+
+### Added
+ -  getAd4mClient to web exports in connect [PR#259](https://github.com/perspect3vism/ad4m/pull/259)
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Not slow polling after sync [PR#260](https://github.com/perspect3vism/ad4m/pull/260)
+ - Trusted agent popup not working consistently [PR#261](https://github.com/perspect3vism/ad4m/pull/261)
+
+## [0.2.14] - 17/02/2013
+
+### Added
+- Adds ability to remove Telepresence signal handler [PR#251](https://github.com/perspect3vism/ad4m/pull/251)
+- e92b19f (connect): Add typescript types to the build, and use web as default. Separate export for Electron.
+
+### Changed
+
+- "Language not created by trusted agent and is not templated" error is now shown in log and contains the meta information of the failed Language [PR#252](https://github.com/perspect3vism/ad4m/pull/252)
+- 968da42 (connect): Separate event state into `authstatechange` `connectionstatechange` and `configstatechange` in ad4m-connect
+- [connect] Updated utils export & made `getAd4mClient` export from web as well. [PR#259](https://github.com/perspect3vism/ad4m/pull/259)
+
+### Deprecated
+
+### Removed
+
+### Fixed
+- Startup when unlocking (instead of generating) agent was halted with empty log and "No Perspective controller" errors. Fixed with better error handling during unlock [PR#253](https://github.com/perspect3vism/ad4m/pull/253) and [PR#256](https://github.com/perspect3vism/ad4m/pull/256)
+  
 ## [0.2.13] - 15/02/2013
 
 ### Added
