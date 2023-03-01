@@ -16,7 +16,7 @@
       import Ad4mConnectUI from "./src/web.ts";
 
       const ui = Ad4mConnectUI({
-        appName: "AD4M Connect Example",
+        appName: "AD4M Connect",
         appDesc: "A description of the app",
         appDomain: "http://localhost:3000",
         appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
@@ -24,14 +24,6 @@
           {
             with: { domain: "*", pointers: ["*"] },
             can: ["*"],
-          },
-          {
-            with: { domain: "*", pointers: ["*"] },
-            can: ["WRITE"],
-          },
-          {
-            with: { domain: "expression", pointers: ["*"] },
-            can: ["READ"],
           },
         ],
       });

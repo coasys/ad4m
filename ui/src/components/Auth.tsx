@@ -74,31 +74,51 @@ const Auth = () => {
           open={requestModalOpened}
           onToggle={(e: any) => setRequestModalOpened(e.target.open)}
         >
-          <j-box px="400" py="600">
+          <j-box px="500" py="600">
             <j-flex gap="200" direction="column">
-              <j-box pb="500">
+              <j-box pb="900">
                 <j-text nomargin size="600" color="black" weight="600">
                   Authorize Capabilities
                 </j-text>
               </j-box>
-              <img src={authInfo.appIconPath}></img>
 
-              <j-text variant="heading-sm">{authInfo.appName}</j-text>
-              <j-text variant="lead">{authInfo.appDesc}</j-text>
-              <j-text>{authInfo.appUrl}</j-text>
+              <j-flex gap="500">
+                <div>
+                  <j-avatar size="xl" src={authInfo.appIconPath}></j-avatar>
+                </div>
+                <div>
+                  <j-text variant="heading-sm">{authInfo.appName}</j-text>
+                  <j-text nomargin size="500">
+                    {authInfo.appDesc}
+                  </j-text>
+                </div>
+              </j-flex>
 
-              <j-text weight="800" size="400" uppercase>
-                Wants permissions to:
-              </j-text>
-              {authInfo.capabilities.map((cap) => {
-                return <li>{capSentence(cap)}</li>;
-              })}
-              <j-box p="200"></j-box>
-              <j-flex>
+              <j-box py="500">
+                <j-text weight="800" size="400" uppercase>
+                  Wants permissions to:
+                </j-text>
+                <ul style={{ listStyle: "none", padding: 0 }}>
+                  {authInfo.capabilities.map((cap) => {
+                    return (
+                      <li style={{ display: "flex", gap: "var(--j-space-300" }}>
+                        <span>
+                          <j-icon
+                            size="sm"
+                            name="check-circle-fill"
+                            color="success-500"
+                          ></j-icon>
+                        </span>
+                        <span>{capSentence(cap)}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </j-box>
+              <j-flex gap="300">
                 <j-button variant="link" onClick={closeRequestModal}>
                   Close
                 </j-button>
-                <j-box p="200"></j-box>
                 <j-button variant="primary" onClick={permitCapability}>
                   Confirm
                 </j-button>

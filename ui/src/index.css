@@ -38,6 +38,10 @@ html {
   padding-bottom: 0;
 }
 
+:root j-avatar::part(base) {
+  border-radius: 4px;
+}
+
 :root j-modal::part(modal) {
   box-shadow: 0px 0px 40px 20px
     hsla(var(--j-color-primary-hue), var(--j-color-saturation), 20%, 0.05);

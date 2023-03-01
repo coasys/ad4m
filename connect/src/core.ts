@@ -52,6 +52,7 @@ export default class Ad4mConnect {
   appName: string;
   appDesc: string;
   appDomain: string;
+  appIconPath: string;
   appUrl?: string;
   listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
@@ -63,6 +64,7 @@ export default class Ad4mConnect {
   constructor({
     appName,
     appDesc,
+    appIconPath,
     appUrl,
     appDomain,
     capabilities,
@@ -75,6 +77,7 @@ export default class Ad4mConnect {
     this.appDesc = appDesc;
     this.appDomain = appDomain;
     this.appUrl = appUrl;
+    this.appIconPath = appIconPath;
     this.capabilities = capabilities;
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
@@ -260,6 +263,7 @@ export default class Ad4mConnect {
       appName: this.appName,
       appDesc: this.appDesc,
       appUrl: this.appUrl,
+      appIconPath: this.appIconPath,
       appDomain: this.appDomain,
       capabilities: this.capabilities,
     });
