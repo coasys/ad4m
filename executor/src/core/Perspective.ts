@@ -90,21 +90,29 @@ export default class Perspective {
 
         if (this.neighbourhood) {
             // setup polling loop for Perspectives with a linkLanguage
-            try {
-                this.getCurrentRevision().then(revision => {
-                    // if revision is null, then we are not connected to the network yet, so we need to poll fast
-                    if(!revision && this.createdFromJoin) {
-                        this.isFastPolling = true;
-                        this.updatePerspectiveState(PerspectiveState.LinkLanguageInstalledButNotSynced);
-                        this.#pollingInterval = this.setupPolling(3000);
-                    } else {
-                        //Say that we are synced here since we dont have any interface on the link language for deeper gossip information
-                        this.updatePerspectiveState(PerspectiveState.Synced);
-                        this.#pollingInterval = this.setupPolling(30000);
-                    }
-                })
-            } catch (e) {
-                console.error(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to get current revision and setting polling loop: ${e}`);
+            this.setupSyncSingals(3000);
+            //this.setupFullRenderSync(20000);
+
+            // Handle join differently so we wait before publishing diffs until we have seen
+            // a first foreign revision. Otherwise we will never use snaphshots and make the
+            // diff graph complex.
+            if(this.createdFromJoin) {
+                try {
+                    this.getCurrentRevision().then(revision => {
+                        // if revision is null, then we are not connected to the network yet
+                        // Set the state to LinkLanguageInstalledButNotSynced so we will keep
+                        // link additions as pending until we are synced
+                        if(!revision) {
+                            this.setupPendingDiffsPublishing(5000);
+                        } else {
+                            this.updatePerspectiveState(PerspectiveState.Synced);
+                        }
+                    })
+                } catch (e) {
+                    console.error(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to get current revision: ${e}`);
+                }
+            } else {
+                this.updatePerspectiveState(PerspectiveState.Synced);
             }
         }
 
@@ -125,6 +133,80 @@ export default class Perspective {
             this.state = state
         }
     }
+
+    async setupFullRenderSync(intervalMs: number) {
+        if(this.state === PerspectiveState.Synced) {
+            try {
+                await this.syncWithSharingAdapter();
+            } catch(e) {
+                console.error(`Perspective.setupFullRenderSync(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to do full render sync with sharing adapter: ${e}`);
+            }
+        } else {
+            console.log(`Perspective.setupFullRenderSync(): NH [${this.sharedUrl}] (${this.name}): Omitting full render sync since perspective is not synced yet`);
+        }
+        await sleep(intervalMs);
+        this.setupFullRenderSync(intervalMs);
+    }
+
+    async setupSyncSingals(intervalMs: number) {
+        try {
+            await this.callLinksAdapter("pull"); // should rename this in the LinksAdapter interface to sync ...
+        } catch(e) {
+            console.error(`Perspective.setupSyncSingals(): NH [${this.sharedUrl}] (${this.name}): Got error when sending sync signals: ${e}`);
+        }
+        await sleep(intervalMs);
+        this.setupSyncSingals(intervalMs);
+    }
+
+    async setupPendingDiffsPublishing(intervalMs: number) {
+        let pendingGotPublished = false;
+        if(this.state == PerspectiveState.LinkLanguageFailedToInstall) {
+            try {
+                await this.getLinksAdapter()
+            } catch(e) {
+                console.error(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to install link language: ${e}`);
+            }
+        }
+        
+        try {
+            // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
+            if (await this.getCurrentRevision()) {
+                //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
+                this.updatePerspectiveState(PerspectiveState.Synced);
+                //Let's check if we have unpublished diffs:
+                const mutations = this.#db.getPendingDiffs(this.uuid);
+                if(mutations && mutations.length > 0) {
+                    // If we do, collect them...
+                    const batchedMutations = {
+                        additions: [],
+                        removals: []
+                    } as PerspectiveDiff
+                    for(const mutation of mutations) {
+                        for (const addition of mutation.additions) {
+                            batchedMutations.additions.push(addition);
+                        }
+                        for (const removal of mutation.removals) {
+                            batchedMutations.removals.push(removal);
+                        }
+                    }
+                    
+                    // ...publish them...
+                    await this.callLinksAdapter('commit', batchedMutations);
+                    // ...and clear the temporary storage
+                    this.#db.clearPendingDiffs(this.uuid)
+                    pendingGotPublished = true;
+                }
+            }
+        } catch (e) {
+            console.warn(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to repulish pending diffs. Error: ${e}`, e);
+        }
+
+        if(!pendingGotPublished) {
+            await sleep(intervalMs);
+            this.setupPendingDiffsPublishing(intervalMs);
+        }
+    }
+
 
     setupPolling(intervalMs: number) {
         return setInterval(
@@ -174,7 +256,7 @@ export default class Perspective {
                         }
                         
                         //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                        if(this.isFastPolling && !madeSync) {
+                        if(this.isFastPolling && madeSync) {
                             this.isFastPolling = false;
                             clearInterval(this.#pollingInterval);
                             this.#pollingInterval = this.setupPolling(30000);
@@ -381,9 +463,9 @@ export default class Perspective {
             return undefined !== list.find(e =>
                 JSON.stringify(e.author) === JSON.stringify(link.author) &&
                 e.timestamp === link.timestamp &&
-                e.source === link.data.source &&
-                e.target === link.data.target &&
-                e.predicate === link.data.predicate
+                e.data.source === link.data.source &&
+                e.data.target === link.data.target &&
+                e.data.predicate === link.data.predicate
                 )
         }
         let linksToCommit = [];
