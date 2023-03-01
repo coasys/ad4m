@@ -2,7 +2,11 @@ import { useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { showNotification } from "@mantine/notifications";
 import { copyTextToClipboard } from "../util";
-import { canCapToString, domainCapToString, pointerCapToString } from "@perspect3vism/ad4m";
+import {
+  canCapToString,
+  domainCapToString,
+  pointerCapToString,
+} from "@perspect3vism/ad4m";
 
 interface Capability {
   with: Resource;
@@ -53,12 +57,16 @@ const Auth = () => {
     return (
       <j-flex direction="column" gap="200" a="flex-start">
         {capabilities.map((cap) => (
-          <j-text>{`${canCapToString(cap.can)} ${domainCapToString(cap.with.domain)}, with specific access to: ${pointerCapToString(cap.with.pointers)}`}</j-text>
+          <j-text>{`${canCapToString(cap.can)} ${domainCapToString(
+            cap.with.domain
+          )}, with specific access to: ${pointerCapToString(
+            cap.with.pointers
+          )}`}</j-text>
         ))}
       </j-flex>
     );
   };
-        
+
   const copyCode = () => {
     copyTextToClipboard(secretCode);
 
@@ -76,91 +84,95 @@ const Auth = () => {
 
   return (
     <div>
-      <j-modal
-        size="fullscreen"
-        open={requestModalOpened}
-        onToggle={(e: any) => setRequestModalOpened(e.target.open)}
-      >
-        <j-box px="400" py="600">
-          <j-flex gap="200" direction="column">
-            <j-box pb="500">
-              <j-text nomargin size="600" color="black" weight="600">
-                Authorize Capabilities
+      {requestModalOpened && (
+        <j-modal
+          size="fullscreen"
+          open={requestModalOpened}
+          onToggle={(e: any) => setRequestModalOpened(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-flex gap="200" direction="column">
+              <j-box pb="500">
+                <j-text nomargin size="600" color="black" weight="600">
+                  Authorize Capabilities
+                </j-text>
+              </j-box>
+              <j-input
+                label="App Name"
+                size="lg"
+                disabled
+                value={authInfo.appName}
+              ></j-input>
+              <j-input
+                label="App Description"
+                size="lg"
+                disabled
+                value={authInfo.appDesc}
+              ></j-input>
+              <j-input
+                label="App URL"
+                size="lg"
+                disabled
+                value={authInfo.appUrl}
+              ></j-input>
+              <j-text>Wants permissions to: </j-text>
+              {showCapabilities(authInfo.capabilities)}
+              <j-box p="200"></j-box>
+              <j-flex>
+                <j-button variant="link" onClick={closeRequestModal}>
+                  Close
+                </j-button>
+                <j-box p="200"></j-box>
+                <j-button variant="primary" onClick={permitCapability}>
+                  Confirm
+                </j-button>
+              </j-flex>
+            </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+
+      {secretCodeModalOpened && (
+        <j-modal
+          size="fullscreen"
+          open={secretCodeModalOpened}
+          onToggle={(e: any) => setSecretCodeModalOpened(e.target.open)}
+        >
+          <div
+            className="center"
+            style={{
+              height: "100%",
+              width: "100%",
+              maxWidth: "500px",
+              paddingLeft: "var(--j-space-400)",
+              paddingRight: "var(--j-space-400)",
+            }}
+          >
+            <div>
+              <j-text size="700" color="black" weight="600">
+                Verification Code
               </j-text>
-            </j-box>
-            <j-input
-              label="App Name"
-              size="lg"
-              disabled
-              value={authInfo.appName}
-            ></j-input>
-            <j-input
-              label="App Description"
-              size="lg"
-              disabled
-              value={authInfo.appDesc}
-            ></j-input>
-            <j-input
-              label="App URL"
-              size="lg"
-              disabled
-              value={authInfo.appUrl}
-            ></j-input>
-            <j-text>Wants permissions to: </j-text>
-            {showCapabilities(authInfo.capabilities)}
-            <j-box p="200"></j-box>
-            <j-flex>
-              <j-button variant="link" onClick={closeRequestModal}>
+              <j-input
+                className="one-time-pass"
+                label="Go back to your app to verify"
+                readonly
+                size="xl"
+                value={secretCode}
+              >
+                <j-button square slot="end" variant="link" onClick={copyCode}>
+                  <j-icon
+                    size="sm"
+                    name={!copied ? "clipboard" : "clipboard-check"}
+                  ></j-icon>
+                </j-button>
+              </j-input>
+              <j-button variant="primary" onClick={closeSecretCodeModal}>
                 Close
               </j-button>
-              <j-box p="200"></j-box>
-              <j-button variant="primary" onClick={permitCapability}>
-                Confirm
-              </j-button>
-            </j-flex>
-          </j-flex>
-        </j-box>
-      </j-modal>
-
-      <j-modal
-        size="fullscreen"
-        open={secretCodeModalOpened}
-        onToggle={(e: any) => setSecretCodeModalOpened(e.target.open)}
-      >
-        <div
-          className="center"
-          style={{
-            height: "100%",
-            width: "100%",
-            maxWidth: "500px",
-            paddingLeft: "var(--j-space-400)",
-            paddingRight: "var(--j-space-400)",
-          }}
-        >
-          <div>
-            <j-text size="700" color="black" weight="600">
-              Verification Code
-            </j-text>
-            <j-input
-              className="one-time-pass"
-              label="Go back to your app to verify"
-              readonly
-              size="xl"
-              value={secretCode}
-            >
-              <j-button square slot="end" variant="link" onClick={copyCode}>
-                <j-icon
-                  size="sm"
-                  name={!copied ? "clipboard" : "clipboard-check"}
-                ></j-icon>
-              </j-button>
-            </j-input>
-            <j-button variant="primary" onClick={closeSecretCodeModal}>
-              Close
-            </j-button>
+            </div>
           </div>
-        </div>
-      </j-modal>
+        </j-modal>
+      )}
     </div>
   );
 };
