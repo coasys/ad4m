@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf8" />
+    <meta name="viewport" content="width=device-width" />
+
+    <title>Create Expression</title>
+    <constructor-icon id="constructorIcon"></constructor-icon>
+  </head>
+
+  <body>
+    <script src="https://unpkg.com/browse/@apollo/client@3.3.11/main.cjs.js"></script>
+    <script type="module">
+      import Constructor from './constructorIcon.js'
+      import './client.js'
+
+      const ad4mClient = await buildAd4mClient();
+
+      customElements.define('constructor-icon', Constructor);
+
+      const ele = document.getElementById('constructorIcon');
+
+      ele.addEventListener('commitExpression', async (e) => {
+        const url = new URL(window.location.href);
+        const address = url.searchParams.get('address')
+        const exp = await ad4mClient.expression.create(e.detail.text, address)
+        console.log(e.detail, address, exp)
+
+        addHref(address, exp);
+      })
+
+      ele.addEventListener('discard', (e) => {
+        console.log(e.detail)
+      })
+
+      function addHref(address, exp) {
+        let href = document.getElementById('ref')
+        if (href) {
+          href.remove();
+        }
+
+        const url = `/expression.html?address=${address}&exp=${encodeURIComponent(exp)}`
+
+        href = document.createElement('a')
+        href.id = 'ref'
+        href.href = url
+        href.innerText = 'Expression created, click here to view it';
+
+        document.body.appendChild(href)
+      }
+    </script>
+  </body>
+</html>
