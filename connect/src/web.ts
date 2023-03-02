@@ -1,25 +1,25 @@
 import { html, css, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { BarcodeDetectorPolyfill } from "@undecaf/barcode-detector-polyfill";
 
 import Ad4mConnect, {
   AuthStates,
-  ConfigStates,
   ConnectionStates,
   Ad4mConnectOptions,
 } from "./core";
 
-import { Html5Qrcode } from "html5-qrcode";
 import Loading from "./components/Loading";
 import RemoteUrl from "./components/RemoteUrl";
 import Start from "./components/Start";
 import Disconnected from "./components/Disconnected";
 import AgentLocked from "./components/AgentLocked";
 import RequestCapability from "./components/RequestCapability";
-import InvalidToken from "./components/InvalidToken";
 import VerifyCode from "./components/VerifyCode";
 import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
+import ScanQRCode from "./components/ScanQRCode";
 import Header from "./components/Header";
 import autoBind from "auto-bind";
+
 export { getAd4mClient } from "./utils";
 
 function detectMob() {
@@ -53,6 +53,8 @@ const styles = css`
   .wrapper {
     font-family: "DM Sans", Helvetica, Arial, sans-serif;
     position: fixed;
+    display: grid;
+    place-content: center;
     top: 0;
     left: 0;
     color: var(--body-color);
@@ -169,10 +171,6 @@ const styles = css`
 
   .dialog {
     background-color: var(--background-color);
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translateX(-50%) translateY(-50%);
     z-index: 10;
     border-radius: 8px;
     width: calc(100vw - 10px);
@@ -376,6 +374,32 @@ const styles = css`
     text-align: center;
     background: red;
   }
+
+  .qr-scanner {
+    background: black;
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+    place-content: center;
+  }
+
+  .qr-scanner .stop {
+    position: absolute;
+    z-index: 10;
+    left: 50%;
+    bottom: 10px;
+    transform: translateX(-50%);
+  }
+
+  .qr-scanner video {
+    height: 100vh;
+    width: 100vw;
+    object-fit: cover;
+  }
 `;
 
 @customElement("ad4m-connect")
@@ -402,6 +426,7 @@ export class Ad4mConnectElement extends LitElement {
     | "loading"
     | "remoteurl"
     | "start"
+    | "qr"
     | "requestcap"
     | "verifycode"
     | "invalidtoken"
@@ -501,7 +526,6 @@ export class Ad4mConnectElement extends LitElement {
     });
 
     this.loadFont();
-    this.constructQR();
   }
 
   connect() {
@@ -523,89 +547,28 @@ export class Ad4mConnectElement extends LitElement {
     document.head.appendChild(link);
   }
 
-  constructQR() {
-    const containerEle = document.createElement("div");
-    containerEle.id = "camera-id";
-    containerEle.style.position = "absolute";
-    containerEle.style.top = "0";
-    containerEle.style.left = "0";
-    containerEle.style.width = "100vw";
-    containerEle.style.height = "100vh";
-    containerEle.style.zIndex = "10000";
-    containerEle.style.display = "none";
-
-    const ele = document.createElement("div");
-    ele.id = "reader";
-    // @ts-ignore
-    ele.width = "100vw";
-    ele.style.height = "100vh";
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.id = "stop-scan";
-    cancelBtn.innerHTML = "&#10005;";
-    cancelBtn.style.paddingTop = "4px";
-    cancelBtn.style.display = "flex";
-    cancelBtn.style.alignItems = "center";
-    cancelBtn.style.justifyContent = "center";
-    cancelBtn.style.position = "absolute";
-    cancelBtn.style.top = "10px";
-    cancelBtn.style.right = "10px";
-    cancelBtn.style.borderRadius = "50%";
-    cancelBtn.style.border = "0";
-    cancelBtn.style.height = "30px";
-    cancelBtn.style.width = "30px";
-    cancelBtn.style.fontFamily = "inherit";
-    cancelBtn.style.fontSize = "20px";
-
-    containerEle.appendChild(ele);
-    containerEle.appendChild(cancelBtn);
-    document.body.appendChild(containerEle);
-  }
-
-  scanQrcode() {
-    const html5QrCode = new Html5Qrcode("reader");
-    const ele = document.getElementById("camera-id");
-    ele.style.display = "block";
-
-    const qrCodeSuccessCallback = (decodedText, decodedResult) => {
-      this._client.connect(decodedText);
-      html5QrCode.stop();
-      ele.style.display = "none";
-    };
-    function onScanFailure(error) {
-      console.warn(`Code scan error = ${error}`);
+  async startCamera(e) {
+    try {
+      window["BarcodeDetector"].getSupportedFormats();
+    } catch {
+      window["BarcodeDetector"] = BarcodeDetectorPolyfill;
     }
 
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    const reverseAspectRatio = height / width;
+    await this.changeUIState("qr");
 
-    const mobileAspectRatio =
-      reverseAspectRatio > 1.5
-        ? reverseAspectRatio + (reverseAspectRatio * 12) / 100
-        : reverseAspectRatio;
+    setTimeout(async () => {
+      const video = this.shadowRoot.querySelector("video");
 
-    const config = {
-      fps: 20, // frame per seconds for qr code scanning
-      qrbox: { width: 250, height: 250 },
-      videoConstraints: {
-        facingMode: "environment",
-        aspectRatio: mobileAspectRatio,
-      },
-    };
+      if (!video) return;
 
-    const cancelBtn = document.getElementById("stop-scan");
-    cancelBtn.addEventListener("click", function () {
-      html5QrCode.stop();
-      ele.style.display = "none";
-    });
+      const media = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: "environment" },
+      });
 
-    html5QrCode.start(
-      { facingMode: "environment" },
-      config,
-      qrCodeSuccessCallback,
-      onScanFailure
-    );
+      video.srcObject = media;
+      video.autoplay = true;
+    }, 100);
   }
 
   changeUrl(url) {
@@ -654,6 +617,14 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   renderViews() {
+    if (this.uiState === "qr") {
+      return ScanQRCode({
+        changeState: this.changeUIState,
+        onSuccess: (url) => this._client.connect(url),
+        uiState: this.uiState,
+      });
+    }
+
     if (this.authState === "locked") {
       return AgentLocked({
         unlockAgent: this.unlockAgent,
@@ -676,7 +647,7 @@ export class Ad4mConnectElement extends LitElement {
 
     if (this.connectionState === "not_connected") {
       return Start({
-        scanQrcode: this.scanQrcode,
+        scanQrcode: this.startCamera,
         connect: this.connect,
         isMobile: this._isMobile,
         hasClickedDownload: this._hasClickedDownload,
