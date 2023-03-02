@@ -158,8 +158,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/host/dist/ad4m-windows-x64
-        asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64
+        asset_path: /home/runner/work/ad4m/ad4m/host/dist/ad4m-windows-x64.exe
+        asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
         asset_content_type: application/octet-stream
 
     # - name: "Upload built AD4MIN"
@@ -200,6 +200,11 @@ jobs:
         with:
           token: ${{ secrets.NPM_TOKEN }}
           package: executor/package.json
+      - name: Publish Test runner
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: test-runner/package.json
       
   
   crates-publish:

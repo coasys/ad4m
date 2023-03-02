@@ -7,6 +7,34 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Added
 
+ - Holochain DHT status logs every 60 seconds [PR#277](https://github.com/perspect3vism/ad4m/pull/277)
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+## [0.2.16] - 25/02/2013
+### Added
+
+### Changed
+ - Main LinkLanguage (Perspective Diff Sync) refactored to replace global/objective latest-revision with a simple gossip algorithm, where agents broadcast their revision and merge in revision of others as they are gossiped. Improves speed and resilience a lot. [PR#12 in PDiff-Sync](https://github.com/perspect3vism/perspective-diff-sync/pull/12) [PR#271](https://github.com/perspect3vism/ad4m/pull/271)
+
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Perspective Diff Sync: calculation of fast_forward_possible fixed, which prevents merge-loops (PR#13)[https://github.com/perspect3vism/perspective-diff-sync/pull/13]
+
+## [0.2.15] - 23/02/2013
+
+### Added
+ -  getAd4mClient to web exports in connect [PR#259](https://github.com/perspect3vism/ad4m/pull/259)
+
 ### Changed
 
 ### Deprecated
@@ -15,6 +43,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
  - Not slow polling after sync [PR#260](https://github.com/perspect3vism/ad4m/pull/260)
+ - Trusted agent popup not working consistently [PR#261](https://github.com/perspect3vism/ad4m/pull/261)
 
 ## [0.2.14] - 17/02/2013
 

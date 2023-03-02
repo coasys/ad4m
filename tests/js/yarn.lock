@@ -53,12 +53,12 @@
   resolved "https://registry.yarnpkg.com/@graphql-typed-document-node/core/-/core-3.1.1.tgz#076d78ce99822258cf813ecc1e7fa460fa74d052"
   integrity sha512-NQ17ii0rK1b34VZonlmT2QMJFI70m0TRwbknO/ihlbatXyaktDhN/98vBiUU6kNBPljqGqyIrl2T4nY2RpFANg==
 
-"@holochain/client@0.11.8":
-  version "0.11.8"
-  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.11.8.tgz#d4d6fbffae30872a0e137b0204e3caa196d01538"
-  integrity sha512-LoB2W/TLP3HKezrMdJA6Bm7vfI7f/BOol1ohjCYl9pgTqbDEsG48hPWJzfYvSot0sfEMqdKoTdRjIa7DZmxrxQ==
+"@holochain/client@0.12.0":
+  version "0.12.0"
+  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.12.0.tgz#1c9bdc082160badd1439962e8d5f30da6c4089a3"
+  integrity sha512-pvrB6Gdc6488iR3VZXoq5QKzoAPTGi0y69Ktrtgr/IZEvtSSHBqHeMhyEjXCa7iS8b1gXsL/HAvq47rs8mu50A==
   dependencies:
-    "@holochain/serialization" "^0.1.0-beta-rc.2"
+    "@holochain/serialization" "^0.1.0-beta-rc.3"
     "@msgpack/msgpack" "^2.7.2"
     "@tauri-apps/api" "^1.2.0"
     emittery "^1.0.1"
@@ -67,7 +67,7 @@
     lodash-es "^4.17.21"
     tweetnacl "^1.0.3"
 
-"@holochain/serialization@^0.1.0-beta-rc.2":
+"@holochain/serialization@^0.1.0-beta-rc.3":
   version "0.1.0-beta-rc.3"
   resolved "https://registry.yarnpkg.com/@holochain/serialization/-/serialization-0.1.0-beta-rc.3.tgz#787a785fa48e00f2d168c6d4b45a233c4800cccb"
   integrity sha512-DJx4V2KXHVLciyOGjOYKTM/JLBpBEZ3RsPIRCgf7qmwhQdxXvhi2p+oFFRD51yUT5uC1/MzIVeJCl/R60PwFbw==
@@ -160,10 +160,10 @@
     webcrypto-core "^1.7.4"
 
 "@perspect3vism/ad4m@file:../../core":
-  version "0.2.7"
+  version "0.2.11"
   dependencies:
     "@apollo/client" "3.6.9"
-    "@holochain/client" "0.11.8"
+    "@holochain/client" "0.12.0"
     "@types/jest" "^26.0.14"
     class-validator "^0.13.1"
     express "^4.18.1"
@@ -2241,7 +2241,7 @@ ts-invariant@^0.10.3:
   dependencies:
     tslib "^2.1.0"
 
-ts-mocha@*:
+ts-mocha@^10.0.0:
   version "10.0.0"
   resolved "https://registry.yarnpkg.com/ts-mocha/-/ts-mocha-10.0.0.tgz#41a8d099ac90dbbc64b06976c5025ffaebc53cb9"
   integrity sha512-VRfgDO+iiuJFlNB18tzOfypJ21xn2xbuZyDvJvqpTbWgkAgD17ONGr8t+Tl8rcBtOBdjXp5e/Rk+d39f7XBHRw==

@@ -1,20 +1,23 @@
-import fs from "fs-extra";
-import wget from "node-wget-js";
-import unzipper from "unzipper";
-import path from "path";
+const fs = require("fs-extra");
+const wget = require("node-wget-js");
+const { Extract } = require("unzipper");
+const { join } = require("path");
 
 const languages = {
   "agent-expression-store": {
     bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.2.0/bundle.js",
   },
   languages: {
-      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.5/bundle.js",
+      targetDnaName: "languages",
+      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.1/bundle.js",
   },
   "neighbourhood-store": {
-    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.2/bundle.js",
+    targetDnaName: "neighbourhood-store",
+    //dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.2/neighbourhood-store.dna",
+    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.1/bundle.js",
   },
   "perspective-diff-sync": {
-    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/v0.3.1/bundle.js",
+    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/v0.2.2-test/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
@@ -29,23 +32,27 @@ const languages = {
 
 async function main() {
   for (const lang in languages) {
-    const targetDir = fs.readFileSync('./scripts/download-languages-path').toString()
-    const dir = path.join(targetDir, lang)
+    // const targetDir = fs.readFileSync('./scripts/download-languages-path').toString()
+    const dir = join('build/languages', lang)
     await fs.ensureDir(dir + "/build");
+
+    let url = "";
+    let dest = "";
 
     // bundle
     if (languages[lang].bundle) {
-      let url = languages[lang].bundle;
-      let dest = dir + "/build/bundle.js";
+      url = languages[lang].bundle;
+      dest = dir + "/build/bundle.js";
       if (url.slice(0, 8) != "https://" && url.slice(0, 7) != "http://") {
         fs.copyFileSync(url, dest);
       } else {
         wget({ url, dest });
       }
     }
-
+    
     // dna
     if (languages[lang].dna) {
+      console.log(languages[lang])
       url = languages[lang].dna;
       dest = dir + `/${languages[lang].targetDnaName}.dna`;
       wget({ url, dest });
@@ -59,9 +66,8 @@ async function main() {
         },
         async () => {
           //Read the zip file into a temp directory
-          await fs
-            .createReadStream(`${dir}/lang.zip`)
-            .pipe(unzipper.Extract({ path: `${dir}` }))
+          await fs.createReadStream(`${dir}/lang.zip`)
+            .pipe(Extract({ path: `${dir}` }))
             .promise();
 
           // if (!fs.pathExistsSync(`${dir}/bundle.js`)) {
@@ -69,8 +75,8 @@ async function main() {
           // }
 
           fs.copyFileSync(
-            path.join(`${dir}/bundle.js`),
-            path.join(`${dir}/build/bundle.js`)
+            join(`${dir}/bundle.js`),
+            join(`${dir}/build/bundle.js`)
           );
           fs.rmSync(`${dir}/lang.zip`);
           fs.rmSync(`${dir}/bundle.js`);

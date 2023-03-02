@@ -41,6 +41,7 @@ export default class HolochainService {
     #conductorConfigPath?: string
     #signalCallbacks: [CellId, AppSignalCb, string][];
     #queue: Map<string, AsyncQueue>
+    #languageDnaHashes: Map<string, Uint8Array[]>
 
     constructor(config: HolochainConfiguration) {
         let {
@@ -73,6 +74,7 @@ export default class HolochainService {
         this.#appPort = holochainAppPort;
         this.#resourcePath = resourcePath;
         this.#queue = new Map();
+        this.#languageDnaHashes = new Map();
 
         if (conductorPath) {
             this.#conductorPath = conductorPath;
@@ -107,6 +109,22 @@ export default class HolochainService {
                 }
             }
         }
+
+        this.logDhtStatus();
+    }
+
+    async logDhtStatus() {
+        if (this.#ready) {
+            console.log(this.#languageDnaHashes);
+            for (const [language, hashes] of this.#languageDnaHashes) {
+                console.log("HolochainStatus.logDhtStatus: ", language, " has gossip status: \n");
+                let dhtInfo = (await this.#appWebsocket!.networkInfo({dnas: hashes}));
+                console.log("HolochainStatus.logDhtStatus: ", language, " has gossip status: ", dhtInfo, "\n");
+            }
+        }
+        //Wait 60 seconds before checking again
+        await sleep(60000);
+        this.logDhtStatus();
     }
 
     handleCallback(signal: AppSignal) {
@@ -324,6 +342,7 @@ export default class HolochainService {
                 //console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
             }
 
+            const hashes: Uint8Array[] = [];
             Object.keys(languageApp.cell_info).forEach(async roleName => {
                 const cellData = languageApp!.cell_info[roleName];
 
@@ -332,6 +351,9 @@ export default class HolochainService {
                     if (!cellId) {
                         throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${cellInfo}`);
                     }
+
+                    let hash = cellId[0];
+                    if (hash) hashes.push(hash);
 
                     const cellIdB64 = this.cellIdToB64(cellId);
                     const signingCredentials = await this.#db.get("signingKeys").find({cellId: cellIdB64}).value() as SigningCredentials | undefined;
@@ -349,6 +371,10 @@ export default class HolochainService {
                     }
                 }
             })
+
+            if (!this.#languageDnaHashes.has(lang)) {
+                this.#languageDnaHashes.set(lang, hashes);
+            }
         }
     }
 
