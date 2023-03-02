@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-test",
-  "version": "0.0.13",
+  "version": "0.2.16-fix.3",
   "description": "Testing library to test ad4m languages",
   "license": "MIT",
   "bin": "./build/cli.js",
@@ -12,7 +12,7 @@
     "test-link": "npm run build && node build/cli.js --languageType linkLanguage --test ./example/link.test.js --bundle \"example/languages/social-context.js\" --meta '{\"name\":\"social-context\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "test-ui": "npm run build && node build/cli.js --ui --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"note-ipfs\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "ad4m-test": "./build/cli.js",
-    "postinstall": "npm run build && yarn build:util && node scripts/get-builtin-test-lang.js"
+    "postinstall": "node scripts/get-builtin-test-lang.js"
   },
   "preferGlobal": true,
   "dependencies": {
