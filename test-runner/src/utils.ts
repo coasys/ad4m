@@ -61,7 +61,7 @@ function fileExist(binaryPath: string): Promise<string[]> {
 
 export async function getAd4mHostBinary(relativePath: string) {
   return new Promise(async (resolve, reject) => {
-    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/92601411");
+    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/93702927");
     const data: any = await response.json();
     const version = data['name'].replace('v', '');
     global.ad4mHostVersion = version;
