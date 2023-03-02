@@ -238,13 +238,13 @@ export class AuthInfoInput {
     @Field()
     appDomain: string;
 
-    @Field()
+    @Field({nullable: true})
     appUrl?: string;
     
-    @Field()
+    @Field({nullable: true})
     appIconPath?: string;
 
-    @Field(type => [CapabilityInput])
+    @Field(type => [CapabilityInput], {nullable: true})
     capabilities?: CapabilityInput[];
 
     constructor(appName: string, appDesc: string, appDomain: string, appUrl?: string, appIconPath?: string, capabilities?: CapabilityInput[]) {
