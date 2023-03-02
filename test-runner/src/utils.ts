@@ -31,8 +31,10 @@ export async function findAndKillProcess(processName: string) {
   try {
     const list = await findProcess('name', processName)
 
-    for (const p of list) {      
-      kill(p.pid, 'SIGKILL')
+    for (const p of list) {   
+      if (p.name.includes(processName)) {
+        kill(p.pid, 'SIGKILL')
+      }   
     }
   } catch (err) {
     logger.error(`No process found by name: ${processName}`)
