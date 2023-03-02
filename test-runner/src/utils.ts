@@ -85,7 +85,7 @@ export async function getAd4mHostBinary(relativePath: string) {
 
     logger.info('ad4m-host binary not found, downloading now...')
 
-    let dest = path.join(binaryPath, `ad4m.exe`);
+    let dest = path.join(binaryPath, `ad4m`);
     let download: any;
     await fs.ensureDir(binaryPath);
     
