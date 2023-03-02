@@ -108,11 +108,11 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
   return new Promise(async (resolve, reject) => {
     deleteAllAd4mData(relativePath);
     
-    let binaryPath = path.join(ad4mDataDirectory(`ad4m-test`), 'binary', `ad4m`);
+    let binaryPath = path.join(ad4mDataDirectory(`.ad4m-test`), 'binary', `ad4m`);
 
     if (!fs.existsSync(binaryPath)) {
-      await getAd4mHostBinary(`ad4m-test`);
-      binaryPath = path.join(ad4mDataDirectory(`ad4m-test`), 'binary', `ad4m`);
+      await getAd4mHostBinary(`.ad4m-test`);
+      binaryPath = path.join(ad4mDataDirectory(`.ad4m-test`), 'binary', `ad4m`);
     }
 
     await findAndKillProcess('holochain')
@@ -242,7 +242,7 @@ async function run() {
   global.hideLogs = args.hideLogs;
   global.ad4mToken = uuidv4()
 
-  const relativePath = args.relativePath || 'ad4m-test';
+  const relativePath = args.relativePath || '.ad4m-test';
 
   global.relativePath = relativePath;
 
