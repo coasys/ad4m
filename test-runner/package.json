@@ -12,7 +12,7 @@
     "test-link": "yarn run build && node build/cli.js --languageType linkLanguage --test ./example/link.test.js --bundle \"example/languages/social-context.js\" --meta '{\"name\":\"social-context\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "test-ui": "yarn run build && node build/cli.js --ui --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"note-ipfs\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "ad4m-test": "./build/cli.js",
-    "postinstall": "node scripts/get-builtin-test-lang.js"
+    "postinstall": "node ../executor/scripts/get-builtin-test-lang.js"
   },
   "preferGlobal": true,
   "dependencies": {
