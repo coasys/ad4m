@@ -6,14 +6,20 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+ - After login / registration the launcher will now open by default [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - If the user has no installed applications, we now show some info about connecting apps to AD4M and a link to Flux [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
 
 ### Changed
+ - Auth screens for launcher & connect will now parse out the capabilities to a human readable string [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Use barcode detector for proxy QR code [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Use proper types for auth methods [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+ - AD4M launcher will no longer flash its modal on load [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
 
 ## [0.2.16] - 25/02/2013
 ### Added
