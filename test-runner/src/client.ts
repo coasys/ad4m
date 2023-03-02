@@ -33,5 +33,5 @@ export function buildAd4mClient(port: number): Ad4mClient {
   });
 
   // @ts-ignore
-  return new Ad4mClient(apolloClient)
+  return new Ad4mClient(apolloClient, false)
 }
