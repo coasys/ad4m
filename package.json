@@ -8,7 +8,8 @@
     "executor",
     "host",
     "ui",
-    "connect"
+    "connect",
+    "test-runner"
   ],
   "private": true,
   "scripts": {
