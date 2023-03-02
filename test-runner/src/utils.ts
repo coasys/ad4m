@@ -31,8 +31,10 @@ export async function findAndKillProcess(processName: string) {
   try {
     const list = await findProcess('name', processName)
 
-    for (const p of list) {      
-      kill(p.pid, 'SIGKILL')
+    for (const p of list) {   
+      if (p.name.includes(processName)) {
+        kill(p.pid, 'SIGKILL')
+      }   
     }
   } catch (err) {
     logger.error(`No process found by name: ${processName}`)
@@ -59,7 +61,7 @@ function fileExist(binaryPath: string): Promise<string[]> {
 
 export async function getAd4mHostBinary(relativePath: string) {
   return new Promise(async (resolve, reject) => {
-    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/92601411");
+    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/93702927");
     const data: any = await response.json();
     const version = data['name'].replace('v', '');
     global.ad4mHostVersion = version;
@@ -83,7 +85,7 @@ export async function getAd4mHostBinary(relativePath: string) {
 
     logger.info('ad4m-host binary not found, downloading now...')
 
-    let dest = path.join(binaryPath, `ad4m.exe`);
+    let dest = path.join(binaryPath, `ad4m`);
     let download: any;
     await fs.ensureDir(binaryPath);
     
