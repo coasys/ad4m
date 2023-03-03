@@ -3,7 +3,6 @@ import { customElement, property, state } from "lit/decorators.js";
 
 import Ad4mConnect, {
   AuthStates,
-  ConfigStates,
   ConnectionStates,
   Ad4mConnectOptions,
 } from "./core";
@@ -15,7 +14,6 @@ import Start from "./components/Start";
 import Disconnected from "./components/Disconnected";
 import AgentLocked from "./components/AgentLocked";
 import RequestCapability from "./components/RequestCapability";
-import InvalidToken from "./components/InvalidToken";
 import VerifyCode from "./components/VerifyCode";
 import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
 import Header from "./components/Header";
@@ -377,16 +375,12 @@ export class Ad4mConnectElement extends LitElement {
 
   @state()
   private uiState:
-    | "loading"
     | "remoteurl"
     | "start"
     | "requestcap"
     | "verifycode"
-    | "invalidtoken"
     | "disconnected"
-    | "agentlocked"
-    | "closed"
-    | "connectionerror" = "start";
+    | "agentlocked" = "start";
 
   @property({ type: String, reflect: true })
   appName = null;
@@ -453,6 +447,7 @@ export class Ad4mConnectElement extends LitElement {
     });
 
     this._client.on("authstatechange", (event: AuthStates) => {
+      console.log("authchange", event);
       const customEvent = new CustomEvent("authstatechange", {
         detail: event,
       });
@@ -464,6 +459,8 @@ export class Ad4mConnectElement extends LitElement {
     });
 
     this._client.on("connectionstatechange", (event: ConnectionStates) => {
+      console.log("connectionchange", event);
+
       if (event === "connected") {
         this.uiState = "requestcap";
       }
@@ -550,8 +547,16 @@ export class Ad4mConnectElement extends LitElement {
     this.setAttribute("url", url);
   }
 
-  connectRemote(url) {
-    this._client.connect(url);
+  async connectRemote(url) {
+    try {
+      const client = await this._client.connect(url);
+      this.changeUIState("requestcap");
+      return client;
+    } catch (e) {
+      if (e.message === "Socket closed with event 4500 Invalid Compact JWS") {
+        this.changeUIState("requestcap");
+      }
+    }
   }
 
   async requestCapability(bool) {
@@ -564,7 +569,6 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   async isAuthenticated() {
-    await this._client.ensureConnection();
     return this._client.checkAuth();
   }
 

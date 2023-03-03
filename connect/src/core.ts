@@ -76,14 +76,7 @@ export default class Ad4mConnect {
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
     this.token = token || this.token;
-    this.ensureConnection()
-      .then(() => {
-        this.checkAuth();
-      })
-      .catch(() => {
-        this.notifyConnectionChange("not_connected");
-        this.notifyAuthChange("unauthenticated");
-      });
+    this.buildClient();
   }
 
   private notifyConfigChange(val: ConfigStates, data: string | number) {
@@ -131,21 +124,26 @@ export default class Ad4mConnect {
     this.listeners[event].push(cb);
   }
 
-  async connect(url?: string) {
+  async connect(url?: string): Promise<Ad4mClient> {
     try {
       if (url) {
+        await connectWebSocket(url, 10000);
         this.setUrl(url);
+        const client = this.buildClient();
+        await this.checkAuth();
+        return client;
+      } else {
+        const client = await this.ensureConnection();
+        await this.checkAuth();
+        return client;
       }
-      const client = await this.ensureConnection();
-      await this.checkAuth();
-      return client;
     } catch {
       this.notifyConnectionChange("not_connected");
       this.notifyAuthChange("unauthenticated");
     }
   }
 
-  async ensureConnection() {
+  async ensureConnection(): Promise<Ad4mClient> {
     const socketIsActive =
       this.activeSocket?.readyState === WebSocket.OPEN &&
       this.activeSocket?.url === this.url;
@@ -162,7 +160,7 @@ export default class Ad4mConnect {
     }
   }
 
-  async connectToPort() {
+  async connectToPort(): Promise<Ad4mClient> {
     try {
       const port = await this.findPort();
       this.setPort(port);
@@ -172,7 +170,7 @@ export default class Ad4mConnect {
     }
   }
 
-  async findPort() {
+  async findPort(): Promise<number> {
     const ports = [...Array(10).keys()].map((i) => {
       return checkPort(12000 + i);
     });
@@ -186,7 +184,9 @@ export default class Ad4mConnect {
     }
   }
 
-  buildClient() {
+  buildClient(): Ad4mClient {
+    this.notifyConnectionChange("connecting");
+
     if (this.apolloClient && this.wsClient) {
       this.requestedRestart = true;
       this.wsClient.dispose();
@@ -244,7 +244,7 @@ export default class Ad4mConnect {
     return this.ad4mClient;
   }
 
-  async checkAuth() {
+  async checkAuth(): Promise<boolean> {
     try {
       const isLocked = await this.ad4mClient.agent.isLocked();
 
@@ -257,8 +257,6 @@ export default class Ad4mConnect {
       // Return true as we are authenticated
       return true;
     } catch (error) {
-      console.log(error);
-
       if (
         error.message ===
         "Socket closed with event 4500 Cannot extractByTags from a ciphered wallet. You must unlock first."
@@ -273,7 +271,7 @@ export default class Ad4mConnect {
     }
   }
 
-  async requestCapability(invalidateToken = false) {
+  async requestCapability(invalidateToken = false): Promise<string> {
     if (invalidateToken) {
       this.setToken(null);
     }
@@ -284,13 +282,15 @@ export default class Ad4mConnect {
       this.appDomain,
       JSON.stringify(this.capabilities)
     );
+
+    return this.requestId;
   }
 
-  async verifyCode(code: string) {
+  async verifyCode(code: string): Promise<string> {
     const jwt = await this.ad4mClient?.agent.generateJwt(this.requestId!, code);
-
     this.setToken(jwt);
     await this.buildClient();
     await this.checkAuth();
+    return this.token;
   }
 }
