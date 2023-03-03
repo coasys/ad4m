@@ -1,6 +1,6 @@
 import { Field, ObjectType, InputType } from "type-graphql";
 import { ExpressionGeneric } from "../expression/Expression";
-import { LinkExpression, LinkExpressionInput } from "../links/Links";
+import { LinkExpression, LinkExpressionInput, LinkInput } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
 
 /** A Perspective represents subjective meaning, encoded through
@@ -93,6 +93,12 @@ export class Perspective {
 export class PerspectiveInput {
     @Field(type => [LinkExpressionInput])
     links: LinkExpressionInput[]
+}
+
+@InputType()
+export class PerspectiveUnsignedInput {
+    @Field(type => [LinkInput])
+    links: LinkInput[] = []
 }
 
 @ObjectType()
