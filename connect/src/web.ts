@@ -184,8 +184,27 @@ const styles = css`
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 120px;
-    padding: 0 30px;
+    padding: 20px 30px;
+    gap: 10px;
+    color: var(--primary-color);
+    margin-bottom: 20px;
+    font-size: 14px;
+  }
+
+  .dialog__logo {
+    display: flex;
+    text-align: center;
+    width: 25px;
+  }
+
+  .dialog__content {
+    min-height: 300px;
+    display: grid;
+    place-content: center;
+    padding-top: 0;
+    padding-left: 30px;
+    padding-right: 30px;
+    padding-bottom: 30px;
   }
 
   .dialog__connect {
@@ -195,13 +214,6 @@ const styles = css`
     flex-gap: 50px;
     gap: 50px;
     position: relative;
-  }
-
-  .dialog__logo {
-    text-align: center;
-    width: 100%;
-    max-width: 50px;
-    margin: 0 auto;
   }
 
   .dialog__logo svg {
@@ -257,13 +269,6 @@ const styles = css`
 
   .uppercase {
     text-transform: uppercase;
-  }
-
-  .dialog__content {
-    padding-top: 0;
-    padding-left: 30px;
-    padding-right: 30px;
-    padding-bottom: 30px;
   }
 
   .input {
@@ -545,10 +550,13 @@ export class Ad4mConnectElement extends LitElement {
 
   private handleConnectionChange(event: ConnectionStates) {
     if (event === "connected") {
-      this.uiState = "requestcap";
+      this.changeUIState("requestcap");
     }
     if (event === "disconnected") {
       this._isOpen = true;
+    }
+    if (event === "not_connected") {
+      this.changeUIState("start");
     }
     const customEvent = new CustomEvent("connectionstatechange", {
       detail: event,
@@ -617,7 +625,7 @@ export class Ad4mConnectElement extends LitElement {
   async requestCapability(bool) {
     try {
       await this._client.requestCapability(bool);
-      this.uiState = "verifycode";
+      this.changeUIState("verifycode");
     } catch (e) {
       console.warn(e);
     }
@@ -632,6 +640,10 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   renderViews() {
+    if (this.connectionState === "connecting") {
+      return Loading();
+    }
+
     if (this.uiState === "qr") {
       return ScanQRCode({
         changeState: this.changeUIState,
@@ -645,10 +657,6 @@ export class Ad4mConnectElement extends LitElement {
         unlockAgent: this.unlockAgent,
         reconnect: this.connect,
       });
-    }
-
-    if (this.connectionState === "connecting") {
-      return Loading();
     }
 
     if (this.uiState === "settings") {
@@ -708,6 +716,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   render() {
+    console.log("ui state is", this.uiState);
     if (this._isOpen === false) return null;
     if (this.authState === "authenticated") return null;
     return html`

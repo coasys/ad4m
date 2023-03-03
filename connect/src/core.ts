@@ -133,6 +133,7 @@ export default class Ad4mConnect {
     this.listeners[event].push(cb);
   }
 
+  // If url is explicit , don't search for open ports
   async connect(url?: string): Promise<Ad4mClient> {
     try {
       if (url) {
@@ -152,6 +153,24 @@ export default class Ad4mConnect {
     }
   }
 
+  // If port is explicit, don't search for port
+  async connectToPort(port?: number): Promise<Ad4mClient> {
+    try {
+      if (port) {
+        const found = await checkPort(port);
+        this.setPort(found);
+      } else {
+        const port = await this.findPort();
+        this.setPort(port);
+      }
+
+      return this.buildClient();
+    } catch (error) {
+      this.notifyConnectionChange("not_connected");
+      this.notifyAuthChange("unauthenticated");
+    }
+  }
+
   async ensureConnection(): Promise<Ad4mClient> {
     const socketIsActive =
       this.activeSocket?.readyState === WebSocket.OPEN &&
@@ -166,24 +185,6 @@ export default class Ad4mConnect {
       return this.buildClient();
     } catch (e) {
       return this.connectToPort();
-    }
-  }
-
-  // If port is excplicit, don't search for port
-  // If port is not set, search for open ports
-  async connectToPort(port?: number): Promise<Ad4mClient> {
-    try {
-      if (port) {
-        const found = await checkPort(port);
-        this.setPort(found);
-      } else {
-        const port = await this.findPort();
-
-        this.setPort(port);
-      }
-      return this.buildClient();
-    } catch (error) {
-      this.notifyConnectionChange("not_connected");
     }
   }
 

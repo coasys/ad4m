@@ -19,8 +19,6 @@ export default function Settings({
     isRemote ? "button--secondary" : "button--primary"
   }`;
 
-  console.log("settings");
-
   return html`
     <div class="items items--small">
       <div class="text-center">
