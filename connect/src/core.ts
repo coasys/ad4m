@@ -291,6 +291,8 @@ export default class Ad4mConnect {
       appDomain: this.appDomain,
       capabilities: this.capabilities,
     });
+
+    return this.requestId;
   }
 
   async verifyCode(code: string): Promise<string> {
