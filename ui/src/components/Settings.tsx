@@ -50,7 +50,7 @@ export const fetchProfile = async (agent: Agent) => {
 const Profile = (props: Props) => {
   const {
     state: { loading },
-    methods: { lockAgent }
+    methods: { lockAgent },
   } = useContext(AgentContext);
 
   const {
@@ -76,7 +76,8 @@ const Profile = (props: Props) => {
     appWindow.emit("copyLogs");
 
     showNotification({
-      message: "Opened logs folder... Please send ad4m.log to support on Discord",
+      message:
+        "Opened logs folder... Please send ad4m.log to support on Discord",
       autoClose: 20000,
     });
   }
@@ -178,36 +179,57 @@ const Profile = (props: Props) => {
     }
   };
 
-  const setupProxy = async () => {
+  const setupProxy = async (event: any) => {
     try {
       const proxy: string = await invoke("setup_proxy", { subdomain: did });
       console.log("Finish setup proxy, ", proxy);
       setProxy(formatProxy(proxy));
+      event.target.checked = true;
     } catch (e) {
       showNotification({
         color: "red",
         message: "Error while starting proxy",
         autoClose: 5000,
       });
+      event.target.checked = false;
+      setProxy("");
     }
   };
 
-  const stopProxy = async () => {
-    await invoke("stop_proxy");
-    setProxy("");
+  const stopProxy = async (event: any) => {
+    try {
+      await invoke("stop_proxy");
+      setProxy("");
+      event.target.checked = false;
+    } catch (e) {
+      event.target.checked = true;
+    }
   };
 
-  const showProxy = () => {
-    return (
-      <>
-        <ActionButton
-          iconColor={proxy.length === 0 ? undefined : "success-500"}
-          title={proxy.length === 0 ? "Proxy" : "Stop proxy"}
-          onClick={() => (proxy.length === 0 ? setupProxy() : stopProxy())}
-          icon="wifi"
-        />
+  return (
+    <div style={MainContainer}>
+      <j-box px="500" my="500">
+        <j-toggle
+          full=""
+          checked={expertMode}
+          onChange={(e) => toggleExpertMode()}
+        >
+          Advanced mode
+        </j-toggle>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-toggle
+          checked={!!proxy}
+          onChange={(e) => {
+            e.target.checked ? setupProxy(e) : stopProxy(e);
+          }}
+        >
+          Proxy
+        </j-toggle>
+
         {proxy && (
-          <>
+          <j-box>
             <ActionButton
               title="Proxy URL"
               onClick={() => copyText(proxy)}
@@ -223,43 +245,39 @@ const Profile = (props: Props) => {
               onClick={() => open(url.replace("ws", "http"))}
               icon="box-arrow-up-right"
             />
-          </>
+          </j-box>
         )}
-      </>
-    );
-  };
+      </j-box>
 
-  return (
-    <div style={MainContainer}>
-      <div style={{ padding: "20px 30px 0 30px" }}>
-        <j-toggle
-          full=""
-          checked={expertMode}
-          onChange={(e) => toggleExpertMode()}
-        >
-          Expert mode
-        </j-toggle>
-      </div>
-      <div class="grid" style={{ paddingTop: 20 }}>
-        {showProxy()}
-        <ActionButton
-          title="Trusted agents"
+      <j-box px="500" my="500">
+        <j-button
           onClick={() => settrustedAgentModalOpen(true)}
-          icon="shield-check"
-        />
-        <ActionButton title="Open Logs" onClick={openLogs} icon="clipboard" />
-        <ActionButton
-          title="Docs"
-          onClick={() => open("https://docs.ad4m.dev/")}
-          icon="file-earmark-richtext"
-        />
-        <ActionButton
-          title="Delete Agent"
+          full
+          variant="secondary"
+        >
+          <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+          Show trusted agents
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button onClick={openLogs} full variant="secondary">
+          <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+          Show logs
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button
           onClick={() => setClearAgentModalOpen(true)}
-          icon="trash"
-        />
-        <j-box p="200" />
-      </div>
+          full
+          variant="primary"
+        >
+          <j-icon size="sm" slot="start" name="trash"></j-icon>
+          Delete Agent
+        </j-button>
+      </j-box>
+
       {trustedAgentModalOpen && (
         <j-modal
           size="fullscreen"
