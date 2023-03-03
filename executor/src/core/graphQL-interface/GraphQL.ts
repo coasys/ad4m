@@ -596,6 +596,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return true
             },
 
+            //@ts-ignore
             neighbourhoodSetOnlineStatusU: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID, status } = args
@@ -652,7 +653,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodSendBroadcasU: async (parent, args, context, info) => {
+            neighbourhoodSendBroadcastU: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID, payload } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
