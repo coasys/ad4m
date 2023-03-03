@@ -6,7 +6,6 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
-
  - Holochain DHT status logs every 60 seconds [PR#277](https://github.com/perspect3vism/ad4m/pull/277)
 
 ### Changed
@@ -16,6 +15,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Removed
 
 ### Fixed
+ - Bug on ad4m-test where apollo connection errors would polute logs [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
+ - ad4m-test internal tests not using self but instead published package [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
+ - ad4m-test will now always pull latest ad4m-host binary [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
 
 ## [0.2.16] - 25/02/2013
 ### Added
