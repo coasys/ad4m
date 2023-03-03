@@ -6,10 +6,11 @@ import Ad4mConnect, {
   AuthStates,
   ConnectionStates,
   Ad4mConnectOptions,
+  ConfigStates,
 } from "./core";
 
 import Loading from "./components/Loading";
-import RemoteUrl from "./components/RemoteUrl";
+import Settings from "./components/Settings";
 import Start from "./components/Start";
 import Disconnected from "./components/Disconnected";
 import AgentLocked from "./components/AgentLocked";
@@ -177,13 +178,6 @@ const styles = css`
     max-width: 500px;
     max-height: 90vh;
     overflow-y: auto;
-  }
-
-  @media (min-width: 800px) {
-    .dialog {
-      width: 100%;
-      max-width: 500px;
-    }
   }
 
   .dialog__header {
@@ -416,6 +410,9 @@ export class Ad4mConnectElement extends LitElement {
   private _hasClickedDownload = null;
 
   @state()
+  private _isRemote = false;
+
+  @state()
   private _client: Ad4mConnect;
 
   @state()
@@ -423,7 +420,7 @@ export class Ad4mConnectElement extends LitElement {
 
   @state()
   private uiState:
-    | "remoteurl"
+    | "settings"
     | "start"
     | "qr"
     | "requestcap"
@@ -486,59 +483,81 @@ export class Ad4mConnectElement extends LitElement {
       url: this.url || localStorage.getItem("ad4murl"),
     });
 
-    this._client.on("configstatechange", (name: any, val) => {
-      this[name] = val;
-      if (val) {
-        localStorage.setItem("ad4m" + name, val);
-      } else {
-        localStorage.removeItem("ad4m" + name);
-      }
-      this.requestUpdate();
-    });
-
-    this._client.on("authstatechange", (event: AuthStates) => {
-      console.log("authchange", event);
-      const customEvent = new CustomEvent("authstatechange", {
-        detail: event,
-      });
-      if (event === "locked") {
-        this._isOpen = true;
-      }
-      this.dispatchEvent(customEvent);
-      this.requestUpdate();
-    });
-
-    this._client.on("connectionstatechange", (event: ConnectionStates) => {
-      console.log("connectionchange", event);
-
-      if (event === "connected") {
-        this.uiState = "requestcap";
-      }
-      if (event === "disconnected") {
-        this._isOpen = true;
-      }
-      const customEvent = new CustomEvent("connectionstatechange", {
-        detail: event,
-      });
-      this.dispatchEvent(customEvent);
-      this.requestUpdate();
-    });
+    this._client.on("configstatechange", this.handleConfigChange);
+    this._client.on("authstatechange", this.handleAuthChange);
+    this._client.on("connectionstatechange", this.handleConnectionChange);
 
     this.loadFont();
   }
 
-  async connect() {
-    this._isOpen = true;
+  private async unlockAgent(passcode) {
+    await this._client.ad4mClient.agent.unlock(passcode);
+  }
+
+  private verifyCode(code) {
+    this._client.verifyCode(code);
+  }
+
+  private changeUrl(url) {
+    this._client.setUrl(url);
+  }
+
+  private changePort(port: number) {
+    this._client.setPort(port);
+  }
+
+  private changeUIState(state) {
+    this.uiState = state;
+  }
+
+  private changeIsRemote(bol: boolean) {
+    this._isRemote = bol;
+  }
+
+  private changeCode(code) {
+    this._code = code;
+  }
+
+  private onDownloaded() {
+    this._hasClickedDownload = true;
+  }
+
+  private handleAuthChange(event: AuthStates) {
+    const customEvent = new CustomEvent("authstatechange", {
+      detail: event,
+    });
+    if (event === "locked") {
+      this._isOpen = true;
+    }
+    this.dispatchEvent(customEvent);
     this.requestUpdate();
-    const client = await this._client.connect();
-    return client;
   }
 
-  getAd4mClient() {
-    return this._client.ad4mClient;
+  private handleConfigChange(name: any, val: string) {
+    this[name] = val;
+    if (val) {
+      localStorage.setItem("ad4m" + name, val);
+    } else {
+      localStorage.removeItem("ad4m" + name);
+    }
+    this.requestUpdate();
   }
 
-  loadFont() {
+  private handleConnectionChange(event: ConnectionStates) {
+    if (event === "connected") {
+      this.uiState = "requestcap";
+    }
+    if (event === "disconnected") {
+      this._isOpen = true;
+    }
+    const customEvent = new CustomEvent("connectionstatechange", {
+      detail: event,
+    });
+    this.dispatchEvent(customEvent);
+    this.requestUpdate();
+  }
+
+  private loadFont() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.type = "text/css";
@@ -548,7 +567,7 @@ export class Ad4mConnectElement extends LitElement {
     document.head.appendChild(link);
   }
 
-  async startCamera(e) {
+  private async startCamera(e) {
     try {
       window["BarcodeDetector"].getSupportedFormats();
     } catch {
@@ -572,16 +591,15 @@ export class Ad4mConnectElement extends LitElement {
     }, 100);
   }
 
-  private async unlockAgent(passcode) {
-    await this._client.ad4mClient.agent.unlock(passcode);
+  async connect() {
+    this._isOpen = true;
+    this.requestUpdate();
+    const client = await this._client.connect();
+    return client;
   }
 
-  private verifyCode(code) {
-    this._client.verifyCode(code);
-  }
-
-  changeUrl(url) {
-    this.setAttribute("url", url);
+  getAd4mClient() {
+    return this._client.ad4mClient;
   }
 
   async connectRemote(url) {
@@ -609,18 +627,6 @@ export class Ad4mConnectElement extends LitElement {
     return this._client.checkAuth();
   }
 
-  changeUIState(state) {
-    this.uiState = state;
-  }
-
-  changeCode(code) {
-    this._code = code;
-  }
-
-  onDownloaded() {
-    this._hasClickedDownload = true;
-  }
-
   setOpen(val: boolean) {
     this._isOpen = val;
   }
@@ -645,11 +651,16 @@ export class Ad4mConnectElement extends LitElement {
       return Loading();
     }
 
-    if (this.uiState === "remoteurl") {
-      return RemoteUrl({
+    if (this.uiState === "settings") {
+      return Settings({
+        port: this.port,
+        changePort: this.changePort,
+        isRemote: this._isRemote,
+        changeIsRemote: this.changeIsRemote,
         url: this.url,
         changeState: this.changeUIState,
         changeUrl: this.changeUrl,
+        connectToPort: this._client.connectToPort,
         connectRemote: this.connectRemote,
       });
     }

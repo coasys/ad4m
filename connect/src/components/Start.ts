@@ -39,9 +39,9 @@ export default function Start({
               or
               <button
                 class="button button--link "
-                @click=${() => changeState("remoteurl")}
+                @click=${() => changeState("settings")}
               >
-                Connect to a remote host
+                Change connection settings
               </button>
             </div>`
         : html`<div class="text-center">

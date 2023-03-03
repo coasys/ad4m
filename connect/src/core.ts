@@ -7,6 +7,7 @@ import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, CapabilityInput } from "@perspect3vism/ad4m";
 import { checkPort, connectWebSocket } from "./utils";
+import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
   appName: string;
@@ -73,6 +74,7 @@ export default class Ad4mConnect {
     token,
     url,
   }: Ad4mConnectOptions) {
+    autoBind(this);
     //! @fayeed - make it support node.js
     this.appName = appName;
     this.appDesc = appDesc;
@@ -167,10 +169,18 @@ export default class Ad4mConnect {
     }
   }
 
-  async connectToPort(): Promise<Ad4mClient> {
+  // If port is excplicit, don't search for port
+  // If port is not set, search for open ports
+  async connectToPort(port?: number): Promise<Ad4mClient> {
     try {
-      const port = await this.findPort();
-      this.setPort(port);
+      if (port) {
+        const found = await checkPort(port);
+        this.setPort(found);
+      } else {
+        const port = await this.findPort();
+
+        this.setPort(port);
+      }
       return this.buildClient();
     } catch (error) {
       this.notifyConnectionChange("not_connected");
@@ -178,14 +188,15 @@ export default class Ad4mConnect {
   }
 
   async findPort(): Promise<number> {
-    const ports = [...Array(10).keys()].map((i) => {
+    const ports = [...Array(10).keys()].map((_, i) => {
       return checkPort(12000 + i);
     });
 
-    const results = await Promise.all(ports);
-    const result = results.find((port) => port);
+    const results = await Promise.allSettled(ports);
+    const result = results.find((port) => port.status === "fulfilled");
 
-    if (result) return result;
+    // @ts-ignore
+    if (result) return result.value;
     else {
       throw Error("Couldn't find an open port");
     }
@@ -193,6 +204,13 @@ export default class Ad4mConnect {
 
   buildClient(): Ad4mClient {
     this.notifyConnectionChange("connecting");
+
+    // Make sure the url is valid
+    try {
+      new WebSocket(this.url);
+    } catch (e) {
+      this.notifyConnectionChange("not_connected");
+    }
 
     if (this.apolloClient && this.wsClient) {
       this.requestedRestart = true;
