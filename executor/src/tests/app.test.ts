@@ -3,7 +3,7 @@ import Websocket from "ws";
 import main from "../main";
 import path from "path";
 import { OuterConfig } from "../types";
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient, CapabilityInput, AuthInfoInput } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import PerspectivismCore from "../core/PerspectivismCore";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
@@ -103,7 +103,21 @@ describe("Apps integration tests", () => {
   })
 
   it("once token issued user can get all authenticated apps", async () => {
-      requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]')
+      requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
+        appName: "demo-app",
+        appDesc: "demo-desc",
+        appDomain: "test.ad4m.org",
+        appUrl: "https://demo-link",
+        capabilities: [
+            {
+                with: {
+                    domain:"agent",
+                    pointers:["*"]
+                },
+                can: ["*"]
+            }
+        ] as CapabilityInput[]
+      } as AuthInfoInput)
       let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
   
@@ -128,7 +142,21 @@ describe("Apps integration tests", () => {
       expect(newApps[0].revoked).to.be.equal(true);
 
       // check if the app can request another token.
-      requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]')
+      requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
+        appName: "demo-app",
+        appDesc: "demo-desc",
+        appDomain: "test.ad4m.org",
+        appUrl: "https://demo-link",
+        capabilities: [
+            {
+                with: {
+                    domain:"agent",
+                    pointers:["*"]
+                },
+                can: ["*"]
+            }
+        ] as CapabilityInput[]
+      } as AuthInfoInput)
       let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
@@ -152,7 +180,21 @@ describe("Apps integration tests", () => {
       expect(newApps.length).to.be.equal(1);
 
       // check if the app can request another token.
-      requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]')
+      requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
+        appName: "demo-app",
+        appDesc: "demo-desc",
+        appDomain: "test.ad4m.org",
+        appUrl: "https://demo-link",
+        capabilities: [
+            {
+                with: {
+                    domain:"agent",
+                    pointers:["*"]
+                },
+                can: ["*"]
+            }
+        ] as CapabilityInput[]
+      } as AuthInfoInput)
       let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
