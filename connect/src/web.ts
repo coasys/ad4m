@@ -716,7 +716,6 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   render() {
-    console.log("ui state is", this.uiState);
     if (this._isOpen === false) return null;
     if (this.authState === "authenticated") return null;
     return html`
