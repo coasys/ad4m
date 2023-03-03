@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf8" />
+    <meta name="viewport" content="width=device-width" />
+
+    <title>View expression</title>
+    <app-icon id="icon"></app-icon>
+  </head>
+
+  <body>
+    <script src="https://unpkg.com/browse/@apollo/client@3.3.11/main.cjs.js"></script>
+    <script type="module">
+      import Constructor from './icon.js'
+      import './client.js'
+
+      const url = new URL(window.location.href);
+      const address = url.searchParams.get('address')
+      const exp = url.searchParams.get('exp')
+
+      const ad4mClient = await buildAd4mClient();
+
+      console.log(globalThis.Bundle.buildAd4mClient(WebSocket))
+
+      customElements.define('app-icon', Constructor);
+
+      const detailExp = await ad4mClient.expression.get(exp);
+
+      console.log(detailExp)
+
+      const icon = document.getElementById('icon');
+
+      icon.expression = JSON.stringify(detailExp)
+
+      const ele = document.getElementById('icon');
+    </script>
+  </body>
+</html>

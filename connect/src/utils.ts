@@ -68,12 +68,6 @@ export function onAuthStateChanged(callback) {
   });
 }
 
-export function isConnected() {
-  const el = document.querySelector("ad4m-connect");
-  //@ts-ignore
-  return el.connected();
-}
-
 export function detectOS(): string {
   let os = navigator.userAgent;
   let finalOs = "";

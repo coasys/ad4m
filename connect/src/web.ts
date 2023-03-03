@@ -528,9 +528,11 @@ export class Ad4mConnectElement extends LitElement {
     this.loadFont();
   }
 
-  connect() {
+  async connect() {
     this._isOpen = true;
-    this._client.connect();
+    this.requestUpdate();
+    const client = await this._client.connect();
+    return client;
   }
 
   getAd4mClient() {
@@ -571,6 +573,14 @@ export class Ad4mConnectElement extends LitElement {
     }, 100);
   }
 
+  private async unlockAgent(passcode) {
+    await this._client.ad4mClient.agent.unlock(passcode);
+  }
+
+  private verifyCode(code) {
+    this._client.verifyCode(code);
+  }
+
   changeUrl(url) {
     this.setAttribute("url", url);
   }
@@ -588,12 +598,9 @@ export class Ad4mConnectElement extends LitElement {
     }
   }
 
-  connectToPort() {
-    this._client.connectToPort();
-  }
-
-  async unlockAgent(passcode) {
-    await this._client.ad4mClient.agent.unlock(passcode);
+  async isAuthenticated() {
+    await this._client.ensureConnection();
+    return this._client.checkAuth();
   }
 
   changeUIState(state) {
@@ -606,10 +613,6 @@ export class Ad4mConnectElement extends LitElement {
 
   onDownloaded() {
     this._hasClickedDownload = true;
-  }
-
-  verifyCode(code) {
-    this._client.verifyCode(code);
   }
 
   setOpen(val: boolean) {
