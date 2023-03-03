@@ -17,4 +17,4 @@ ad4m-test.txt
 !example/*.js
 !example/languages/*.js
 ad4m-test-*
-ad4m-test
+.ad4m-test

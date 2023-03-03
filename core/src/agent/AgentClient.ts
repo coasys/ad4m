@@ -1,7 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import unwrapApolloResult from "../unwrapApolloResult";
-import { Agent, Apps, AuthInfo, EntanglementProof, EntanglementProofInput } from "./Agent";
+import { Agent, Apps, AuthInfo, AuthInfoInput, EntanglementProof, EntanglementProofInput } from "./Agent";
 import { AgentStatus } from "./AgentStatus"
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
@@ -341,12 +341,12 @@ export class AgentClient {
         })
     }
 
-    async requestCapability(appName: string, appDesc: string, appUrl: string, capabilities: string): Promise<string> {
+    async requestCapability(authInfo: AuthInfoInput): Promise<string> {
         const { agentRequestCapability } = unwrapApolloResult(await this.#apolloClient.mutate({ 
-            mutation: gql`mutation agentRequestCapability($appName: String!, $appDesc: String!, $appUrl: String!, $capabilities: String!) {
-                agentRequestCapability(appName: $appName, appDesc: $appDesc, appUrl: $appUrl, capabilities: $capabilities)
+            mutation: gql`mutation agentRequestCapability($authInfo: AuthInfoInput!) {
+                agentRequestCapability(authInfo: $authInfo)
             }`,
-            variables: { appName, appDesc, appUrl, capabilities }
+            variables: { authInfo }
         }))
         return agentRequestCapability
     }

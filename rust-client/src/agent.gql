@@ -1,142 +1,154 @@
 query AgentStatus {
-    agentStatus {
-        isInitialized
-        isUnlocked
-        did
-        didDocument
-        error
-    }
+  agentStatus {
+    isInitialized
+    isUnlocked
+    did
+    didDocument
+    error
+  }
 }
 
-mutation RequestCapability($appName: String!, $appDesc: String!, $appUrl: String!, $capabilities: String!) {
-    agentRequestCapability(appName: $appName, appDesc: $appDesc, appUrl: $appUrl, capabilities: $capabilities)
+mutation RequestCapability($authInfo: AuthInfoInput!) {
+  agentRequestCapability(authInfo: $authInfo)
 }
 
 mutation RetrieveCapability($requestId: String!, $rand: String!) {
-    agentGenerateJwt(requestId: $requestId, rand: $rand)
+  agentGenerateJwt(requestId: $requestId, rand: $rand)
 }
 
-query Me { agent { 
+query Me {
+  agent {
     did
     directMessageLanguage
-    perspective { 
-        links {
-            author, timestamp, 
-            proof {
-                signature, key, valid, invalid
-            }
-            data {
-                source, predicate, target
-            }
+    perspective {
+      links {
+        author
+        timestamp
+        proof {
+          signature
+          key
+          valid
+          invalid
         }
+        data {
+          source
+          predicate
+          target
+        }
+      }
     }
-}}
+  }
+}
 
 query GetApps {
-    agentGetApps {
-        requestId
-        revoked
-        auth {
-            appName
-            appDesc
-            appUrl
-            capabilities {
-                with {
-                    domain
-                    pointers
-                }
-                can 
-            }
+  agentGetApps {
+    requestId
+    revoked
+    auth {
+      appName
+      appDesc
+      appUrl
+      capabilities {
+        with {
+          domain
+          pointers
         }
+        can
+      }
     }
+  }
 }
 
 mutation RevokeToken($requestId: String!) {
-    agentRevokeToken(requestId: $requestId) {
-        requestId
-        revoked
-        auth {
-            appName
-            appDesc
-            appUrl
-            capabilities {
-                with {
-                    domain
-                    pointers
-                }
-                can 
-            }
+  agentRevokeToken(requestId: $requestId) {
+    requestId
+    revoked
+    auth {
+      appName
+      appDesc
+      appUrl
+      capabilities {
+        with {
+          domain
+          pointers
         }
+        can
+      }
     }
+  }
 }
 
 mutation RemoveApp($requestId: String!) {
-    agentRemoveApp(requestId: $requestId)  {
-        requestId
-        revoked
-        auth {
-            appName
-            appDesc
-            appUrl
-            capabilities {
-                with {
-                    domain
-                    pointers
-                }
-                can 
-            }
+  agentRemoveApp(requestId: $requestId) {
+    requestId
+    revoked
+    auth {
+      appName
+      appDesc
+      appUrl
+      capabilities {
+        with {
+          domain
+          pointers
         }
+        can
+      }
     }
+  }
 }
 
 mutation Lock($passphrase: String!) {
-    agentLock(passphrase: $passphrase) {
-        isInitialized
-        isUnlocked
-        did
-        didDocument
-        error
-    }
+  agentLock(passphrase: $passphrase) {
+    isInitialized
+    isUnlocked
+    did
+    didDocument
+    error
+  }
 }
 
 mutation Unlock($passphrase: String!) {
-    agentUnlock(passphrase: $passphrase) {
-        isInitialized
-        isUnlocked
-        did
-        didDocument
-        error
-    }
+  agentUnlock(passphrase: $passphrase) {
+    isInitialized
+    isUnlocked
+    did
+    didDocument
+    error
+  }
 }
 
 query ByDID($did: String!) {
-    agentByDID(did: $did) {
-        did
-        directMessageLanguage
-        perspective { 
-            links {
-                author, timestamp, 
-                proof {
-                    signature, key, valid, invalid
-                }
-                data {
-                    source, predicate, target
-                }
-            }
+  agentByDID(did: $did) {
+    did
+    directMessageLanguage
+    perspective {
+      links {
+        author
+        timestamp
+        proof {
+          signature
+          key
+          valid
+          invalid
         }
+        data {
+          source
+          predicate
+          target
+        }
+      }
     }
+  }
 }
 
-mutation Generate(
-    $passphrase: String!
-) {
-    agentGenerate(passphrase: $passphrase) {
-        isInitialized
-        isUnlocked
-        did
-        didDocument
-        error
-    }
+mutation Generate($passphrase: String!) {
+  agentGenerate(passphrase: $passphrase) {
+    isInitialized
+    isUnlocked
+    did
+    didDocument
+    error
+  }
 }
 
 mutation SignMessage($message: String!) {
