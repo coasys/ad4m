@@ -31,8 +31,10 @@ export async function findAndKillProcess(processName: string) {
   try {
     const list = await findProcess('name', processName)
 
-    for (const p of list) {      
-      kill(p.pid, 'SIGKILL')
+    for (const p of list) {   
+      if (p.name.includes(processName)) {
+        kill(p.pid, 'SIGKILL')
+      }   
     }
   } catch (err) {
     logger.error(`No process found by name: ${processName}`)
@@ -59,13 +61,14 @@ function fileExist(binaryPath: string): Promise<string[]> {
 
 export async function getAd4mHostBinary(relativePath: string) {
   return new Promise(async (resolve, reject) => {
-    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/92601411");
+    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/latest");
     const data: any = await response.json();
     const version = data['name'].replace('v', '');
     global.ad4mHostVersion = version;
 
     const isWin = process.platform === "win32";
     const isMac = process.platform === 'darwin';
+    const isLinux = process.platform === 'linux';
   
     const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary');
 
@@ -83,7 +86,7 @@ export async function getAd4mHostBinary(relativePath: string) {
 
     logger.info('ad4m-host binary not found, downloading now...')
 
-    let dest = path.join(binaryPath, `ad4m.exe`);
+    let dest = path.join(binaryPath, `ad4m`);
     let download: any;
     await fs.ensureDir(binaryPath);
     
@@ -99,11 +102,14 @@ export async function getAd4mHostBinary(relativePath: string) {
         e.name.includes("-windows-")
       ).browser_download_url;
       download = wget.download(link, dest)
-    } else {
+    } else if (isLinux){
       const link = data.assets.find((e: any) =>
         e.name.includes("-linux-")
       ).browser_download_url;
       download = wget.download(link, dest)
+    } else {
+      console.error("Unknown OS type, cannot fetch ad4m binary");
+      throw new Error("Unknown OS type, cannot fetch ad4m binary");
     }
 
     download.on('end', async () => {

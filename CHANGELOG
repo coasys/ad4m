@@ -21,6 +21,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Removed
 
 ### Fixed
+ - Bug on ad4m-test where apollo connection errors would polute logs [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
+ - ad4m-test internal tests not using self but instead published package [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
+ - ad4m-test will now always pull latest ad4m-host binary [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
  - AD4M launcher will no longer flash its modal on load [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - Broken CI tests using nix (fixed by bumping nix & cachix gh action versions) [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - ad4m-connect more stable by not running an async function on the constructor. This will ensure that the client exsist even if we couldn't make a connection [PR#298](https://github.com/perspect3vism/ad4m/pull/298)
