@@ -1,6 +1,6 @@
 import { DID } from "../DID";
 import { OnlineAgent } from "../language/Language";
-import { Perspective, PerspectiveExpression } from "../perspectives/Perspective";
+import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective";
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 
 export class NeighbourhoodProxy {
@@ -28,12 +28,24 @@ export class NeighbourhoodProxy {
         return await this.#client.setOnlineStatus(this.#pID, status)
     }
 
+    async setOnlineStatusU(status: PerspectiveUnsignedInput): Promise<boolean> {
+        return await this.#client.setOnlineStatusU(this.#pID, status)
+    }
+
     async sendSignal(remoteAgentDid: string, payload: Perspective): Promise<boolean> {
         return await this.#client.sendSignal(this.#pID, remoteAgentDid, payload)
     }
 
+    async sendSignalU(remoteAgentDid: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
+        return await this.#client.sendSignalU(this.#pID, remoteAgentDid, payload)
+    }
+
     async sendBroadcast(payload: Perspective): Promise<boolean> {
         return await this.#client.sendBroadcast(this.#pID, payload)
+    }
+
+    async sendBroadcastU(payload: PerspectiveUnsignedInput): Promise<boolean> {
+        return await this.#client.sendBroadcastU(this.#pID, payload)
     }
 
     async addSignalHandler(handler: (payload: PerspectiveExpression) => void): Promise<void> {
