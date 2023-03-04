@@ -1,6 +1,6 @@
 import { Arg, Mutation, Query, Resolver, Subscription, PubSub } from "type-graphql";
 import { PerspectiveHandle, PerspectiveState } from "../perspectives/PerspectiveHandle";
-import { Perspective, PerspectiveExpression, PerspectiveInput } from "../perspectives/Perspective";
+import { Perspective, PerspectiveExpression, PerspectiveInput, PerspectiveUnsignedInput } from "../perspectives/Perspective";
 import { DID } from "../DID";
 import { TEST_AGENT_DID } from "../agent/AgentResolver";
 import { OnlineAgent } from "../language/Language";
@@ -69,12 +69,27 @@ export default class NeighbourhoodResolver {
     }
 
     @Mutation()
+    neighbourhoodSetOnlineStatusU(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('status') status: PerspectiveUnsignedInput): boolean {
+        return true
+    }
+
+    @Mutation()
     neighbourhoodSendSignal(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('remoteAgentDid') recipient: DID, @Arg('payload') signal: PerspectiveInput): boolean {
         return true
     }
 
     @Mutation()
+    neighbourhoodSendSignalU(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('remoteAgentDid') recipient: DID, @Arg('payload') signal: PerspectiveUnsignedInput): boolean {
+        return true
+    }
+
+    @Mutation()
     neighbourhoodSendBroadcast(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('payload') signal: PerspectiveInput): boolean {
+        return true
+    }
+
+    @Mutation()
+    neighbourhoodSendBroadcastU(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('payload') signal: PerspectiveUnsignedInput): boolean {
         return true
     }
 
