@@ -62,7 +62,7 @@ export default function CapNotMatchedFirst({
       </div>
       <button
         class="button button--full button--link"
-        @click=${() => changeState("remoteurl")}
+        @click=${() => changeState("settings")}
       >
         Connection settings
       </button>

@@ -38,10 +38,10 @@ export async function checkPort(port: number) {
     if (res.status === 400 || res.status === 0) {
       return port;
     } else {
-      return null;
+      throw new Error(`Could not connect to port ${port}`);
     }
   } catch (e) {
-    return null;
+    throw new Error(`Could not connect to port ${port}`);
   }
 }
 
