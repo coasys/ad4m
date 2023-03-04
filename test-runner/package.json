@@ -8,7 +8,7 @@
     "build": "tsc",
     "build:util": "browserify build/client.js --standalone Bundle -p esmify > public/client.js",
     "test": "yarn run test-expression",
-    "test-expression": "node build/cli.js --test ./example/expression.test.js --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"junto-sdp\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
+    "test-expression": "node build/cli.js --test ./example/expression.test.js --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"note-ipfs\",\"description\":\"IPFS based language for storing data\",\"sourceCodeLink\":\"https://github.com/perspect3vism/note-ipfs\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "test-link": "node build/cli.js --languageType linkLanguage --test ./example/link.test.js --bundle \"example/languages/social-context.js\" --meta '{\"name\":\"social-context\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "test-ui": "node build/cli.js --ui --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"note-ipfs\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "ad4m-test": "./build/cli.js",
