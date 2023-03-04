@@ -9,6 +9,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - After login / registration the launcher will now open by default [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - If the user has no installed applications, we now show some info about connecting apps to AD4M and a link to Flux [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - Holochain DHT status logs every 60 seconds [PR#277](https://github.com/perspect3vism/ad4m/pull/277)
+ - ad4m-connect connection settings gives you the option of connecting to local or remote [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
 
 ### Changed
  - Auth screens for launcher & connect will now parse out the capabilities to a human readable string [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
@@ -22,6 +23,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Fixed
  - AD4M launcher will no longer flash its modal on load [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - Broken CI tests using nix (fixed by bumping nix & cachix gh action versions) [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - ad4m-connect more stable by not running an async function on the constructor. This will ensure that the client exsist even if we couldn't make a connection [PR#298](https://github.com/perspect3vism/ad4m/pull/298)
+ - ad4m-connect will now handle connection error from port correctly and ensure UI state get's updated correctly [PR#298](https://github.com/perspect3vism/ad4m/pull/298)
 
 ## [0.2.16] - 25/02/2013
 ### Added
