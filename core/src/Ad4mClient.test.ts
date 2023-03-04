@@ -21,7 +21,7 @@ import NeighbourhoodResolver from "./neighbourhood/NeighbourhoodResolver";
 import PerspectiveResolver from "./perspectives/PerspectiveResolver";
 import RuntimeResolver from "./runtime/RuntimeResolver";
 import ExpressionResolver from "./expression/ExpressionResolver";
-import { EntanglementProofInput } from "./agent/Agent";
+import { AuthInfoInput, EntanglementProofInput, CapabilityInput, ResourceInput } from "./agent/Agent";
 import { LanguageMetaInput } from "./language/LanguageMeta";
 import { InteractionCall } from "./language/Language";
 
@@ -238,7 +238,21 @@ describe('Ad4mClient', () => {
         })
 
         it('requestCapability() smoke tests', async () => {
-            const requestId = await ad4mClient.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
+            const requestId = await ad4mClient.agent.requestCapability({
+                appName: "demo-app",
+                appDesc: "demo-desc",
+                appDomain: "demo.test.org",
+                appUrl: "https://demo-link",
+                appIconPath: "/some/image/path", 
+                capabilities: [
+                    { 
+                        with: {
+                            "domain":"agent",
+                            "pointers":["*"]
+                        } as ResourceInput,
+                        can: ["QUERY"]
+                }] as CapabilityInput[]
+            } as AuthInfoInput)
             expect(requestId).toBe("test-request-id")
         })
 

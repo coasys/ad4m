@@ -471,8 +471,8 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             agentRequestCapability: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
-                const { appName, appDesc, appUrl, capabilities } = args;
-                let token = core.agentService.requestCapability(appName, appDesc, appUrl, capabilities);
+                const { authInfo } = args;
+                let token = core.agentService.requestCapability(authInfo);
                 return token;
             },
             //@ts-ignore

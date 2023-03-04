@@ -5,15 +5,16 @@ import {
 } from "@apollo/client/core";
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient, CapabilityInput } from "@perspect3vism/ad4m";
 import { checkPort, connectWebSocket } from "./utils";
 
 export type Ad4mConnectOptions = {
   appName: string;
   appDesc: string;
   appDomain: string;
+  appUrl?: string;
   appIconPath?: string;
-  capabilities: { [x: string]: any }[];
+  capabilities: CapabilityInput[];
   dataPath?: string;
   port?: number;
   token?: string;
@@ -48,10 +49,12 @@ export default class Ad4mConnect {
   url: string;
   token: string;
   port = 12000;
-  capabilities: { [x: string]: any }[] = [];
+  capabilities: CapabilityInput[] = [];
   appName: string;
   appDesc: string;
   appDomain: string;
+  appIconPath: string;
+  appUrl?: string;
   listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
     ["configstatechange"]: [],
@@ -62,6 +65,8 @@ export default class Ad4mConnect {
   constructor({
     appName,
     appDesc,
+    appIconPath,
+    appUrl,
     appDomain,
     capabilities,
     port,
@@ -72,6 +77,8 @@ export default class Ad4mConnect {
     this.appName = appName;
     this.appDesc = appDesc;
     this.appDomain = appDomain;
+    this.appUrl = appUrl;
+    this.appIconPath = appIconPath;
     this.capabilities = capabilities;
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
@@ -278,12 +285,14 @@ export default class Ad4mConnect {
       this.setToken(null);
     }
 
-    this.requestId = await this.ad4mClient?.agent.requestCapability(
-      this.appName,
-      this.appDesc,
-      this.appDomain,
-      JSON.stringify(this.capabilities)
-    );
+    this.requestId = await this.ad4mClient?.agent.requestCapability({
+      appName: this.appName,
+      appDesc: this.appDesc,
+      appUrl: this.appUrl,
+      appIconPath: this.appIconPath,
+      appDomain: this.appDomain,
+      capabilities: this.capabilities,
+    });
   }
 
   async verifyCode(code: string) {
