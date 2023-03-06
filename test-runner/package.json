@@ -6,7 +6,7 @@
   "bin": "./build/cli.js",
   "files": [
     "bin/*",
-    "build/*",
+    "build/**/*",
     "public/*",
     "src/*",
     "scripts/*"
