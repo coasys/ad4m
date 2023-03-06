@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-test",
-  "version": "0.2.16-fix.11",
+  "version": "0.2.16-fix.12",
   "description": "Testing library to test ad4m languages",
   "license": "MIT",
   "bin": "./build/cli.js",
