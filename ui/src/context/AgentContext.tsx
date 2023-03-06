@@ -101,7 +101,7 @@ export function AgentProvider({ children }: any) {
 
     await invoke('close_main_window');
     await invoke('open_tray');
-    await invoke('login_proxy');
+    await invoke('login_proxy', { subdomain: agentStatus.did! });
     
     navigate('/apps');
   };
@@ -118,7 +118,7 @@ export function AgentProvider({ children }: any) {
       console.log("agent status in unlock: ", agentStatus);
       await invoke('close_main_window');
       await invoke('open_tray');
-      await invoke('login_proxy');
+      await invoke('login_proxy', { subdomain: agentStatus!.did });
       navigate('/apps');
     } else {
       setState((prev) => ({ ...prev, hasLoginError: true }));
