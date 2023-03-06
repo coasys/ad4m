@@ -16,6 +16,8 @@ import QRCode from "react-qr-code";
 import { buildAd4mClient } from "../util";
 import { fetchProfile } from "./Settings";
 import CardItems from "./CardItems";
+import { checkUpdate, installUpdate } from '@tauri-apps/api/updater'
+import { relaunch } from '@tauri-apps/api/process'
 
 const useStyles = createStyles((theme) => ({
   label: {
@@ -38,6 +40,7 @@ function Profile() {
   const [password, setPassword] = useState("");
   const [showProfileInfo, setShowProfileInfo] = useState(false);
   const [lockAgentModalOpen, setLockAgentModalOpen] = useState(false);
+  const [installUpdateModelOpen, setInstallUpdateModelOpen] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [profile, setProfile] = useState({
     firstName: "",
@@ -75,6 +78,27 @@ function Profile() {
     setPassword(value);
   };
 
+  const onCheckUpdate = async () => {
+    try {
+      const { shouldUpdate, manifest } = await checkUpdate()
+      if (shouldUpdate) {
+        setInstallUpdateModelOpen(true)
+      }
+    } catch (error) {
+      console.log(error)
+    }
+  }
+
+  const onInstallUpdate = async () => {
+    try {
+      await installUpdate();
+
+      await relaunch();
+    } catch (error) {
+      console.log(error)
+    }
+  }
+
   return (
     <div>
       <j-popover placement="top">
@@ -89,6 +113,10 @@ function Profile() {
           <j-menu-item onClick={() => setLockAgentModalOpen(true)}>
             Lock Agent
             <j-icon size="xs" slot="start" name="lock"></j-icon>
+          </j-menu-item>
+          <j-menu-item onClick={() => onCheckUpdate()}>
+            Check updates
+            <j-icon size="xs" slot="start" name="arrow-repeat"></j-icon>
           </j-menu-item>
           <j-menu-item onClick={() => setShowProfileInfo(true)}>
             Profile details
@@ -184,6 +212,32 @@ function Profile() {
                 Close
               </j-button>
             </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+      {installUpdateModelOpen && (
+        <j-modal
+          size="fullscreen"
+          open={installUpdateModelOpen}
+          onToggle={(e: any) => setInstallUpdateModelOpen(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Install Update
+              </j-text>
+              <j-text>
+                Warning: App will restart once the update is installed.
+              </j-text>
+            </j-box>
+            <j-box p="200"></j-box>
+            <j-button
+              variant="primary"
+              onClick={() => onInstallUpdate()}
+              loading={loading}
+            >
+              Install
+            </j-button>
           </j-box>
         </j-modal>
       )}
