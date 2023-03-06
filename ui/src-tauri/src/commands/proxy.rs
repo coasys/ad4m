@@ -9,15 +9,12 @@ const PROXY_SERVER: &str = "https://proxy-worker.ad4m.dev";
 const AD4M_SERVER: &str = "http://127.0.0.1";
 
 #[tauri::command]
-pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, proxy: State<'_, ProxyState>) -> Result<String, String> {
-    log::info!("Setup proxy: {}", subdomain);
+pub async fn login_proxy(subdomain: String, app_state: State<'_, AppState>, proxy: State<'_, ProxyState>) -> Result<(), String> {
+    log::info!("Login proxy server with did: {}", subdomain);
 
     let graphql_port = app_state.graphql_port;
     let req_credential = &app_state.req_credential;
-    let (notify_shutdown, _) = broadcast::channel(1);
-    let subdomain = subdomain.replace("did:key:", "").to_lowercase();
-    let max_len = std::cmp::min(32, subdomain.len());
-    let subdomain = &subdomain[0..max_len];
+    let subdomain = format_subdomain(&subdomain);
 
     let rand = reqwest::get(format!("{}/login?did={}", PROXY_SERVER, subdomain))
         .await
@@ -57,14 +54,33 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
             format!("Set proxy error:  {:?}", err)
         })?;
 
+    *proxy.0.lock().unwrap() = ProxyService {
+        credential: Some(credential),
+        endpoint: None,
+        shutdown_signal: None,
+    };
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, proxy: State<'_, ProxyState>) -> Result<String, String> {
+    log::info!("Setup proxy: {}", subdomain);
+
+    let graphql_port = app_state.graphql_port;
+    let (notify_shutdown, _) = broadcast::channel(1);
+    let subdomain = format_subdomain(&subdomain);
+
+    let credential = (*proxy.0.lock().unwrap()).credential.as_ref().map(|s| s.clone());
+
     let endpoint = open_tunnel(
         Some(PROXY_SERVER),
-        Some(subdomain),
+        Some(&subdomain),
         None,
         graphql_port,
         notify_shutdown.clone(),
         5,
-        Some(credential),
+        credential.clone(),
     )
     .await
     .map_err(|err| {
@@ -73,26 +89,39 @@ pub async fn setup_proxy(subdomain: String, app_state: State<'_, AppState>, prox
     })?;
     log::info!("Proxy endpoint: {}", endpoint);
 
-    *proxy.0.lock().unwrap() = Some(ProxyService{
-        endpoint: endpoint.clone(),
-        shutdown_signal: notify_shutdown,
-    });
+    *proxy.0.lock().unwrap() = ProxyService{
+        credential,
+        endpoint: Some(endpoint.clone()),
+        shutdown_signal: Some(notify_shutdown),
+    };
 
     Ok(endpoint)
 }
 
 #[tauri::command]
 pub fn get_proxy(proxy: State<'_, ProxyState>) -> Option<String> {
-    (*proxy.0.lock().unwrap()).as_ref().map(|s| s.endpoint.clone())
+    (*proxy.0.lock().unwrap()).endpoint.as_ref().map(|s| s.clone())
 }
 
 #[tauri::command]
 pub fn stop_proxy(proxy: State<'_, ProxyState>) {
-    match &(*proxy.0.lock().unwrap()) {
-        Some(s) => {
-            let _ = s.shutdown_signal.send(());
+    match &(*proxy.0.lock().unwrap()).shutdown_signal {
+        Some(signal) => {
+            let _ = signal.send(());
         },
         None => log::info!("Proxy is not set up."),
     };
-    *proxy.0.lock().unwrap() = None;
+
+    let credential = (*proxy.0.lock().unwrap()).credential.as_ref().map(|s| s.clone());
+    *proxy.0.lock().unwrap() = ProxyService {
+        credential,
+        endpoint: None,
+        shutdown_signal: None,
+    };
+}
+
+fn format_subdomain(subdomain: &str) -> String {
+    let subdomain = subdomain.replace("did:key:", "").to_lowercase();
+    let max_len = std::cmp::min(32, subdomain.len());
+    subdomain[0..max_len].to_string()
 }
