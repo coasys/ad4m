@@ -1,6 +1,6 @@
 # AD4M Test
 
-This is a testing library for testing languages for ad4m. This package internally uses ad4m-host (https://github.com/perspect3vism/ad4m/tree/dev/host) to start and interact with ad4m-executor. For more detailed example look go [here](https://github.com/perspect3vism/ad4m-test/tree/main/example)
+This is a testing library for testing languages for ad4m. This package internally uses ad4m-host (https://github.com/perspect3vism/ad4m/tree/dev/host) to start and interact with ad4m-executor. For more detailed example look go [here](https://github.com/perspect3vism/ad4m/tree/dev/test-runner/example)
 
 ## Usage
 
