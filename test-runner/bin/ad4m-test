@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+
+process.title = 'ad4m-test'
+require = require('esm')(module /*, options*/);
+// TODO: change this to target the build file
+require('../build/cli').cli(process.argv);

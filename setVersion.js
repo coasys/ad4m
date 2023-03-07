@@ -76,3 +76,8 @@ const book = JSON.parse(fs.readFileSync('docs-src/book.json', 'utf8'))
 console.log("Docs version: " + book.variables.ad4mVersion + " -> " + VERSION)
 book.variables.ad4mVersion = VERSION
 fs.writeFileSync('docs-src/book.json', JSON.stringify(book, null, 2) + '\n')
+
+const testRunner = JSON.parse(fs.readFileSync('test-runner/package.json', 'utf8'))
+console.log("Test runner version: " + testRunner.version + " -> " + VERSION)
+testRunner.version = VERSION
+fs.writeFileSync('test-runner/package.json', JSON.stringify(testRunner, null, 2) + '\n')

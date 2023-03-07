@@ -1,25 +1,26 @@
 import { html, css, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { BarcodeDetectorPolyfill } from "@undecaf/barcode-detector-polyfill";
 
 import Ad4mConnect, {
   AuthStates,
-  ConfigStates,
   ConnectionStates,
   Ad4mConnectOptions,
+  ConfigStates,
 } from "./core";
 
-import { Html5Qrcode } from "html5-qrcode";
 import Loading from "./components/Loading";
-import RemoteUrl from "./components/RemoteUrl";
+import Settings from "./components/Settings";
 import Start from "./components/Start";
 import Disconnected from "./components/Disconnected";
 import AgentLocked from "./components/AgentLocked";
 import RequestCapability from "./components/RequestCapability";
-import InvalidToken from "./components/InvalidToken";
 import VerifyCode from "./components/VerifyCode";
 import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
+import ScanQRCode from "./components/ScanQRCode";
 import Header from "./components/Header";
 import autoBind from "auto-bind";
+
 export { getAd4mClient } from "./utils";
 
 function detectMob() {
@@ -53,6 +54,8 @@ const styles = css`
   .wrapper {
     font-family: "DM Sans", Helvetica, Arial, sans-serif;
     position: fixed;
+    display: grid;
+    place-content: center;
     top: 0;
     left: 0;
     color: var(--body-color);
@@ -62,6 +65,18 @@ const styles = css`
 
   * {
     box-sizing: border-box;
+  }
+
+  .check-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .check-list li {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
   }
 
   .items {
@@ -108,7 +123,11 @@ const styles = css`
     font-size: 18px;
     font-weight: 600;
     margin: 0;
-    margin-bottom: 15px;
+    margin-bottom: 10px;
+  }
+
+  .heading.nomargin {
+    margin: 0;
   }
 
   .body {
@@ -153,29 +172,39 @@ const styles = css`
 
   .dialog {
     background-color: var(--background-color);
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translateX(-50%) translateY(-50%);
     z-index: 10;
     border-radius: 8px;
     width: calc(100vw - 10px);
     max-width: 500px;
-  }
-
-  @media (min-width: 800px) {
-    .dialog {
-      width: 100%;
-      max-width: 500px;
-    }
+    max-height: 90vh;
+    overflow-y: auto;
   }
 
   .dialog__header {
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 120px;
-    padding: 0 30px;
+    padding: 20px 30px;
+    gap: 10px;
+    color: var(--primary-color);
+    margin-bottom: 20px;
+    font-size: 14px;
+  }
+
+  .dialog__logo {
+    display: flex;
+    text-align: center;
+    width: 25px;
+  }
+
+  .dialog__content {
+    min-height: 300px;
+    display: grid;
+    place-content: center;
+    padding-top: 0;
+    padding-left: 30px;
+    padding-right: 30px;
+    padding-bottom: 30px;
   }
 
   .dialog__connect {
@@ -187,20 +216,13 @@ const styles = css`
     position: relative;
   }
 
-  .dialog__logo {
-    text-align: center;
-    width: 100%;
-    max-width: 50px;
-    margin: 0 auto;
-  }
-
   .dialog__logo svg {
     width: 100%;
   }
 
   .dialog__connect-ad4m {
-    width: 100px;
-    height: 100px;
+    width: 80px;
+    height: 80px;
     background: var(--background-color);
     padding: 20px;
     box-shadow: 0px 4px 7px 0px rgb(0 0 0 / 8%);
@@ -229,8 +251,8 @@ const styles = css`
   .dialog__connect-check:before {
     content: "";
     display: block;
-    width: 120px;
-    border-bottom: 1px dashed var(--body-color);
+    width: 40px;
+    border-bottom: 2px dashed var(--body-color);
     position: absolute;
     left: 50%;
     top: 50%;
@@ -245,11 +267,8 @@ const styles = css`
     text-align: center;
   }
 
-  .dialog__content {
-    padding-top: 0;
-    padding-left: 30px;
-    padding-right: 30px;
-    padding-bottom: 30px;
+  .uppercase {
+    text-transform: uppercase;
   }
 
   .input {
@@ -354,6 +373,32 @@ const styles = css`
     text-align: center;
     background: red;
   }
+
+  .qr-scanner {
+    background: black;
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+    place-content: center;
+  }
+
+  .qr-scanner .stop {
+    position: absolute;
+    z-index: 10;
+    left: 50%;
+    bottom: 10px;
+    transform: translateX(-50%);
+  }
+
+  .qr-scanner video {
+    height: 100vh;
+    width: 100vw;
+    object-fit: cover;
+  }
 `;
 
 @customElement("ad4m-connect")
@@ -370,6 +415,9 @@ export class Ad4mConnectElement extends LitElement {
   private _hasClickedDownload = null;
 
   @state()
+  private _isRemote = false;
+
+  @state()
   private _client: Ad4mConnect;
 
   @state()
@@ -377,16 +425,13 @@ export class Ad4mConnectElement extends LitElement {
 
   @state()
   private uiState:
-    | "loading"
-    | "remoteurl"
+    | "settings"
     | "start"
+    | "qr"
     | "requestcap"
     | "verifycode"
-    | "invalidtoken"
     | "disconnected"
-    | "agentlocked"
-    | "closed"
-    | "connectionerror" = "start";
+    | "agentlocked" = "start";
 
   @property({ type: String, reflect: true })
   appName = null;
@@ -433,6 +478,7 @@ export class Ad4mConnectElement extends LitElement {
       appName: this.appName,
       appDesc: this.appDesc,
       appDomain: this.appDomain,
+      appUrl: window.location.origin,
       appIconPath: this.appIconPath,
       capabilities: Array.isArray(this.capabilities)
         ? this.capabilities
@@ -442,55 +488,84 @@ export class Ad4mConnectElement extends LitElement {
       url: this.url || localStorage.getItem("ad4murl"),
     });
 
-    this._client.on("configstatechange", (name: any, val) => {
-      this[name] = val;
-      if (val) {
-        localStorage.setItem("ad4m" + name, val);
-      } else {
-        localStorage.removeItem("ad4m" + name);
-      }
-      this.requestUpdate();
-    });
-
-    this._client.on("authstatechange", (event: AuthStates) => {
-      const customEvent = new CustomEvent("authstatechange", {
-        detail: event,
-      });
-      if (event === "locked") {
-        this._isOpen = true;
-      }
-      this.dispatchEvent(customEvent);
-      this.requestUpdate();
-    });
-
-    this._client.on("connectionstatechange", (event: ConnectionStates) => {
-      if (event === "connected") {
-        this.uiState = "requestcap";
-      }
-      if (event === "disconnected") {
-        this._isOpen = true;
-      }
-      const customEvent = new CustomEvent("connectionstatechange", {
-        detail: event,
-      });
-      this.dispatchEvent(customEvent);
-      this.requestUpdate();
-    });
+    this._client.on("configstatechange", this.handleConfigChange);
+    this._client.on("authstatechange", this.handleAuthChange);
+    this._client.on("connectionstatechange", this.handleConnectionChange);
 
     this.loadFont();
-    this.constructQR();
   }
 
-  connect() {
-    this._isOpen = true;
-    this._client.connect();
+  private async unlockAgent(passcode) {
+    await this._client.ad4mClient.agent.unlock(passcode);
   }
 
-  getAd4mClient() {
-    return this._client.ad4mClient;
+  private verifyCode(code) {
+    this._client.verifyCode(code);
   }
 
-  loadFont() {
+  private changeUrl(url) {
+    this._client.setUrl(url);
+  }
+
+  private changePort(port: number) {
+    this._client.setPort(port);
+  }
+
+  private changeUIState(state) {
+    this.uiState = state;
+  }
+
+  private changeIsRemote(bol: boolean) {
+    this._isRemote = bol;
+  }
+
+  private changeCode(code) {
+    this._code = code;
+  }
+
+  private onDownloaded() {
+    this._hasClickedDownload = true;
+  }
+
+  private handleAuthChange(event: AuthStates) {
+    const customEvent = new CustomEvent("authstatechange", {
+      detail: event,
+    });
+    if (event === "locked") {
+      this._isOpen = true;
+    }
+    this.dispatchEvent(customEvent);
+    this.requestUpdate();
+  }
+
+  private handleConfigChange(name: any, val: string) {
+    this[name] = val;
+    if (val) {
+      localStorage.setItem("ad4m" + name, val);
+    } else {
+      localStorage.removeItem("ad4m" + name);
+    }
+    this.requestUpdate();
+  }
+
+  private handleConnectionChange(event: ConnectionStates) {
+    if (event === "connected") {
+      this.changeUIState("requestcap");
+    }
+    if (event === "disconnected") {
+      this._isOpen = true;
+    }
+    if (event === "not_connected") {
+      this.changeUIState("start");
+    }
+    const customEvent = new CustomEvent("connectionstatechange", {
+      detail: event,
+    });
+    this.dispatchEvent(customEvent);
+    this.requestUpdate();
+  }
+
+  private loadFont() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.type = "text/css";
@@ -500,133 +575,83 @@ export class Ad4mConnectElement extends LitElement {
     document.head.appendChild(link);
   }
 
-  constructQR() {
-    const containerEle = document.createElement("div");
-    containerEle.id = "camera-id";
-    containerEle.style.position = "absolute";
-    containerEle.style.top = "0";
-    containerEle.style.left = "0";
-    containerEle.style.width = "100vw";
-    containerEle.style.height = "100vh";
-    containerEle.style.zIndex = "10000";
-    containerEle.style.display = "none";
-
-    const ele = document.createElement("div");
-    ele.id = "reader";
-    // @ts-ignore
-    ele.width = "100vw";
-    ele.style.height = "100vh";
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.id = "stop-scan";
-    cancelBtn.innerHTML = "&#10005;";
-    cancelBtn.style.paddingTop = "4px";
-    cancelBtn.style.display = "flex";
-    cancelBtn.style.alignItems = "center";
-    cancelBtn.style.justifyContent = "center";
-    cancelBtn.style.position = "absolute";
-    cancelBtn.style.top = "10px";
-    cancelBtn.style.right = "10px";
-    cancelBtn.style.borderRadius = "50%";
-    cancelBtn.style.border = "0";
-    cancelBtn.style.height = "30px";
-    cancelBtn.style.width = "30px";
-    cancelBtn.style.fontFamily = "inherit";
-    cancelBtn.style.fontSize = "20px";
-
-    containerEle.appendChild(ele);
-    containerEle.appendChild(cancelBtn);
-    document.body.appendChild(containerEle);
-  }
-
-  scanQrcode() {
-    const html5QrCode = new Html5Qrcode("reader");
-    const ele = document.getElementById("camera-id");
-    ele.style.display = "block";
-
-    const qrCodeSuccessCallback = (decodedText, decodedResult) => {
-      this._client.connect(decodedText);
-      html5QrCode.stop();
-      ele.style.display = "none";
-    };
-    function onScanFailure(error) {
-      console.warn(`Code scan error = ${error}`);
+  private async startCamera(e) {
+    try {
+      window["BarcodeDetector"].getSupportedFormats();
+    } catch {
+      window["BarcodeDetector"] = BarcodeDetectorPolyfill;
     }
 
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    const reverseAspectRatio = height / width;
+    await this.changeUIState("qr");
 
-    const mobileAspectRatio =
-      reverseAspectRatio > 1.5
-        ? reverseAspectRatio + (reverseAspectRatio * 12) / 100
-        : reverseAspectRatio;
+    setTimeout(async () => {
+      const video = this.shadowRoot.querySelector("video");
 
-    const config = {
-      fps: 20, // frame per seconds for qr code scanning
-      qrbox: { width: 250, height: 250 },
-      videoConstraints: {
-        facingMode: "environment",
-        aspectRatio: mobileAspectRatio,
-      },
-    };
+      if (!video) return;
 
-    const cancelBtn = document.getElementById("stop-scan");
-    cancelBtn.addEventListener("click", function () {
-      html5QrCode.stop();
-      ele.style.display = "none";
-    });
+      const media = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: "environment" },
+      });
 
-    html5QrCode.start(
-      { facingMode: "environment" },
-      config,
-      qrCodeSuccessCallback,
-      onScanFailure
-    );
+      video.srcObject = media;
+      video.autoplay = true;
+    }, 100);
   }
 
-  changeUrl(url) {
-    this.setAttribute("url", url);
+  async connect() {
+    this._isOpen = true;
+    this.requestUpdate();
+    const client = await this._client.connect();
+    return client;
   }
 
-  connectRemote(url) {
-    this._client.connect(url);
+  getAd4mClient() {
+    return this._client.ad4mClient;
+  }
+
+  async connectRemote(url) {
+    try {
+      const client = await this._client.connect(url);
+      this.changeUIState("requestcap");
+      return client;
+    } catch (e) {
+      if (e.message === "Socket closed with event 4500 Invalid Compact JWS") {
+        this.changeUIState("requestcap");
+      }
+    }
   }
 
   async requestCapability(bool) {
     try {
       await this._client.requestCapability(bool);
-      this.uiState = "verifycode";
+      this.changeUIState("verifycode");
     } catch (e) {
       console.warn(e);
     }
   }
 
-  connectToPort() {
-    this._client.connectToPort();
+  async isAuthenticated() {
+    return this._client.checkAuth();
   }
 
-  async unlockAgent(passcode) {
-    await this._client.ad4mClient.agent.unlock(passcode);
-  }
-
-  changeUIState(state) {
-    this.uiState = state;
-  }
-
-  changeCode(code) {
-    this._code = code;
-  }
-
-  onDownloaded() {
-    this._hasClickedDownload = true;
-  }
-
-  verifyCode(code) {
-    this._client.verifyCode(code);
+  setOpen(val: boolean) {
+    this._isOpen = val;
   }
 
   renderViews() {
+    if (this.connectionState === "connecting") {
+      return Loading();
+    }
+
+    if (this.uiState === "qr") {
+      return ScanQRCode({
+        changeState: this.changeUIState,
+        onSuccess: (url) => this._client.connect(url),
+        uiState: this.uiState,
+      });
+    }
+
     if (this.authState === "locked") {
       return AgentLocked({
         unlockAgent: this.unlockAgent,
@@ -634,22 +659,23 @@ export class Ad4mConnectElement extends LitElement {
       });
     }
 
-    if (this.connectionState === "connecting") {
-      return Loading();
-    }
-
-    if (this.uiState === "remoteurl") {
-      return RemoteUrl({
+    if (this.uiState === "settings") {
+      return Settings({
+        port: this.port,
+        changePort: this.changePort,
+        isRemote: this._isRemote,
+        changeIsRemote: this.changeIsRemote,
         url: this.url,
         changeState: this.changeUIState,
         changeUrl: this.changeUrl,
+        connectToPort: this._client.connectToPort,
         connectRemote: this.connectRemote,
       });
     }
 
     if (this.connectionState === "not_connected") {
       return Start({
-        scanQrcode: this.scanQrcode,
+        scanQrcode: this.startCamera,
         connect: this.connect,
         isMobile: this._isMobile,
         hasClickedDownload: this._hasClickedDownload,
@@ -673,6 +699,7 @@ export class Ad4mConnectElement extends LitElement {
         requestCapability: this.requestCapability,
         capabilities: this.capabilities,
         appname: this.appName,
+        setOpen: this.setOpen,
         appiconpath: this.appIconPath,
       });
     }

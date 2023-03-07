@@ -2,7 +2,7 @@ import { ApolloClient, ApolloQueryResult, gql } from "@apollo/client/core"
 import { Address } from "../Address"
 import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
-import { Perspective } from "../perspectives/Perspective"
+import { Perspective, PerspectiveUnsignedInput } from "../perspectives/Perspective"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import unwrapApolloResult from "../unwrapApolloResult"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
@@ -126,6 +126,23 @@ export class NeighbourhoodClient {
         return neighbourhoodSetOnlineStatus
     }
 
+    async setOnlineStatusU(perspectiveUUID: string, status: PerspectiveUnsignedInput): Promise<boolean> {
+        const { neighbourhoodSetOnlineStatusU } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation neighbourhoodSetOnlineStatusU(
+                $perspectiveUUID: String!,
+                $status: PerspectiveUnsignedInput!
+            ) {
+                neighbourhoodSetOnlineStatusU(
+                    perspectiveUUID: $perspectiveUUID,
+                    status: $status
+                )
+            }`,
+            variables: { perspectiveUUID, status }
+        }))
+
+        return neighbourhoodSetOnlineStatusU
+    }
+
     async sendSignal(perspectiveUUID: string, remoteAgentDid: string, payload: Perspective): Promise<boolean> {
         const { neighbourhoodSendSignal } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation neighbourhoodSendSignal(
@@ -145,6 +162,25 @@ export class NeighbourhoodClient {
         return neighbourhoodSendSignal
     }
 
+    async sendSignalU(perspectiveUUID: string, remoteAgentDid: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
+        const { neighbourhoodSendSignalU } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation neighbourhoodSendSignalU(
+                $perspectiveUUID: String!,
+                $remoteAgentDid: String!,
+                $payload: PerspectiveUnsignedInput!
+            ) {
+                neighbourhoodSendSignalU(
+                    perspectiveUUID: $perspectiveUUID,
+                    remoteAgentDid: $remoteAgentDid,
+                    payload: $payload
+                )
+            }`,
+            variables: { perspectiveUUID, remoteAgentDid, payload }
+        }))
+
+        return neighbourhoodSendSignalU
+    }
+
     async sendBroadcast(perspectiveUUID: string, payload: Perspective): Promise<boolean> {
         const { neighbourhoodSendBroadcast } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation neighbourhoodSendBroadcast(
@@ -160,6 +196,23 @@ export class NeighbourhoodClient {
         }))
 
         return neighbourhoodSendBroadcast
+    }
+
+    async sendBroadcastU(perspectiveUUID: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
+        const { neighbourhoodSendBroadcastU } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation neighbourhoodSendBroadcastU(
+                $perspectiveUUID: String!,
+                $payload: PerspectiveUnsignedInput!
+            ) {
+                neighbourhoodSendBroadcastU(
+                    perspectiveUUID: $perspectiveUUID,
+                    payload: $payload
+                )
+            }`,
+            variables: { perspectiveUUID, payload }
+        }))
+
+        return neighbourhoodSendBroadcastU
     }
 
     dispatchSignal(perspectiveUUID:string, signal: any) {

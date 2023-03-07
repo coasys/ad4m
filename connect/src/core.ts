@@ -5,15 +5,17 @@ import {
 } from "@apollo/client/core";
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient, CapabilityInput } from "@perspect3vism/ad4m";
 import { checkPort, connectWebSocket } from "./utils";
+import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
   appName: string;
   appDesc: string;
   appDomain: string;
+  appUrl?: string;
   appIconPath?: string;
-  capabilities: { [x: string]: any }[];
+  capabilities: CapabilityInput[];
   dataPath?: string;
   port?: number;
   token?: string;
@@ -37,6 +39,8 @@ export type ConnectionStates =
   | "disconnected";
 
 export default class Ad4mConnect {
+  activeSocket: WebSocket = null;
+  requestedRestart: boolean = false;
   authState: AuthStates = "unauthenticated";
   connectionState: ConnectionStates = "not_connected";
   wsClient?: WSClient;
@@ -45,12 +49,13 @@ export default class Ad4mConnect {
   requestId?: string;
   url: string;
   token: string;
-  isFullyInitialized = false;
   port = 12000;
-  capabilities: { [x: string]: any }[] = [];
+  capabilities: CapabilityInput[] = [];
   appName: string;
   appDesc: string;
   appDomain: string;
+  appIconPath: string;
+  appUrl?: string;
   listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
     ["configstatechange"]: [],
@@ -61,24 +66,26 @@ export default class Ad4mConnect {
   constructor({
     appName,
     appDesc,
+    appIconPath,
+    appUrl,
     appDomain,
     capabilities,
     port,
     token,
     url,
   }: Ad4mConnectOptions) {
+    autoBind(this);
     //! @fayeed - make it support node.js
     this.appName = appName;
     this.appDesc = appDesc;
     this.appDomain = appDomain;
+    this.appUrl = appUrl;
+    this.appIconPath = appIconPath;
     this.capabilities = capabilities;
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
     this.token = token || this.token;
-
-    setTimeout(() => {
-      this.checkConnection();
-    }, 0);
+    this.buildClient();
   }
 
   private notifyConfigChange(val: ConfigStates, data: string | number) {
@@ -126,50 +133,88 @@ export default class Ad4mConnect {
     this.listeners[event].push(cb);
   }
 
-  async connect(url?: string) {
-    if (url) {
-      this.setUrl(url);
+  // If url is explicit , don't search for open ports
+  async connect(url?: string): Promise<Ad4mClient> {
+    try {
+      if (url) {
+        await connectWebSocket(url, 10000);
+        this.setUrl(url);
+        const client = this.buildClient();
+        await this.checkAuth();
+        return client;
+      } else {
+        const client = await this.ensureConnection();
+        await this.checkAuth();
+        return client;
+      }
+    } catch {
+      this.notifyConnectionChange("not_connected");
+      this.notifyAuthChange("unauthenticated");
     }
-    this.checkConnection();
   }
 
-  async checkConnection() {
+  // If port is explicit, don't search for port
+  async connectToPort(port?: number): Promise<Ad4mClient> {
     try {
-      this.notifyConnectionChange("connecting");
-      const res = await connectWebSocket(this.url, 10000);
-      this.buildClient();
-    } catch (e) {
-      this.connectToPort();
-    }
-  }
+      if (port) {
+        const found = await checkPort(port);
+        this.setPort(found);
+      } else {
+        const port = await this.findPort();
+        this.setPort(port);
+      }
 
-  async connectToPort() {
-    try {
-      this.notifyConnectionChange("connecting");
-      const port = await this.findPort();
-      this.setPort(port);
-      this.buildClient();
+      return this.buildClient();
     } catch (error) {
       this.notifyConnectionChange("not_connected");
+      this.notifyAuthChange("unauthenticated");
     }
   }
 
-  async findPort() {
-    const ports = [...Array(10).keys()].map((i) => {
+  async ensureConnection(): Promise<Ad4mClient> {
+    const socketIsActive =
+      this.activeSocket?.readyState === WebSocket.OPEN &&
+      this.activeSocket?.url === this.url;
+
+    if (socketIsActive && this.ad4mClient) {
+      return this.ad4mClient;
+    }
+
+    try {
+      await connectWebSocket(this.url, 10000);
+      return this.buildClient();
+    } catch (e) {
+      return this.connectToPort();
+    }
+  }
+
+  async findPort(): Promise<number> {
+    const ports = [...Array(10).keys()].map((_, i) => {
       return checkPort(12000 + i);
     });
 
-    const results = await Promise.all(ports);
-    const result = results.find((port) => port);
+    const results = await Promise.allSettled(ports);
+    const result = results.find((port) => port.status === "fulfilled");
 
-    if (result) return result;
+    // @ts-ignore
+    if (result) return result.value;
     else {
       throw Error("Couldn't find an open port");
     }
   }
 
-  async buildClient() {
-    if (this.apolloClient) {
+  buildClient(): Ad4mClient {
+    this.notifyConnectionChange("connecting");
+
+    // Make sure the url is valid
+    try {
+      new WebSocket(this.url);
+    } catch (e) {
+      this.notifyConnectionChange("not_connected");
+    }
+
+    if (this.apolloClient && this.wsClient) {
+      this.requestedRestart = true;
       this.wsClient.dispose();
       this.apolloClient.stop();
     }
@@ -182,6 +227,14 @@ export default class Ad4mConnect {
         },
       }),
       on: {
+        connecting: () => {
+          if (!this.requestedRestart) {
+            this.notifyConnectionChange("connecting");
+          }
+        },
+        opened: (socket: WebSocket) => {
+          this.activeSocket = socket;
+        },
         error: (e) => {
           this.notifyConnectionChange("not_connected");
           this.notifyAuthChange("unauthenticated");
@@ -190,9 +243,10 @@ export default class Ad4mConnect {
           this.notifyConnectionChange("connected");
         },
         closed: () => {
-          if (this.isFullyInitialized) {
+          if (!this.requestedRestart) {
             this.notifyConnectionChange("disconnected");
             this.notifyAuthChange("unauthenticated");
+            this.requestedRestart = false;
           }
         },
       },
@@ -211,18 +265,12 @@ export default class Ad4mConnect {
       },
     });
 
-    // @ts-ignore
     this.ad4mClient = new Ad4mClient(this.apolloClient);
 
-    this.checkAuth();
-
-    this.ad4mClient.agent.addAgentStatusChangedListener(() => {
-      console.log("callback called");
-      this.checkAuth();
-    });
+    return this.ad4mClient;
   }
 
-  async checkAuth() {
+  async checkAuth(): Promise<boolean> {
     try {
       const isLocked = await this.ad4mClient.agent.isLocked();
 
@@ -231,41 +279,46 @@ export default class Ad4mConnect {
       } else {
         await this.ad4mClient.agent.status();
         this.notifyAuthChange("authenticated");
-        this.isFullyInitialized = true;
       }
+      // Return true as we are authenticated
+      return true;
     } catch (error) {
-      console.log(error);
-      // TODO: isLocked throws an error, should just return a boolean. Temp fix
       if (
         error.message ===
         "Socket closed with event 4500 Cannot extractByTags from a ciphered wallet. You must unlock first."
       ) {
+        // TODO: isLocked throws an error, should just return a boolean. Temp fix
         this.notifyAuthChange("locked");
+        return true;
       } else {
         this.notifyAuthChange("unauthenticated");
+        return false;
       }
     }
   }
 
-  async requestCapability(invalidateToken = false) {
+  async requestCapability(invalidateToken = false): Promise<string> {
     if (invalidateToken) {
       this.setToken(null);
     }
 
-    this.requestId = await this.ad4mClient?.agent.requestCapability(
-      this.appName,
-      this.appDesc,
-      this.appDomain,
-      JSON.stringify(this.capabilities)
-    );
+    this.requestId = await this.ad4mClient?.agent.requestCapability({
+      appName: this.appName,
+      appDesc: this.appDesc,
+      appUrl: this.appUrl,
+      appIconPath: this.appIconPath,
+      appDomain: this.appDomain,
+      capabilities: this.capabilities,
+    });
+
+    return this.requestId;
   }
 
-  async verifyCode(code: string) {
+  async verifyCode(code: string): Promise<string> {
     const jwt = await this.ad4mClient?.agent.generateJwt(this.requestId!, code);
-
     this.setToken(jwt);
-    this.buildClient();
-
-    this.isFullyInitialized = true;
+    await this.buildClient();
+    await this.checkAuth();
+    return this.token;
   }
 }
