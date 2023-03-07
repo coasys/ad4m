@@ -398,6 +398,8 @@ const Login = (props: any) => {
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
                 onKeyDown={onKeyDown}
+                errortext={passwordError}
+                error={passwordError}
               >
                 <j-button
                   onClick={() => setShowPassword(!showPassword)}

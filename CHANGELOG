@@ -29,6 +29,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Broken CI tests using nix (fixed by bumping nix & cachix gh action versions) [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - ad4m-connect more stable by not running an async function on the constructor. This will ensure that the client exsist even if we couldn't make a connection [PR#298](https://github.com/perspect3vism/ad4m/pull/298)
  - ad4m-connect will now handle connection error from port correctly and ensure UI state get's updated correctly [PR#298](https://github.com/perspect3vism/ad4m/pull/298)
+ - ad4m-launcher now gives feedback if password is wrong. [PR#302](https://github.com/perspect3vism/ad4m/pull/302)
 
 ## [0.2.16] - 25/02/2013
 ### Added
