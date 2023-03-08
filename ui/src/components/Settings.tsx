@@ -5,11 +5,10 @@ import {
   PREDICATE_LASTNAME,
   PREDICATE_USERNAME,
 } from "../constants/triples";
-import { cardStyle, MainContainer } from "./styles";
+import { cardStyle } from "./styles";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { buildAd4mClient, copyTextToClipboard } from "../util";
 import { useCallback } from "react";
-import { showNotification } from "@mantine/notifications";
 import { invoke } from "@tauri-apps/api";
 import QRCode from "react-qr-code";
 import { AgentContext } from "../context/AgentContext";
@@ -72,14 +71,10 @@ const Profile = (props: Props) => {
 
   const [showPassword, setShowPassword] = useState(false);
 
+  const [loadingProxy, setLoadingProxy] = useState(false);
+
   function openLogs() {
     appWindow.emit("copyLogs");
-
-    showNotification({
-      message:
-        "Opened logs folder... Please send ad4m.log to support on Discord",
-      autoClose: 20000,
-    });
   }
 
   const [profile, setProfile] = useState({
@@ -160,10 +155,6 @@ const Profile = (props: Props) => {
 
   const copyText = (text: string) => {
     copyTextToClipboard(text);
-    showNotification({
-      message: "Text copied to clipboard",
-      autoClose: 1000,
-    });
   };
 
   const showProxyQRCode = () => {
@@ -181,18 +172,16 @@ const Profile = (props: Props) => {
 
   const setupProxy = async (event: any) => {
     try {
+      setLoadingProxy(true);
       const proxy: string = await invoke("setup_proxy", { subdomain: did });
       console.log("Finish setup proxy, ", proxy);
       setProxy(formatProxy(proxy));
       event.target.checked = true;
     } catch (e) {
-      showNotification({
-        color: "red",
-        message: "Error while starting proxy",
-        autoClose: 5000,
-      });
       event.target.checked = false;
       setProxy("");
+    } finally {
+      setLoadingProxy(false);
     }
   };
 
@@ -207,7 +196,7 @@ const Profile = (props: Props) => {
   };
 
   return (
-    <div style={MainContainer}>
+    <div>
       <j-box px="500" my="500">
         <j-toggle
           full=""
@@ -228,23 +217,27 @@ const Profile = (props: Props) => {
           Proxy
         </j-toggle>
 
+        {loadingProxy && <j-spinner size="sm"></j-spinner>}
+
         {proxy && (
-          <j-box>
-            <ActionButton
-              title="Proxy URL"
-              onClick={() => copyText(proxy)}
-              icon="clipboard"
-            />
-            <ActionButton
-              title="QR Code"
-              onClick={showProxyQRCode}
-              icon="qr-code-scan"
-            />
-            <ActionButton
-              title="Open GraphQL"
-              onClick={() => open(url.replace("ws", "http"))}
-              icon="box-arrow-up-right"
-            />
+          <j-box pb="500">
+            <j-flex a="center">
+              <ActionButton
+                title="Proxy URL"
+                onClick={() => copyText(proxy)}
+                icon="clipboard"
+              />
+              <ActionButton
+                title="QR Code"
+                onClick={showProxyQRCode}
+                icon="qr-code-scan"
+              />
+              <ActionButton
+                title="Open GraphQL"
+                onClick={() => open(url.replace("ws", "http"))}
+                icon="box-arrow-up-right"
+              />
+            </j-flex>
           </j-box>
         )}
       </j-box>

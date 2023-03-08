@@ -1,16 +1,9 @@
-import { useDisclosure } from "@mantine/hooks";
-import { showNotification } from "@mantine/notifications";
 import { LanguageMeta } from "@perspect3vism/ad4m";
 import { useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { isSystemLanguage } from "../util";
 import ActionButton from "./ActionButton";
-import {
-  badge,
-  cardStyle,
-  listStyle,
-  MainContainer,
-} from "./styles";
+import { cardStyle, listStyle } from "./styles";
 
 type Props = {
   opened: boolean;
@@ -40,8 +33,6 @@ const Language = (props: Props) => {
   const [languageBundlePath, setLanguageBundlePath] = useState("");
   const [data, setData] = useState<any[]>([]);
 
-  const [opened, handlers] = useDisclosure(false);
-
   const publishLanguage = async () => {
     setLoading(true);
     if (languageBundlePath) {
@@ -63,10 +54,7 @@ const Language = (props: Props) => {
 
       setPublishLanguageResult(installedLanguage);
     } else {
-      showNotification({
-        message: "Language file missing",
-        color: "red",
-      });
+      // TODO: Add popup Language file is missing
     }
     setLoading(false);
   };
@@ -81,14 +69,9 @@ const Language = (props: Props) => {
 
         setInstallLanguageModalOpen(false);
 
-        showNotification({
-          message: "Language sucessfully installed",
-        });
+        // TODO: Show notification: Language sucessfully installed
       } else {
-        showNotification({
-          message: "Language file missing",
-          color: "red",
-        });
+        // TODO: Show notification: Language file missing
       }
 
       setLoading(false);
@@ -132,19 +115,21 @@ const Language = (props: Props) => {
   }, []);
 
   return (
-    <div style={MainContainer}>
-      <div class="grid">
-        <ActionButton
-          title="Publish language"
-          onClick={() => setPublishLanguageModalOpen(true)}
-          icon="globe"
-        />
-        <ActionButton
-          title="Install language"
-          onClick={() => setInstallLanguageModalOpen(true)}
-          icon="download"
-        />
-      </div>
+    <div>
+      <j-box px="500" py="500">
+        <j-flex gap="300">
+          <ActionButton
+            title="Publish language"
+            onClick={() => setPublishLanguageModalOpen(true)}
+            icon="globe"
+          />
+          <ActionButton
+            title="Install language"
+            onClick={() => setInstallLanguageModalOpen(true)}
+            icon="download"
+          />
+        </j-flex>
+      </j-box>
       <div style={listStyle}>
         {languages.map((e, i) => {
           const { language, perspective } = e;
@@ -155,37 +140,29 @@ const Language = (props: Props) => {
               key={`language-${language?.address}`}
               style={{ ...cardStyle, width: "100%" }}
             >
-              <j-flex a="flex-start" direction="column">
-                <div
-                  style={{
-                    ...badge,
-                    backgroundColor: isSystem
-                      ? "#6e52c2bb"
-                      : "rgba(230, 73, 128, 0.671)",
-                  }}
-                >
-                  {isSystem ? "System" : "Installed"}
-                </div>
-                <j-box p="200"></j-box>
-                <j-flex direction="column" style={{ marginTop: 4 }}>
-                  <j-text weight="bold">{language?.name}</j-text>
-                  <j-flex a="center" j="between">
-                    <j-text nomargin variant="body" size="400">
-                      {language?.address.length > 28
-                        ? `${language?.address.substring(0, 28)}...`
-                        : language?.address}
-                    </j-text>
-                    <j-box p="100"></j-box>
-                    <j-button
-                      size="xs"
-                      variant="subtle"
-                      onClick={() => console.log("wow")}
-                    >
-                      <j-icon size="xs" slot="end" name="clipboard"></j-icon>
-                    </j-button>
-                  </j-flex>
-                </j-flex>
-              </j-flex>
+              <j-badge size="sm" variant={isSystem ? "success" : "primary"}>
+                {isSystem ? "System" : "Installed"}
+              </j-badge>
+
+              <j-box pt="300" pb="400">
+                <j-text variant="heading-sm">{language?.name}</j-text>
+              </j-box>
+
+              <j-box>
+                <j-text variant="label" size="300">
+                  Address
+                </j-text>
+                <j-input readonly value={language?.address}>
+                  <j-button
+                    slot="end"
+                    size="xs"
+                    variant="subtle"
+                    onClick={() => console.log("wow")}
+                  >
+                    <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                  </j-button>
+                </j-input>
+              </j-box>
             </div>
           );
         })}

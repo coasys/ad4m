@@ -189,9 +189,7 @@ export default class AgentResolver {
   }
 
   @Mutation((returns) => String)
-  agentRequestCapability(
-    @Arg("authInfo") authInfo: AuthInfoInput
-  ): String {
+  agentRequestCapability(@Arg("authInfo") authInfo: AuthInfoInput): String {
     return "test-request-id";
   }
 
@@ -233,6 +231,7 @@ export default class AgentResolver {
           appName: "test-app",
           appDesc: "-",
           appUrl: "-",
+          appIconPath: "_",
           capabilities: [
             {
               with: {
