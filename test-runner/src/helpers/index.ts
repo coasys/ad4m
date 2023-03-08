@@ -40,18 +40,6 @@ class AgentLinkClass {
   
     return response;
   }
-
-  async getNeighbourhood() {
-    return this.neighbourhood;
-  }
-
-  async joinNeighbourhood(neighbourhood: string) {
-    const response = await this.client.neighbourhood.joinFromUrl(neighbourhood);
-    this.neighbourhood = neighbourhood;
-    this.perspective = response.uuid;
-
-    return response;
-  }
 }
 
 class AgentExpressionClass {
