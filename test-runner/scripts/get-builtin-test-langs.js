@@ -8,16 +8,13 @@ const languages = {
     bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.2.0/bundle.js",
   },
   languages: {
-      targetDnaName: "languages",
-      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.1/bundle.js",
+      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.5/bundle.js",
   },
   "neighbourhood-store": {
-    targetDnaName: "neighbourhood-store",
-    //dna: "https://github.com/perspect3vism/neighbourhood-language/releases/download/0.0.2/neighbourhood-store.dna",
-    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.1/bundle.js",
+    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.2/bundle.js",
   },
   "perspective-diff-sync": {
-    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/v0.2.2-test/bundle.js",
+    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/v0.3.3/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",

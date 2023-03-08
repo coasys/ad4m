@@ -58,20 +58,20 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
           const createdNeighbourhood = await ad4mClient.neighbourhood.publishFromPerspective(perspective, templateLanguage.address, JSON.parse('{"links":[]}'));
           logger.info(`Neighbourhood created: `, createdNeighbourhood)
           
-          global.neighnourhood = createdNeighbourhood;
+          global.neighbourhood = createdNeighbourhood;
   
           neighbourhood = createdNeighbourhood;
         } else {
-          const joinedPerspectve = await ad4mClient.neighbourhood.joinFromUrl(global.neighnourhood);
-          logger.info(`Neighbouhood joined: `, joinedPerspectve)
+          const joinedPerspectve = await ad4mClient.neighbourhood.joinFromUrl(global.neighbourhood);
+          logger.info(`Neighbourhood joined: `, joinedPerspectve)
 
           global.perspective = joinedPerspectve.uuid;
   
           perspective = joinedPerspectve.uuid;
 
-          global.neighnourhood = global.neighnourhood;
+          global.neighbourhood = global.neighbourhood;
   
-          neighbourhood = global.neighnourhood;
+          neighbourhood = global.neighbourhood;
         }
       }
 
@@ -85,15 +85,7 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
         return {
           languageAddress,
           perspective,
-          neighbourhood,
-          clear: () => {
-            kill(child.pid!, async () => {
-              await findAndKillProcess('holochain')
-              await findAndKillProcess('lair-keystore')
-              deleteAllAd4mData(relativePath);
-              resolve(null);
-            })
-          }
+          neighbourhood
         }
       }
     } catch (err) {
@@ -103,6 +95,12 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
 
 }
 
+interface StartServerResponse {
+  languageAddress?: string;
+  perspective?: string;
+  neighbourhood: string;
+  clear: () => void;
+}
 
 export function startServer(relativePath: string, bundle: string, meta: string, languageType: string, port: number, defaultLangPath?: string, callback?: any): Promise<any> {
   return new Promise(async (resolve, reject) => {
@@ -115,26 +113,13 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       binaryPath = path.join(ad4mDataDirectory(`.ad4m-test`), 'binary', `ad4m`);
     }
 
-    await findAndKillProcess('holochain')
+    //await findAndKillProcess('holochain')
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
     const agentSeedFile = path.join(__dirname, `../${relativePath}-bootstrapSeed.json`);
 
 
     const tempSeedFile = JSON.parse(fs.readFileSync(seedFile).toString())
 
-    if (!fs.pathExistsSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)) {
-      fs.removeSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
-      fs.mkdirSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
-    }
-    if (!fs.pathExistsSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)) {
-      fs.removeSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
-      fs.mkdirSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
-    }
-
-    fs.copySync(tempSeedFile.languageLanguageSettings.storagePath, `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`, { overwrite: true })
-
-    tempSeedFile.languageLanguageSettings.storagePath = `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`
-    tempSeedFile.neighbourhoodLanguageSettings.storagePath = `${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`
     fs.writeFileSync(agentSeedFile, JSON.stringify(tempSeedFile));
     
     execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${agentSeedFile} --overrideConfig`, { encoding: 'utf-8' });
@@ -144,14 +129,16 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
     let child: ChildProcessWithoutNullStreams;
 
     const ipfsPort = await getPort({port: 14000});
+    const holochainAppPort = await getPort({port: 15000});
+    const holochainAdminPort = await getPort({port: 16000});
 
     if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(),'--languageLanguageOnly', 'false'])
+      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(),'--languageLanguageOnly', 'false', '--hcAppPort', holochainAppPort.toString(), '--hcAdminPort', holochainAdminPort.toString()])
     } else {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(), '--languageLanguageOnly', 'false'])
+      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(), '--languageLanguageOnly', 'false', '--hcAppPort', holochainAppPort.toString(), '--hcAdminPort', holochainAdminPort.toString()])
     }
 
-    const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
+    const logFile = fs.createWriteStream(path.join(process.cwd(), `ad4m-test-agent-${global.agents.length}.log`))
 
     child.stdout.on('data', async (data) => {
       logFile.write(data)
@@ -171,9 +158,23 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       }
       
       if (data.toString().includes('AD4M init complete')) {
-        const clear = await installLanguage(child, binaryPath, bundle, meta, languageType, resolve, port, callback);
+        await installLanguage(child, binaryPath, bundle, meta, languageType, resolve, port, callback);
 
-        resolve(clear);
+        const clear = () => {
+          kill(child.pid!, async () => {
+            await findAndKillProcess('holochain')
+            await findAndKillProcess('lair-keystore')
+            deleteAllAd4mData(relativePath);
+            resolve(null);
+          })
+        };
+
+        resolve({
+          perspective: perspective,
+          languageAddress: languageAddress,
+          neighbourhood: neighbourhood,
+          clear
+        } as StartServerResponse);
       }
     });
 

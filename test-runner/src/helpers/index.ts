@@ -2,6 +2,7 @@ import { Ad4mClient, Link, LinkExpression, LinkQuery } from "@perspect3vism/ad4m
 import getPort from "get-port";
 import { startServer } from "../cli.js";
 import { buildAd4mClient } from "../client.js";
+import fs from "fs";
 
 class AgentLinkClass {
   client: Ad4mClient
@@ -37,6 +38,18 @@ class AgentLinkClass {
   async queryLinks(query: LinkQuery) {
     const response = await this.client.perspective.queryLinks(this.perspective, query);
   
+    return response;
+  }
+
+  async getNeighbourhood() {
+    return this.neighbourhood;
+  }
+
+  async joinNeighbourhood(neighbourhood: string) {
+    const response = await this.client.neighbourhood.joinFromUrl(neighbourhood);
+    this.neighbourhood = neighbourhood;
+    this.perspective = response.uuid;
+
     return response;
   }
 }
@@ -101,9 +114,17 @@ export async function spawnLinkAgent() {
 
   const relativePath = `ad4m-test-${global.agents.length}`;
 
-  const { languageAddress, clear, perspective, neighbourhood } = await startServer(relativePath, bundle!, meta!, 'linkLanguage', port, defaultLangPath);
-  
+  let isJoining = global.agents.length > 0;
+  let { languageAddress, clear, perspective, neighbourhood } = await startServer(relativePath, bundle!, meta!, 'linkLanguage', port, defaultLangPath);
+
   const client = await buildAd4mClient(port);
+
+  if (isJoining) {
+    const previousAgent = global.agents[global.agents.length - 1];
+    const neighbourhood = previousAgent.neighbourhood!;
+
+    console.log(`Agent number ${global.agents.length}, is joining neighbourhood: `, neighbourhood);
+  }
   
   const agent = new AgentLinkClass(client, languageAddress, perspective, neighbourhood);
 
@@ -118,4 +139,8 @@ export async function spawnLinkAgent() {
   })
 
   return agent;
+}
+
+export function sleep(ms: number): Promise<any> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

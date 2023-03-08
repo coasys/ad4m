@@ -3,7 +3,7 @@ declare module globalThis {
   var hideLogs: boolean;
   var languageAddress: string;
   var perspective: string;
-  var neighnourhood: string;
+  var neighbourhood: string;
   var relativePath: string;
   var ad4mHostVersion: string;
   var ad4mToken: string;
