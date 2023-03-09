@@ -15,21 +15,47 @@ const Apps = () => {
   const getApps = async () => {
     const apps = await client!.agent.getApps();
 
-    setApps(apps);
+    const newApps: any = {}
+
+    for (const app of apps) {
+      if (newApps[app.auth.appUrl]) {
+        console.log('whaha', newApps[app.auth.appUrl])
+        newApps[app.auth.appUrl].token.push({
+          revoked: app.revoked,
+          requestId: app.requestId
+        })
+      } else {
+        newApps[app.auth.appUrl] = {
+          ...app,
+          token: [{
+            revoked: app.revoked,
+            requestId: app.requestId
+          }]
+        }
+      }
+    }
+
+    setApps(Object.values(newApps));
   };
 
-  const removeApps = async (requestId: string) => {
-    const apps = await client!.agent.removeApp(requestId);
+  const removeApps = async (appUrl: string) => {
+    const app = apps.find((a: any) => a.auth.appUrl === appUrl)
+    for (const token of app.token) {
+      await client!.agent.removeApp(token.requestId);
+    }
 
-    setApps(apps);
+    await getApps()
 
     setShowModal(false);
   };
 
-  const revokeToken = async (requestId: string) => {
-    const apps = await client!.agent.revokeToken(requestId);
+  const revokeToken = async (appUrl: string) => {
+    const app = apps.find((a: any) => a.auth.appUrl === appUrl)
+    for (const token of app.token) {
+      await client!.agent.revokeToken(token.requestId);
+    }
 
-    setApps(apps);
+    await getApps()
 
     setShowModal(false);
   };
@@ -95,7 +121,7 @@ const Apps = () => {
                   variant="link"
                   onClick={() => {
                     setShowModal(true);
-                    setSelectedRequestId(app.requestId);
+                    setSelectedRequestId(app.auth.appUrl);
                   }}
                 >
                   <j-icon name="x" />
@@ -125,7 +151,7 @@ const Apps = () => {
             <j-box p="200"></j-box>
             <j-box p="200"></j-box>
             <j-flex>
-              {!apps.find((app) => app.requestId === selectedRequestId)
+              {!apps.find((app) => app.auth.appUrl === selectedRequestId)
                 .revoked && (
                 <>
                   <j-button
