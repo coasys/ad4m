@@ -102,14 +102,14 @@ interface StartServerResponse {
   clear: () => void;
 }
 
-export function startServer(relativePath: string, bundle: string, meta: string, languageType: string, port: number, defaultLangPath?: string, callback?: any): Promise<any> {
+export function startServer(relativePath: string, bundle: string, meta: string, languageType: string, port: number, defaultLangPath?: string, callback?: any, ): Promise<any> {
   return new Promise(async (resolve, reject) => {
     deleteAllAd4mData(relativePath);
     
     let binaryPath = path.join(ad4mDataDirectory(`.ad4m-test`), 'binary', `ad4m`);
 
     if (!fs.existsSync(binaryPath)) {
-      await getAd4mHostBinary(`.ad4m-test`);
+      await getAd4mHostBinary(`.ad4m-test`, localAd4mPath);
       binaryPath = path.join(ad4mDataDirectory(`.ad4m-test`), 'binary', `ad4m`);
     }
 
@@ -132,11 +132,11 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
     const holochainAppPort = await getPort({port: 15000});
     const holochainAdminPort = await getPort({port: 16000});
 
-    if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(),'--languageLanguageOnly', 'false', '--hcAppPort', holochainAppPort.toString(), '--hcAdminPort', holochainAdminPort.toString()])
-    } else {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(), '--languageLanguageOnly', 'false', '--hcAppPort', holochainAppPort.toString(), '--hcAdminPort', holochainAdminPort.toString()])
-    }
+    const args = ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, 
+      '--port', port.toString(), '--ipfsPort', ipfsPort.toString(),'--languageLanguageOnly', 'false', 
+      '--hcAppPort', holochainAppPort.toString(), '--hcAdminPort', holochainAdminPort.toString(),
+      '--hcUseLocalProxy', 'false', '--hcUseMdns', 'true', '--hcUseProxy', 'false', '--hcUseBootstrap', 'false'];
+    child = spawn(`${binaryPath}`, args);
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), `ad4m-test-agent-${global.agents.length}.log`))
 
@@ -231,6 +231,12 @@ async function run() {
         type: 'boolean',
         default: false,
         describe: 'Starts a live-server with the UI'
+      },
+      localAd4mPath: {
+        type: 'string',
+        describe: 'Path to the ad4m-host binary',
+        alias: 'lap',
+        default: undefined
       }
     })
     .strict()
@@ -246,8 +252,9 @@ async function run() {
   const relativePath = args.relativePath || '.ad4m-test';
 
   global.relativePath = relativePath;
+  global.localAd4mPath = args.localAd4mPath;
 
-  await getAd4mHostBinary(relativePath);
+  await getAd4mHostBinary(relativePath, args.localAd4mPath);
 
   if (!args.bundle) {
     console.error('bundle param is required')

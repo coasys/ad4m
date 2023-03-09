@@ -7,8 +7,6 @@ import fs from 'fs';
 import getPort from 'get-port';
 import { getConfig } from '../utils/config';
 import { ad4mDataDirectory } from '../ad4mDataDirectory';
-import { homedir } from 'os';
-
 
 type Options = {
   port?: number;
@@ -22,6 +20,10 @@ type Options = {
   appLangAliases?: string;
   dataPath?: string;
   reqCredential?: string;
+  hcUseBootstrap?: boolean;
+  hcUseProxy?: boolean;
+  hcUseLocalProxy?: boolean;
+  hcUseMdns?: boolean;
 };
 
 export const command: string = 'serve';
@@ -80,6 +82,22 @@ export const builder = (yargs: Argv) =>
       reqCredential: {
         type: 'string',
         describe: 'The credential for an admin client to override capability checks',
+      },
+      hcUseBootstrap: {
+        type: 'boolean',
+        describe: 'Flag to use bootstrap server for holochain conductor'
+      },
+      hcUseProxy: {
+        type: 'boolean',
+        describe: 'Flag to use proxy server for holochain conductor'
+      },
+      hcUseLocalProxy: {
+        type: 'boolean',
+        describe: 'Flag to use local proxy server for holochain conductor'
+      },
+      hcUseMdns: {
+        type: 'boolean',
+        describe: 'Flag to use mdns for holochain conductor'
       }
     });
 
@@ -87,7 +105,7 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
   const {
     port, ipfsPort, hcAdminPort, hcAppPort, connectHolochain, languageLanguageOnly,
     dataPath, bootstrapLanguage, bootstrapPerspective, appLangAliases,
-    reqCredential
+    reqCredential, useBootstrap, useProxy, useLocalProxy, useMdns
   } = argv;
 
   const globalConfig = getConfig(dataPath);
@@ -133,7 +151,11 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
     connectHolochain,
     reqCredential,
     swiplPath,
-    swiplHomePath
+    swiplHomePath,
+    useBootstrap,
+    useProxy,
+    useLocalProxy,
+    useMdns
   };
 
   await init(config);

@@ -31,4 +31,5 @@ declare module globalThis {
   var afterAll: (fn: () => void) => void;
   var beforeEach: (fn: () => void) => void;
   var afterEach: (fn: () => void) => void;
+  var localAd4mPath: string | undefined;
 }
