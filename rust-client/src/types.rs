@@ -34,6 +34,39 @@ pub struct PerspectiveExpression {
     pub timestamp: String,
 }
 
+#[derive(Debug)]
+pub struct Capability {
+    pub can: Vec<String>,
+    pub with: Resource,
+}
+
+#[derive(Debug)]
+pub struct Resource {
+    pub domain: String,
+    pub pointers: Vec<String>,
+}
+
+use crate::agent::request_capability::CapabilityInput;
+use crate::agent::request_capability::ResourceInput;
+
+impl From<Capability> for CapabilityInput {
+    fn from(cap: Capability) -> Self {
+        Self {
+            can: cap.can,
+            with: cap.with.into(),
+        }
+    }
+}
+
+impl From<Resource> for ResourceInput {
+    fn from(res: Resource) -> Self {
+        Self {
+            domain: res.domain,
+            pointers: res.pointers,
+        }
+    }
+}
+
 impl From<QueryLinksPerspectiveQueryLinks> for LinkExpression {
     fn from(link: QueryLinksPerspectiveQueryLinks) -> Self {
         Self {

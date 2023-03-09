@@ -1,41 +1,10 @@
-import { createStyles, Image } from "@mantine/core";
 import { appWindow } from "@tauri-apps/api/window";
 import { useState } from "react";
 import { useEffect } from "react";
 
 import Logo from "./Logo";
 
-const useStyles = createStyles((theme, _params, getRef) => {
-  return {
-    container: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      flexDirection: "column",
-      height: "100vh",
-      width: "100vw",
-      color: "white",
-      fontFamily: "comfortaa",
-    },
-    error: {
-      padding: "40px 80px",
-      visibility: "collapse",
-      opacity: 0,
-      transition: "visibility 0s, opacity 0.5s linear, height 1s",
-      height: 0,
-      fontFamily: "comfortaa",
-    },
-    errorFlex: {
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
-      fontFamily: "comfortaa",
-    },
-  };
-});
-
 export default function Splashscreen() {
-  const { classes } = useStyles();
   const [copied, setCopied] = useState(false);
 
   function copyFile() {
@@ -63,7 +32,7 @@ export default function Splashscreen() {
   }, []);
 
   return (
-    <div className={classes.container}>
+    <div>
       <Logo gradient style={{ width: "100px", height: "100px" }}></Logo>
       <div id="error" className={classes.error}>
         <div className={classes.errorFlex}>

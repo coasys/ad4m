@@ -13,10 +13,5 @@
     "skipLibCheck": true
   },
   "include": ["./src"],
-  "exclude": [
-    "node_modules/*",
-    "**/*.spec.ts",
-    "dist",
-    "node_modules/ipfs-core-types"
-  ]
+  "exclude": ["node_modules/*", "**/*.spec.ts", "dist"]
 }

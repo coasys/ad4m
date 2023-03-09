@@ -1,4 +1,3 @@
-import { Image } from "@mantine/core";
 import { useContext, useEffect, useState } from "react";
 import { AgentContext } from "../context/AgentContext";
 import { Ad4minContext } from "../context/Ad4minContext";
@@ -95,7 +94,7 @@ const Login = (props: any) => {
     if (!connected && !connectedLaoding) {
       navigate("/connect");
     } else if (connected && isUnlocked) {
-      navigate("/settings");
+      navigate("/apps");
     } else if (isInitialized) {
       setCurrentIndex(5);
     }
@@ -117,7 +116,7 @@ const Login = (props: any) => {
             ></Logo>
 
             <j-text size="800" color="black">
-              P2P Framework Beyond Apps
+              The First Social Network
             </j-text>
 
             <j-flex direction="column" gap="200">
@@ -128,25 +127,6 @@ const Login = (props: any) => {
               >
                 Get Started
               </j-button>
-              {!isInitialized ? (
-                <j-button
-                  size="lg"
-                  variant="link"
-                  onClick={() => setCurrentIndex(4)}
-                >
-                  Sign up
-                </j-button>
-              ) : (
-                <j-button
-                  size="lg"
-                  variant="link"
-                  onClick={() => {
-                    setCurrentIndex(5);
-                  }}
-                >
-                  Sign in
-                </j-button>
-              )}
             </j-flex>
           </div>
         </div>
@@ -270,7 +250,7 @@ const Login = (props: any) => {
                   variant="primary"
                   onClick={() => setCurrentIndex(4)}
                 >
-                  Sign up
+                  Create account
                 </j-button>
               ) : (
                 <j-button
@@ -417,6 +397,8 @@ const Login = (props: any) => {
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
                 onKeyDown={onKeyDown}
+                errortext={passwordError}
+                error={passwordError}
               >
                 <j-button
                   onClick={() => setShowPassword(!showPassword)}

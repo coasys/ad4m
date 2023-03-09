@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-connect",
-  "version": "0.2.16",
+  "version": "0.3.0",
   "description": "Lib for handling everything needed to setup a connection to a local or remote ad4m-executor",
   "license": "CAL-1.0",
   "main": "dist/web.js",
@@ -50,36 +50,18 @@
   "devDependencies": {
     "@apollo/client": "3.6.9",
     "@perspect3vism/ad4m": "*",
-    "@rollup/plugin-commonjs": "^14.0.0",
-    "@rollup/plugin-node-resolve": "^8.0.0",
-    "@rollup/plugin-typescript": "^4.0.0",
-    "@tsconfig/svelte": "^1.0.0",
     "esbuild": "^0.15.5",
     "esbuild-plugin-lit": "^0.0.10",
     "graphql-ws": "^5.10.1",
-    "ipfs-core-types": "^0.10.1",
-    "node-sass": "^7.0.0",
     "np": "^7.6.2",
     "npm-run-all": "^4.1.5",
-    "rollup": "^2.3.4",
-    "rollup-plugin-postcss": "^3.1.8",
-    "rollup-plugin-string": "^3.0.0",
-    "rollup-plugin-svelte": "^6.0.0",
-    "rollup-plugin-terser": "^7.0.0",
-    "subscriptions-transport-ws": "^0.9.19",
-    "svelte": "^3.0.0",
-    "svelte-check": "^1.0.0",
-    "svelte-preprocess": "^4.0.0",
-    "tslib": "^2.0.0",
     "typescript": "^4.6.2",
-    "uint8arrays": "^3.0.0"
+    "vite": "^4.1.1"
   },
   "dependencies": {
+    "@undecaf/barcode-detector-polyfill": "^0.9.15",
     "auto-bind": "^5.0.1",
     "electron": "^20.0.3",
-    "esbuild-plugin-inline-image": "^0.0.8",
-    "html5-qrcode": "^2.2.1",
-    "lit": "^2.3.1",
-    "vite": "^4.1.1"
+    "lit": "^2.3.1"
   }
 }

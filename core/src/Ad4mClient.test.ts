@@ -14,14 +14,14 @@ import express from 'express';
 
 import AgentResolver from "./agent/AgentResolver"
 import { Ad4mClient } from "./Ad4mClient";
-import { Perspective } from "./perspectives/Perspective";
+import { Perspective, PerspectiveUnsignedInput } from "./perspectives/Perspective";
 import { Link, LinkExpression, LinkExpressionInput, LinkInput, LinkMutations } from "./links/Links";
 import LanguageResolver from "./language/LanguageResolver";
 import NeighbourhoodResolver from "./neighbourhood/NeighbourhoodResolver";
 import PerspectiveResolver from "./perspectives/PerspectiveResolver";
 import RuntimeResolver from "./runtime/RuntimeResolver";
 import ExpressionResolver from "./expression/ExpressionResolver";
-import { EntanglementProofInput } from "./agent/Agent";
+import { AuthInfoInput, EntanglementProofInput, CapabilityInput, ResourceInput } from "./agent/Agent";
 import { LanguageMetaInput } from "./language/LanguageMeta";
 import { InteractionCall } from "./language/Language";
 
@@ -238,7 +238,21 @@ describe('Ad4mClient', () => {
         })
 
         it('requestCapability() smoke tests', async () => {
-            const requestId = await ad4mClient.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
+            const requestId = await ad4mClient.agent.requestCapability({
+                appName: "demo-app",
+                appDesc: "demo-desc",
+                appDomain: "demo.test.org",
+                appUrl: "https://demo-link",
+                appIconPath: "/some/image/path", 
+                capabilities: [
+                    { 
+                        with: {
+                            "domain":"agent",
+                            "pointers":["*"]
+                        } as ResourceInput,
+                        can: ["QUERY"]
+                }] as CapabilityInput[]
+            } as AuthInfoInput)
             expect(requestId).toBe("test-request-id")
         })
 
@@ -426,12 +440,18 @@ describe('Ad4mClient', () => {
 
     describe('.neighbourhood', () => {
         const testPerspective = new Perspective()
-        const link = new LinkExpression()
-        link.author = 'did:method:12345'
-        link.timestamp = new Date().toString()
-        link.data = new Link({source: 'root', target: 'perspective://Qm34589a3ccc0'})
-        link.proof = { signature: 'asdfasdf', key: 'asdfasdf' }
-        testPerspective.links.push(link)
+        const linkExpr = new LinkExpression()
+        linkExpr.author = 'did:method:12345'
+        linkExpr.timestamp = new Date().toString()
+        linkExpr.data = new Link({source: 'root', target: 'perspective://Qm34589a3ccc0'})
+        linkExpr.proof = { signature: 'asdfasdf', key: 'asdfasdf' }
+        testPerspective.links.push(linkExpr)
+
+        const testUnsignedPerspective = new PerspectiveUnsignedInput()
+        const link = new Link({
+            source: 'root', target: 'perspective://Qm34589a3ccc0'
+        })
+        testUnsignedPerspective.links.push(link)
 
         it('publishFromPerspective() smoke test', async () => {
             const expressionRef = await ad4mClient.neighbourhood.publishFromPerspective('UUID', 'test-link-lang', new Perspective())
@@ -473,13 +493,28 @@ describe('Ad4mClient', () => {
             expect(result).toBe(true)
         })
 
+        it('setOnlineStatusU() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.setOnlineStatusU('01234', testUnsignedPerspective)
+            expect(result).toBe(true)
+        })
+
         it('sendSignal() smoke test', async () => {
             const result = await ad4mClient.neighbourhood.sendSignal('01234', "did:test:recipient", testPerspective)
             expect(result).toBe(true)
         })
 
+        it('sendSignaU() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.sendSignalU('01234', "did:test:recipient", testUnsignedPerspective)
+            expect(result).toBe(true)
+        })
+
         it('sendBroadcast() smoke test', async () => {
             const result = await ad4mClient.neighbourhood.sendBroadcast('01234', testPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('sendBroadcastU() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.sendBroadcastU('01234', testUnsignedPerspective)
             expect(result).toBe(true)
         })
 
