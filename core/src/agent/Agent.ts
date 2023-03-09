@@ -179,8 +179,8 @@ export class AuthInfo {
   @Field()
   appUrl: string;
 
-  @Field()
-  appIconPath: string;
+  @Field({nullable: true})
+  appIconPath?: string;
 
   @Field((type) => [Capability])
   capabilities: Capability[];
@@ -189,8 +189,8 @@ export class AuthInfo {
     appName: string,
     appDesc: string,
     appUrl: string,
-    appIconPath: string,
-    capabilities: Capability[]
+    capabilities: Capability[],
+    appIconPath?: string
   ) {
     this.appName = appName;
     this.appDesc = appDesc;
