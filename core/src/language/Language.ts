@@ -163,16 +163,16 @@ export interface LinkSyncAdapter {
     public(): boolean;
     others(): Promise<DID[]>;
 
-    /** Call this to check if there are new changes
-     * (compare returned revision with last one that was pulled)
-     */
-    latestRevision(): Promise<string>;
-
     /** What revision are we on now -> what changes are included in output of render() */
     currentRevision(): Promise<string>;
 
-    /** Check for and get new changes */
-    pull(): Promise<PerspectiveDiff>;
+    /** 
+     * Check for and get new changes, 
+     * notify others of local changes.
+     * This function will be called every 
+     * few seconds by the ad4m-executor.
+     *  */
+    sync(): Promise<PerspectiveDiff>;
 
     /** Returns the full, rendered Perspective at currentRevision */
     render(): Promise<Perspective>;
