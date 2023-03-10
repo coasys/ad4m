@@ -243,7 +243,7 @@ const Language = (props: Props) => {
                 onClick={publishLanguage}
                 loading={loading}
               >
-                Install
+                Publish
               </j-button>
             </j-flex>
           </j-box>
