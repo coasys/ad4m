@@ -6,15 +6,31 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+ - After login / registration the launcher will now open by default [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - If the user has no installed applications, we now show some info about connecting apps to AD4M and a link to Flux [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Holochain DHT status logs every 60 seconds [PR#277](https://github.com/perspect3vism/ad4m/pull/277)
+ - ad4m-connect connection settings gives you the option of connecting to local or remote [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Convience overloads for telepresence functions: `setOnlineStatusU`, `sendSignalU`, `sendBroadcastU` in `NeighbourhoodProxy`, which take new type `PerspectiveUnsignedInput` as argument. This enables sending signed signals without having to create temporary perspectives. These functions sign the whole perspective including links. [PR#296](https://github.com/perspect3vism/ad4m/pull/296)
 
 ### Changed
+ - Auth screens for launcher & connect will now parse out the capabilities to a human readable string [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Use barcode detector for proxy QR code [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Use proper types for auth methods [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
-- [launcher] Trusted agent popup now works correctly & Fixed language actions [PR#273](https://github.com/perspect3vism/ad4m/pull/273)
+ - Trusted agent popup now works correctly & Fixed language actions [PR#273](https://github.com/perspect3vism/ad4m/pull/273)
+ - Bug on ad4m-test where apollo connection errors would polute logs [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
+ - ad4m-test internal tests not using self but instead published package [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
+ - ad4m-test will now always pull latest ad4m-host binary [PR#295](https://github.com/perspect3vism/ad4m/pull/295)
+ - AD4M launcher will no longer flash its modal on load [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Broken CI tests using nix (fixed by bumping nix & cachix gh action versions) [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - ad4m-connect more stable by not running an async function on the constructor. This will ensure that the client exsist even if we couldn't make a connection [PR#298](https://github.com/perspect3vism/ad4m/pull/298)
+ - ad4m-connect will now handle connection error from port correctly and ensure UI state get's updated correctly [PR#298](https://github.com/perspect3vism/ad4m/pull/298)
+ - ad4m-launcher now gives feedback if password is wrong. [PR#302](https://github.com/perspect3vism/ad4m/pull/302)
 
 ## [0.2.16] - 25/02/2013
 ### Added

@@ -1,4 +1,7 @@
-use ad4m_client::{agent, perspectives};
+use ad4m_client::{
+    agent, perspectives,
+    types::{Capability, Resource},
+};
 use anyhow::{Context, Result};
 use rustyline::Editor;
 use std::path::PathBuf;
@@ -59,15 +62,22 @@ pub async fn get_cap_token(executor_url: String) -> Result<String> {
 
     let app_name = "AD4M cli".to_string();
     let app_desc = "Command line administration tool for AD4M".to_string();
-    let app_url = "org.perspect3vism.ad4m.cli".to_string();
-    let capabilities =
-        "[{\"with\":{\"domain\":\"*\",\"pointers\":[\"*\"]},\"can\":[\"*\"]}]".to_string();
+    let app_domain = "org.perspect3vism.ad4m.cli".to_string();
+    let capabilities = Capability {
+        with: Resource {
+            domain: "*".to_string(),
+            pointers: vec!["*".to_string()],
+        },
+        can: vec!["*".to_string()],
+    };
     let request_id = agent::request_capability(
         executor_url.clone(),
         app_name,
         app_desc,
-        app_url,
-        capabilities,
+        app_domain,
+        None,
+        None,
+        Some(vec![capabilities]),
     )
     .await?;
     println!(
