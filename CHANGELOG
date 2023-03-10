@@ -15,7 +15,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
 
-## [0.3.1] - 010/03/2013
+## [0.3.1] - 10/03/2023
 
 ### Added
 
@@ -29,7 +29,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Fixed
 - ad4m-launcher not opening on older MacOS version [PR#311](https://github.com/perspect3vism/ad4m/pull/311)
 
-## [0.3.0] - 09/03/2013
+## [0.3.0] - 09/03/2023
 
 ### Added
 
@@ -67,7 +67,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - ad4m-launcher now gives feedback if password is wrong. [PR#302](https://github.com/perspect3vism/ad4m/pull/302)
 - Fix issue where scroll was broken [PR#307](https://github.com/perspect3vism/ad4m/pull/307)
 
-## [0.2.16] - 25/02/2013
+## [0.2.16] - 25/02/2023
 
 ### Added
 
@@ -83,7 +83,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 - Perspective Diff Sync: calculation of fast_forward_possible fixed, which prevents merge-loops (PR#13)[https://github.com/perspect3vism/perspective-diff-sync/pull/13]
 
-## [0.2.15] - 23/02/2013
+## [0.2.15] - 23/02/2023
 
 ### Added
 
@@ -100,7 +100,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Not slow polling after sync [PR#260](https://github.com/perspect3vism/ad4m/pull/260)
 - Trusted agent popup not working consistently [PR#261](https://github.com/perspect3vism/ad4m/pull/261)
 
-## [0.2.14] - 17/02/2013
+## [0.2.14] - 17/02/2023
 
 ### Added
 
@@ -121,7 +121,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 - Startup when unlocking (instead of generating) agent was halted with empty log and "No Perspective controller" errors. Fixed with better error handling during unlock [PR#253](https://github.com/perspect3vism/ad4m/pull/253) and [PR#256](https://github.com/perspect3vism/ad4m/pull/256)
 
-## [0.2.13] - 15/02/2013
+## [0.2.13] - 15/02/2023
 
 ### Added
 
