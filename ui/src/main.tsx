@@ -1,8 +1,6 @@
 import { render } from "preact";
 import App from "./App";
 import reportWebVitals from "./reportWebVitals";
-import { MantineProvider } from "@mantine/core";
-import { NotificationsProvider } from "@mantine/notifications";
 import { Ad4minProvider } from "./context/Ad4minContext";
 import { BrowserRouter as Router } from "react-router-dom";
 import "@junto-foundation/junto-elements";
@@ -11,15 +9,11 @@ import "./index.css";
 
 const Main = () => {
   return (
-    <MantineProvider styles={{ width: "100%" }}>
-      <NotificationsProvider>
-        <Ad4minProvider>
-          <Router>
-            <App />
-          </Router>
-        </Ad4minProvider>
-      </NotificationsProvider>
-    </MantineProvider>
+    <Ad4minProvider>
+      <Router>
+        <App />
+      </Router>
+    </Ad4minProvider>
   );
 };
 

@@ -1,6 +1,5 @@
 import { useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
-import { showNotification } from "@mantine/notifications";
 import { copyTextToClipboard } from "../util";
 import { capSentence } from "@perspect3vism/ad4m";
 
@@ -56,15 +55,9 @@ const Auth = () => {
 
     setTimeout(() => {
       setCopied(false);
-    }, 2000);
-
-    showNotification({
-      message: "Secret code copied to clipboard",
-      autoClose: 1000,
-    });
+      closeSecretCodeModal();
+    }, 3000);
   };
-
-  console.log(authInfo);
 
   return (
     <div>
@@ -162,9 +155,16 @@ const Auth = () => {
                   ></j-icon>
                 </j-button>
               </j-input>
-              <j-button variant="primary" onClick={closeSecretCodeModal}>
-                Close
-              </j-button>
+              <j-box pt="500">
+                <j-button
+                  full
+                  size="lg"
+                  variant=""
+                  onClick={closeSecretCodeModal}
+                >
+                  Close
+                </j-button>
+              </j-box>
             </div>
           </div>
         </j-modal>

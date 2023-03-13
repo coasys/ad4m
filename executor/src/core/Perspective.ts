@@ -150,7 +150,7 @@ export default class Perspective {
 
     async setupSyncSingals(intervalMs: number) {
         try {
-            await this.callLinksAdapter("pull"); // should rename this in the LinksAdapter interface to sync ...
+            await this.callLinksAdapter("sync");
         } catch(e) {
             console.error(`Perspective.setupSyncSingals(): NH [${this.sharedUrl}] (${this.name}): Got error when sending sync signals: ${e}`);
         }
@@ -212,19 +212,6 @@ export default class Perspective {
         return setInterval(
             async () => {
                 try {
-                    // We should pull first, so that the committing of pending diffs happens on the
-                    // normative top of the shared history
-                    let links = await this.callLinksAdapter("pull");
-                    if (links.additions && links.removals) {
-                        if (links.additions.length > 0 || links.removals.length > 0) {
-                            this.populateLocalLinks(links.additions, links.removals);
-                            this.#prologNeedsRebuild = true
-                            if (this.neighbourhood) {
-                                this.#languageController?.callLinkObservers(links, {address: this.neighbourhood!.linkLanguage, name: ""});
-                            }
-                        }
-                    }
-
                     let madeSync = false;
                     // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
                     const currentRevision = await this.getCurrentRevision();
@@ -264,7 +251,7 @@ export default class Perspective {
                     }
 
                 } catch (e) {
-                    console.warn(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to pull on linksAdapter. Error: ${e}`, e);
+                    console.warn(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to check sync on linksAdapter. Error: ${e}`, e);
                 }
             },
             intervalMs
