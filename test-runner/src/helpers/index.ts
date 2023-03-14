@@ -2,7 +2,42 @@ import { Ad4mClient, Link, LinkExpression, LinkQuery } from "@perspect3vism/ad4m
 import getPort from "get-port";
 import { startServer } from "../cli.js";
 import { buildAd4mClient } from "../client.js";
-import fs from "fs";
+
+const retry = (run: any) => {
+  return new Promise((resolve, reject) => {
+   const interval = setInterval(async () => {   
+     console.log('hehe 1')   
+     const arr = await run();
+     console.log('hehe 2', arr)   
+     if (arr.length > 1) {
+       clearInterval(interval)
+       resolve(arr)
+     }
+   }, 10000);
+
+ })
+}
+
+export const waitForAgentsToSync = async () => {
+ const promiseClearList = []
+ const promiseList = []
+ for (const agent of global.agents) {
+   const link = await agent.client.addLink({source:"root", predicate: "soic://test", target:"QmYVsrMpiFmV9S7bTWNAkUzSqjRJskQ8g4TWKKwKrHAPqL://QmSsCCtXMDAZXMpyiNLzwjGEU4hLmhG7fphidhEEodQ4Wy"})
+   
+   promiseClearList.push(link)
+ 
+   promiseList.push(retry(async () => await agent.client.queryLinks({})))
+ }
+
+ await Promise.all(promiseList)
+
+ for (let index = 0; index < global.agents.length; index++) {
+   const agent = global.agents[index];
+
+   await agent.client.removeLink(promiseClearList[index])
+
+ }
+}
 
 class AgentLinkClass {
   client: Ad4mClient
@@ -17,20 +52,30 @@ class AgentLinkClass {
       this.perspective = perspective
   }
 
+  async waitAgent() {
+    return await this.client.neighbourhood.otherAgents(this.perspective)
+  }
+
   async addLink(link: Link) {
     const response = await this.client.perspective.addLink(this.perspective, link);
+
+    await sleep(10000)
   
     return response;
   }
 
   async removeLink(link: LinkExpression) {
     const response = await this.client.perspective.removeLink(this.perspective, link);
+
+    await sleep(10000)
   
     return response;
   }
 
   async updateLink(oldLink: LinkExpression, newLink: Link) {
     const response = await this.client.perspective.updateLink(this.perspective, oldLink, newLink);
+
+    await sleep(10000)
   
     return response;
   }
