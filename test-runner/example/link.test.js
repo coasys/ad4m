@@ -1,11 +1,13 @@
-const { spawnLinkAgent, sleep } = require('@perspect3vism/ad4m-test/helpers')
+const { spawnLinkAgent, waitForAgentsToSync } = require('@perspect3vism/ad4m-test/helpers')
 
 describe("Link", () => {
   it("Create Link", async () => {
     const agent = await spawnLinkAgent();
+    const agent2 = await spawnLinkAgent();
 
+    await waitForAgentsToSync()
+    
     const all = await agent.queryLinks({});
-
     expect(all.length).toBe(0)
     
     const link = await agent.addLink({source:"root", predicate: "soic://test", target:"QmYVsrMpiFmV9S7bTWNAkUzSqjRJskQ8g4TWKKwKrHAPqL://QmSsCCtXMDAZXMpyiNLzwjGEU4hLmhG7fphidhEEodQ4Wy"})
@@ -17,21 +19,13 @@ describe("Link", () => {
     expect(all1[0].data.predicate).toBe(link.data.predicate)
     expect(all1[0].data.target).toBe(link.data.target)
 
-    const agent2 = await spawnLinkAgent();
-
-    console.log("sleep");
-    await sleep(30000);
-    console.log("query");
-
-    const all2 = await agent2.queryLinks({});
+    const all2 = await agent2.queryLinks({})
     expect(all2.length).toBe(1)
     expect(all2[0].data.source).toBe(link.data.source)
     expect(all2[0].data.predicate).toBe(link.data.predicate)
     expect(all2[0].data.target).toBe(link.data.target)
 
     const link2 = await agent2.addLink({source:"root2", predicate: "soic://test", target:"QmYVsrMpiFmV9S7bTWNAkUzSqjRJskQ8g4TWKKwKrHAPqL://QmSsCCtXMDAZXMpyiNLzwjGEU4hLmhG7fphidhEEodQ4Wy"})
-
-    await sleep(30000);
 
     const all3 = await agent.queryLinks({});
     expect(all3.length).toBe(2)
