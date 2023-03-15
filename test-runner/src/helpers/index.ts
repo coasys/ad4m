@@ -3,22 +3,27 @@ import getPort from "get-port";
 import { startServer } from "../cli.js";
 import { buildAd4mClient } from "../client.js";
 
-const retry = (run: any) => {
-  return new Promise((resolve, reject) => {
-   const interval = setInterval(async () => {   
-     console.log('hehe 1')   
-     const arr = await run();
-     console.log('hehe 2', arr)   
-     if (arr.length > 1) {
-       clearInterval(interval)
-       resolve(arr)
-     }
-   }, 10000);
+const retry = (run: any, maxRetires: number) => {
+  let currRetry = 0;
 
+  return new Promise((resolve, reject) => {
+    const interval = setInterval(async () => {   
+      currRetry += 1; 
+      const arr = await run();
+
+      if (arr.length > 1) {
+        clearInterval(interval)
+        resolve(arr)
+      }
+
+      if (currRetry === maxRetires) {
+        reject("Max Retries exceeded when trying to sync agent.")
+      }
+    }, 10000);
  })
 }
 
-export const waitForAgentsToSync = async () => {
+export const waitForAgentsToSync = async (maxRetires = 50) => {
  const promiseClearList = []
  const promiseList = []
  for (const agent of global.agents) {
@@ -26,7 +31,7 @@ export const waitForAgentsToSync = async () => {
    
    promiseClearList.push(link)
  
-   promiseList.push(retry(async () => await agent.client.queryLinks({})))
+   promiseList.push(retry(async () => await agent.client.queryLinks({}), maxRetires))
  }
 
  await Promise.all(promiseList)
@@ -35,7 +40,6 @@ export const waitForAgentsToSync = async () => {
    const agent = global.agents[index];
 
    await agent.client.removeLink(promiseClearList[index])
-
  }
 }
 
