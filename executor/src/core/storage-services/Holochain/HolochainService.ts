@@ -114,17 +114,16 @@ export default class HolochainService {
     }
 
     async logDhtStatus() {
-        if (this.#ready) {
-            console.log(this.#languageDnaHashes);
-            for (const [language, hashes] of this.#languageDnaHashes) {
-                console.log("HolochainStatus.logDhtStatus: ", language, " has gossip status: \n");
-                let dhtInfo = (await this.#appWebsocket!.networkInfo({dnas: hashes}));
-                console.log("HolochainStatus.logDhtStatus: ", language, " has gossip status: ", dhtInfo, "\n");
+        setInterval(async () => {
+            if (this.#ready) {
+                console.log(this.#languageDnaHashes);
+                for (const [language, hashes] of this.#languageDnaHashes) {
+                    console.log("HolochainStatus.logDhtStatus: ", language, " has gossip status: \n");
+                    let dhtInfo = (await this.#appWebsocket!.networkInfo({dnas: hashes}));
+                    console.log("HolochainStatus.logDhtStatus: ", language, " has gossip status: ", dhtInfo, "\n");
+                }
             }
-        }
-        //Wait 60 seconds before checking again
-        await sleep(60000);
-        this.logDhtStatus();
+        }, 60000);
     }
 
     handleCallback(signal: AppSignal) {

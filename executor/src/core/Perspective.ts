@@ -135,76 +135,78 @@ export default class Perspective {
     }
 
     async setupFullRenderSync(intervalMs: number) {
-        if(this.state === PerspectiveState.Synced) {
-            try {
-                await this.syncWithSharingAdapter();
-            } catch(e) {
-                console.error(`Perspective.setupFullRenderSync(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to do full render sync with sharing adapter: ${e}`);
+        return setInterval(async () => {
+            if(this.state === PerspectiveState.Synced) {
+                try {
+                    await this.syncWithSharingAdapter();
+                } catch(e) {
+                    console.error(`Perspective.setupFullRenderSync(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to do full render sync with sharing adapter: ${e}`);
+                }
+            } else {
+                console.log(`Perspective.setupFullRenderSync(): NH [${this.sharedUrl}] (${this.name}): Omitting full render sync since perspective is not synced yet`);
             }
-        } else {
-            console.log(`Perspective.setupFullRenderSync(): NH [${this.sharedUrl}] (${this.name}): Omitting full render sync since perspective is not synced yet`);
-        }
-        await sleep(intervalMs);
-        this.setupFullRenderSync(intervalMs);
+        }, intervalMs);
     }
 
     async setupSyncSingals(intervalMs: number) {
-        try {
-            await this.callLinksAdapter("sync");
-        } catch(e) {
-            console.error(`Perspective.setupSyncSingals(): NH [${this.sharedUrl}] (${this.name}): Got error when sending sync signals: ${e}`);
-        }
-        await sleep(intervalMs);
-        this.setupSyncSingals(intervalMs);
+        return setInterval(async () => {
+            try {
+                await this.callLinksAdapter("sync");
+            } catch(e) {
+                console.error(`Perspective.setupSyncSingals(): NH [${this.sharedUrl}] (${this.name}): Got error when sending sync signals: ${e}`);
+            }
+        }, intervalMs);
     }
 
     async setupPendingDiffsPublishing(intervalMs: number) {
         let pendingGotPublished = false;
-        if(this.state == PerspectiveState.LinkLanguageFailedToInstall) {
-            try {
-                await this.getLinksAdapter()
-            } catch(e) {
-                console.error(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to install link language: ${e}`);
-            }
-        }
-        
-        try {
-            // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
-            if (await this.getCurrentRevision()) {
-                //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
-                this.updatePerspectiveState(PerspectiveState.Synced);
-                //Let's check if we have unpublished diffs:
-                const mutations = this.#db.getPendingDiffs(this.uuid);
-                if(mutations && mutations.length > 0) {
-                    // If we do, collect them...
-                    const batchedMutations = {
-                        additions: [],
-                        removals: []
-                    } as PerspectiveDiff
-                    for(const mutation of mutations) {
-                        for (const addition of mutation.additions) {
-                            batchedMutations.additions.push(addition);
-                        }
-                        for (const removal of mutation.removals) {
-                            batchedMutations.removals.push(removal);
-                        }
-                    }
-                    
-                    // ...publish them...
-                    await this.callLinksAdapter('commit', batchedMutations);
-                    // ...and clear the temporary storage
-                    this.#db.clearPendingDiffs(this.uuid)
-                    pendingGotPublished = true;
+
+        let pendingDiffsInterval = setInterval(async () => {
+            if(this.state == PerspectiveState.LinkLanguageFailedToInstall) {
+                try {
+                    await this.getLinksAdapter()
+                } catch(e) {
+                    console.error(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to install link language: ${e}`);
                 }
             }
-        } catch (e) {
-            console.warn(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to repulish pending diffs. Error: ${e}`, e);
-        }
+            
+            try {
+                // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
+                if (await this.getCurrentRevision()) {
+                    //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
+                    this.updatePerspectiveState(PerspectiveState.Synced);
+                    //Let's check if we have unpublished diffs:
+                    const mutations = this.#db.getPendingDiffs(this.uuid);
+                    if(mutations && mutations.length > 0) {
+                        // If we do, collect them...
+                        const batchedMutations = {
+                            additions: [],
+                            removals: []
+                        } as PerspectiveDiff
+                        for(const mutation of mutations) {
+                            for (const addition of mutation.additions) {
+                                batchedMutations.additions.push(addition);
+                            }
+                            for (const removal of mutation.removals) {
+                                batchedMutations.removals.push(removal);
+                            }
+                        }
+                        
+                        // ...publish them...
+                        await this.callLinksAdapter('commit', batchedMutations);
+                        // ...and clear the temporary storage
+                        this.#db.clearPendingDiffs(this.uuid)
+                        pendingGotPublished = true;
+                    }
+                }
+            } catch (e) {
+                console.warn(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to repulish pending diffs. Error: ${e}`, e);
+            }
 
-        if(!pendingGotPublished) {
-            await sleep(intervalMs);
-            this.setupPendingDiffsPublishing(intervalMs);
-        }
+            if(pendingGotPublished) {
+                clearInterval(pendingDiffsInterval);
+            }
+        }, intervalMs);
     }
 
 
@@ -327,9 +329,10 @@ export default class Perspective {
             try {
                 const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
-                    setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
+                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     const result = await linksAdapter.render();
+                    clearTimeout(timeout)
                     //console.debug("Got result:", result)
                     resolve(result)
                 } else {
@@ -357,11 +360,12 @@ export default class Perspective {
             try {
                 const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
-                    setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
+                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
                     console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args).substring(0, 50)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
+                    clearInterval(timeout);
                     resolve(result)
                 } else {
                     // TODO: request install
@@ -386,8 +390,9 @@ export default class Perspective {
             try {
                 const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
-                    setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000);
+                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000);
                     let currentRevisionString = await linksAdapter.currentRevision();
+                    clearInterval(timeout);
 
                     if(!currentRevisionString) {
                         resolve(null)
