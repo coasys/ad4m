@@ -54,20 +54,20 @@
   },
   "homepage": "https://github.com/perspect3vism/ad4m#readme",
   "dependencies": {
-    "@apollo/client": "3.6.9",
+    "@apollo/client": "3.7.10",
     "@perspect3vism/ad4m": "*",
     "@perspect3vism/ad4m-executor": "*",
     "appdata-path": "perspect3vism/appdata-path",
     "esm": "^3.2.25",
     "fs-extra": "^9.1.0",
     "get-port": "5.1.1",
-    "graphql-ws": "^5.9.1",
+    "graphql-ws": "5.12.0",
     "node-fetch": "^2.5.11",
     "readline-sync": "^1.4.10",
     "semver": "^7.3.8",
     "unzipper": "^0.10.11",
     "wget-improved": "^3.3.1",
-    "ws": "^8.8.0",
+    "ws": "8.13.0",
     "yargs": "^17.3.1"
   },
   "devDependencies": {
