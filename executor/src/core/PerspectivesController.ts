@@ -42,19 +42,29 @@ export default class PerspectivesController {
                 console.log("PerspectiveController: received signal from linkObserver, adding remote links from a language to a local perspective...");
                 perspective.populateLocalLinks(diff.additions, diff.removals);
 
-                for (const link of diff.additions) {
+                let perspectivePlain = perspective.plain();
+                const linkAddPubsub = diff.additions.map(link => {
                     this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-                        perspective: perspective.plain(),
+                        perspective: perspectivePlain,
                         link: link
                     })
+                });
+
+                try {
+                    Promise.all(linkAddPubsub).then(() => {
+                        const linkRemovedPubsub = diff.removals.map(link => {
+                            this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+                                perspective: perspectivePlain,
+                                link: link
+                            })
+                        });
+                        Promise.all(linkRemovedPubsub);
+                    });
+                } catch (e) {
+                    console.error("PerspectiveController.linkObserver(): Error publishing pubsub", e);
                 }
 
-                for (const linkRemoved of diff.removals) {
-                    this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
-                        perspective: perspective.plain(),
-                        link: linkRemoved
-                    })
-                }
+                console.log("finished calling pubsub");
             } else {
                 console.warn(`Could not find perspective for added link with lang: ${lang}`)
             }

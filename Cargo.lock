@@ -10,7 +10,7 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
 name = "ad4m"
-version = "0.3.2-alpha"
+version = "0.3.1"
 dependencies = [
  "ad4m-client",
  "anyhow",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.3.2-alpha"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-std",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.3.2-alpha"
+version = "0.3.1"
 dependencies = [
  "ad4m-client",
  "directories",

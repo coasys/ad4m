@@ -23,7 +23,7 @@ ad4m executor run &
 Then use `Ad4mClient` to connect to and work with the running ad4m-executor like this:
 ```
 npm install --save @perspect3vism/ad4m
-npm install --save-exact @apollo/client@3.6.9
+npm install --save-exact @apollo/client@10
 npm install --save graphql-ws
 npm install --save ws
 ```

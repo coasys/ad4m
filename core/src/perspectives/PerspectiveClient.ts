@@ -127,6 +127,7 @@ export class PerspectiveClient {
     }
 
     async queryProlog(uuid: string, query: string): Promise<any> {
+        console.log("Have listeners length:", this.#perspectiveAddedCallbacks.length, this.#perspectiveUpdatedCallbacks.length, this.#perspectiveRemovedCallbacks.length);
         const { perspectiveQueryProlog } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query perspectiveQueryProlog($uuid: String!, $query: String!) {
                 perspectiveQueryProlog(uuid: $uuid, query: $query)
