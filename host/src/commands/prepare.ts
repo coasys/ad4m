@@ -26,7 +26,7 @@ export const builder = (yargs: Argv) =>
         },
     });
 
-function cleanAd4mData(dataPath: string) {
+function cleanAd4mData(dataPath: string, shouldClearState: boolean) {
     const appDataPath = ad4mDataDirectory(dataPath);
     if (fs.existsSync(appDataPath)) {
         // Path to our binaries
@@ -46,6 +46,11 @@ function cleanAd4mData(dataPath: string) {
         fs.removeSync(bootstrapSeedPath);
         fs.removeSync(holochainDataPath);
         fs.removeSync(languagesPath);
+
+        if (shouldClearState) {
+            const dbPath = path.join(appDataPath, 'ad4m', 'data', 'db.json');
+            fs.removeSync(dbPath);
+        }
     }
 }
 
@@ -64,18 +69,18 @@ export const handler = (argv: Arguments<Options>): void => {
         // No last seen version file, lets clean their state. Note we are assuming the first time this added to a release
         // we wish to clear the stat eof an agent
         console.log("Not last seen version file, lets clean their state");
-        cleanAd4mData(dataPath);
+        cleanAd4mData(dataPath, false);
         fs.writeFileSync(lastSeenFile, getAd4mHostVersion());
         return;
     }
 
     const lastSeenVersion = fs.readFileSync(lastSeenFile, { encoding: 'utf-8' });
     console.log("Current last seen version is", lastSeenVersion);
-    const oldestSupportedVersion = getOldestSupportedVersion();
-    if (!semver.gte(lastSeenVersion, oldestSupportedVersion)) {
+    const migratonInfo = getOldestSupportedVersion();
+    if (!semver.gte(lastSeenVersion, migratonInfo.version)) {
         // Agents old ad4m version is too old, lets clean their state
         console.log("Agents old ad4m version is too old, lets clean their state");
-        cleanAd4mData(dataPath);
+        cleanAd4mData(dataPath, migratonInfo.shouldClearState);
         return;
     }
 };
