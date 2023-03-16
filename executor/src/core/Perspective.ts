@@ -9,6 +9,7 @@ import PrologInstance from "./PrologInstance";
 import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
 import { DID } from "@perspect3vism/ad4m/lib/src/DID";
+import { PerspectivismDb } from "./db";
 
 type PerspectiveSubscription = {
     perspective: PerspectiveHandle,
@@ -30,7 +31,7 @@ export default class Perspective {
     state: PerspectiveState = PerspectiveState.Private;
     retries: number = 0;
 
-    #db: any;
+    #db: PerspectivismDb;
     #agent: AgentService;
     #languageController?: LanguageController
     #pubsub: any
@@ -176,26 +177,12 @@ export default class Perspective {
                     //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
                     this.updatePerspectiveState(PerspectiveState.Synced);
                     //Let's check if we have unpublished diffs:
-                    const mutations = this.#db.getPendingDiffs(this.uuid);
-                    if(mutations && mutations.length > 0) {
-                        // If we do, collect them...
-                        const batchedMutations = {
-                            additions: [],
-                            removals: []
-                        } as PerspectiveDiff
-                        for(const mutation of mutations) {
-                            for (const addition of mutation.additions) {
-                                batchedMutations.additions.push(addition);
-                            }
-                            for (const removal of mutation.removals) {
-                                batchedMutations.removals.push(removal);
-                            }
-                        }
-                        
+                    const mutations = await this.#db.getPendingDiffs(this.uuid!);
+                    if (mutations.additions.length > 0 || mutations.removals.length > 0) {                        
                         // ...publish them...
-                        await this.callLinksAdapter('commit', batchedMutations);
+                        await this.callLinksAdapter('commit', mutations);
                         // ...and clear the temporary storage
-                        this.#db.clearPendingDiffs(this.uuid)
+                        await this.#db.clearPendingDiffs(this.uuid!);
                         pendingGotPublished = true;
                     }
                 }
@@ -222,26 +209,12 @@ export default class Perspective {
                         //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
                         this.updatePerspectiveState(PerspectiveState.Synced);
                         //Let's check if we have unpublished diffs:
-                        const mutations = this.#db.getPendingDiffs(this.uuid);
-                        if(mutations && mutations.length > 0) {
-                            // If we do, collect them...
-                            const batchedMutations = {
-                                additions: [],
-                                removals: []
-                            } as PerspectiveDiff
-                            for(const mutation of mutations) {
-                                for (const addition of mutation.additions) {
-                                    batchedMutations.additions.push(addition);
-                                }
-                                for (const removal of mutation.removals) {
-                                    batchedMutations.removals.push(removal);
-                                }
-                            }
-                           
+                        const mutations = await this.#db.getPendingDiffs(this.uuid!);
+                        if (mutations.additions.length > 0 || mutations.removals.length > 0) {                        
                             // ...publish them...
-                            await this.callLinksAdapter('commit', batchedMutations);
+                            await this.callLinksAdapter('commit', mutations);
                             // ...and clear the temporary storage
-                            this.#db.clearPendingDiffs(this.uuid)
+                            await this.#db.clearPendingDiffs(this.uuid!);
                         }
                         
                         //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
@@ -448,8 +421,7 @@ export default class Perspective {
     }
 
     async syncWithSharingAdapter() {
-        //@ts-ignore
-        const localLinks = this.#db.getAllLinks(this.uuid).map(l => l.link);
+        const localLinks = await this.#db.getAllLinks(this.uuid!);
         const remoteLinks = await this.renderLinksAdapter()
         const includes = (link: LinkExpression, list: LinkExpression[]) => {
             return undefined !== list.find(e =>
@@ -470,11 +442,7 @@ export default class Perspective {
             await this.callLinksAdapter("commit", {additions: linksToCommit, removals: []})
         }
 
-        for(const l of remoteLinks.links) {
-            if(!includes(l, localLinks)) {
-                this.addLocalLink(l);
-            }
-        }
+        await this.#db.addManyLinks(this.uuid!, remoteLinks.links);
     }
 
     async othersInNeighbourhood(): Promise<DID[]> {
@@ -508,30 +476,30 @@ export default class Perspective {
     }
 
 
-    addLocalLink(linkExpression: LinkExpression) {
-        let foundLink = this.findLink(linkExpression);
-        if (!foundLink) {
-            const hash = new SHA3(256);
-            hash.update(JSON.stringify(linkExpression));
-            const addr = hash.digest('hex');
+    // addLocalLink(linkExpression: LinkExpression) {
+    //     let foundLink = this.findLink(linkExpression);
+    //     if (!foundLink) {
+    //         const hash = new SHA3(256);
+    //         hash.update(JSON.stringify(linkExpression));
+    //         const addr = hash.digest('hex');
     
-            let link = linkExpression.data as Link
+    //         let link = linkExpression.data as Link
     
-            this.#db.storeLink(this.uuid, linkExpression, addr)
-            this.#db.attachSource(this.uuid, link.source, addr)
-            this.#db.attachTarget(this.uuid, link.target, addr)
-        }
-    }
+    //         this.#db.storeLink(this.uuid, linkExpression, addr)
+    //         this.#db.attachSource(this.uuid, link.source, addr)
+    //         this.#db.attachTarget(this.uuid, link.target, addr)
+    //     }
+    // }
 
-    removeLocalLink(linkExpression: LinkExpression) {
-        let foundLink = this.findLink(linkExpression);
-        if (foundLink) {
-            let link = linkExpression.data as Link
-            this.#db.removeSource(this.uuid, link.source, foundLink!)
-            this.#db.removeTarget(this.uuid, link.target, foundLink!)
-            this.#db.remove(this.#db.allLinksKey(this.uuid), foundLink!)
-        }
-    }
+    // removeLocalLink(linkExpression: LinkExpression) {
+    //     let foundLink = this.findLink(linkExpression);
+    //     if (foundLink) {
+    //         let link = linkExpression.data as Link
+    //         this.#db.removeSource(this.uuid, link.source, foundLink!)
+    //         this.#db.removeTarget(this.uuid, link.target, foundLink!)
+    //         this.#db.remove(this.#db.allLinksKey(this.uuid), foundLink!)
+    //     }
+    // }
 
     async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
         const linkExpression = this.ensureLinkExpression(link);
@@ -542,13 +510,14 @@ export default class Perspective {
         const addLink = await this.commit(diff);
 
         if (!addLink) {
-            this.#db.addPendingDiff(this.uuid, diff);
+            await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
-        this.addLocalLink(linkExpression)
+        await this.#db.addLink(this.uuid!, linkExpression);
         this.#prologNeedsRebuild = true;
+        let perspectivePlain = this.plain();
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-            perspective: this.plain(),
+            perspective: perspectivePlain,
             link: linkExpression
         })
 
@@ -564,14 +533,15 @@ export default class Perspective {
         const addLinks = await this.commit(diff);
 
         if (!addLinks) {
-            this.#db.addPendingDiff(this.uuid, diff);
+            await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
-        linkExpressions.forEach(l => this.addLocalLink(l))
+        await this.#db.addManyLinks(this.uuid!, linkExpressions);
         this.#prologNeedsRebuild = true;
+        let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
             this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-                perspective: this.plain(),
+                perspective: perspectivePlain,
                 link: link
             })
         };
@@ -588,10 +558,10 @@ export default class Perspective {
         const removeLinks = await this.commit(diff);
 
         if (!removeLinks) {
-            this.#db.addPendingDiff(this.uuid, diff);
+            await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
-        linkExpressions.forEach(l => this.removeLocalLink(l))
+        linkExpressions.forEach(async l => await this.#db.removeLink(this.uuid!, l))
         this.#prologNeedsRebuild = true;
         for (const link of linkExpressions) {
             this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
@@ -611,11 +581,11 @@ export default class Perspective {
         const mutation = await this.commit(diff);
 
         if (!mutation) {
-            this.#db.addPendingDiff(this.uuid, diff);
+            await this.#db.addPendingDiff(this.uuid!, diff);
         };
 
-        diff.additions.forEach(l => this.addLocalLink(l))
-        diff.removals.forEach(l => this.removeLocalLink(l))
+        await this.#db.addManyLinks(this.uuid!, diff.additions);
+        diff.removals.forEach(async l => await this.#db.removeLink(this.uuid!, l));
         this.#prologNeedsRebuild = true;
         for (const link of diff.additions) {
             this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
@@ -633,34 +603,26 @@ export default class Perspective {
         return diff;
     }
 
-    private findLink(linkToFind: LinkExpressionInput): string | undefined {
-        const allLinks = this.#db.getAllLinks(this.uuid)
-        for(const {name, link} of allLinks) {
-            if(linkEqual(linkToFind, link)) {
-                return name
-            }
-        }
-    }
+    // private findLink(linkToFind: LinkExpressionInput): string | undefined {
+    //     const allLinks = this.#db.getAllLinks(this.uuid)
+    //     for(const {name, link} of allLinks) {
+    //         if(linkEqual(linkToFind, link)) {
+    //             return name
+    //         }
+    //     }
+    // }
 
     async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
-        const addr = this.findLink(oldLink)
-        if (!addr) {
+        const link = await this.#db.getLink(this.uuid!, oldLink);
+        if (!link) {
+            const allLinks = await this.#db.getAllLinks(this.uuid!);
+            console.log("all links", allLinks);
             throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
         }
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
 
-        const _old = oldLink.data as Link
-
-        this.#db.updateLink(this.uuid, newLinkExpression, addr)
-        if(_old.source !== newLink.source){
-            this.#db.removeSource(this.uuid, _old.source, addr)
-            this.#db.attachSource(this.uuid, newLink.source, addr)
-        }
-        if(_old.target !== newLink.target){
-            this.#db.removeTarget(this.uuid, _old.target, addr)
-            this.#db.attachTarget(this.uuid, newLink.target, addr)
-        }
+        await this.#db.updateLink(this.uuid!, link, newLinkExpression);
 
         const diff = {
             additions: [newLinkExpression],
@@ -669,7 +631,7 @@ export default class Perspective {
         const mutation = await this.commit(diff);
 
         if (!mutation) {
-            this.#db.addPendingDiff(this.uuid, diff);
+            await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
         const perspective = this.plain();
@@ -684,7 +646,7 @@ export default class Perspective {
     }
 
     async removeLink(linkExpression: LinkExpressionInput) {
-        this.removeLocalLink(linkExpression);
+        await this.#db.removeLink(this.uuid!, linkExpression);
 
         const diff = {
             additions: [],
@@ -693,7 +655,7 @@ export default class Perspective {
         const mutation = await this.commit(diff);
         
         if (!mutation) {
-            this.#db.addPendingDiff(this.uuid, diff);
+            await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
         this.#prologNeedsRebuild = true;
@@ -703,10 +665,21 @@ export default class Perspective {
         })
     }
 
-    private getLinksLocal(query: LinkQuery): LinkExpression[] {
+    async populateLocalLinks(additions: LinkExpression[], removals: LinkExpression[]) {
+        if (additions) {
+            await this.#db.addManyLinks(this.uuid!, additions);
+        }
+
+        if (removals) {
+            removals.forEach(async (link) => {
+                await this.#db.removeLink(this.uuid!, link);
+            })
+        }
+    }
+
+    private async getLinksLocal(query: LinkQuery): Promise<LinkExpression[]> {
         if(!query || !query.source && !query.predicate && !query.target) {
-            //@ts-ignore
-            return this.#db.getAllLinks(this.uuid).map(e => e.link)
+            return await this.#db.getAllLinks(this.uuid!);
         }
 
         const reverse = query.fromDate! >= query.untilDate!;
@@ -738,8 +711,7 @@ export default class Perspective {
         }
 
         if(query.source) {
-            //@ts-ignore
-            let result = this.#db.getLinksBySource(this.uuid, query.source).map(e => e.link)
+            let result = await this.#db.getLinksBySource(this.uuid!, query.source);
             // @ts-ignore
             if(query.target) result = result.filter(l => l.data.target === query.target)
             // @ts-ignore
@@ -753,8 +725,7 @@ export default class Perspective {
         }
 
         if(query.target) {
-            //@ts-ignore
-            let result = this.#db.getLinksByTarget(this.uuid, query.target).map(e => e.link)
+            let result = await this.#db.getLinksByTarget(this.uuid!, query.target);
             // @ts-ignore
             if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
             //@ts-ignore
@@ -765,24 +736,9 @@ export default class Perspective {
             return result
         }
 
-        //@ts-ignore
-        let result = this.#db.getAllLinks(this.uuid).map(e => e.link).filter(link => link.data.predicate === query.predicate)
+        let result = (await this.#db.getAllLinks(this.uuid!)).filter(link => link.data.predicate === query.predicate)
         if (query.limit) result = result.slice(0, query.limit)
         return result
-    }
-
-    async populateLocalLinks(additions: LinkExpression[], removals: LinkExpression[]) {
-        if (additions) {
-            additions.forEach((link) => {
-                this.addLocalLink(link)
-            })
-        }
-
-        if (removals) {
-            removals.forEach((link) => {
-                this.removeLocalLink(link);
-            })
-        }
     }
 
     async getLinks(query: LinkQuery): Promise<LinkExpression[]> {

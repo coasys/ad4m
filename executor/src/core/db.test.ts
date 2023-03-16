@@ -1,177 +1,157 @@
 import { PerspectivismDb } from './db'
-import Memory from 'lowdb/adapters/Memory'
 import { v4 as uuidv4 } from 'uuid';
 import { expect } from "chai";
-import { LinkExpression, PerspectiveDiff } from '@perspect3vism/ad4m';
+import { LinkExpression, LinkExpressionInput, PerspectiveDiff } from '@perspect3vism/ad4m';
+import faker from 'faker'
+
+function constructDummyLinkExpression(): LinkExpressionInput {
+    return {
+        data: {
+            source: faker.internet.url(),
+            target: faker.internet.url(),
+            predicate: faker.internet.url(),
+        },
+        proof: {
+            signature: 'signature',
+            key: 'key',
+            date: 'date',
+        },
+        author: "did:test:key",
+        timestamp: new Date().toISOString(),
+    } as LinkExpressionInput
+}
 
 describe('PerspectivismDb', () => {
     let db: PerspectivismDb | undefined
     let pUUID: string | undefined
 
     beforeEach(() => {
-        db = new PerspectivismDb(new Memory(""))
+        db = new PerspectivismDb();
         pUUID = uuidv4()
     })
 
-    it('can store and retrieve objects by name', () => {
-        const obj = { test: 'object' }
-        const name = 'linkName'
+    it('can store and retrieve links', async () => {
+        const link = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link);
 
-        db!.storeLink(pUUID!, obj, name)
-        const result = db!.getLink(pUUID!, name)
-
-        expect(result).to.be.deep.equal(obj)
+        const result = await db!.getLink(pUUID!, link);
+        expect(result).to.be.deep.equal(link);
     })
 
-    it('can call getLink() multiple times', () => {
-        const obj = { test: 'object' }
-        const name = 'linkName'
-        db!.storeLink(pUUID!, obj, name)
+    it('can store and get link with missing predicate', async () => {
+        const link = constructDummyLinkExpression();
+        delete link.data.predicate
+        await db!.addLink(pUUID!, link);
+
+        link.data.predicate = null;
+
+        const result = await db!.getLink(pUUID!, link);
+        expect(result).to.be.deep.equal(link);
+    })
+
+    it('can call getLink() multiple times', async () => {
+        const link = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link);
 
         for(let i=0; i<3; i++) {
-            expect(db!.getLink(pUUID!, name)).to.be.deep.equal(obj)
+            expect(await db!.getLink(pUUID!, link)).to.be.deep.equal(link);
         }
-
     })
 
-    it('can getAllLinks', () => {
-        const obj1 = { test: 'object1' }
-        const name1 = 'linkName1'
-        db!.storeLink(pUUID!, obj1, name1)
+    it('can getAllLinks', async () => {
+        const link1 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link1);
 
-        const obj2 = { test: 'object2' }
-        const name2 = 'linkName2'
-        db!.storeLink(pUUID!, obj2, name2)
+        const link2 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link2);
 
-        const allLinks = db!.getAllLinks(pUUID!)
+        const allLinks = await db!.getAllLinks(pUUID!)
 
         expect(allLinks).to.be.deep.equal([
-            {
-                link: obj1,
-                name: name1,
-            },
-            {
-                link: obj2,
-                name: name2,
-            }
+            link1,
+            link2
         ])
     })
 
-    it('can getAllLinks with only one link (attached)', () => {
-        const obj1 = { test: 'object1' }
-        const name1 = 'linkName1'
-        db!.storeLink(pUUID!, obj1, name1)
-        db!.attachSource(pUUID!, 'root', name1)
-        db!.attachTarget(pUUID!, 'link-url', name1)
-
-        const allLinks = db!.getAllLinks(pUUID!)
-
-        expect(allLinks).to.be.deep.equal([
-            {
-                link: obj1,
-                name: name1,
-            }
-        ])
-    })
-
-    it('can call getAllLinks() multiple times', () => {
-        const obj1 = { test: 'object1' }
-        const name1 = 'linkName1'
-        db!.storeLink(pUUID!, obj1, name1)
+    it('can call getAllLinks() multiple times', async () => {
+        const link1 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link1);
 
         for(let i=0; i<3; i++) {
-            expect(db!.getAllLinks(pUUID!)).to.be.deep.equal([
-                {
-                    link: obj1,
-                    name: name1,
-                }
+            expect(await db!.getAllLinks(pUUID!)).to.be.deep.equal([
+                link1
             ])
         }
     })
 
-    it('can getLinksBySource', () => {
-        const obj1 = { test: 'object1' }
-        const name1 = 'linkName1'
-        db!.storeLink(pUUID!, obj1, name1)
+    it('can getLinksBySource', async () => {
+        const link1 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link1);
 
-        const obj2 = { test: 'object2' }
-        const name2 = 'linkName2'
-        db!.storeLink(pUUID!, obj2, name2)
+        const link2 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link2);
 
-        db!.attachSource(pUUID!, name1, name2)
+        const result = await db!.getLinksBySource(pUUID!, link1.data.source);
 
-        const result = db!.getLinksBySource(pUUID!, name1)
-
-        expect(result).to.be.deep.equal([{
-            link: obj2,
-            name: name2
-        }])
+        expect(result).to.be.deep.equal([link1]);
     })
 
-    it('can getLinksByTarget', () => {
-        const obj1 = { test: 'object1' }
-        const name1 = 'linkName1'
-        db!.storeLink(pUUID!, obj1, name1)
+    it('can getLinksByTarget', async () => {
+        const link1 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link1);
 
-        const obj2 = { test: 'object2' }
-        const name2 = 'linkName2'
-        db!.storeLink(pUUID!, obj2, name2)
+        const link2 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link2);
 
-        db!.attachTarget(pUUID!, name1, name2)
+        const result = await db!.getLinksByTarget(pUUID!, link1.data.target);
 
-        const result = db!.getLinksByTarget(pUUID!, name1)
-
-        expect(result).to.be.deep.equal([{
-            link: obj2,
-            name: name2
-        }])
+        expect(result).to.be.deep.equal([link1]);
     })
 
-    it('can updateLink', () => {
-        const obj1 = { test: 'object1' }
-        const name1 = 'linkName1'
-        db!.storeLink(pUUID!, obj1, name1)
+    it('can updateLink', async () => {
+        const link1 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link1);
 
-        expect(db!.getLink(pUUID!, name1)).to.be.deep.equal(obj1)
+        expect(await db!.getLink(pUUID!, link1)).to.be.deep.equal(link1);
 
-        const obj2 = { test: 'object2' }
-        db!.updateLink(pUUID!, obj2, name1)
-        expect(db!.getLink(pUUID!, name1)).to.be.deep.equal(obj2)
+        const link2 = constructDummyLinkExpression();
+        await db!.updateLink(pUUID!, link1, link2);
+        expect(await db!.getLink(pUUID!, link1)).to.be.undefined;
+        expect(await db!.getLink(pUUID!, link2)).to.be.deep.equal(link2);
     })
 
-    it('can remove()', () => {
-        db!.storeLink(pUUID!, { test: 'object1' }, '1')
-        expect(db!.getLink(pUUID!, '1')).to.be.deep.equal({ test: 'object1' })
-        db!.remove
+    it('can remove()', async () => {
+        const link1 = constructDummyLinkExpression();
+        await db!.addLink(pUUID!, link1);
+
+        expect(await db!.getLink(pUUID!, link1)).to.be.deep.equal(link1)
+        await db!.removeLink(pUUID!, link1);
+        expect(await db!.getLink(pUUID!, link1)).to.be.undefined;
     })
 
-    it('can removeTarget()', () => {
-        db!.storeLink(pUUID!, { test: 'object1' }, '1')
-        db!.storeLink(pUUID!, { test: 'object2' }, '2')
+    it('can get & remove pendingDiffs()', async () => {
+        const addition = constructDummyLinkExpression();
+        const removal = constructDummyLinkExpression();
+        await db!.addPendingDiff(pUUID!, {additions: [
+            addition,
+        ], removals: [
+            removal,
+        ]} as PerspectiveDiff);
 
-        db!.attachTarget(pUUID!, '1', '2')
+        const get = await db!.getPendingDiffs(pUUID!);
 
-        const result1 = db!.getLinksByTarget(pUUID!, '1')
+        expect(get?.additions.length).to.be.equal(1);
+        expect(get?.removals.length).to.be.equal(1);
 
-        expect(result1).to.be.deep.equal([{
-            link: { test: 'object2' },
-            name: '2'
-        }])
+        expect(get).to.be.deep.equal({additions: [
+            addition,
+        ], removals: [
+            removal,
+        ]} as PerspectiveDiff);
 
-        db!.removeTarget(pUUID!, '1', '2')
+        await db!.clearPendingDiffs(pUUID!)
+        const get2 = await db?.getPendingDiffs(pUUID!);
 
-        const result2 = db!.getLinksByTarget(pUUID!, '1')
-
-        expect(result2).to.be.deep.equal([])
-    })
-
-    it('can get & remove pendingDiffs()', () => {
-        db?.addPendingDiff(pUUID!, {additions: [], removals: []} as PerspectiveDiff);
-        const get = db?.getPendingDiffs(pUUID!);
-        expect(get?.length).to.be.equal(1);
-        expect(get).to.be.deep.equal([{additions: [], removals: []} as PerspectiveDiff]);
-        db!.clearPendingDiffs(pUUID!)
-        const get2 = db?.getPendingDiffs(pUUID!);
-        expect(get2?.length).to.be.equal(0);
+        expect(get2?.additions.length).to.be.equal(0);
     })
 })
