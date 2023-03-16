@@ -4,7 +4,7 @@ import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
-import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from '../PubSub'
+import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC, PERSPECTE_SYNC_STATE_CHANGE } from '../PubSub'
 
 export const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -96,6 +96,7 @@ export default class PerspectiveResolver {
         l.data = link
 
         pubSub.publish(LINK_ADDED_TOPIC, { link: l })
+        pubSub.publish(PERSPECTE_SYNC_STATE_CHANGE, PerspectiveState.LinkLanguageInstalledButNotSynced)
         return l
     }
 
@@ -198,5 +199,10 @@ export default class PerspectiveResolver {
     @Subscription({topics: LINK_UDATED_TOPIC, nullable: true})
     perspectiveLinkUpdated(@Arg('uuid') uuid: string): LinkExpressionUpdated {
         return {oldLink: testLink, newLink: testLink}
+    }
+
+    @Subscription({topics: PERSPECTE_SYNC_STATE_CHANGE, nullable: true})
+    perspectiveSyncStateChange(@Arg('uuid') uuid: string): PerspectiveState {
+        return PerspectiveState.Synced
     }
 }

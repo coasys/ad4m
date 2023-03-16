@@ -7,7 +7,7 @@ import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
-import { PerspectiveHandle } from "./PerspectiveHandle";
+import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { PerspectiveProxy } from './PerspectiveProxy';
 
 const LINK_EXPRESSION_FIELDS = `
@@ -39,6 +39,8 @@ neighbourhood {
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
+export type SyncStateChangeCallback = (state: PerspectiveState) => null
+
 export class PerspectiveClient {
     #apolloClient: ApolloClient<any>
     #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
@@ -363,6 +365,23 @@ export class PerspectiveClient {
             next: result => {
                 cb.forEach(c => {
                     c(result.data.perspectiveLinkRemoved)
+                })
+            },
+            error: (e) => console.error(e)
+        })
+
+        await new Promise<void>(resolve => setTimeout(resolve, 500))
+    }
+
+    async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
+        this.#apolloClient.subscribe({
+            query: gql` subscription {
+                perspectiveSyncStateChange(uuid: "${uuid}")
+            }
+        `}).subscribe({
+            next: result => {
+                cb.forEach(c => {
+                    c(result.data.perspectiveSyncStateChange)
                 })
             },
             error: (e) => console.error(e)
