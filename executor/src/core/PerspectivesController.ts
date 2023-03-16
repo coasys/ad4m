@@ -36,20 +36,23 @@ export default class PerspectivesController {
             })
         }
 
-        this.#context.languageController!.addLinkObserver((diff: PerspectiveDiff, lang: LanguageRef) => {
+        this.#context.languageController!.addLinkObserver(async (diff: PerspectiveDiff, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
                 console.log("PerspectiveController: received signal from linkObserver, adding remote links from a language to a local perspective...");
+                console.log(diff.additions, diff.removals)
                 perspective.populateLocalLinks(diff.additions, diff.removals);
 
                 let perspectivePlain = perspective.plain();
-                const linkAddPubsub = diff.additions.map(link => {
-                    this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+                for (const link of diff.additions) {
+                    console.log("publishing addition:", link)
+                    await this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
                         perspective: perspectivePlain,
                         link: link
                     })
-                });
+                }
 
+                /*
                 try {
                     Promise.all(linkAddPubsub).then(() => {
                         const linkRemovedPubsub = diff.removals.map(link => {
@@ -62,9 +65,17 @@ export default class PerspectivesController {
                     });
                 } catch (e) {
                     console.error("PerspectiveController.linkObserver(): Error publishing pubsub", e);
+                }*/
+
+                for (const linkRemoved of diff.removals) {
+                    console.log("publishing removal:", linkRemoved)
+                    await this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+                        perspective: perspective.plain(),
+                        link: linkRemoved
+                    })
                 }
 
-                console.log("finished calling pubsub");
+                console.log("all link mutations published")
             } else {
                 console.warn(`Could not find perspective for added link with lang: ${lang}`)
             }
