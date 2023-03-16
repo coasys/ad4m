@@ -50,6 +50,10 @@ function cleanAd4mData(dataPath: string, shouldClearState: boolean) {
         if (shouldClearState) {
             const dbPath = path.join(appDataPath, 'ad4m', 'data', 'db.json');
             fs.removeSync(dbPath);
+            const languagesPath = path.join(appDataPath, 'ad4m', 'languages');
+            fs.removeSync(languagesPath);
+            const perspectivePath = path.join(appDataPath, 'ad4m', 'perspectives.json');
+            fs.removeSync(perspectivePath);
         }
     }
 }
