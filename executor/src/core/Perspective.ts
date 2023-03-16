@@ -475,32 +475,6 @@ export default class Perspective {
         return onlineAgents.filter(o => o)
     }
 
-
-    // addLocalLink(linkExpression: LinkExpression) {
-    //     let foundLink = this.findLink(linkExpression);
-    //     if (!foundLink) {
-    //         const hash = new SHA3(256);
-    //         hash.update(JSON.stringify(linkExpression));
-    //         const addr = hash.digest('hex');
-    
-    //         let link = linkExpression.data as Link
-    
-    //         this.#db.storeLink(this.uuid, linkExpression, addr)
-    //         this.#db.attachSource(this.uuid, link.source, addr)
-    //         this.#db.attachTarget(this.uuid, link.target, addr)
-    //     }
-    // }
-
-    // removeLocalLink(linkExpression: LinkExpression) {
-    //     let foundLink = this.findLink(linkExpression);
-    //     if (foundLink) {
-    //         let link = linkExpression.data as Link
-    //         this.#db.removeSource(this.uuid, link.source, foundLink!)
-    //         this.#db.removeTarget(this.uuid, link.target, foundLink!)
-    //         this.#db.remove(this.#db.allLinksKey(this.uuid), foundLink!)
-    //     }
-    // }
-
     async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
         const linkExpression = this.ensureLinkExpression(link);
         const diff = {
@@ -561,7 +535,7 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
-        linkExpressions.forEach(async l => await this.#db.removeLink(this.uuid!, l))
+        await Promise.all(linkExpressions.map(async l => await this.#db.removeLink(this.uuid!, l)))
         this.#prologNeedsRebuild = true;
         for (const link of linkExpressions) {
             this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
@@ -585,7 +559,7 @@ export default class Perspective {
         };
 
         await this.#db.addManyLinks(this.uuid!, diff.additions);
-        diff.removals.forEach(async l => await this.#db.removeLink(this.uuid!, l));
+        await Promise.all(diff.removals.map(async l => await this.#db.removeLink(this.uuid!, l)));
         this.#prologNeedsRebuild = true;
         for (const link of diff.additions) {
             this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
@@ -602,15 +576,6 @@ export default class Perspective {
 
         return diff;
     }
-
-    // private findLink(linkToFind: LinkExpressionInput): string | undefined {
-    //     const allLinks = this.#db.getAllLinks(this.uuid)
-    //     for(const {name, link} of allLinks) {
-    //         if(linkEqual(linkToFind, link)) {
-    //             return name
-    //         }
-    //     }
-    // }
 
     async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
         const link = await this.#db.getLink(this.uuid!, oldLink);
@@ -671,9 +636,9 @@ export default class Perspective {
         }
 
         if (removals) {
-            removals.forEach(async (link) => {
+            await Promise.all(removals.map(async (link) => {
                 await this.#db.removeLink(this.uuid!, link);
-            })
+            }))
         }
     }
 
