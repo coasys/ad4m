@@ -93,7 +93,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       return this.myCurrentRevision && !revision.equals(this.myCurrentRevision);
     });
 
-    if (sameRevisions.length < differentRevisions.length) {
+    if (sameRevisions.length <= differentRevisions.length) {
       this.syncStateChangeCallback(PerspectiveState.LinkLanguageInstalledButNotSynced);
     } else {
       this.syncStateChangeCallback(PerspectiveState.Synced);

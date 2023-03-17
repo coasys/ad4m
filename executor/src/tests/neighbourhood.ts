@@ -81,6 +81,68 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobLinks.length).to.be.equal(1)
             })
 
+            it('can get the correct state change signals', async () => {
+                const aliceP1 = await testContext.alice.perspective.add("state-changes")
+                expect(aliceP1.state).to.be.equal(PerspectiveState.Private);
+
+                const socialContext = await testContext.alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob"}));
+                expect(socialContext.name).to.be.equal("Alice's neighbourhood with Bob");
+                const neighbourhoodUrl = await testContext.alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+
+                let aliceSyncChangeCalls = 0;
+                let aliceSyncChangeData = null;
+                const aliceSyncChangeHandler = (payload: PerspectiveState) => {
+                    aliceSyncChangeCalls += 1;
+                    //@ts-ignore
+                    aliceSyncChangeData = payload;
+                    return null;
+                };
+
+                aliceP1.addSyncStateChangeListener(aliceSyncChangeHandler);
+
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
+
+                let bobSyncChangeCalls = 0;
+                let bobSyncChangeData = null;
+                const bobSyncChangeHandler = (payload: PerspectiveState) => {
+                    bobSyncChangeCalls += 1;
+                    //@ts-ignore
+                    bobSyncChangeData = payload;
+                    return null;
+                };
+
+                let bobHandler = await testContext.bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+                let bobP1 = await testContext.bob.perspective.byUUID(bobHandler.uuid);
+
+                bobP1!.addSyncStateChangeListener(bobSyncChangeHandler);
+
+                await sleep(100);
+
+                //These next assertions are flaky since they depend on holochain not syncing right away, which most of the time is the case
+                expect(aliceSyncChangeCalls).to.be.equal(1);
+                expect(aliceSyncChangeData).to.be.equal(PerspectiveState.LinkLanguageInstalledButNotSynced);
+
+                expect(bobSyncChangeCalls).to.be.equal(1);
+                expect(bobSyncChangeData).to.be.equal(PerspectiveState.LinkLanguageInstalledButNotSynced);
+
+                let bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let tries = 1
+
+                while(bobLinks.length < 1 && tries < 20) {
+                    await sleep(1000)
+                    bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    tries++
+                }
+
+                expect(bobLinks.length).to.be.equal(1)
+
+                expect(aliceSyncChangeCalls).to.be.equal(2);
+                expect(aliceSyncChangeData).to.be.equal(PerspectiveState.Synced);
+
+                expect(bobSyncChangeCalls).to.be.equal(2);
+                expect(bobSyncChangeData).to.be.equal(PerspectiveState.Synced);
+            })
+
             describe('with set up and joined NH for Telepresence', async () => {
                 let aliceNH: NeighbourhoodProxy|undefined
                 let bobNH: NeighbourhoodProxy|undefined
