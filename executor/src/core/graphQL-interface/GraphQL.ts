@@ -940,7 +940,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     )(undefined, args)
                 },
                 //@ts-ignore
-                resolve: payload => payload
+                resolve: payload => payload.state
             }
         },
 

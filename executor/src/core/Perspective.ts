@@ -116,7 +116,7 @@ export default class Perspective {
 
     async updatePerspectiveState(state: PerspectiveState) {
         if (this.state != state) {
-            await this.#pubsub.publish(PubSub.PERSPECTIVE_SYNC_STATE_CHANGE, state)
+            await this.#pubsub.publish(PubSub.PERSPECTIVE_SYNC_STATE_CHANGE, {state, uuid: this.uuid})
             this.state = state
         }
     }
