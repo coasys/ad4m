@@ -6,7 +6,7 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-libs": {
-      "dependsOn": ["@perspect3vism/ad4m#build", "@perspect3vism/ad4m-connect#build", "@perspect3vism/ad4m-executor#build", "@perspect3vism/ad4m-test#build", "@perspect3vism/perspective-diff-sync#build"],
+      "dependsOn": ["@perspect3vism/ad4m#build", "@perspect3vism/ad4m-connect#build", "@perspect3vism/ad4m-executor#build", "@perspect3vism/ad4m-test#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-languages": {
