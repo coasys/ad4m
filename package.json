@@ -1,6 +1,6 @@
 {
   "name": "ad4m-monorepo",
-  "version": "0.3.2-alpha",
+  "version": "0.3.2",
   "workspaces": [
     "core",
     "docs",
@@ -9,7 +9,8 @@
     "host",
     "ui",
     "connect",
-    "test-runner"
+    "test-runner",
+    "bootstrap-languages/*"
   ],
   "private": true,
   "scripts": {
@@ -26,6 +27,7 @@
     "build-macos": "turbo run build-macos",
     "build-windows": "turbo run build-windows",
     "build-linux": "turbo run build-linux",
+    "build-languages": "turbo run build-languages",
     "release": "changeset publish",
     "build-all-macos": "turbo run build-all-macos",
     "build-all-linux": "turbo run build-all-linux",

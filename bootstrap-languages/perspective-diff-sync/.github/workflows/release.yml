@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    tags:
+    - '*'
+
+jobs:
+  release:
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [16.x]
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v2
+      with:
+        submodules: 'recursive'
+    - name: Use Nix
+      uses: cachix/install-nix-action@v12
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
+    - name: Configure Nix substituters
+      run: |
+        set -xe
+        mkdir -p ~/.config/nix/
+        cp ./.github/nix.conf ~/.config/nix/
+    - uses: cachix/cachix-action@v10
+      with:
+        name: perspect3vism
+        # authToken: '${{ secrets.CACHIX_HOLOCHAIN_CI }}'
+    - name: Prepare Nix environment
+      run: nix-shell --command "echo Completed"
+    - name: Release languages
+      run: ./release.sh
+    - name: Upload released files
+      uses: ncipollo/release-action@v1
+      with:
+        artifacts: "release/bundle.js, release/perspective-diff-sync.dna"
+        token: ${{ secrets.GITHUB_TOKEN }}
+        allowUpdates: true  
