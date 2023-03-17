@@ -73,10 +73,10 @@ export default class PerspectivesController {
             }
         })
 
-        this.#context.languageController!.addSyncStateChangeObserver((state: PerspectiveState, lang: LanguageRef) => {
+        this.#context.languageController!.addSyncStateChangeObserver(async (state: PerspectiveState, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                perspective.updatePerspectiveState(state);
+                await perspective.updatePerspectiveState(state);
             } else {
                 console.warn(`Could not find perspective sync state change signal with lang: ${lang}`)
             }

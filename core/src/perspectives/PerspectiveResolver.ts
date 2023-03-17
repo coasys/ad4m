@@ -201,7 +201,7 @@ export default class PerspectiveResolver {
         return {oldLink: testLink, newLink: testLink}
     }
 
-    @Subscription({topics: PERSPECTIVE_SYNC_STATE_CHANGE, nullable: true})
+    @Subscription({topics: PERSPECTIVE_SYNC_STATE_CHANGE, nullable: false})
     perspectiveSyncStateChange(@Arg('uuid') uuid: string): PerspectiveState {
         return PerspectiveState.Synced
     }

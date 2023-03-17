@@ -303,6 +303,10 @@ export default class LanguageController {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name});
             })
+
+            language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+            })
         }
 
         if(language.telepresenceAdapter) {
