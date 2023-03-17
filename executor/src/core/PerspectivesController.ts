@@ -3,7 +3,7 @@ import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, Expression, LanguageRef, PerspectiveDiff, PerspectiveState } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -76,11 +76,7 @@ export default class PerspectivesController {
         this.#context.languageController!.addSyncStateChangeObserver((state: PerspectiveState, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                console.log("PerspectiveController: received sync state change signal...");
-                this.pubsub.publish(PubSub.PERSPECTE_SYNC_STATE_CHANGE, {
-                    state: state,
-                    perspective: perspective.plain()
-                })
+                perspective.updatePerspectiveState(state);
             } else {
                 console.warn(`Could not find perspective sync state change signal with lang: ${lang}`)
             }

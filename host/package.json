@@ -1,6 +1,6 @@
 {
   "name": "ad4m-host",
-  "version": "0.3.2-alpha",
+  "version": "0.3.2",
   "description": "Self hosting ad4m service",
   "private": true,
   "bin": {

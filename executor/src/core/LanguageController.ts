@@ -20,7 +20,7 @@ import stringify from 'json-stable-stringify'
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
-type SyncStateChangeOverserver = (state: PerspectiveState, lang: LanguageRef)=>void;
+type SyncStateChangeObserver = (state: PerspectiveState, lang: LanguageRef)=>void;
 
 interface Services {
     holochainService: HolochainService,
@@ -65,7 +65,7 @@ export default class LanguageController {
     #context: object;
     #linkObservers: LinkObservers[];
     #telepresenceSignalObservers: TelepresenceSignalObserver[];
-    #syncStateChangeObservers: SyncStateChangeOverserver[];
+    #syncStateChangeObservers: SyncStateChangeObserver[];
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
     #signatures: Signatures;
@@ -189,6 +189,12 @@ export default class LanguageController {
         })
     }
 
+    callSyncStateChangeObservers(syncState: PerspectiveState, ref: LanguageRef) {
+        this.#syncStateChangeObservers.forEach(o => {
+            o(syncState, ref)
+        })
+    }
+
     callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
         this.#telepresenceSignalObservers.forEach(o => {
             o(signal, ref)
@@ -250,6 +256,10 @@ export default class LanguageController {
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
+            })
+
+            language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
             })
         }
 
@@ -1093,7 +1103,7 @@ export default class LanguageController {
         this.#telepresenceSignalObservers.push(observer)
     }
 
-    addSyncStateChangeObserver(listener: SyncStateChangeOverserver) {
+    addSyncStateChangeObserver(listener: SyncStateChangeObserver) {
         this.#syncStateChangeObservers.push(listener)
     }
 

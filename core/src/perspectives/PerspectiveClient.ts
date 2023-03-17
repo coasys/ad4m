@@ -46,6 +46,7 @@ export class PerspectiveClient {
     #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
     #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
     #perspectiveRemovedCallbacks: UuidCallback[]
+    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
 
@@ -54,6 +55,7 @@ export class PerspectiveClient {
         this.#perspectiveAddedCallbacks = []
         this.#perspectiveUpdatedCallbacks = []
         this.#perspectiveRemovedCallbacks = []
+        this.#perspectiveSyncStateChangeCallbacks = []
 
         if(subscribe) {
             this.subscribePerspectiveAdded()
@@ -320,6 +322,27 @@ export class PerspectiveClient {
         })
     }
 
+    addPerspectiveSyncedListener(cb: SyncStateChangeCallback) {
+        this.#perspectiveSyncStateChangeCallbacks.push(cb)
+    }
+
+    async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
+        this.#apolloClient.subscribe({
+            query: gql` subscription {
+                perspectiveSyncStateChange(uuid: "${uuid}")
+            }
+        `}).subscribe({
+            next: result => {
+                cb.forEach(c => {
+                    c(result.data.perspectiveSyncStateChange)
+                })
+            },
+            error: (e) => console.error(e)
+        })
+
+        await new Promise<void>(resolve => setTimeout(resolve, 500))
+    }
+
     addPerspectiveRemovedListener(cb: UuidCallback) {
         this.#perspectiveRemovedCallbacks.push(cb)
     }
@@ -365,23 +388,6 @@ export class PerspectiveClient {
             next: result => {
                 cb.forEach(c => {
                     c(result.data.perspectiveLinkRemoved)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
-    }
-
-    async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveSyncStateChange(uuid: "${uuid}")
-            }
-        `}).subscribe({
-            next: result => {
-                cb.forEach(c => {
-                    c(result.data.perspectiveSyncStateChange)
                 })
             },
             error: (e) => console.error(e)

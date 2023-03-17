@@ -90,8 +90,7 @@ export default class Perspective {
 
         if (this.neighbourhood) {
             // setup polling loop for Perspectives with a linkLanguage
-            this.setupSyncSingals(3000);
-            //this.setupFullRenderSync(20000);
+            this.setupSyncSignals(3000);
 
             // Handle join differently so we wait before publishing diffs until we have seen
             // a first foreign revision. Otherwise we will never use snaphshots and make the
@@ -104,58 +103,32 @@ export default class Perspective {
                         // link additions as pending until we are synced
                         if(!revision) {
                             this.setupPendingDiffsPublishing(5000);
-                        } else {
-                            this.updatePerspectiveState(PerspectiveState.Synced);
                         }
                     })
                 } catch (e) {
                     console.error(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to get current revision: ${e}`);
                 }
-            } else {
-                this.updatePerspectiveState(PerspectiveState.Synced);
             }
         }
 
         this.#prologMutex = new Mutex()
     }
 
-    private updatePerspectiveState(state: PerspectiveState) {
+    async updatePerspectiveState(state: PerspectiveState) {
         if (this.state != state) {
-            this.#pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { 
-                perspective: {
-                    uuid: this.uuid,
-                    name: this.name,
-                    neighbourhood: this.neighbourhood,
-                    sharedUrl: this.sharedUrl,
-                    state: this.state
-                } as PerspectiveHandle 
-            })
+            await this.#pubsub.publish(PubSub.PERSPECTIVE_SYNC_STATE_CHANGE, state)
             this.state = state
         }
     }
 
-    async setupFullRenderSync(intervalMs: number) {
-        if(this.state === PerspectiveState.Synced) {
-            try {
-                await this.syncWithSharingAdapter();
-            } catch(e) {
-                console.error(`Perspective.setupFullRenderSync(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to do full render sync with sharing adapter: ${e}`);
-            }
-        } else {
-            console.log(`Perspective.setupFullRenderSync(): NH [${this.sharedUrl}] (${this.name}): Omitting full render sync since perspective is not synced yet`);
-        }
-        await sleep(intervalMs);
-        this.setupFullRenderSync(intervalMs);
-    }
-
-    async setupSyncSingals(intervalMs: number) {
+    async setupSyncSignals(intervalMs: number) {
         try {
             await this.callLinksAdapter("sync");
         } catch(e) {
-            console.error(`Perspective.setupSyncSingals(): NH [${this.sharedUrl}] (${this.name}): Got error when sending sync signals: ${e}`);
+            console.error(`Perspective.setupSyncSignals(): NH [${this.sharedUrl}] (${this.name}): Got error when sending sync signals: ${e}`);
         }
         await sleep(intervalMs);
-        this.setupSyncSingals(intervalMs);
+        this.setupSyncSignals(intervalMs);
     }
 
     async setupPendingDiffsPublishing(intervalMs: number) {
@@ -171,8 +144,6 @@ export default class Perspective {
         try {
             // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
             if (await this.getCurrentRevision()) {
-                //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
-                this.updatePerspectiveState(PerspectiveState.Synced);
                 //Let's check if we have unpublished diffs:
                 const mutations = this.#db.getPendingDiffs(this.uuid);
                 if(mutations && mutations.length > 0) {
@@ -217,8 +188,6 @@ export default class Perspective {
                     const currentRevision = await this.getCurrentRevision();
                     if (currentRevision) {
                         madeSync = true;
-                        //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
-                        this.updatePerspectiveState(PerspectiveState.Synced);
                         //Let's check if we have unpublished diffs:
                         const mutations = this.#db.getPendingDiffs(this.uuid);
                         if(mutations && mutations.length > 0) {
