@@ -88,16 +88,25 @@ export class LinkAdapter implements LinkSyncAdapter {
     let sameRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
       return this.myCurrentRevision && revision.equals(this.myCurrentRevision);
     });
+    if (this.myCurrentRevision) {
+      sameRevisions.push(this.myCurrentRevision);
+    }
     //Get a copied array of revisions that are different than mine
     let differentRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
       return this.myCurrentRevision && !revision.equals(this.myCurrentRevision);
     });
 
-    if (sameRevisions.length <= differentRevisions.length) {
-      this.syncStateChangeCallback(PerspectiveState.LinkLanguageInstalledButNotSynced);
-    } else {
-      this.syncStateChangeCallback(PerspectiveState.Synced);
-    };
+    function checkSyncState(callback: SyncStateChangeObserver) {
+      if (sameRevisions.length > 0 || differentRevisions.length > 0) {
+        if (sameRevisions.length <= differentRevisions.length) {
+          callback(PerspectiveState.LinkLanguageInstalledButNotSynced);
+        } else {
+          callback(PerspectiveState.Synced);
+        };
+      }
+    }
+
+    checkSyncState(this.syncStateChangeCallback);
 
     revisions.forEach( async (hash) => {
       if(!hash) return
@@ -110,6 +119,9 @@ export class LinkAdapter implements LinkSyncAdapter {
         if (pullResult.current_revision && Buffer.isBuffer(pullResult.current_revision)) {
           let myRevision = pullResult.current_revision;
           this.myCurrentRevision = myRevision;
+
+          //TODO; also update same and different revision arrays again before making this call
+          checkSyncState(this.syncStateChangeCallback);
         }
       }
     })
