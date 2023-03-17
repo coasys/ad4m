@@ -12,6 +12,7 @@ export const LINK_UPDATED_TOPIC = 'link-updated-topic'
 export const SIGNAL = "signal"
 export const EXCEPTION_OCCURRED_TOPIC = "exception-occurred-topic"
 export const NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC = "neighbourhood-signal-received-topic"
+export const PERSPECTE_SYNC_STATE_CHANGE = "perspective-sync-state-change"
 
 const pubsub = new PubSub()
 

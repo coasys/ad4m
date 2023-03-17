@@ -72,6 +72,19 @@ export default class PerspectivesController {
                 console.warn(`Could not find perspective telepresence signal with lang: ${lang}`)
             }
         })
+
+        this.#context.languageController!.addSyncStateChangeObserver((state: PerspectiveState, lang: LanguageRef) => {
+            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
+            if (perspective) {
+                console.log("PerspectiveController: received sync state change signal...");
+                this.pubsub.publish(PubSub.PERSPECTE_SYNC_STATE_CHANGE, {
+                    state: state,
+                    perspective: perspective.plain()
+                })
+            } else {
+                console.warn(`Could not find perspective sync state change signal with lang: ${lang}`)
+            }
+        })
     }
 
     private save() {
