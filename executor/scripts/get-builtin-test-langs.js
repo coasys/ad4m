@@ -14,7 +14,7 @@ const languages = {
     bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.2/bundle.js",
   },
   "perspective-diff-sync": {
-    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/v0.3.4/bundle.js",
+    bundle: "../bootstrap-languages/perspective-diff-sync/build/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
@@ -38,7 +38,7 @@ async function main() {
       let url = languages[lang].bundle;
       let dest = dir + "/build/bundle.js";
       if (url.slice(0, 8) != "https://" && url.slice(0, 7) != "http://") {
-        fs.copyFileSync(url, dest);
+        fs.copyFileSync(path.join(process.cwd(), url), dest);
       } else {
         wget({ url, dest });
       }
