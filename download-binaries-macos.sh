@@ -7,8 +7,9 @@ if [ ! -f "./executor/temp/binary/hc" ]; then
     mv hc-darwin-0.1.0 ./executor/temp/binary/hc
     chmod +x ./executor/temp/binary/hc
 
-    if [ ! -f "/bin/hc" ]; then
-        cp ./executor/temp/binary/hc /bin/hc
+    if [ ! -f "/usr/local/bin/hc" ]; then
+        echo "Copying hc to /usr/local/bin"
+        cp ./executor/temp/binary/hc /usr/local/bin/hc
     fi
 fi
 
@@ -17,8 +18,9 @@ if [ ! -f "./executor/temp/binary/holochain" ]; then
     mv holochain-darwin-0.1.0 ./executor/temp/binary/holochain
     chmod +x ./executor/temp/binary/holochain
 
-    if [ ! -f "/bin/holochain" ]; then
-        cp ./executor/temp/binary/holochain /bin/holochain
+    if [ ! -f "/usr/local/bin/holochain" ]; then
+        echo "Copying holochain to /usr/local/bin"
+        cp ./executor/temp/binary/holochain /usr/local/bin/holochain
     fi
 fi
 
