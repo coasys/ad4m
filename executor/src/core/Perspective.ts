@@ -136,7 +136,7 @@ export default class Perspective {
         }, intervalMs);
     }
 
-    async setupSyncSingals(intervalMs: number) {
+    async setupSyncSignals(intervalMs: number) {
         return setInterval(async () => {
             try {
                 await this.callLinksAdapter("sync");
