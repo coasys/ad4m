@@ -1,4 +1,7 @@
 choco install wget --no-progress
+choco install swi-prolog
+
+$env:path += ";C:\Program Files\swipl\bin"
         
 mkdir executor/temp/binary
 

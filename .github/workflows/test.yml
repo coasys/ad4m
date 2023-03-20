@@ -85,7 +85,4 @@ jobs:
         run: yarn install
 
       - name: Run the tests
-        run: |
-          choco install swi-prolog
-          $env:path += ";C:\Program Files\swipl\bin"
-          yarn run test:windows
+        run: yarn run test:windows
