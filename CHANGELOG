@@ -9,6 +9,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Changed
 
+- Launcher automatically authenticates with the proxy on login. [PR#303](https://github.com/perspect3vism/ad4m/pull/303)
+ 
 ### Deprecated
 
 ### Removed
