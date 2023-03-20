@@ -38,6 +38,7 @@ async function main() {
       let url = languages[lang].bundle;
       let dest = dir + "/build/bundle.js";
       if (url.slice(0, 8) != "https://" && url.slice(0, 7) != "http://") {
+        if (os.platform() == "win32") url = url.replace(/\//g, "\\");
         fs.copyFileSync(path.join(process.cwd(), url), dest);
       } else {
         wget({ url, dest });
