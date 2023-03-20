@@ -27,8 +27,4 @@ if [ ! -f "./executor/temp/swipl/bin/swipl" ]; then
     unzip swipl-darwin-x86.zip -d ./temp
     rm -rf ./executor/temp/__MACOSX
     rm -rf swipl-linux-x64.zip
-
-    if [ ! -f "/bin/swipl" ]; then
-        cp ./executor/temp/swipl/bin/swipl /bin/swipl
-    fi
 fi

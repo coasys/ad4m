@@ -20,4 +20,3 @@ if (-not (Test-Path $global_path -PathType Container)) {
 
 Copy-Item ./executor/temp/binary/hc.exe $global_path
 Copy-Item ./executor/temp/binary/holochain.exe $global_path
-Copy-Item ./executor/temp/binary/swipl.exe $global_path
