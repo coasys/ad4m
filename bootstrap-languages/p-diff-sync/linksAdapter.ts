@@ -89,15 +89,15 @@ export class LinkAdapter implements LinkSyncAdapter {
     //Get a copied array of revisions that are different than mine
     let differentRevisions;
 
-    function generateRevisionStates(myRevision: Buffer) {
+    function generateRevisionStates(myCurrentRevision: Buffer) {
       sameRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
-        return this.myCurrentRevision && revision.equals(this.myCurrentRevision);
+        return myCurrentRevision && revision.equals(myCurrentRevision);
       });
-      if (this.myCurrentRevision) {
-        sameRevisions.push(this.myCurrentRevision);
+      if (myCurrentRevision) {
+        sameRevisions.push(myCurrentRevision);
       };
       differentRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
-        return this.myCurrentRevision && !revision.equals(this.myCurrentRevision);
+        return myCurrentRevision && !revision.equals(myCurrentRevision);
       });
     }
 
