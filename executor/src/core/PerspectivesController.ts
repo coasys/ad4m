@@ -36,24 +36,34 @@ export default class PerspectivesController {
             })
         }
 
-        this.#context.languageController!.addLinkObserver((diff: PerspectiveDiff, lang: LanguageRef) => {
+        this.#context.languageController!.addLinkObserver(async (diff: PerspectiveDiff, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
                 console.log("PerspectiveController: received signal from linkObserver, adding remote links from a language to a local perspective...");
                 perspective.populateLocalLinks(diff.additions, diff.removals);
 
-                for (const link of diff.additions) {
-                    this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-                        perspective: perspective.plain(),
-                        link: link
-                    })
-                }
+                try {
+                    let perspectivePlain = perspective.plain();
+                    for (const link of diff.additions) {
+                        await this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+                            perspective: perspectivePlain,
+                            link: link
+                        })
+                    }
 
-                for (const linkRemoved of diff.removals) {
-                    this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
-                        perspective: perspective.plain(),
-                        link: linkRemoved
-                    })
+                    console.log("PerspectiveController: published link additions");
+
+                    for (const linkRemoved of diff.removals) {
+                        console.log("publishing removal:", linkRemoved)
+                        await this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+                            perspective: perspectivePlain,
+                            link: linkRemoved
+                        })
+                    }
+
+                    console.log("PerspectiveController: published link removals");
+                } catch (e) {
+                    console.error("PerspectiveController: error publishing link additions/removals", e);
                 }
             } else {
                 console.warn(`Could not find perspective for added link with lang: ${lang}`)

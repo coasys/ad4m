@@ -1012,14 +1012,14 @@ export default class LanguageController {
                 const langIsImmutable = await this.isImmutableExpression(ref);
                 if (langIsImmutable) {
                     console.log("Calling cache for expression...");
-                    const cachedExpression = this.#db.getExpression(ref.expression);
+                    const cachedExpression = await this.#db.getExpression(ref.expression);
                     if (cachedExpression) {
                         console.log("Cache hit...");
-                        expr = JSON.parse(cachedExpression) as Expression
+                        expr = cachedExpression;
                     } else {
                         console.log("Cache miss...");
                         expr = await lang.expressionAdapter.get(ref.expression);
-                        if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
+                        if (expr) { await this.#db.addExpression(ref.expression, expr) };
                     };
                 } else {
                     expr = await lang.expressionAdapter.get(ref.expression);

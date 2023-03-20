@@ -8,6 +8,10 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Added
 
 ### Changed
+ - Changed core database engine and refactored index & interface structure [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
+ - Pubsub link addition/removal publishing will now await correctly [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
+ - Use consistent apollo & ws versions [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
+ - Use new holochain client version 0.12.5 [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
 
 ### Deprecated
 
