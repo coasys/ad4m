@@ -4,7 +4,7 @@
   "description": "An AD4M language for syncing mutations to a share perspective",
   "main": "index.js",
   "scripts": {
-    "build-dna": "cd hc-dna && nix-shell --command ./build.sh && cd ..",
+    "build-dna": "cd hc-dna && ./build.sh && cd ..",
     "build": "npm run build-dna && tsc && rollup -c",
     "build:windows": "cd hc-dna && ./build.sh && cd .. && tsc && rollup -c",
     "build-lang": "tsc && rollup -c",
