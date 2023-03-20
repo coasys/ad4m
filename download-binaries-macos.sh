@@ -8,7 +8,7 @@ if [ ! -f "./executor/temp/binary/hc" ]; then
     chmod +x ./executor/temp/binary/hc
 
     if [ ! -f "/bin/hc" ]; then
-        sudo ln -s ./executor/temp/binary/hc /bin/hc
+        cp ./executor/temp/binary/hc /bin/hc
     fi
 fi
 
@@ -18,7 +18,7 @@ if [ ! -f "./executor/temp/binary/holochain" ]; then
     chmod +x ./executor/temp/binary/holochain
 
     if [ ! -f "/bin/holochain" ]; then
-        sudo ln -s ./executor/temp/binary/holochain /bin/holochain
+        cp ./executor/temp/binary/holochain /bin/holochain
     fi
 fi
 
@@ -29,6 +29,6 @@ if [ ! -f "./executor/temp/swipl/bin/swipl" ]; then
     rm -rf swipl-linux-x64.zip
 
     if [ ! -f "/bin/swipl" ]; then
-        sudo ln -s ./executor/temp/swipl/bin/swipl /bin/swipl
+        cp ./executor/temp/swipl/bin/swipl /bin/swipl
     fi
 fi
