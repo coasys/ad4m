@@ -1109,6 +1109,11 @@ export async function startServer(params: StartServerParams) {
         path: server.graphqlPath,
     });
 
+    wsServer.on('error', (err) => {
+        console.error("WsServer got error: ", err);
+        wsServer.clients.clear();
+    });
+
     serverCleanup = useServer({
         schema,
         context: async (context, msg, args) => {

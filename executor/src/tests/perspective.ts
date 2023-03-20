@@ -2,6 +2,7 @@ import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, PerspectiveState } from 
 import { TestContext } from './integration.test'
 import { expect } from "chai";
 import * as sinon from "sinon";
+import sleep from "./sleep";
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -109,9 +110,13 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(create.name).to.equal("test-links-time");
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
+                await sleep(10);
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
+                await sleep(10);
                 let addLink3 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
+                await sleep(10);
                 let addLink4 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
+                await sleep(10);
                 let addLink5 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
 
                 // Get all the links
