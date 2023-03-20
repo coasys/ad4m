@@ -28,6 +28,10 @@
       "dependsOn": ["build-libs", "build-languages"],
       "outputs": []
     },
+    "test:windows": {
+      "dependsOn": ["build-libs", "build-languages"],
+      "outputs": []
+    },
 
     "ad4m-host#package-linux": {
       "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
