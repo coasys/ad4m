@@ -23,11 +23,11 @@
       "cache": false
     },
     "test": {
-      "dependsOn": ["build"],
+      "dependsOn": ["build", "build-languages"],
       "outputs": []
     },
     "test:windows": {
-      "dependsOn": ["build"],
+      "dependsOn": ["build", "build-languages"],
       "outputs": []
     },
 

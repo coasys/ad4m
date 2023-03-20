@@ -2,6 +2,7 @@ import fs from "fs-extra";
 import wget from "node-wget-js";
 import unzipper from "unzipper";
 import path from "path";
+import os from "os";
 
 const languages = {
   "agent-expression-store": {
