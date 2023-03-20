@@ -13,6 +13,10 @@
       "dependsOn": ["@perspect3vism/perspective-diff-sync#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
+    "build-languages-windows": {
+      "dependsOn": ["@perspect3vism/perspective-diff-sync#build:windows"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
     "lint": {
       "outputs": []
     },
@@ -23,11 +27,11 @@
       "cache": false
     },
     "test": {
-      "dependsOn": ["build", "build-languages"],
+      "dependsOn": ["build-libs", "build-languages"],
       "outputs": []
     },
     "test:windows": {
-      "dependsOn": ["build", "build-languages"],
+      "dependsOn": ["build-libs", "build-languages-windows"],
       "outputs": []
     },
 

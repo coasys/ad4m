@@ -85,16 +85,21 @@ export class LinkAdapter implements LinkSyncAdapter {
 
     //Do checking on incoming gossip revisions and see if we have the same hash as the majority of the peers
     //Get a copied array of revisions that are the same as mine
-    let sameRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
-      return this.myCurrentRevision && revision.equals(this.myCurrentRevision);
-    });
-    if (this.myCurrentRevision) {
-      sameRevisions.push(this.myCurrentRevision);
-    }
+    let sameRevisions;
     //Get a copied array of revisions that are different than mine
-    let differentRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
-      return this.myCurrentRevision && !revision.equals(this.myCurrentRevision);
-    });
+    let differentRevisions;
+
+    function generateRevisionStates(myRevision: Buffer) {
+      sameRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
+        return this.myCurrentRevision && revision.equals(this.myCurrentRevision);
+      });
+      if (this.myCurrentRevision) {
+        sameRevisions.push(this.myCurrentRevision);
+      };
+      differentRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
+        return this.myCurrentRevision && !revision.equals(this.myCurrentRevision);
+      });
+    }
 
     function checkSyncState(callback: SyncStateChangeObserver) {
       if (sameRevisions.length > 0 || differentRevisions.length > 0) {
@@ -105,6 +110,8 @@ export class LinkAdapter implements LinkSyncAdapter {
         };
       }
     }
+
+    generateRevisionStates(this.myCurrentRevision);
 
     checkSyncState(this.syncStateChangeCallback);
 
@@ -120,7 +127,7 @@ export class LinkAdapter implements LinkSyncAdapter {
           let myRevision = pullResult.current_revision;
           this.myCurrentRevision = myRevision;
 
-          //TODO; also update same and different revision arrays again before making this call
+          generateRevisionStates(this.myCurrentRevision);
           checkSyncState(this.syncStateChangeCallback);
         }
       }

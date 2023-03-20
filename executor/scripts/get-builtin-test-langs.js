@@ -15,7 +15,7 @@ const languages = {
     bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.2/bundle.js",
   },
   "perspective-diff-sync": {
-    bundle: "../bootstrap-languages/perspective-diff-sync/build/bundle.js",
+    bundle: "../bootstrap-languages/p-diff-sync/build/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
