@@ -37,7 +37,7 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
-    - run: cd bootstrap-languages/p-dff-sync/hc-dna && cargo test -- --test-threads=1
+    - run: cd bootstrap-languages/p-diff-sync/hc-dna && cargo test -- --test-threads=1
 
   pull:
     name: Perspective Diff Sync Pull
@@ -74,7 +74,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
-    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-pull
+    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-pull
 
   render:
     name: Perspective Diff Sync Render
@@ -111,7 +111,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
-    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-render
+    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-render
 
   revisions:
     name: Perspective Diff Sync Revisions
@@ -148,7 +148,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
-    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-revisions
+    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-revisions
 
   signals:
     name: Perspective Diff Sync Signals
@@ -185,7 +185,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
-    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-signals
+    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-signals
 
 
   stress:
@@ -223,7 +223,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
-    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-stress
+    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-stress
 
   telepresence:
     name: Perspective Diff Sync Telepresence
@@ -260,7 +260,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
-    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-telepresence
+    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-telepresence
 
   integration:
     name: Perspective Diff Sync Integration Test
@@ -297,4 +297,4 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
-    - run: cd bootstrap-languages/p-dff-sync && yarn run test
+    - run: cd bootstrap-languages/p-diff-sync && yarn run test
