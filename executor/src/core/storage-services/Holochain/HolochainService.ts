@@ -292,6 +292,9 @@ export default class HolochainService {
             // 1. install app
             try {
                 console.debug("HolochainService: Installing DNAs for language", lang);
+                const existingDnas = await this.#adminWebsocket!.listDnas();
+                console.log("Got existing dnas", existingDnas, "installing new dnas", dnas);
+                //const existingDnaHashes = existingDnas.filter(dna => dnas.contains());
                 const roles = dnas.map(dna => {
                     const p = path.join(this.#dataPath, `${lang}-${dna.nick}.dna`);
                     fs.writeFileSync(p, dna.file);
@@ -336,7 +339,7 @@ export default class HolochainService {
         } 
 
         if (languageApp) {
-            if ("running" in languageApp.status) {
+            if ("running" ! in languageApp.status) {
                 const activateResult = await this.#adminWebsocket!.enableApp({installed_app_id: lang});
                 //console.warn("HolochainService: Activated app:", lang, "with result:", activateResult);
             }

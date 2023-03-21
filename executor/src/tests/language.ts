@@ -12,6 +12,25 @@ const __dirname = path.dirname(__filename);
 
 export default function languageTests(testContext: TestContext) {
     return () => {
+        describe('general install checks', () => {
+            it('can install languages with same DNA', async () => {
+                const ad4mClient = testContext.ad4mClient;
+                const agentLanguagePath = path.join(__dirname, "../tst-tmp/languages/agent-language/build/bundle.js");
+
+                //Test publishing a language with the same DNA & hash as an existing language
+                const agentLanguagePublish = await ad4mClient.languages.publish(agentLanguagePath, new LanguageMetaInput("Newly published agent-language", "..here for you template"));
+                console.log("agentLanguage install", agentLanguagePublish);
+
+                //Test publishing a language with the same DNA but differing language hash
+                const agentLanguageData = fs.readFileSync(agentLanguagePath).toString();
+                const agentLanguageData2 = agentLanguageData + "\n";
+                fs.writeFileSync(agentLanguagePath, agentLanguageData2);
+
+                const agentLanguagePublish2 = await ad4mClient.languages.publish(agentLanguagePath, new LanguageMetaInput("Newly published agent-language", "..here for you template"));
+                console.log("agentLanguage install", agentLanguagePublish2);
+            })
+        })
+
         describe('with a perspective-diff-sync templated by Alice', () => {
             let ad4mClient: Ad4mClient
             let bobAd4mClient: Ad4mClient
