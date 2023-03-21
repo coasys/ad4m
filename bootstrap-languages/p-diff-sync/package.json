@@ -11,7 +11,7 @@
     "build:windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && tsc && rollup -c",
     "build-lang": "tsc && rollup -c",
     "dev": "tsc && rollup -c -w",
-    "integration-test": "../../test-runner/bin/ad4m-test --test ./integration-test.js --bundle \"./build/bundle.js\" --meta '{\"name\":\"p-diff-sync\",\"description\":\"Holochain based language for sharing Perspectives\",\"sourceCodeLink\":\"https://github.com/perspect3vism/perspective-diff-sync\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'"
+    "integration-test": "node ../../test-runner/build/cli.js --test ./integration-test.js --bundle \"./build/bundle.js\" --meta '{\"name\":\"p-diff-sync\",\"description\":\"Holochain based language for sharing Perspectives\",\"sourceCodeLink\":\"https://github.com/perspect3vism/perspective-diff-sync\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'"
   },
   "author": "",
   "license": "ISC",
