@@ -304,4 +304,4 @@ jobs:
     - run: yarn install
     - run: yarn run build-languages
     - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
-    - run: cd bootstrap-languages/p-diff-sync && yarn run test
+    - run: cd bootstrap-languages/p-diff-sync && yarn test
