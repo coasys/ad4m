@@ -74,6 +74,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
+    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-pull
 
   render:
@@ -111,6 +112,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
+    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-render
 
   revisions:
@@ -148,6 +150,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
+    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-revisions
 
   signals:
@@ -185,6 +188,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
+    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-signals
 
 
@@ -223,6 +227,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
+    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-stress
 
   telepresence:
@@ -260,6 +265,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
+    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-telepresence
 
   integration:
@@ -297,4 +303,5 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: yarn run build-languages
+    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync && yarn run test
