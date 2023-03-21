@@ -11,7 +11,7 @@ on:
 
 jobs:
   unit:
-    name: Rust Unit Tests
+    name: Perspective Diff Sync Rust Unit Tests
 
     strategy:
       matrix:
@@ -37,10 +37,10 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
-    - run: cd hc-dna && cargo test -- --test-threads=1
+    - run: cd bootstrap-languages/p-dff-sync/hc-dna && cargo test -- --test-threads=1
 
   pull:
-    name: Pull
+    name: Perspective Diff Sync Pull
 
     strategy:
       matrix:
@@ -72,13 +72,12 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
-    - run: npm install -g npm
-    - run: cd hc-dna/zomes/tests && ./download-hc-binaries.sh
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
-    - run: cd hc-dna/zomes/tests && npm i && npm run build-ci && npm run test-pull
+    - run: yarn install
+    - run: yarn run build-languages
+    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-pull
 
   render:
-    name: Render
+    name: Perspective Diff Sync Render
 
     strategy:
       matrix:
@@ -110,13 +109,12 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
-    - run: npm install -g npm
-    - run: cd hc-dna/zomes/tests && ./download-hc-binaries.sh
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
-    - run: cd hc-dna/zomes/tests && npm i && npm run build-ci && npm run test-render
+    - run: yarn install
+    - run: yarn run build-languages
+    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-render
 
   revisions:
-    name: Revisions
+    name: Perspective Diff Sync Revisions
 
     strategy:
       matrix:
@@ -148,13 +146,12 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
-    - run: npm install -g npm
-    - run: cd hc-dna/zomes/tests && ./download-hc-binaries.sh
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
-    - run: npm install -g npm && cd hc-dna/zomes/tests && npm i && npm run build-ci && npm run test-revisions
+    - run: yarn install
+    - run: yarn run build-languages
+    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-revisions
 
   signals:
-    name: Signals
+    name: Perspective Diff Sync Signals
 
     strategy:
       matrix:
@@ -186,14 +183,13 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
-    - run: npm install -g npm
-    - run: cd hc-dna/zomes/tests && ./download-hc-binaries.sh
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
-    - run: npm install -g npm && cd hc-dna/zomes/tests && npm i && npm run build-ci && npm run test-signals
+    - run: yarn install
+    - run: yarn run build-languages
+    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-signals
 
 
   stress:
-    name: Stress
+    name: Perspective Diff Sync Stress
 
     strategy:
       matrix:
@@ -225,13 +221,12 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
-    - run: npm install -g npm
-    - run: cd hc-dna/zomes/tests && ./download-hc-binaries.sh
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
-    - run: npm install -g npm && cd hc-dna/zomes/tests && npm i && npm run build-ci && npm run test-stress
+    - run: yarn install
+    - run: yarn run build-languages
+    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-stress
 
   telepresence:
-    name: Telepresence
+    name: Perspective Diff Sync Telepresence
 
     strategy:
       matrix:
@@ -263,13 +258,12 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
-    - run: npm install -g npm
-    - run: cd hc-dna/zomes/tests && ./download-hc-binaries.sh
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
-    - run: npm install -g npm && cd hc-dna/zomes/tests && npm i && npm run build-ci && npm run test-telepresence
+    - run: yarn install
+    - run: yarn run build-languages
+    - run: cd bootstrap-languages/p-dff-sync/hc-dna/zomes/tests && yarn install && yarn run test-telepresence
 
   integration:
-    name: Integration Test
+    name: Perspective Diff Sync Integration Test
     
     strategy:
       matrix:
@@ -301,7 +295,6 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
-    - run: npm install -g npm
-    - run: ./hc-dna/zomes/tests/download-hc-binaries.sh && mv ./hc /usr/local/bin
-    - run: npm install && cd hc-dna && ./build.sh
-    - run: npm run build-lang && npm test
+    - run: yarn install
+    - run: yarn run build-languages
+    - run: cd bootstrap-languages/p-dff-sync && yarn run test
