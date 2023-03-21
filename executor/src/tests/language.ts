@@ -15,11 +15,12 @@ export default function languageTests(testContext: TestContext) {
         describe('general install checks', () => {
             it('can install languages with same DNA', async () => {
                 const ad4mClient = testContext.ad4mClient;
-                const agentLanguagePath = path.join(__dirname, "../tst-tmp/languages/agent-language/build/bundle.js");
+                const agentLanguagePath = path.join(__dirname, "../tst-tmp/languages/agent-expression-store/build/bundle.js");
 
                 //Test publishing a language with the same DNA & hash as an existing language
                 const agentLanguagePublish = await ad4mClient.languages.publish(agentLanguagePath, new LanguageMetaInput("Newly published agent-language", "..here for you template"));
-                console.log("agentLanguage install", agentLanguagePublish);
+                const sameLanguageInstall = await ad4mClient.languages.byAddress(agentLanguagePublish.address);
+                expect(sameLanguageInstall.name).to.be.equal("agent-expression-store");
 
                 //Test publishing a language with the same DNA but differing language hash
                 const agentLanguageData = fs.readFileSync(agentLanguagePath).toString();
@@ -27,7 +28,8 @@ export default function languageTests(testContext: TestContext) {
                 fs.writeFileSync(agentLanguagePath, agentLanguageData2);
 
                 const agentLanguagePublish2 = await ad4mClient.languages.publish(agentLanguagePath, new LanguageMetaInput("Newly published agent-language", "..here for you template"));
-                console.log("agentLanguage install", agentLanguagePublish2);
+                const sameLanguageInstall2 = await ad4mClient.languages.byAddress(agentLanguagePublish2.address);
+                expect(sameLanguageInstall2.name).to.be.equal("Newly published agent-language");
             })
         })
 
