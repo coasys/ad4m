@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "zomes/agent_store",
+  "zomes/agent_store_integrity"
+]
+
+[profile.dev]
+opt-level = "z"
+
+[profile.release]
+opt-level = "z"
