@@ -1,20 +1,18 @@
 {
-  "name": "@perspect3vism/perspective-language",
-  "version": "0.3.2",
-  "description": "An AD4M Language for perspective snapshot expressions stored on IPFS",
+  "name": "@perspect3vism/neighbourhood-language",
+  "version": "0.0.1",
+  "description": "This is a Language for storing AD4M neighbourhood objects",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build-icons": "rollup -c rollup.config.icons.js",
-    "build": "npm run build-icons && tsc && rollup -c",
-    "dev": "tsc && rollup -c rollup.config.icons.js && rollup -c -w"
+    "build": "tsc && rollup -c",
+    "dev": "tsc && rollup -c -w"
   },
-  "author": "",
+  "author": "joshuadparkin@gmail.com",
   "license": "ISC",
   "devDependencies": {
     "@perspect3vism/ad4m": "*",
     "@rollup/plugin-commonjs": "^14.0.0",
-    "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^8.0.0",
     "@rollup/plugin-typescript": "^4.0.0",
     "@tsconfig/svelte": "^1.0.0",
@@ -28,7 +26,10 @@
     "svelte-check": "^1.0.0",
     "svelte-preprocess": "^4.0.0",
     "tslib": "^2.0.0",
-    "typescript": "^4.5.5",
-    "uint8arrays": "^3.0.0"
+    "typescript": "^4.5.5"
+  },
+  "dependencies": {
+    "@types/node": "^14.14.37",
+    "axios": "^0.26.1"
   }
 }

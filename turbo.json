@@ -12,7 +12,7 @@
     "build-languages": {
       "dependsOn": ["@perspect3vism/perspective-diff-sync#build", "@perspect3vism/agent-language#build", 
         "@perspect3vism/direct-message-language#build", "@perspect3vism/perspective-language#build", 
-        "@perspect3vism/language-language#build"],
+        "@perspect3vism/language-language#build", "@perspect3vism/neighbourhood-language#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
