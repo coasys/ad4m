@@ -116,7 +116,8 @@ export function subjectFlag(opts: FlagOptions) {
 }
 
 interface WhereOptions {
-    isInstance: any
+    isInstance?: any
+    condition?: string
 }
 interface CollectionOptions {
     through: string,
@@ -232,16 +233,29 @@ export function SDNAClass(opts: SDNAClassOptions) {
     
                 if(through) {
                     if(where) {
-                        if(!where.isInstance) {
-                            throw "'where' currently only supports 'isInstance'"
+                        if(!where.isInstance && !where.condition) {
+                            throw "'where' needs one of 'isInstance' or 'condition'"
                         }
-                        let otherClass
-                        if(where.isInstance.name) {
-                            otherClass = where.isInstance.name
-                        } else {
-                            otherClass = where.isInstance
+
+                        let conditions = []
+
+                        if(where.isInstance) {
+                            let otherClass
+                            if(where.isInstance.name) {
+                                otherClass = where.isInstance.name
+                            } else {
+                                otherClass = where.isInstance
+                            }
+                            conditions.push(`instance(OtherClass, Target), subject_class("${otherClass}", OtherClass)`)
+                        } 
+                        
+                        if(where.condition) {
+                            conditions.push(where.condition)
                         }
-                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(C, (triple(Base, "${through}", C), instance(OtherClass, C), subject_class("${otherClass}", OtherClass)), List).\n`    
+
+                        const conditionString = conditions.join(", ")
+
+                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
                     } else {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }
