@@ -6,6 +6,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+ - bootstrap languages to mono repo [PR#328](https://github.com/perspect3vism/ad4m/pull/328)
 
 ### Changed
  - Changed core database engine and refactored index & interface structure [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
