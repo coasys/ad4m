@@ -388,6 +388,13 @@ describe("Integration", () => {
                     where: { isInstance: Message }
                 })
                 messages: string[] = []
+
+                //@ts-ignore
+                @subjectCollection({
+                    through: "flux://entry_type",
+                    where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
+                })
+                likedMessages: string[] = []
             }
 
             it("should generate correct SDNA from a JS class", async () => {
@@ -484,6 +491,27 @@ describe("Integration", () => {
 
                 expect(await perspective!.getSdna()).to.have.lengthOf(2)
                 //console.log((await perspective!.getSdna())[1])
+            })
+
+            it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                let root = Literal.from("Collection where test with prolog condition").toUrl()
+                let todo = await perspective!.createSubject(new Todo(), root)
+
+                let messageEntry = Literal.from("test message").toUrl()
+
+                // @ts-ignore
+                await todo.addEntries(messageEntry)
+
+                let entries = await todo.entries
+                expect(entries.length).to.equal(1)
+
+                let messageEntries = await todo.messages
+                expect(messageEntries.length).to.equal(0)
+
+                await perspective?.add(new Link({source: messageEntry, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
+
+                messageEntries = await todo.messages
+                expect(messageEntries.length).to.equal(1)
             })
 
             describe("with Message subject class registered", () => {
