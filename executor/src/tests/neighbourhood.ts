@@ -118,16 +118,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 await bobP1!.addSyncStateChangeListener(bobSyncChangeHandler);
 
-                //await sleep(100);
-
                 //These next assertions are flaky since they depend on holochain not syncing right away, which most of the time is the case
-                //expect(aliceSyncChangeCalls).to.be.equal(1);
-                //expect(aliceSyncChangeData).to.be.equal(PerspectiveState.LinkLanguageInstalledButNotSynced);
 
                 let bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                 let tries = 1
 
-                while(bobLinks.length < 1 && tries < 20) {
+                while(bobLinks.length < 1 && tries < 50) {
                     await sleep(1000)
                     bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
