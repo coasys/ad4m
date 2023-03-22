@@ -10,3 +10,4 @@ build/*
 *.js.map
 !*.config.icons.js
 !*.config.js
+!dna.js

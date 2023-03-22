@@ -10,7 +10,7 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-languages": {
-      "dependsOn": ["@perspect3vism/perspective-diff-sync#build"],
+      "dependsOn": ["@perspect3vism/perspective-diff-sync#build", "@perspect3vism/agent-language#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
