@@ -454,7 +454,7 @@ describe("Integration", () => {
                 todos = await Todo.all(perspective!)
                 let todo = todos[0]
                 //@ts-ignore
-                perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
+                await perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
                 
                 todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(1)
@@ -505,12 +505,12 @@ describe("Integration", () => {
                 let entries = await todo.entries
                 expect(entries.length).to.equal(1)
 
-                let messageEntries = await todo.messages
+                let messageEntries = await todo.likedMessages
                 expect(messageEntries.length).to.equal(0)
 
                 await perspective?.add(new Link({source: messageEntry, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
 
-                messageEntries = await todo.messages
+                messageEntries = await todo.likedMessages
                 expect(messageEntries.length).to.equal(1)
             })
 

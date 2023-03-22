@@ -23,6 +23,11 @@ collection_adder(c, "entriess", '[{action: "addLink", source: "this", predicate:
 collection_setter(c, "entriess", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
 
 collection(c, "messages").
-collection_getter(c, Base, "messages", List) :- setof(C, (triple(Base, "flux://entry_type", C), instance(OtherClass, C), subject_class("Message", OtherClass)), List).
+collection_getter(c, Base, "messages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), instance(OtherClass, Target), subject_class("Message", OtherClass)), List).
 collection_adder(c, "messagess", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
 collection_setter(c, "messagess", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
+
+collection(c, "likedMessages").
+collection_getter(c, Base, "likedMessages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), triple(Target, "flux://has_reaction", "flux://thumbsup")), List).
+collection_adder(c, "likedMessagess", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_setter(c, "likedMessagess", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
