@@ -6,6 +6,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+ - Subject class decorator @subjectCollection got new parameter "condition" on where option which allows for adding verbatim Prolog conditions to collections, filtering the entries in that collection. [PR#329](https://github.com/perspect3vism/ad4m/pull/329)
 
 ### Changed
  - Changed core database engine and refactored index & interface structure [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
