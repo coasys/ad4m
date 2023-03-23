@@ -6,6 +6,14 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+### Changed
+### Deprecated
+### Removed
+### Fixed
+
+## [0.3.2] - 23/03/2020
+
+### Added
  - Subject class decorators got new parameters "getter" & "setter" on @subjectProperty and "condition" on @subjectCollection which allow for adding verbatim Prolog conditions to the auto-generated Prolog SDNA code. This allows for computed properties like "isPopular" which checks for certain links/reactions being there and for collections to be filtered or otherwise computed. [PR#329](https://github.com/perspect3vism/ad4m/pull/329)
  - New callback method on PerspectiveProxy for registering callback when sync state for a given Perspective changes [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
  - New method on LinkAdapter interface for reporting sync state of a given link language [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
