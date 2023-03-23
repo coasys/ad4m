@@ -164,7 +164,7 @@ describe("Integration", () => {
 
             it("should work with a property that is not set initially and that auto-resolves", async () => {
                 //@ts-ignore
-                expect(await subject.title).to.be.undefined
+                expect(await subject.title).to.be.false
         
                 let title = "test title"
                 //@ts-ignore
@@ -373,6 +373,11 @@ describe("Integration", () => {
                 })
                 title: string = ""
 
+                @subjectProperty({
+                    getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
+                })
+                isLiked: boolean = false
+
                 //@ts-ignore
                 @subjectCollection({ through: "todo://comment" })
                 // @ts-ignore
@@ -463,7 +468,7 @@ describe("Integration", () => {
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
                 let todo = todos[0]
-                expect(await todo.title).to.equal(undefined)
+                expect(await todo.title).to.equal(false)
 
                 // @ts-ignore
                 await todo.setTitle("new title")
@@ -512,6 +517,21 @@ describe("Integration", () => {
 
                 messageEntries = await todo.likedMessages
                 expect(messageEntries.length).to.equal(1)
+            })
+
+            it("can use properties with custom getter prolog code", async () => {
+                let root = Literal.from("Custom getter test").toUrl()
+                let todo = await perspective!.createSubject(new Todo(), root)
+
+                // @ts-ignore
+                const liked1 = await todo.isLiked
+                expect(liked1).to.be.false
+
+                await perspective?.add(new Link({source: root, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
+
+                // @ts-ignore
+                const liked2 = await todo.isLiked
+                expect(liked2).to.be.true
             })
 
             describe("with Message subject class registered", () => {

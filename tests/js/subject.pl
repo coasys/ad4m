@@ -12,6 +12,9 @@ property_resolve_language(c, "title", "literal").
 property_getter(c, Base, "title", Value) :- triple(Base, "todo://has_title", Value).
 property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "todo://has_title", target: "value"}]').
 
+property(c, "isLiked").
+property_getter(c, Base, "isLiked", Value) :- triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true.
+
 collection(c, "comments").
 collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
 collection_adder(c, "commentss", '[{action: "addLink", source: "this", predicate: "todo://comment", target: "value"}]').

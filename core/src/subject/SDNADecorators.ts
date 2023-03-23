@@ -71,11 +71,13 @@ export function instanceQuery(options?: InstanceQueryParams) {
 
 
 interface PropertyOptions {
-    through: string;
+    through?: string;
     initial?: string,
     required?: boolean,
     writable?: boolean,
     resolveLanguage?: string;
+    getter?: string;
+    setter?: string;
 }
 export function subjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
@@ -180,14 +182,16 @@ export function SDNAClass(opts: SDNAClassOptions) {
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
     
-                let { through, initial, required, resolveLanguage, writable, flag } = properties[property]
+                let { through, initial, required, resolveLanguage, writable, flag, getter, setter } = properties[property]
     
                 if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
                     propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
                 }
                 
-                if(through) {
+                if(getter) {
+                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- ${getter}.\n`
+                } else if(through) {
                     propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
     
                     if(required) {
@@ -199,7 +203,9 @@ export function SDNAClass(opts: SDNAClassOptions) {
                     }    
                 }
                 
-                if (writable) {
+                if(setter) {
+                    propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${setter}.\n`
+                } else if (writable) {
                     let setter = obj[propertyNameToSetterName(property)]
                     if(typeof setter === "function") {
                         let action = [{
