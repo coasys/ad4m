@@ -87,4 +87,6 @@ export const handler = (argv: Arguments<Options>): void => {
         cleanAd4mData(dataPath, migratonInfo.shouldClearState);
         return;
     }
+
+    process.exit();
 };
