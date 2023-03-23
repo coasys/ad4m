@@ -6,7 +6,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
- - Subject class decorator @subjectCollection got new parameter "condition" on where option which allows for adding verbatim Prolog conditions to collections, filtering the entries in that collection. [PR#329](https://github.com/perspect3vism/ad4m/pull/329)
+ - Subject class decorators got new parameters "getter" & "setter" on @subjectProperty and "condition" on @subjectCollection which allow for adding verbatim Prolog conditions to the auto-generated Prolog SDNA code. This allows for computed properties like "isPopular" which checks for certain links/reactions being there and for collections to be filtered or otherwise computed. [PR#329](https://github.com/perspect3vism/ad4m/pull/329)
 
 ### Changed
  - Changed core database engine and refactored index & interface structure [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
