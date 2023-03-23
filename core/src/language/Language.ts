@@ -4,6 +4,7 @@ import type { Expression } from '../expression/Expression'
 import { Perspective, PerspectiveExpression } from '../perspectives/Perspective';
 import { PerspectiveDiff } from '../perspectives/PerspectiveDiff';
 import { InputType, Field, ObjectType } from "type-graphql";
+import { PerspectiveState } from '../perspectives/PerspectiveHandle';
 
 /** Interface of AD4M Languages
  * 
@@ -148,6 +149,7 @@ export interface GetAllAdapter {
 }
 
 export type PerspectiveDiffObserver = (diff: PerspectiveDiff)=>void;
+export type SyncStateChangeObserver = (state: PerspectiveState)=>void;
 
 /** Interface for "Link Languages" that facilitate the synchronization
  * between agents' local Perspectives inside a Neighbourhood.
@@ -182,6 +184,9 @@ export interface LinkSyncAdapter {
 
     /** Get push notification when a diff got published */
     addCallback(callback: PerspectiveDiffObserver);
+
+    /** Add a sync state callback method */
+    addSyncStateChangeCallback(callback: SyncStateChangeObserver);
 }
 
 export type MessageCallback = (message: PerspectiveExpression) => void;

@@ -216,12 +216,14 @@ describe("Integration", () => {
                 let c2 = Literal.from("new comment 2").toUrl()
 
                 //@ts-ignore
-                subject.addComments(c1)
+                await subject.addComments(c1)
+                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1])
 
                 //@ts-ignore
-                subject.addComments(c2)
+                await subject.addComments(c2)
+                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1, c2])
             })
@@ -638,3 +640,7 @@ describe("Integration", () => {
     })
 
 })
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -19,8 +19,8 @@
     "build": "tsc",
     "run": "node  --experimental-specifier-resolution=node lib/main.js",
     "prepare-test": "run-script-os",
-    "prepare-test:macos": "./scripts/build-test-language.sh && ./scripts/download-binaries-macos.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
-    "prepare-test:linux": "./scripts/build-test-language.sh && ./scripts/download-binaries-linux.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
+    "prepare-test:macos": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
+    "prepare-test:linux": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",

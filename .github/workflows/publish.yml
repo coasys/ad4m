@@ -54,6 +54,7 @@ jobs:
       with:
         override: true
         toolchain: 1.63.0
+    - run: rustup target add wasm32-unknown-unknown
 
     - name: install dependencies (ubuntu only)
       if: matrix.platform == 'ubuntu-latest'
@@ -230,6 +231,7 @@ jobs:
             ~/.cargo/git/db/
           key: ${{ runner.os }}-cargo
           restore-keys: ${{ runner.os }}-cargo
+      - run: rustup target add wasm32-unknown-unknown
       - run: cd core && yarn install && yarn build && cd ..
       - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}

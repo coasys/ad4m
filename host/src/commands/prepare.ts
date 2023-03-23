@@ -5,7 +5,8 @@
 import type { Arguments, Argv } from 'yargs';
 import path from 'path';
 import fs from 'fs-extra';
-import { getAd4mHostVersion, getOldestSupportedVersion } from '../utils/config';
+import { getAd4mHostVersion } from '../utils/config';
+import oldestSupportedVersion from '../../oldestSupportedVersion';
 import { ad4mDataDirectory } from '../ad4mDataDirectory';
 import semver from "semver";
 
@@ -80,11 +81,13 @@ export const handler = (argv: Arguments<Options>): void => {
 
     const lastSeenVersion = fs.readFileSync(lastSeenFile, { encoding: 'utf-8' });
     console.log("Current last seen version is", lastSeenVersion);
-    const migratonInfo = getOldestSupportedVersion();
+    const migratonInfo = oldestSupportedVersion();
     if (!semver.gte(lastSeenVersion, migratonInfo.version)) {
         // Agents old ad4m version is too old, lets clean their state
         console.log("Agents old ad4m version is too old, lets clean their state");
         cleanAd4mData(dataPath, migratonInfo.shouldClearState);
         return;
     }
+
+    process.exit();
 };

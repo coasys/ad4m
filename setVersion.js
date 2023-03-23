@@ -81,3 +81,8 @@ const testRunner = JSON.parse(fs.readFileSync('test-runner/package.json', 'utf8'
 console.log("Test runner version: " + testRunner.version + " -> " + VERSION)
 testRunner.version = VERSION
 fs.writeFileSync('test-runner/package.json', JSON.stringify(testRunner, null, 2) + '\n')
+
+const perspectiveDiffSync = JSON.parse(fs.readFileSync('bootstrap-languages/p-diff-sync/package.json', 'utf8'))
+console.log("Perspective diff sync: " + perspectiveDiffSync.version + " -> " + VERSION)
+perspectiveDiffSync.version = VERSION
+fs.writeFileSync('bootstrap-languages/p-diff-sync/package.json', JSON.stringify(perspectiveDiffSync, null, 2) + '\n')
