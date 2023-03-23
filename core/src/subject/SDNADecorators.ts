@@ -71,11 +71,13 @@ export function instanceQuery(options?: InstanceQueryParams) {
 
 
 interface PropertyOptions {
-    through: string;
+    through?: string;
     initial?: string,
     required?: boolean,
     writable?: boolean,
     resolveLanguage?: string;
+    getter?: string;
+    setter?: string;
 }
 export function subjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
@@ -116,7 +118,8 @@ export function subjectFlag(opts: FlagOptions) {
 }
 
 interface WhereOptions {
-    isInstance: any
+    isInstance?: any
+    condition?: string
 }
 interface CollectionOptions {
     through: string,
@@ -179,14 +182,16 @@ export function SDNAClass(opts: SDNAClassOptions) {
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
     
-                let { through, initial, required, resolveLanguage, writable, flag } = properties[property]
+                let { through, initial, required, resolveLanguage, writable, flag, getter, setter } = properties[property]
     
                 if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
                     propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
                 }
                 
-                if(through) {
+                if(getter) {
+                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- ${getter}.\n`
+                } else if(through) {
                     propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
     
                     if(required) {
@@ -198,7 +203,9 @@ export function SDNAClass(opts: SDNAClassOptions) {
                     }    
                 }
                 
-                if (writable) {
+                if(setter) {
+                    propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${setter}.\n`
+                } else if (writable) {
                     let setter = obj[propertyNameToSetterName(property)]
                     if(typeof setter === "function") {
                         let action = [{
@@ -232,16 +239,29 @@ export function SDNAClass(opts: SDNAClassOptions) {
     
                 if(through) {
                     if(where) {
-                        if(!where.isInstance) {
-                            throw "'where' currently only supports 'isInstance'"
+                        if(!where.isInstance && !where.condition) {
+                            throw "'where' needs one of 'isInstance' or 'condition'"
                         }
-                        let otherClass
-                        if(where.isInstance.name) {
-                            otherClass = where.isInstance.name
-                        } else {
-                            otherClass = where.isInstance
+
+                        let conditions = []
+
+                        if(where.isInstance) {
+                            let otherClass
+                            if(where.isInstance.name) {
+                                otherClass = where.isInstance.name
+                            } else {
+                                otherClass = where.isInstance
+                            }
+                            conditions.push(`instance(OtherClass, Target), subject_class("${otherClass}", OtherClass)`)
+                        } 
+                        
+                        if(where.condition) {
+                            conditions.push(where.condition)
                         }
-                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(C, (triple(Base, "${through}", C), instance(OtherClass, C), subject_class("${otherClass}", OtherClass)), List).\n`    
+
+                        const conditionString = conditions.join(", ")
+
+                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
                     } else {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }
