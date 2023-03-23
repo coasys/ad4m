@@ -258,9 +258,11 @@ export default class LanguageController {
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
 
-            language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
-                this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
-            })
+            if (language.linksAdapter.addSyncStateChangeCallback) {
+                language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+                })
+            }
         }
 
         if(language.telepresenceAdapter) {
@@ -304,9 +306,11 @@ export default class LanguageController {
                 this.callLinkObservers(diff, {address: hash, name: language.name});
             })
 
-            language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
-                this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
-            })
+            if (language.linksAdapter.addSyncStateChangeCallback) {
+                language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+                })
+            }
         }
 
         if(language.telepresenceAdapter) {
