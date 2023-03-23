@@ -1,6 +1,6 @@
 {
   "name": "ad4m-monorepo",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "workspaces": [
     "core",
     "docs",
@@ -9,7 +9,8 @@
     "host",
     "ui",
     "connect",
-    "test-runner"
+    "test-runner",
+    "bootstrap-languages/*"
   ],
   "private": true,
   "scripts": {
@@ -20,13 +21,17 @@
     "lint": "turbo run lint",
     "test": "turbo run test --concurrency=1",
     "test:windows": "turbo run test:windows",
+    "fetch-binaries": "run-script-os",
+    "fetch-binaries:macos": "./download-binaries-macos.sh",
+    "fetch-binaries:windows": "powershell.exe -ExecutionPolicy Bypass -File download-binaries-windows.ps1",
+    "fetch-binaries:linux": "./download-binaries-linux.sh",
     "package-macos": "turbo run package-macos",
     "package-windows": "turbo run package-windows",
     "package-linux": "turbo run package-linux",
     "build-macos": "turbo run build-macos",
     "build-windows": "turbo run build-windows",
     "build-linux": "turbo run build-linux",
-    "release": "changeset publish",
+    "build-languages": "turbo run build-languages",
     "build-all-macos": "turbo run build-all-macos",
     "build-all-linux": "turbo run build-all-linux",
     "build-all-windows": "turbo run build-all-windows",
@@ -42,7 +47,8 @@
     "docs:cp": "cp -r docs-src/_book/ docs/",
     "patchpackage": "patch-package",
     "set-version": "node setVersion.js",
-    "patch-package": "^6.5.0"
+    "patch-package": "^6.5.0",
+    "postinstall": "yarn run fetch-binaries"
   },
   "devDependencies": {
     "@changesets/cli": "^2.25.2",

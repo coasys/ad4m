@@ -6,12 +6,16 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+ - New callback method on PerspectiveProxy for registering callback when sync state for a given Perspective changes [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
+ - New method on LinkAdapter interface for reporting sync state of a given link language [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
+ - Perspective diff sync to mono repo as a bootstrap language [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
 
 ### Changed
  - Changed core database engine and refactored index & interface structure [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
  - Pubsub link addition/removal publishing will now await correctly [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
  - Use consistent apollo & ws versions [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
  - Use new holochain client version 0.12.5 [PR#322](https://github.com/perspect3vism/ad4m/pull/322)
+ - Improved CI workflow where holochain binaries are always downloaded and used for all tests and builds [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
 
 - Launcher automatically authenticates with the proxy on login. [PR#303](https://github.com/perspect3vism/ad4m/pull/303)
  
