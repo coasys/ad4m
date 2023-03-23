@@ -34,8 +34,3 @@ export function getAd4mHostVersion(): string {
   console.log("Got ad4mHost version: ", version);
   return version;
 }
-
-export function getOldestSupportedVersion(): {version: string, shouldClearState: boolean} {
-  const migrationFile = JSON.parse(fs.readFileSync(path.join(__dirname, `../oldestSupportedVersion.json`), { encoding: 'utf-8' }));
-  return {version: migrationFile.version, shouldClearState: migrationFile.shouldClearState};
-}
