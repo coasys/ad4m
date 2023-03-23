@@ -33,7 +33,7 @@ mod commands;
 
 use tauri::api::dialog;
 use tauri::Manager;
-use crate::commands::proxy::{get_proxy, setup_proxy, stop_proxy};
+use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::commands::app::{close_application, close_main_window, clear_state, open_tray};
 use crate::config::data_path;
@@ -48,11 +48,13 @@ struct Payload {
   message: String,
 }
 
-pub struct ProxyState(Mutex<Option<ProxyService>>);
+pub struct ProxyState(Mutex<ProxyService>);
 
+#[derive(Default)]
 pub struct ProxyService {
-    endpoint: String,
-    shutdown_signal: broadcast::Sender<()>,
+    credential: Option<String>,
+    endpoint: Option<String>,
+    shutdown_signal: Option<broadcast::Sender<()>>,
 }
 
 pub struct AppState {
@@ -130,6 +132,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_port,
             request_credential,
+            login_proxy,
             setup_proxy,
             get_proxy,
             stop_proxy,

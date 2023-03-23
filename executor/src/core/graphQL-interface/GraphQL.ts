@@ -929,6 +929,18 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 },
                 //@ts-ignore
                 resolve: payload => payload
+            },
+            perspectiveSyncStateChange: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
+                    return withFilter(
+                        () => pubsub.asyncIterator(PubSub.PERSPECTIVE_SYNC_STATE_CHANGE),
+                        (payload, variables) => payload.uuid === variables.uuid
+                    )(undefined, args)
+                },
+                //@ts-ignore
+                resolve: payload => payload.state
             }
         },
 
@@ -1107,6 +1119,11 @@ export async function startServer(params: StartServerParams) {
     const wsServer = new WebSocketServer({
         server: httpServer,
         path: server.graphqlPath,
+    });
+
+    wsServer.on('error', (err) => {
+        console.error("WsServer got error: ", err);
+        wsServer.clients.clear();
     });
 
     serverCleanup = useServer({

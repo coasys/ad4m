@@ -24,6 +24,7 @@ import ExpressionResolver from "./expression/ExpressionResolver";
 import { AuthInfoInput, EntanglementProofInput, CapabilityInput, ResourceInput } from "./agent/Agent";
 import { LanguageMetaInput } from "./language/LanguageMeta";
 import { InteractionCall } from "./language/Language";
+import { PerspectiveState } from "./perspectives/PerspectiveHandle";
 
 jest.setTimeout(15000)
 
@@ -737,6 +738,18 @@ describe('Ad4mClient', () => {
             await perspective.add({source: 'root', target: 'neighbourhood://Qm123456'})  
 
             expect(linkAdded).toBeCalledTimes(1)
+        })
+
+        it('addSyncStateChangeListener() smoke test', async () => {
+            let perspective = await ad4mClient.perspective.byUUID('00004')
+
+            const syncState = jest.fn()
+
+            await perspective.addSyncStateChangeListener(syncState)
+            await perspective.add({source: 'root', target: 'neighbourhood://Qm12345'})
+
+            expect(syncState).toBeCalledTimes(1)
+            expect(syncState).toBeCalledWith(PerspectiveState.Synced)
         })
 
         it('updateLink() smoke test', async () => {

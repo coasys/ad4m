@@ -56,7 +56,7 @@ describe('Perspective', () => {
     beforeEach(() => {
         const TEST_DIR = `${__dirname}/../tst-tmp`
         const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
-        const db = new PerspectivismDb(new Memory(""))
+        const db = new PerspectivismDb();
         perspective = new Perspective(
             {
                 uuid: uuidv4(),
@@ -108,7 +108,7 @@ describe('Perspective', () => {
             const result = await perspective!.getLinks({} as LinkQuery)
 
             expect(result.length).to.be.equal(5)
-            expect(result).to.have.members(allLinks!);
+            expect(result).to.have.deep.members(allLinks!);
         })
 
         it('can get links by source', async () => {
