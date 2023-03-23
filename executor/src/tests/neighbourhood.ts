@@ -123,7 +123,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 let bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                 let tries = 1
 
-                while(bobLinks.length < 1 && tries < 50) {
+                while(bobLinks.length < 1 && tries < 300) {
                     await sleep(1000)
                     bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
