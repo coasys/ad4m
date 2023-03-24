@@ -43,27 +43,26 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async sync(): Promise<PerspectiveDiff> {
-    await this.currentRevisionMutex.lock();
     try {
+      await this.currentRevisionMutex.lock();
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
       if (current_revision && Buffer.isBuffer(current_revision)) {
         this.myCurrentRevision = current_revision; 
       }
-      await this.gossip();
-      return new PerspectiveDiff()
     } finally {
       this.currentRevisionMutex.unlock();
     }
+    await this.gossip();
+    return new PerspectiveDiff()
   }
 
   async gossip() {
     this.gossipLogCount += 1;
     let lostPeers: DID[] = [];
 
-    await this.peersMutex.lock();
-    await this.currentRevisionMutex.lock();
-
     try {
+      await this.peersMutex.lock();
+      await this.currentRevisionMutex.lock();
       this.peers.forEach( (peerInfo, peer) => {
         if (peerInfo.lastSeen.getTime() + 10000 < new Date().getTime()) {
           lostPeers.push(peer);
@@ -173,8 +172,8 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async commit(diff: PerspectiveDiff): Promise<string> {
-    await this.currentRevisionMutex.lock();
     try {
+      await this.currentRevisionMutex.lock();
       let prep_diff = {
         additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
         removals: diff.removals.map((diff) => prepareLinkExpression(diff))
@@ -213,8 +212,8 @@ export class LinkAdapter implements LinkSyncAdapter {
       //       }
       //       broadcast_author: ${broadcast_author}
       //       `)
-      await this.peersMutex.lock();
       try {
+        await this.peersMutex.lock();
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
       } finally {
         this.peersMutex.unlock();
