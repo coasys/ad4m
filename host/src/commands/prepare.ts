@@ -74,7 +74,7 @@ export const handler = (argv: Arguments<Options>): void => {
         // No last seen version file, lets clean their state. Note we are assuming the first time this added to a release
         // we wish to clear the stat eof an agent
         console.log("Not last seen version file, lets clean their state");
-        cleanAd4mData(dataPath, false);
+        cleanAd4mData(dataPath, true);
         fs.writeFileSync(lastSeenFile, getAd4mHostVersion());
         return;
     }
@@ -86,6 +86,7 @@ export const handler = (argv: Arguments<Options>): void => {
         // Agents old ad4m version is too old, lets clean their state
         console.log("Agents old ad4m version is too old, lets clean their state");
         cleanAd4mData(dataPath, migratonInfo.shouldClearState);
+        fs.writeFileSync(lastSeenFile, getAd4mHostVersion());
         return;
     }
 
