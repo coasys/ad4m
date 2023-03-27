@@ -1,6 +1,6 @@
 {
   "name": "ad4m-monorepo",
-  "version": "0.3.3.prerelease",
+  "version": "0.3.3",
   "workspaces": [
     "core",
     "docs",
