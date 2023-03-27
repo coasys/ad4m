@@ -139,7 +139,8 @@ export default class PerspectivismCore {
 
     async initIPFS(params: InitIPFSParams) {
         console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
-        let repoPath = params.ipfsRepoPath ? path.join(params.ipfsRepoPath, "ipfs", "repo.lock") : path.join(this.#config.dataPath, "ipfs", "repo.lock")
+        let basePath = params.ipfsRepoPath ? params.ipfsRepoPath : path.join(this.#config.dataPath, "ipfs");
+        let repoPath = path.join(basePath, "repo.lock");
         console.log("Check if repo.lock exists at: ", repoPath);
 
         let retries = 0;
@@ -149,7 +150,7 @@ export default class PerspectivismCore {
             if (retries > 10) {
                 console.log("Waited long enough for repo.lock to be released, deleting...");
                 fs.rmdirSync(repoPath, { recursive: true });
-                fs.rmSync(path.join(this.#config.dataPath, "ipfs", "datastore", "LOCK"));
+                fs.rmSync(path.join(basePath, "datastore", "LOCK"));
             }
         }
 
