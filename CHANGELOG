@@ -6,10 +6,29 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+
 ### Changed
+ 
 ### Deprecated
+
 ### Removed
+
 ### Fixed
+
+## [0.3.3] - 27/03/2023
+
+### Added
+
+### Changed
+ - ipfs repo.lock now handled in the executor so ad4m-host startups will not have ipfs repo.lock conflicts [PR#333](https://github.com/perspect3vism/ad4m/pull/333)
+ - Perspective diff sync now uses mutex locks to ensure its not updating its internal state in conflicting ways [PR#334](https://github.com/perspect3vism/ad4m/pull/334)
+ 
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Language controller will now check that the sync callback is available on a language before trying to call it [PR#332](https://github.com/perspect3vism/ad4m/pull/332)
 
 ## [0.3.2] - 23/03/2020
 
