@@ -9,6 +9,11 @@
       "dependsOn": ["@perspect3vism/ad4m#build", "@perspect3vism/ad4m-connect#build", "@perspect3vism/ad4m-executor#build", "@perspect3vism/ad4m-test#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
+    "build-languages": {
+      "dependsOn": ["@perspect3vism/perspective-diff-sync#build"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+
     "lint": {
       "outputs": []
     },
@@ -18,12 +23,13 @@
     "serve": {
       "cache": false
     },
+    
     "test": {
-      "dependsOn": ["build"],
+      "dependsOn": ["build-libs", "build-languages"],
       "outputs": []
     },
     "test:windows": {
-      "dependsOn": ["build"],
+      "dependsOn": ["build-libs", "build-languages"],
       "outputs": []
     },
 

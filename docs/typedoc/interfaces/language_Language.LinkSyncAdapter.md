@@ -20,10 +20,9 @@ to the latest one.
 - [addCallback](language_Language.LinkSyncAdapter.md#addcallback)
 - [commit](language_Language.LinkSyncAdapter.md#commit)
 - [currentRevision](language_Language.LinkSyncAdapter.md#currentrevision)
-- [latestRevision](language_Language.LinkSyncAdapter.md#latestrevision)
 - [others](language_Language.LinkSyncAdapter.md#others)
 - [public](language_Language.LinkSyncAdapter.md#public)
-- [pull](language_Language.LinkSyncAdapter.md#pull)
+- [sync](language_Language.LinkSyncAdapter.md#sync)
 - [render](language_Language.LinkSyncAdapter.md#render)
 - [writable](language_Language.LinkSyncAdapter.md#writable)
 
@@ -134,11 +133,11 @@ ___
 
 ___
 
-### pull
+### sync
 
-▸ **pull**(): `Promise`<[`PerspectiveDiff`](../classes/perspectives_PerspectiveDiff.PerspectiveDiff.md)\>
+▸ **sync**(): `Promise`<void>
 
-Check for and get new changes
+Sync your state in the network with other agents
 
 #### Returns
 

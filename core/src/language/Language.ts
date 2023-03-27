@@ -4,6 +4,7 @@ import type { Expression } from '../expression/Expression'
 import { Perspective, PerspectiveExpression } from '../perspectives/Perspective';
 import { PerspectiveDiff } from '../perspectives/PerspectiveDiff';
 import { InputType, Field, ObjectType } from "type-graphql";
+import { PerspectiveState } from '../perspectives/PerspectiveHandle';
 
 /** Interface of AD4M Languages
  * 
@@ -148,6 +149,7 @@ export interface GetAllAdapter {
 }
 
 export type PerspectiveDiffObserver = (diff: PerspectiveDiff)=>void;
+export type SyncStateChangeObserver = (state: PerspectiveState)=>void;
 
 /** Interface for "Link Languages" that facilitate the synchronization
  * between agents' local Perspectives inside a Neighbourhood.
@@ -163,16 +165,16 @@ export interface LinkSyncAdapter {
     public(): boolean;
     others(): Promise<DID[]>;
 
-    /** Call this to check if there are new changes
-     * (compare returned revision with last one that was pulled)
-     */
-    latestRevision(): Promise<string>;
-
     /** What revision are we on now -> what changes are included in output of render() */
     currentRevision(): Promise<string>;
 
-    /** Check for and get new changes */
-    pull(): Promise<PerspectiveDiff>;
+    /** 
+     * Check for and get new changes, 
+     * notify others of local changes.
+     * This function will be called every 
+     * few seconds by the ad4m-executor.
+     *  */
+    sync(): Promise<PerspectiveDiff>;
 
     /** Returns the full, rendered Perspective at currentRevision */
     render(): Promise<Perspective>;
@@ -182,6 +184,9 @@ export interface LinkSyncAdapter {
 
     /** Get push notification when a diff got published */
     addCallback(callback: PerspectiveDiffObserver);
+
+    /** Add a sync state callback method */
+    addSyncStateChangeCallback(callback: SyncStateChangeObserver);
 }
 
 export type MessageCallback = (message: PerspectiveExpression) => void;

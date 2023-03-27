@@ -1,6 +1,7 @@
 import { 
-    Address, Expression, Language, LanguageContext, 
-    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective, Literal, TelepresenceAdapter 
+    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta, 
+    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, 
+    parseExprUrl, Literal, TelepresenceAdapter, PerspectiveState
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
@@ -19,6 +20,8 @@ import stringify from 'json-stable-stringify'
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
+type SyncStateChangeObserver = (state: PerspectiveState, lang: LanguageRef)=>void;
+
 interface Services {
     holochainService: HolochainService,
     runtimeService: RuntimeService,
@@ -62,6 +65,7 @@ export default class LanguageController {
     #context: object;
     #linkObservers: LinkObservers[];
     #telepresenceSignalObservers: TelepresenceSignalObserver[];
+    #syncStateChangeObservers: SyncStateChangeObserver[];
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
     #signatures: Signatures;
@@ -84,6 +88,7 @@ export default class LanguageController {
         this.#languageConstructors = new Map()
         this.#linkObservers = []
         this.#telepresenceSignalObservers = []
+        this.#syncStateChangeObservers = []
         this.pubSub = PubSub.get()
         this.#config = (context as any).config;
     }
@@ -184,6 +189,12 @@ export default class LanguageController {
         })
     }
 
+    callSyncStateChangeObservers(syncState: PerspectiveState, ref: LanguageRef) {
+        this.#syncStateChangeObservers.forEach(o => {
+            o(syncState, ref)
+        })
+    }
+
     callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
         this.#telepresenceSignalObservers.forEach(o => {
             o(signal, ref)
@@ -246,6 +257,12 @@ export default class LanguageController {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
+
+            if (language.linksAdapter.addSyncStateChangeCallback) {
+                language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+                })
+            }
         }
 
         if(language.telepresenceAdapter) {
@@ -288,6 +305,12 @@ export default class LanguageController {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name});
             })
+
+            if (language.linksAdapter.addSyncStateChangeCallback) {
+                language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+                })
+            }
         }
 
         if(language.telepresenceAdapter) {
@@ -993,14 +1016,14 @@ export default class LanguageController {
                 const langIsImmutable = await this.isImmutableExpression(ref);
                 if (langIsImmutable) {
                     console.log("Calling cache for expression...");
-                    const cachedExpression = this.#db.getExpression(ref.expression);
+                    const cachedExpression = await this.#db.getExpression(ref.expression);
                     if (cachedExpression) {
                         console.log("Cache hit...");
-                        expr = JSON.parse(cachedExpression) as Expression
+                        expr = cachedExpression;
                     } else {
                         console.log("Cache miss...");
                         expr = await lang.expressionAdapter.get(ref.expression);
-                        if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
+                        if (expr) { await this.#db.addExpression(ref.expression, expr) };
                     };
                 } else {
                     expr = await lang.expressionAdapter.get(ref.expression);
@@ -1086,6 +1109,10 @@ export default class LanguageController {
 
     addTelepresenceSignalObserver(observer: TelepresenceSignalObserver) {
         this.#telepresenceSignalObservers.push(observer)
+    }
+
+    addSyncStateChangeObserver(listener: SyncStateChangeObserver) {
+        this.#syncStateChangeObservers.push(listener)
     }
 
     async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {

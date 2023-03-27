@@ -1,4 +1,3 @@
-import { Image } from "@mantine/core";
 import { useContext, useEffect, useState } from "react";
 import { AgentContext } from "../context/AgentContext";
 import { Ad4minContext } from "../context/Ad4minContext";

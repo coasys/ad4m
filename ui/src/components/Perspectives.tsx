@@ -1,5 +1,3 @@
-import { Group, Menu } from "@mantine/core";
-import { showNotification } from "@mantine/notifications";
 import {
   LanguageHandle,
   Link,
@@ -8,14 +6,7 @@ import {
 } from "@perspect3vism/ad4m";
 import { useContext, useEffect, useMemo, useState } from "react";
 import { sanitizeLink } from "../util";
-import {
-  badge,
-  cardStyle,
-  listStyle,
-  MainContainer,
-} from "./styles";
-import { Trash } from "tabler-icons-react";
-import { useDisclosure } from "@mantine/hooks";
+import { cardStyle, listStyle } from "./styles";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { nanoid } from "nanoid";
 import ActionButton from "./ActionButton";
@@ -36,25 +27,21 @@ const PerspectiveMenu = ({
     state: { client },
   } = useContext(Ad4minContext);
 
-  const [opened, handlers] = useDisclosure(false);
-
   const deletePerspective = async (id: string) => {
     await client!.perspective.remove(id);
 
     await reload();
-
-    handlers.close();
   };
 
   return (
-    <Menu opened={opened} onOpen={handlers.open} onClose={handlers.close}>
-      <Menu.Item
-        icon={<Trash size={16} />}
-        onClick={() => deletePerspective(uuid)}
-      >
-        Delete
-      </Menu.Item>
-    </Menu>
+    <j-button
+      variant="ghost"
+      square
+      size="xs"
+      onClick={() => deletePerspective(uuid)}
+    >
+      <j-icon name="x"></j-icon>
+    </j-button>
   );
 };
 
@@ -158,22 +145,16 @@ const Perspectives = (props: Props) => {
           new Perspective(templateLangs)
         );
 
-        showNotification({
-          message: "Neighbourhood sucessfully created",
-        });
+        // Todo: Show neighbourhood created notification
       } else {
-        showNotification({
-          message: "Perspecctive sucessfully created",
-        });
+        // Todo: Show perspective created notification
       }
 
       await fetchPerspective();
     } catch (e) {
       client!.perspective.remove(perspective.uuid);
-      showNotification({
-        message: `Error: ${e}`,
-        color: "red",
-      });
+
+      // Show error notification
     }
 
     setLoading(false);
@@ -186,14 +167,17 @@ const Perspectives = (props: Props) => {
   );
 
   return (
-    <div style={MainContainer}>
-      <div class="grid">
-        <ActionButton
-          title="Add perspective"
-          onClick={() => setPerspectiveModalOpen(true)}
-          icon="folder-plus"
-        />
-      </div>
+    <div>
+      <j-box px="500" py="500">
+        <j-flex gap="300">
+          <ActionButton
+            title="Add perspective"
+            onClick={() => setPerspectiveModalOpen(true)}
+            icon="folder-plus"
+          />
+        </j-flex>
+      </j-box>
+
       <div style={listStyle}>
         {perspectives.map((e, i) => {
           return (
@@ -201,66 +185,54 @@ const Perspectives = (props: Props) => {
               key={`perspectice-${e?.name}`}
               style={{ ...cardStyle, width: "100%" }}
             >
-              <j-flex align="flex-start">
-                <j-flex align="flex-start">
-                  <j-flex a="flex-start" direction="column">
-                    <div
-                      style={{
-                        ...badge,
-                        backgroundColor: e?.neighbourhood
-                          ? "#6e52c2bb"
-                          : "rgba(230, 73, 128, 0.671)",
-                      }}
+              <j-badge
+                size="sm"
+                variant={e?.neighbourhood ? "success" : "primary"}
+              >
+                {e?.neighbourhood ? "Neighbourhood" : "Perspective"}
+              </j-badge>
+
+              <j-box pt="300" pb="400">
+                <j-text variant="heading-sm">{e?.name}</j-text>
+              </j-box>
+
+              <j-box pb="300">
+                <j-text variant="label" size="300">
+                  UUID
+                </j-text>
+                <j-input size="sm" value={e.uuid} readonly>
+                  <j-button
+                    slot="end"
+                    size="xs"
+                    variant="subtle"
+                    onClick={() => console.log("wow")}
+                  >
+                    <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                  </j-button>
+                </j-input>
+              </j-box>
+
+              {e?.sharedUrl && (
+                <>
+                  <j-text variant="label" size="300">
+                    Invite link
+                  </j-text>
+                  <j-input size="sm" full readonly value={e?.sharedUrl}>
+                    <j-button
+                      slot="end"
+                      size="xs"
+                      variant="subtle"
+                      onClick={() => console.log("wow")}
                     >
-                      {e?.neighbourhood ? "Neighbourhood" : "Perspective"}
-                    </div>
-                    <j-box p="200"></j-box>
-                    <j-text weight="bold">{e?.name}</j-text>
-                    <j-flex a="center" j="between">
-                      <j-text nomargin variant="body" size="400">
-                        {e?.uuid?.length || 0 > 32
-                          ? `${e?.uuid?.substring(0, 32)}...`
-                          : e?.uuid}
-                      </j-text>
-                      <j-box p="100"></j-box>
-                      <j-button
-                        size="xs"
-                        variant="subtle"
-                        onClick={() => console.log("wow")}
-                      >
-                        <j-icon size="xs" slot="end" name="clipboard"></j-icon>
-                      </j-button>
-                    </j-flex>
-                    <j-box p="200"></j-box>
-                    {e?.sharedUrl && (
-                      <>
-                        <j-flex a="center" j="between">
-                          <j-text nomargin variant="body" size="400">
-                            {e?.sharedUrl?.length > 28
-                              ? `${e?.sharedUrl?.substring(0, 28)}...`
-                              : e?.sharedUrl}
-                          </j-text>
-                          <j-box p="100"></j-box>
-                          <j-button
-                            size="xs"
-                            variant="subtle"
-                            onClick={() => console.log("wow")}
-                          >
-                            <j-icon
-                              size="xs"
-                              slot="end"
-                              name="clipboard"
-                            ></j-icon>
-                          </j-button>
-                        </j-flex>
-                      </>
-                    )}
-                  </j-flex>
-                </j-flex>
-                <div style={{ position: "absolute", top: 10, right: 10 }}>
-                  <PerspectiveMenu uuid={e!.uuid} reload={fetchPerspective} />
-                </div>
-              </j-flex>
+                      <j-icon size="xs" slot="end" name="clipboard"></j-icon>
+                    </j-button>
+                  </j-input>
+                </>
+              )}
+
+              <div style={{ position: "absolute", top: 10, right: 10 }}>
+                <PerspectiveMenu uuid={e!.uuid} reload={fetchPerspective} />
+              </div>
             </div>
           );
         })}

@@ -1,4 +1,4 @@
-import { LinkCallback, PerspectiveClient } from "./PerspectiveClient";
+import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
@@ -29,16 +29,19 @@ export class PerspectiveProxy {
     #perspectiveLinkAddedCallbacks: LinkCallback[]
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
+    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
 
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = []
         this.#perspectiveLinkRemovedCallbacks = []
         this.#perspectiveLinkUpdatedCallbacks = []
+        this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
         this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
         this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
         this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
+        this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
     }
 
     async executeAction(actions, expression, parameters: Parameter[]) {
@@ -174,6 +177,14 @@ export class PerspectiveProxy {
         } else if (type === 'link-updated') {
             this.#perspectiveLinkUpdatedCallbacks.push(cb);
         }
+    }
+
+    /** Adds a sync state listener
+     * @param cb Callback function that is called when the sync state of the perspective changes
+     * @returns A function that can be called to remove the listener
+     */
+    async addSyncStateChangeListener(cb: SyncStateChangeCallback) {
+        this.#perspectiveSyncStateChangeCallbacks.push(cb)
     }
 
     /** Removes a previously added link listener

@@ -128,7 +128,7 @@ export default function languageTests(testContext: TestContext) {
                 }
 
                 //@ts-ignore
-                expect(error.toString()).to.be.equal(`Error: Language not created by trusted agent: ${(await ad4mClient.agent.me()).did} and is not templated... aborting language install. Language metadata: ${stringify(sourceLanguageMeta)}`)
+                expect(error.toString()).to.be.equal(`ApolloError: Language not created by trusted agent: ${(await ad4mClient.agent.me()).did} and is not templated... aborting language install. Language metadata: ${stringify(sourceLanguageMeta)}`)
             })
 
             describe('with Bob having added Alice to list of trusted agents', () => {

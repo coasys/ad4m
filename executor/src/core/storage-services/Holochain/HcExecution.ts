@@ -118,6 +118,11 @@ export async function runHolochain(resourcePath: string, conductorConfigPath: st
     hcProcess.stdout.on('data', (data) => {
         console.log(`${data}`);
     });
+    // hcProcess.stdout.on('error', (err) => {
+    //     if (err.code == "EPIPE") {
+    //         process.exit(0);
+    //     }
+    // });
     //Log holochain process stderr to out
     hcProcess.stderr.on('data', (data) => {
         console.log(`${data}`);
