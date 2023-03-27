@@ -26,8 +26,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
         with:
-          tag_name: ${{ steps.create_tag.outputs.version }}-staging
-          release_name: AD4M Launcher & Host ${{ steps.create_tag.outputs.version }}-staging
+          tag_name: ${{ steps.create_tag.outputs.version }}
+          release_name: AD4M Launcher & Host ${{ steps.create_tag.outputs.version }} Prerelease
           body: See the assets to download this version and install.
           draft: true
           prerelease: true
