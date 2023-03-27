@@ -22,6 +22,8 @@ import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
 import { OuterConfig } from '../main'
+import path from "path";
+import { sleep } from "./utils";
 
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
@@ -137,6 +139,19 @@ export default class PerspectivismCore {
 
     async initIPFS(params: InitIPFSParams) {
         console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
+        let repoPath = params.ipfsRepoPath ? path.join(params.ipfsRepoPath, "ipfs", "repo.lock") : path.join(this.#config.dataPath, "ipfs", "repo.lock")
+        console.log("Check if repo.lock exists at: ", repoPath);
+
+        let retries = 0;
+        while (fs.existsSync(repoPath)) {
+            await sleep(1000);
+            retries++;
+            if (retries > 10) {
+                console.log("Waited long enough for repo.lock to be released, deleting...");
+                fs.rmdirSync(repoPath, { recursive: true });
+                fs.rmSync(path.join(this.#config.dataPath, "ipfs", "datastore", "LOCK"));
+            }
+        }
 
         let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
         this.#IPFS = ipfs;
