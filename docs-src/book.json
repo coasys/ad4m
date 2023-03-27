@@ -2,6 +2,6 @@
   "title": "AD4M Documentation",
   "author": "Nicolas Luck",
   "variables": {
-    "ad4mVersion": "0.3.3-prerelease"
+    "ad4mVersion": "0.3.3.prerelease"
   }
 }
