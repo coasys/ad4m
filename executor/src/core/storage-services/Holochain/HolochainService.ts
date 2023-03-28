@@ -116,9 +116,7 @@ export default class HolochainService {
     async logDhtStatus() {
         setInterval(async () => {
             if (this.#ready) {
-                console.log(this.#languageDnaHashes);
                 for (const [language, hashes] of this.#languageDnaHashes) {
-                    console.log("HolochainStatus.logDhtStatus: ", language, " has gossip status: \n");
                     let dhtInfo = (await this.#appWebsocket!.networkInfo({dnas: hashes}));
                     console.log("HolochainStatus.logDhtStatus: ", language, " has gossip status: ", dhtInfo, "\n");
                 }
@@ -264,7 +262,6 @@ export default class HolochainService {
 
     private async generateSigningKeys(cell: CellId): Promise<SigningCredentials> {
         const cellIdB64 = this.cellIdToB64(cell);
-        console.log("generateSigningKeys", cellIdB64)
 
         const [keyPair, signingKey] = generateSigningKeyPair();
         const capSecret = await this.#adminWebsocket!.grantSigningKey(cell, {[GrantedFunctionsType.All]: null}, signingKey);
@@ -445,8 +442,9 @@ export default class HolochainService {
 
         //4. Call the zome function
         try {
-            console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
-
+            if (fnName != "sync") {
+                console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
+            }
             //Check that signZomeCall will be able to find the signing credentials
             const signingKeyExists = getSigningCredentials(cellId);
 
@@ -464,7 +462,6 @@ export default class HolochainService {
                 }
             }
 
-            const signedZomeCallStart = Date.now();
             const signedZomeCall = await signZomeCall({
                 cell_id: cellId,
                 zome_name: zomeName,
@@ -472,22 +469,19 @@ export default class HolochainService {
                 provenance,
                 payload
             });
-            const signedZomeCallEnd = Date.now();
-            console.log("HolochainService.callZomeFunction: signZomeCall took", signedZomeCallEnd - signedZomeCallStart, "ms")
 
-            const startCall = Date.now();
             const result = await this.#appWebsocket!.callZome(signedZomeCall);
-            const endCall = Date.now();
-            console.log("HolochainService.callZomeFunction: callZome took", endCall - startCall, "ms")
 
-            if (typeof result === "string") {
-                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
-            } else if (typeof result === "object") {
-                let resultString = JSON.stringify(result);
-                let endingLog = resultString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
-                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (object):", resultString.substring(0, 50), endingLog)
-            } else {
-                console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (other):", result, "\x1b[0m")
+            if (fnName != "sync") {
+                if (typeof result === "string") {
+                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
+                } else if (typeof result === "object") {
+                    let resultString = JSON.stringify(result);
+                    let endingLog = resultString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
+                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (object):", resultString.substring(0, 50), endingLog)
+                } else {
+                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (other):", result, "\x1b[0m")
+                }
             }
             return result
         } catch(e) {
