@@ -1,5 +1,4 @@
 import { useContext, useEffect, useState } from "react";
-import { showNotification } from "@mantine/notifications";
 import { Ad4minContext } from "../context/Ad4minContext";
 
 type Props = {
@@ -20,11 +19,8 @@ const TrustAgent = (props: Props) => {
 
   const addTrustedAgent = async () => {
     let agents = await client!.runtime.addTrustedAgents([props.candidate]);
+    // TODO: Show agent trusted notification
     closeModal();
-    showNotification({
-      message: "Great, the agent is trusted now! 🤥",
-    });
-    console.log("agent is now trusted: ", agents);
   };
 
   const closeModal = () => {

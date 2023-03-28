@@ -3,7 +3,7 @@ import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, Expression, LanguageRef, PerspectiveDiff, PerspectiveState } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -36,24 +36,34 @@ export default class PerspectivesController {
             })
         }
 
-        this.#context.languageController!.addLinkObserver((diff: PerspectiveDiff, lang: LanguageRef) => {
+        this.#context.languageController!.addLinkObserver(async (diff: PerspectiveDiff, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
                 console.log("PerspectiveController: received signal from linkObserver, adding remote links from a language to a local perspective...");
                 perspective.populateLocalLinks(diff.additions, diff.removals);
 
-                for (const link of diff.additions) {
-                    this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
-                        perspective: perspective.plain(),
-                        link: link
-                    })
-                }
+                try {
+                    let perspectivePlain = perspective.plain();
+                    for (const link of diff.additions) {
+                        await this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+                            perspective: perspectivePlain,
+                            link: link
+                        })
+                    }
 
-                for (const linkRemoved of diff.removals) {
-                    this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
-                        perspective: perspective.plain(),
-                        link: linkRemoved
-                    })
+                    console.log("PerspectiveController: published link additions");
+
+                    for (const linkRemoved of diff.removals) {
+                        console.log("publishing removal:", linkRemoved)
+                        await this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+                            perspective: perspectivePlain,
+                            link: linkRemoved
+                        })
+                    }
+
+                    console.log("PerspectiveController: published link removals");
+                } catch (e) {
+                    console.error("PerspectiveController: error publishing link additions/removals", e);
                 }
             } else {
                 console.warn(`Could not find perspective for added link with lang: ${lang}`)
@@ -70,6 +80,15 @@ export default class PerspectivesController {
                 })
             } else {
                 console.warn(`Could not find perspective telepresence signal with lang: ${lang}`)
+            }
+        })
+
+        this.#context.languageController!.addSyncStateChangeObserver(async (state: PerspectiveState, lang: LanguageRef) => {
+            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
+            if (perspective) {
+                await perspective.updatePerspectiveState(state);
+            } else {
+                console.warn(`Could not find perspective sync state change signal with lang: ${lang}`)
             }
         })
     }

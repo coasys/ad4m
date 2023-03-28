@@ -2,10 +2,11 @@ import fs from "fs-extra";
 import wget from "node-wget-js";
 import unzipper from "unzipper";
 import path from "path";
+import os from "os";
 
 const languages = {
   "agent-expression-store": {
-    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.2.0/bundle.js",
+    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.2.1/bundle.js",
   },
   languages: {
       bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.5/bundle.js",
@@ -14,7 +15,7 @@ const languages = {
     bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.2/bundle.js",
   },
   "perspective-diff-sync": {
-    bundle: "https://github.com/perspect3vism/perspective-diff-sync/releases/download/v0.3.3/bundle.js",
+    bundle: "../bootstrap-languages/p-diff-sync/build/bundle.js",
   },
   "note-ipfs": {
     bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
@@ -38,7 +39,8 @@ async function main() {
       let url = languages[lang].bundle;
       let dest = dir + "/build/bundle.js";
       if (url.slice(0, 8) != "https://" && url.slice(0, 7) != "http://") {
-        fs.copyFileSync(url, dest);
+        if (os.platform() == "win32") url = url.replace(/\//g, "\\");
+        fs.copyFileSync(path.join(process.cwd(), url), dest);
       } else {
         wget({ url, dest });
       }

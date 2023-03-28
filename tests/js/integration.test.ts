@@ -164,7 +164,7 @@ describe("Integration", () => {
 
             it("should work with a property that is not set initially and that auto-resolves", async () => {
                 //@ts-ignore
-                expect(await subject.title).to.be.undefined
+                expect(await subject.title).to.be.false
         
                 let title = "test title"
                 //@ts-ignore
@@ -216,12 +216,14 @@ describe("Integration", () => {
                 let c2 = Literal.from("new comment 2").toUrl()
 
                 //@ts-ignore
-                subject.addComments(c1)
+                await subject.addComments(c1)
+                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1])
 
                 //@ts-ignore
-                subject.addComments(c2)
+                await subject.addComments(c2)
+                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1, c2])
             })
@@ -373,6 +375,11 @@ describe("Integration", () => {
                 })
                 title: string = ""
 
+                @subjectProperty({
+                    getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
+                })
+                isLiked: boolean = false
+
                 //@ts-ignore
                 @subjectCollection({ through: "todo://comment" })
                 // @ts-ignore
@@ -388,6 +395,13 @@ describe("Integration", () => {
                     where: { isInstance: Message }
                 })
                 messages: string[] = []
+
+                //@ts-ignore
+                @subjectCollection({
+                    through: "flux://entry_type",
+                    where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
+                })
+                likedMessages: string[] = []
             }
 
             it("should generate correct SDNA from a JS class", async () => {
@@ -447,7 +461,7 @@ describe("Integration", () => {
                 todos = await Todo.all(perspective!)
                 let todo = todos[0]
                 //@ts-ignore
-                perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
+                await perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
                 
                 todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(1)
@@ -456,7 +470,7 @@ describe("Integration", () => {
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
                 let todo = todos[0]
-                expect(await todo.title).to.equal(undefined)
+                expect(await todo.title).to.equal(false)
 
                 // @ts-ignore
                 await todo.setTitle("new title")
@@ -484,6 +498,42 @@ describe("Integration", () => {
 
                 expect(await perspective!.getSdna()).to.have.lengthOf(2)
                 //console.log((await perspective!.getSdna())[1])
+            })
+
+            it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                let root = Literal.from("Collection where test with prolog condition").toUrl()
+                let todo = await perspective!.createSubject(new Todo(), root)
+
+                let messageEntry = Literal.from("test message").toUrl()
+
+                // @ts-ignore
+                await todo.addEntries(messageEntry)
+
+                let entries = await todo.entries
+                expect(entries.length).to.equal(1)
+
+                let messageEntries = await todo.likedMessages
+                expect(messageEntries.length).to.equal(0)
+
+                await perspective?.add(new Link({source: messageEntry, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
+
+                messageEntries = await todo.likedMessages
+                expect(messageEntries.length).to.equal(1)
+            })
+
+            it("can use properties with custom getter prolog code", async () => {
+                let root = Literal.from("Custom getter test").toUrl()
+                let todo = await perspective!.createSubject(new Todo(), root)
+
+                // @ts-ignore
+                const liked1 = await todo.isLiked
+                expect(liked1).to.be.false
+
+                await perspective?.add(new Link({source: root, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
+
+                // @ts-ignore
+                const liked2 = await todo.isLiked
+                expect(liked2).to.be.true
             })
 
             describe("with Message subject class registered", () => {
@@ -590,3 +640,7 @@ describe("Integration", () => {
     })
 
 })
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

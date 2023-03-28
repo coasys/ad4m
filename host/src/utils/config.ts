@@ -34,9 +34,3 @@ export function getAd4mHostVersion(): string {
   console.log("Got ad4mHost version: ", version);
   return version;
 }
-
-export function getOldestSupportedVersion(): string {
-  const oldestVersion = fs.readFileSync(path.join(__dirname, `../oldestSupportedVersion.txt`), { encoding: 'utf-8' });
-  console.log("Got oldest supported version: ", oldestVersion);
-  return oldestVersion;
-}

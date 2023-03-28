@@ -23,7 +23,13 @@ html {
   --j-border-width: 3px;
   --start-color: #a4adff;
   --end-color: #d273ff;
+  --j-scrollbar-width: 2px;
   --gradient: linear-gradient(90deg, var(--start-color), var(--end-color));
+  --j-color-primary-50: hsl(610, 50%, calc((90% - 100%) * -1));
+}
+
+::-webkit-scrollbar {
+  display: none;
 }
 
 :root j-button[variant="primary"]::part(base) {
@@ -52,6 +58,20 @@ html {
   color: var(--j-color-black);
 }
 
+:root j-text[ellipsis] {
+  display: block;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+:root j-text[ellipsis]::part(base) {
+  max-width: 100%;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  display: block;
+  overflow: hidden;
+}
+
 :root j-popover::part(content) {
   background: var(--j-color-ui-50);
   box-shadow: 0px 0px 40px 20px
@@ -73,6 +93,42 @@ html {
   font-size: var(--j-font-size-800);
 }
 
+:root j-tabs::part(base) {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0;
+  gap: 0;
+  width: 100%;
+  height: 48px;
+  margin: 0;
+  font-size: var(--j-font-size-200);
+  border-radius: 0;
+  border-bottom: 1px solid var(--j-color-ui-200);
+}
+
+j-tabs {
+  z-index: 10;
+  background-color: var(--j-color-white);
+  position: sticky;
+  top: 0;
+  left: 0;
+  display: flex;
+}
+
+:root j-tab-item::part(base) {
+  flex: 1;
+  padding: 0 var(--j-space-400);
+  font-size: var(--j-font-size-400);
+}
+
+j-tab-item {
+  width: 100%;
+  display: block;
+  flex: 1;
+}
+
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
     monospace;
@@ -84,6 +140,7 @@ code {
 }
 
 .slider {
+  width: 100%;
   height: 100vh;
 }
 

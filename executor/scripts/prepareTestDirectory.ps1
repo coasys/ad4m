@@ -1,4 +1,5 @@
 choco install wget --no-progress
+# $env:path += ";C:\Program Files\swipl\bin"
 
 mkdir src\tst-tmp
 cd src\tst-tmp
