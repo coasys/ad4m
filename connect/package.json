@@ -37,7 +37,7 @@
     "release:beta": "np --no-2fa --no-tests --tag=beta --any-branch",
     "dev": "NODE_ENV=dev && vite dev",
     "serve": "npx serve",
-    "build": "npm run build:core && npm run build:web && npm run build:electron && npm run build:utils && tsc",
+    "build": "yarn run build:core && yarn run build:web && yarn run build:electron && yarn run build:utils && tsc",
     "build:core": "tsc --project tsconfig.json && node scripts/esbuild.js",
     "build:web": "tsc --project tsconfig.json && node scripts/esbuild_web.js",
     "build:utils": "tsc --project tsconfig.json && node scripts/esbuild_utils.js",

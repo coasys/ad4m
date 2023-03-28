@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "TRYORAMA_LOG_LEVEL=debug  WASM_LOG=debug,wasmer_compiler_cranelift=error,holochain::conductor::manager=warn,holochain::core::workflow::publish_dht_ops_workflow::publish_query=warn,publish_dht_ops_workflow=error,kitsune_p2p_types::metrics=error,kitsune_p2p::gossip::sharded_gossip=error,wasm_trace=debug,app_validation_workflow=error RUST_BACKTRACE=1 node --loader ts-node/esm --experimental-specifier-resolution=node src/index.ts",
-    "build-test": "cd ..; ./build.sh; cd tests; npm run test"
+    "build-test": "cd ..; ./build.sh; cd tests; yarn run test"
   },
   "author": "",
   "license": "ISC",

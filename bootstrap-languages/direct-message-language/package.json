@@ -6,11 +6,11 @@
   "scripts": {
     "test": "echo \"No direct message integration tests\"",
     "build": "run-script-os",
-    "build:linux": "npm run build-dna && tsc && rollup -c",
-    "build:macos": "npm run build-dna && tsc && rollup -c",
+    "build:linux": "yarn run build-dna && tsc && rollup -c",
+    "build:macos": "yarn run build-dna && tsc && rollup -c",
     "build:windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && tsc && rollup -c",
     "build-dna": "cd hc-dna && ./build.sh && cd ..",
-    "build-nix": "npm run build-dna && tsc && rollup -c",
+    "build-nix": "yarn run build-dna && tsc && rollup -c",
     "dev": "tsc && rollup -c -w"
   },
   "author": "",

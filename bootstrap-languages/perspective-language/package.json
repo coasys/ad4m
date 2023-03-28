@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"No perspective language integration tests\"",
     "build-icons": "rollup -c rollup.config.icons.js",
-    "build": "npm run build-icons && tsc && rollup -c",
+    "build": "yarn run build-icons && tsc && rollup -c",
     "dev": "tsc && rollup -c rollup.config.icons.js && rollup -c -w"
   },
   "author": "",
