@@ -5,7 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"No direct message integration tests\"",
-    "build": "yarn run build-dna && tsc && rollup -c",
+    "build": "run-script-os",
+    "build:linux": "npm run build-dna && tsc && rollup -c",
+    "build:macos": "npm run build-dna && tsc && rollup -c",
+    "build:windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && tsc && rollup -c",
     "build-dna": "cd hc-dna && ./build.sh && cd ..",
     "build-nix": "npm run build-dna && tsc && rollup -c",
     "dev": "tsc && rollup -c -w"
@@ -22,6 +25,7 @@
     "rollup-plugin-postcss": "^3.1.8",
     "rollup-plugin-string": "^3.0.0",
     "rollup-plugin-terser": "^7.0.0",
+    "run-script-os": "^1.1.6",
     "tslib": "^2.0.0",
     "typescript": "^4.2.4"
   },
