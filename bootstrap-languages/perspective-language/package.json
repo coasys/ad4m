@@ -4,7 +4,7 @@
   "description": "An AD4M Language for perspective snapshot expressions stored on IPFS",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"No perspective language integration tests\"",
     "build-icons": "rollup -c rollup.config.icons.js",
     "build": "npm run build-icons && tsc && rollup -c",
     "dev": "tsc && rollup -c rollup.config.icons.js && rollup -c -w"

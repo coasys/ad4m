@@ -4,7 +4,7 @@
   "description": "AD4M Language implementation for Holochain profile DNA",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"No agent language integration tests\"",
     "build-icons": "rollup -c rollup.config.icons.js",
     "build": "npm run build-dna && npm run build-icons && tsc && rollup -c",
     "build-dna": "cd hc-dna && ./build.sh && cd ..",

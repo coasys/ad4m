@@ -4,7 +4,7 @@
   "description": "A templateable AD4M Language for personal, per-agent direct message Languages",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"No direct message integration tests\"",
     "build": "yarn run build-dna && tsc && rollup -c",
     "build-dna": "cd hc-dna && ./build.sh && cd ..",
     "build-nix": "npm run build-dna && tsc && rollup -c",
