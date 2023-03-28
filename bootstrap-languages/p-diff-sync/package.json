@@ -24,7 +24,7 @@
     "@rollup/plugin-node-resolve": "^8.0.0",
     "@rollup/plugin-typescript": "^4.0.0",
     "@tsconfig/svelte": "^1.0.0",
-    "@types/node": "^14.11.2",
+    "@types/node": "^18.0.0",
     "faker": "^5.5.3",
     "rollup": "^2.3.4",
     "rollup-plugin-postcss": "^3.1.8",
