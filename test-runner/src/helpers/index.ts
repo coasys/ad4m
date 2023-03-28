@@ -1,47 +1,7 @@
-import { Ad4mClient, Link, LinkExpression, LinkQuery } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkExpression, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import getPort from "get-port";
 import { startServer } from "../cli.js";
 import { buildAd4mClient } from "../client.js";
-
-const retry = (run: any, maxRetires: number) => {
-  let currRetry = 0;
-
-  return new Promise((resolve, reject) => {
-    const interval = setInterval(async () => {   
-      currRetry += 1; 
-      const arr = await run();
-
-      if (arr.length > 1) {
-        clearInterval(interval)
-        resolve(arr)
-      }
-
-      if (currRetry === maxRetires) {
-        reject("Max Retries exceeded when trying to sync agent.")
-      }
-    }, 10000);
- })
-}
-
-export const waitForAgentsToSync = async (maxRetires = 50) => {
- const promiseClearList = []
- const promiseList = []
- for (const agent of global.agents) {
-   const link = await agent.client.addLink({source:"root", predicate: "soic://test", target:"QmYVsrMpiFmV9S7bTWNAkUzSqjRJskQ8g4TWKKwKrHAPqL://QmSsCCtXMDAZXMpyiNLzwjGEU4hLmhG7fphidhEEodQ4Wy"})
-   
-   promiseClearList.push(link)
- 
-   promiseList.push(retry(async () => await agent.client.queryLinks({}), maxRetires))
- }
-
- await Promise.all(promiseList)
-
- for (let index = 0; index < global.agents.length; index++) {
-   const agent = global.agents[index];
-
-   await agent.client.removeLink(promiseClearList[index])
- }
-}
 
 class AgentLinkClass {
   client: Ad4mClient
@@ -88,6 +48,21 @@ class AgentLinkClass {
     const response = await this.client.perspective.queryLinks(this.perspective, query);
   
     return response;
+  }
+
+  async waitForSync() {
+    await new Promise(async (resolve, reject) => {
+      const syncCallback = (state: PerspectiveState) => {
+        if (state === PerspectiveState.Synced) {
+          resolve(null)
+        };
+        return null;
+      };
+
+      const proxy = await this.client.perspective.byUUID(this.perspective);
+      if (proxy?.state === PerspectiveState.Synced) resolve(null);
+      proxy?.addSyncStateChangeListener(syncCallback);
+    });
   }
 }
 
