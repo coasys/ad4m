@@ -1,4 +1,5 @@
 const fs = require('fs')
+const readline = require('readline-sync');
 
 function replaceVersionLine(content, version, prefix = 'version = ', suffix = '') {
     const lines = content.split('\n')
@@ -11,8 +12,23 @@ function replaceVersionLine(content, version, prefix = 'version = ', suffix = ''
     return { oldVersion, newContent }
 }
 
-const VERSION = process.argv[2]
-console.log("Setting all sub-project versions to: " + VERSION)
+let isPreRelease = false;
+
+const answer = readline.question('Is this a pre-release version? (y/n) ');
+isPreRelease = answer === 'y' || answer === 'Y';
+if (isPreRelease) {
+    console.log('Setting versions for pre-release (will not add pre-release prefix to launcher version)');
+}
+
+let VERSION = process.argv[2]
+
+if (isPreRelease) {
+    VERSION = VERSION + ".prerelease";
+}
+
+const RAW_VERSION = process.argv[2];
+
+console.log("Setting all sub-project versions to: " + VERSION + " with tauri still being set to: " + RAW_VERSION);
 
 const rootRepo = JSON.parse(fs.readFileSync('package.json', 'utf8'))
 console.log("Root repo version: " + rootRepo.version + " -> " + VERSION)
@@ -59,18 +75,34 @@ console.log("rust-client version: " + rustClient.oldVersion + " -> " + VERSION)
 fs.writeFileSync('rust-client/Cargo.toml', rustClient.newContent)
 
 const uiPackage = JSON.parse(fs.readFileSync('ui/package.json', 'utf8'))
-console.log("UI version: " + uiPackage.version + " -> " + VERSION)
-uiPackage.version = VERSION
+if (isPreRelease) {
+    console.log("UI version: " + uiPackage.version + " -> " + RAW_VERSION)
+    uiPackage.version = RAW_VERSION
+} else {
+    console.log("UI version: " + uiPackage.version + " -> " + VERSION)
+    uiPackage.version = VERSION
+}
 fs.writeFileSync('ui/package.json', JSON.stringify(uiPackage, null, 2) + '\n')
 
 const uiTauri = JSON.parse(fs.readFileSync('ui/src-tauri/tauri.conf.json', 'utf8'))
-console.log("UI Tauri version: " + uiTauri.package.version + " -> " + VERSION)
-uiTauri.package.version = VERSION
+if (isPreRelease) {
+    console.log("UI Tauri version: " + uiTauri.package.version + " -> " + RAW_VERSION)
+    uiTauri.package.version = RAW_VERSION
+} else {
+    console.log("UI Tauri version: " + uiTauri.package.version + " -> " + VERSION)
+    uiTauri.package.version = VERSION
+}
 fs.writeFileSync('ui/src-tauri/tauri.conf.json', JSON.stringify(uiTauri, null, 2) + '\n')
 
-const uiCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), VERSION)
-console.log("UI Cargo version: " + uiCargo.oldVersion + " -> " + VERSION)
-fs.writeFileSync('ui/src-tauri/Cargo.toml', uiCargo.newContent)
+let uiTauriCargo;
+if (isPreRelease) {
+    uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), RAW_VERSION)
+    console.log("UI Cargo version: " + uiTauriCargo.oldVersion + " -> " + RAW_VERSION)
+} else {
+    uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), VERSION)
+    console.log("UI Cargo version: " + uiTauriCargo.oldVersion + " -> " + VERSION)
+}
+fs.writeFileSync('ui/src-tauri/Cargo.toml', uiTauriCargo.newContent)
 
 const book = JSON.parse(fs.readFileSync('docs-src/book.json', 'utf8'))
 console.log("Docs version: " + book.variables.ad4mVersion + " -> " + VERSION)
@@ -106,3 +138,4 @@ const perspectiveLanguage = JSON.parse(fs.readFileSync('bootstrap-languages/pers
 console.log("Perspective language: " + perspectiveLanguage.version + " -> " + VERSION)
 perspectiveLanguage.version = VERSION
 fs.writeFileSync('bootstrap-languages/perspective-language/package.json', JSON.stringify(perspectiveLanguage, null, 2) + '\n')
+fs.writeFileSync('bootstrap-languages/p-diff-sync/package.json', JSON.stringify(perspectiveDiffSync, null, 2) + '\n')

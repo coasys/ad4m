@@ -1,6 +1,6 @@
 # AD4M Test
 
-This is a testing library for testing languages for ad4m. This package internally uses [ad4m-host v0.0.9](https://github.com/fluxsocial/ad4m-host/) to start and interact with ad4m-executor. For more detailed example look go [here](https://github.com/perspect3vism/ad4m-test/tree/main/example)
+This is a testing library for testing languages for ad4m. This package internally uses ad4m-host (https://github.com/perspect3vism/ad4m/tree/dev/host) to start and interact with ad4m-executor. For more detailed example look go [here](https://github.com/perspect3vism/ad4m/tree/dev/test-runner/example)
 
 ## Usage
 
@@ -21,7 +21,7 @@ You can write tests like you would with any other testing framework. You can use
 **example**
 
 ```js
-const { spawnExpressionAgent, spawnLinkAgent } = require('ad4m-test/helpers')
+const { spawnExpressionAgent, spawnLinkAgent } = require('@perspect3vism/ad4m-test/helpers')
 
 describe("Expression", () => {
   it("Create Expression", async () => {

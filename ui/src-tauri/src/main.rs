@@ -33,7 +33,7 @@ mod commands;
 
 use tauri::api::dialog;
 use tauri::Manager;
-use crate::commands::proxy::{get_proxy, setup_proxy, stop_proxy};
+use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::commands::app::{close_application, close_main_window, clear_state, open_tray};
 use crate::config::data_path;
@@ -48,11 +48,13 @@ struct Payload {
   message: String,
 }
 
-pub struct ProxyState(Mutex<Option<ProxyService>>);
+pub struct ProxyState(Mutex<ProxyService>);
 
+#[derive(Default)]
 pub struct ProxyService {
-    endpoint: String,
-    shutdown_signal: broadcast::Sender<()>,
+    credential: Option<String>,
+    endpoint: Option<String>,
+    shutdown_signal: Option<broadcast::Sender<()>>,
 }
 
 pub struct AppState {
@@ -68,18 +70,6 @@ fn main() {
 
     if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
         let _ = remove_dir_all(data_path());
-    }
-
-    let mut waited_seconds = 0;
-    while data_path().join("ipfs").join("repo.lock").exists() {
-        println!("IPFS repo.lock exists, waiting...");
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        waited_seconds = waited_seconds + 1;
-        if waited_seconds > 10 {
-            println!("Waited long enough, removing lock...");
-            let _ = remove_dir_all(data_path().join("ipfs").join("repo.lock"));
-            let _ = remove_dir_all(data_path().join("ipfs").join("datastore").join("LOCK"));
-        }
     }
     
     if let Err(err) = setup_logs() {
@@ -130,6 +120,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_port,
             request_credential,
+            login_proxy,
             setup_proxy,
             get_proxy,
             stop_proxy,

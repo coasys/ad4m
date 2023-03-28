@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useEffect } from "react";
 
 import Logo from "./Logo";
+import { splashscreenContainer, splashscreenError, splashscreenErrorFlex } from "./styles";
 
 export default function Splashscreen() {
   const [copied, setCopied] = useState(false);
@@ -32,10 +33,10 @@ export default function Splashscreen() {
   }, []);
 
   return (
-    <div>
+    <div style={splashscreenContainer}>
       <Logo gradient style={{ width: "100px", height: "100px" }}></Logo>
-      <div id="error" className={classes.error}>
-        <div className={classes.errorFlex}>
+      <div id="error" style={splashscreenError}>
+        <div style={splashscreenErrorFlex}>
           <j-text variant="heading-lg">Whoops, something broke! 😅</j-text>
           <j-text variant="ingress">
             To help us fix this, please click the button below to open your AD4M
