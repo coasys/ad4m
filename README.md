@@ -1,27 +1,76 @@
-# AD4M Executor (= run-time)
+[![Project](https://img.shields.io/badge/Project-AD4M-brightgreen.svg)](http://ad4m.dev/)
+[![Docs](https://img.shields.io/badge/Docs-AD4M-blue.svg)](http://docs.ad4m.dev/)
+[![License: CAL 1.0](https://img.shields.io/badge/License-CAL%201.0-blue.svg)](https://github.com/holochain/cryptographic-autonomy-license)
 
-## What's AD4M?
-AD4M (*Agent-Centric Distributed Application Meta-Ontology*) is an abstract interface definition that tries to distill the quintessence of agent-centric software architecture such that applications can choose to become interoprable by building components congruent to this interface. It introduces a simple and powerful ontology consisting of three entities
-1. **Agent** (=user/human)
-2. **Language** (=space of expressions / combining storage and UI on an abstract level)
-3. **Perspective** (=what an agent perceives / spaces of links (triplets) between expressions)
+![Logo](docs-src/ad4mlogo_green_angle2_colouremblem.png)
 
-See [the AD4M repository](https://github.com/perspect3vism/ad4m/blob/main/README.md) for a more detailed description as well as TypeScript classes and interfaces.
+# AD4M
 
+_The **A**gent-Centric **D**istributed **A**pplication **M**eta-ontology_
+or just:
+**\*A**gent-Centric **DA**pp **M**eta-ontology\*
 
-## Why a Node.js Executor For AD4M?
+- A new **meta-ontology** for interoperable, decentralized application design
+- A **spanning-layer** to enable seamless integration between Holochain DNAs, blockchains, linked-data structures/ontologies and centralized back-ends
+- The basis for turning distinct, monolithic and siloed apps into a global, open and interoperable **sense-making network**
 
-Using this as the local back-end / middleware, all that's left to do in order to build an AD4M based / compatible application is writing a UI that connects to this AD4M executor via it's [GraphQL interface](src/core/graphQL-interface/GraphQL.ts) and potentially adding custom AD4M Languages. See [Perspect3ve](https://github.com/perspect3vism/perspect3ve) for a working example.
+## Repo Structure / History
 
-So this package can be used for starting an AD4M node.js runtime.
+This is the new mono-repository with all components making up a whole AD4M implementation merged back into what formerly was only the `ad4m-executor`.
 
-`main.js` will listen for calls from the host on the event `init`. Upon receiving this event it will spawn the AD4M runtime; this runtime is interfaced with and managed via a locally running graphql server. Information on the topology of this server can be found [here](./src/core/graphQL-interface/GraphQL.ts).
+- `core`: Former [ad4m repository](https://github.com/perspect3vism/ad4m-core-deprecated). Holds the core ontology types, the `Ad4mClient` and the GraphQL schema build automatically from the core types. This package gets published as https://www.npmjs.com/package/@perspect3vism/ad4m and is thus holding most of the app/UI facing coding.
+- `executor`: All the code running inside an AD4M instance. UI-less GraphQL server, managing Agent keys, Perspectives and running Languages. TypeScript library without runnable main / executable.
+- `host`: Former [ad4m-host repository](https://github.com/perspect3vism/ad4m-host). Imports and wraps executor and uses vercel/pkg to create runnable binary.
+- `ui`: Former [ad4min repository](https://github.com/perspect3vism/ad4min). Tauri based system-tray icon launcher UI which is the end-user deployment including the `host` executable and providing and AD4M admin (_AD4Min_) UI interface.
 
-More information about the AD4M ontology and scope can be found [here](https://github.com/perspect3vism/perspect3ve/tree/master/src/ad4m).
+---
 
-## Building
+- `connect`: Former [ad4m-connect repository](https://github.com/perspect3vism/ad4m-connect). Convenience library to connect to a (local or via proxy) AD4M-executor, potentially requesting or reusing capability tokens and creating an `Ad4mClient` ready for the app/UI to use.
+- `docs-src` / `docs`: Documentation hosted under https://docs.ad4m.dev
+
+---
+
+ - `cli`: The new Rust based `ad4m` command-line based generic UI. See [it's readme](cli/README.md) for more details. Published to Crates.io as `ad4m`: https://crates.io/crates/ad4m
+ - `rust-client`: Rust based `Ad4mClient`. Wraps GraphQL and provides the same high-level interface to AD4M as the TypeScript based version in core. Published to Crates.io as `ad4m-client`: https://crates.io/crates/ad4m-client.
+
+The project started in August 2020 in https://github.com/lucksus/perspectivism, then got broken down into the `ad4m` (core), `ad4m-executor` and [perspect3ve](https://github.com/perspect3vism/perspect3ve) repositories for simultaneuous use in [Flux](https://github.com/fluxsocial) and Perspect3ve. Other components got added over the years 2021, 2022.
+
+In October/November 2022, these componentes were collected into a mono-repo again to avoid PR-chains across multiple repositories and to have version numbers be in lock-step.
+
+## Build
+
+Install Rust by visiting [here](https://www.rust-lang.org/tools/install)
+
+### Fresh build:
 
 ```
-npm i
-npm run build
+yarn install
+yarn run build-linux/macos/windows (choose version for your OS)
+```
+
+### Subsequent builds
+
+```
+yarn run build-all-linux/macos/windows (choose version for your OS)
+```
+
+## Testing
+
+```
+yarn install
+yarn test
+```
+
+## Building ad4m-host
+
+```
+yarn install
+yarn run package-linux/macos/windows (choose version for your OS)
+```
+
+## Building ad4m launcher
+
+```
+yarn install
+yarn run build-linux/macos/windows (choose version for your OS)
 ```

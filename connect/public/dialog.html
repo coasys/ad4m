@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>AD4M Connection Wizard</title>
+    <link rel="icon" type="image/png" href="favicon.png" />
+  </head>
+
+  <body>
+    <div id="container"></div>
+    <script type="module">
+      const { ipcRenderer } = require("electron");
+
+      import Ad4mConnectUI from "../dist/web.js";
+
+      const {
+        appName,
+        appDesc = "",
+        appDomain = "",
+        appIconPath,
+        executorUrl,
+        capabilityToken,
+        capabilities,
+      } = ipcRenderer.sendSync("get");
+
+      const ui = Ad4mConnectUI({
+        appName,
+        appDesc,
+        appDomain,
+        appIconPath,
+        capabilities,
+      });
+
+      ui.connect();
+
+      ui.addEventListener("authstatechange", (e) => {
+        if (ui.authState === "authenticated") {
+          console.log(ui.token);
+          ipcRenderer.send("resolve", {
+            executorUrl,
+            capabilityToken: ui.token || localStorage.getItem("ad4mtoken"),
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

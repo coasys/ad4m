@@ -1,0 +1,67 @@
+{
+  "name": "@perspect3vism/ad4m-connect",
+  "version": "0.3.3",
+  "description": "Lib for handling everything needed to setup a connection to a local or remote ad4m-executor",
+  "license": "CAL-1.0",
+  "main": "dist/web.js",
+  "browser": "dist/web.js",
+  "files": [
+    "dist",
+    "public"
+  ],
+  "exports": {
+    ".": "./dist/web.js",
+    "./electron": {
+      "require": "./dist/electron.js",
+      "type": "commonjs"
+    },
+    "./web": {
+      "import": "./dist/web.js",
+      "require": "./dist/web.js",
+      "type": "module"
+    },
+    "./core": {
+      "import": "./dist/core.js",
+      "require": "./dist/core.js",
+      "type": "module"
+    },
+    "./utils": {
+      "import": "./dist/utils.js",
+      "require": "./dist/utils.js",
+      "type": "module"
+    }
+  },
+  "scripts": {
+    "prepare": "run-s build:*",
+    "release": "np --no-2fa --no-tests --tag=latest",
+    "release:beta": "np --no-2fa --no-tests --tag=beta --any-branch",
+    "dev": "NODE_ENV=dev && vite dev",
+    "serve": "npx serve",
+    "build": "npm run build:core && npm run build:web && npm run build:electron && npm run build:utils && tsc",
+    "build:core": "tsc --project tsconfig.json && node scripts/esbuild.js",
+    "build:web": "tsc --project tsconfig.json && node scripts/esbuild_web.js",
+    "build:utils": "tsc --project tsconfig.json && node scripts/esbuild_utils.js",
+    "build:electron": "tsc --project tsconfig.json && node scripts/esbuild_electron.js"
+  },
+  "author": {
+    "name": "Nicolas Luck",
+    "email": "nicolas@perspect3vism.org"
+  },
+  "devDependencies": {
+    "@apollo/client": "3.7.10",
+    "@perspect3vism/ad4m": "*",
+    "esbuild": "^0.15.5",
+    "esbuild-plugin-lit": "^0.0.10",
+    "graphql-ws": "5.12.0",
+    "np": "^7.6.2",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^4.6.2",
+    "vite": "^4.1.1"
+  },
+  "dependencies": {
+    "@undecaf/barcode-detector-polyfill": "^0.9.15",
+    "auto-bind": "^5.0.1",
+    "electron": "^20.0.3",
+    "lit": "^2.3.1"
+  }
+}

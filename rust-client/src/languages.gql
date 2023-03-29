@@ -1,0 +1,73 @@
+query ByFilter($filter: String!) {
+    languages(filter: $filter) {
+        name
+        address
+        settings
+    }
+}
+
+query ByAddress($address: String!) {
+    language(address: $address) {
+        name
+        address
+        settings
+    }
+}
+
+mutation WriteSettings($languageAddress: String!, $settings: String!) {
+    languageWriteSettings(languageAddress: $languageAddress, settings: $settings)
+}
+
+mutation ApplyTemplateAndPublish(
+    $sourceLanguageHash: String!,
+    $templateData: String!,
+) {
+    languageApplyTemplateAndPublish(sourceLanguageHash: $sourceLanguageHash, templateData: $templateData) {
+        name, address
+    }
+}
+
+query Meta(
+    $address: String!,
+) {
+    languageMeta(address: $address) {
+        name
+        address
+        description
+        author
+        templated
+        templateSourceLanguageAddress
+        templateAppliedParams
+        possibleTemplateParams
+        sourceCodeLink
+    }
+}
+
+mutation Publish(
+    $languagePath: String!,
+    $languageMeta: LanguageMetaInput!,
+) {
+    languagePublish(languagePath: $languagePath, languageMeta: $languageMeta) {
+        name
+        address
+        description
+        author
+        templated
+        templateSourceLanguageAddress
+        templateAppliedParams
+        possibleTemplateParams
+        sourceCodeLink
+    }
+}
+
+query Source(
+    $address: String!,
+) {
+    languageSource(address: $address)
+}
+
+mutation Remove(
+    $address: String!,
+) {
+    languageRemove(address: $address)
+}

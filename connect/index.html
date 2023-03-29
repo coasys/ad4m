@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body>
+    <h1 id="auth"></h1>
+    <h1 id="connection"></h1>
+
+    <button id="button">Connect with AD4M</button>
+
+    <script type="module">
+      import Ad4mConnectUI from "./src/web.ts";
+
+      const ui = Ad4mConnectUI({
+        appName: "AD4M Connect",
+        appDesc: "A description of the app",
+        appUrl: "http://localhost:3000",
+        appDomain: "dev.ad4m.connect.example",
+        appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+        capabilities: [
+          {
+            with: { domain: "*", pointers: ["*"] },
+            can: ["*"],
+          },
+        ],
+      });
+
+      const authTitle = document.getElementById("auth");
+      const connectionTitle = document.getElementById("connection");
+      const button = document.getElementById("button");
+
+      connectionTitle.innerText = ui.connectionState;
+      authTitle.innerText = ui.authState;
+
+      button.addEventListener("click", () => {
+        ui.connect();
+      });
+
+      ui.addEventListener("connectionstatechange", (e) => {
+        connectionTitle.innerText = ui.connectionState;
+      });
+
+      ui.addEventListener("authstatechange", (e) => {
+        authTitle.innerText = ui.authState;
+      });
+    </script>
+  </body>
+</html>

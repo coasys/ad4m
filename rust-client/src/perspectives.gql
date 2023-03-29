@@ -1,0 +1,76 @@
+query All {
+    perspectives {
+        uuid
+        name
+        sharedUrl
+        neighbourhood { 
+            linkLanguage 
+            meta { 
+                links
+                    {
+                        author
+                        timestamp
+                        data { source, predicate, target }
+                        proof { valid, invalid, signature, key }
+                    }  
+            } 
+        }
+    }    
+}
+
+mutation Add($name: String!) {
+    perspectiveAdd(name: $name) {
+        uuid
+        name
+    }
+}
+
+mutation Remove($uuid: String!) {
+    perspectiveRemove(uuid: $uuid)
+}
+
+mutation AddLink($uuid: String!, $link: LinkInput!){
+    perspectiveAddLink(link: $link, uuid: $uuid) {
+        author
+        timestamp
+        data { source, predicate, target }
+        proof { valid, invalid, signature, key }
+    }
+}
+
+mutation RemoveLink($uuid: String!, $link: LinkExpressionInput!) {
+    perspectiveRemoveLink(link: $link, uuid: $uuid)
+}
+
+query QueryLinks($uuid: String!, $query: LinkQuery!) {
+    perspectiveQueryLinks(query: $query, uuid: $uuid) {
+        author
+        timestamp
+        data { source, predicate, target }
+        proof { valid, invalid, signature, key }
+    }
+}
+
+query Infer($uuid: String!, $query: String!) {
+    perspectiveQueryProlog(uuid: $uuid, query: $query)
+}
+
+subscription SubscriptionLinkAdded($uuid: String!) {
+    perspectiveLinkAdded(uuid: $uuid) { 
+        author
+        timestamp
+        data { source, predicate, target }
+        proof { valid, invalid, signature, key }
+    }
+} 
+
+query Snapshot($uuid: String!) {
+    perspectiveSnapshot(uuid: $uuid) {
+        links { 
+            author
+            timestamp
+            data { source, predicate, target }
+            proof { signature, key }
+        }
+    }
+}
