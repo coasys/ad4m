@@ -237,6 +237,10 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return core.perspectivesController.allPerspectiveHandles()
             },
             //@ts-ignore
+            agentGetEntanglementProofs: (parent, args, context, info) => {
+                return core.entanglementProofController.getEntanglementProofs();
+            },
+            //@ts-ignore
             getTrustedAgents: (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
                 return core.runtimeService.getTrustedAgents();
@@ -258,6 +262,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             runtimeHcAgentInfos: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
                 return JSON.stringify(await core.holochainRequestAgentInfos())
+            },
+
+            //@ts-ignore
+            runtimeVerifyStringSignedByDid: async (parent, args, context, info) => {
+                const { did, didSigningKeyId, data, signedData } = args;
+                return await core.signatureService.verifyStringSignedByDid(did, didSigningKeyId, data, signedData)
             },
 
             //@ts-ignore
@@ -297,6 +307,23 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             }
         },
         Mutation: {
+            //@ts-ignore
+            agentAddEntanglementProofs: (parent, args, context, info) => {
+                const { proofs } = args;
+                core.entanglementProofController.addEntanglementProofs(proofs);
+                return core.entanglementProofController.getEntanglementProofs();
+            },
+            //@ts-ignore
+            agentDeleteEntanglementProofs: (parent, args, context, info) => {
+                const { proofs } = args;
+                core.entanglementProofController.deleteEntanglementProofs(proofs);
+                return core.entanglementProofController.getEntanglementProofs();  
+            },
+            //@ts-ignore
+            agentEntanglementProofPreFlight: (parent, args, context, info) => {
+                const { deviceKey, deviceKeyType } = args;
+                return core.entanglementProofController.signDeviceKey(deviceKey, deviceKeyType);
+            },
             //@ts-ignore
             agentRemoveApp: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)

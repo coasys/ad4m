@@ -209,6 +209,9 @@ export default class LanguageController {
             sourceFilePath = path.join(process.env.PWD!, sourceFilePath)
 
         const bundleBytes = fs.readFileSync(sourceFilePath)
+        if (bundleBytes.length === 0) {
+            throw new Error("Language to be loaded does not contain any data")
+        }
         // @ts-ignore
         const hash = await this.ipfsHash(bundleBytes)
         console.debug("LanguageController.loadLanguage: loading language at path", sourceFilePath, "with hash", hash);

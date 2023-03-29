@@ -9,10 +9,15 @@ import type { Dna } from '@perspect3vism/ad4m'
 import type { ChildProcess } from 'child_process'
 import yaml from 'js-yaml';
 import { AsyncQueue } from './Queue'
+
 import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
+import EntanglementProofController from '../../EntanglementProof'
+import AgentService from '../../agent/AgentService'
+import fetch from "node-fetch";
 
 export const bootstrapUrl = "https://bootstrap.holo.host"
 export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"
+const signingServiceVersion = "0.0.2";
 
 export interface HolochainConfiguration {
     conductorPath?: string, 
@@ -42,8 +47,11 @@ export default class HolochainService {
     #signalCallbacks: [CellId, AppSignalCb, string][];
     #queue: Map<string, AsyncQueue>
     #languageDnaHashes: Map<string, Uint8Array[]>
+    #agentService: AgentService
+    #entanglementProofController?: EntanglementProofController
+    #signingService?: CellId
 
-    constructor(config: HolochainConfiguration) {
+    constructor(config: HolochainConfiguration, agentService: AgentService, entanglementProofController?: EntanglementProofController) {
         let {
             conductorPath, 
             dataPath, 
@@ -57,6 +65,8 @@ export default class HolochainService {
         } = config;
 
         this.#didResolveError = false;
+        this.#agentService = agentService;
+        this.#entanglementProofController = entanglementProofController;
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
         this.#dataPath = dataPath
@@ -168,6 +178,45 @@ export default class HolochainService {
                 this.#appWebsocket.on('signal', this.handleCallback.bind(this))
                 console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
             };
+
+             //Install signing service DNA
+            const activeApps = await this.#adminWebsocket!.listApps({status_filter: AppStatusFilter.Enabled});
+            if (!activeApps.map(value => value.installed_app_id).includes("signing_service")) {
+                const pubKey = await this.pubKeyForLanguage("main");
+
+                const dest = path.join(this.#dataPath, "signing.dna");
+                const res = await fetch(`https://github.com/perspect3vism/signing-service/releases/download/${signingServiceVersion}/signing.dna`);
+                const fileStream = fs.createWriteStream(dest);
+                await new Promise((resolve, reject) => {
+                    res.body.pipe(fileStream);
+                    res.body.on("error", reject);
+                    fileStream.on("finish", resolve);
+                });
+
+                const hash = await this.#adminWebsocket!.registerDna({
+                    path: dest
+                })
+
+                const installedApp = await this.#adminWebsocket!.installApp({
+                    installed_app_id: "signing_service", agent_key: pubKey, dnas: [{hash: hash, role_id: "crypto"}]
+                })
+                this.#signingService = installedApp.cell_data[0].cell_id;
+
+                try {
+                    await this.#adminWebsocket!.activateApp({installed_app_id: "signing_service"})
+                } catch(e) {
+                    console.error("HolochainService: ERROR activating app signing_service", " - ", e)
+                }
+            } else {
+                const { cell_data } = await this.#appWebsocket!.appInfo({installed_app_id: "signing_service"})
+                const cell = cell_data.find(c => c.role_id === "crypto")
+                if(!cell) {
+                    const e = new Error(`No DNA with nick signing_service found for language signing service DNA`)
+                    throw e
+                }
+                this.#signingService = cell.cell_id;
+            }
+
             resolveReady!()
             this.#didResolveError = false;
         } catch(e) {
@@ -194,6 +243,22 @@ export default class HolochainService {
         
         resolveReady!()
         this.#didResolveError = false;
+    }
+
+    async callSigningService(data: string): Promise<string> {
+        if (!this.#signingService) {
+            throw new Error("Signing service DNA is not init'd yet!")
+        }
+        const pubKey = await this.pubKeyForLanguage("main");
+        const result = await this.#appWebsocket!.callZome({
+            cap_secret: null,
+            cell_id: this.#signingService!,
+            zome_name: "crypto",
+            fn_name: "sign",
+            payload: data,
+            provenance: pubKey
+        })
+        return result.toString("hex")
     }
 
     async stop() {
@@ -305,10 +370,23 @@ export default class HolochainService {
                         }
                     }
                 });
+
+                const did = this.#agentService.did;
+                //Did should only ever be undefined when the system DNA's get init'd before agent create occurs
+                //These system DNA's do not currently need EP proof's
+                let membraneProof;
+                if(did) {
+                    const signedDid = await this.callSigningService(did);
+                    const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(Buffer.from(pubKey).toString("base64"), signedDid);
+                    membraneProof = {"ad4mDidEntanglement": Buffer.from(JSON.stringify(didHolochainEntanglement))};
+                } else {
+                    membraneProof = {};
+                }
+
                 //console.log("HolochainService: Installing DNA:", dna, "at data path:", this.#dataPath, "\n");
                 //Install the app; with on the fly generated app bundle
                 const installAppResult = await this.#adminWebsocket!.installApp({
-                    installed_app_id: lang, agent_key: pubKey, membrane_proofs: {}, bundle: {
+                    installed_app_id: lang, agent_key: pubKey, membrane_proofs: membraneProof, bundle: {
                         manifest: {
                             manifest_version: "1",
                             name: lang,

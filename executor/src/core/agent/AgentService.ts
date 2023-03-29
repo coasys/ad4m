@@ -8,7 +8,7 @@ import {
   ReadOnlyLanguage,
   ExceptionType,
 } from "@perspect3vism/ad4m";
-import { Agent, ExpressionProof, AgentSignature } from "@perspect3vism/ad4m";
+import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@perspect3vism/ad4m";
 import secp256k1 from "secp256k1";
 import * as secp256k1DIDKey from "@transmute/did-key-secp256k1";
 import Signatures from "./Signatures";
@@ -89,6 +89,13 @@ export default class AgentService {
     return this.#readyPromise;
   }
 
+  get signingKeyId(): string {
+    if (!this.#signingKeyId) {
+        throw new Error("No signing key id on AgentService")
+    }
+    return this.#signingKeyId!
+  }
+
   createSignedExpression(data: any): Expression {
     if (!this.isInitialized) {
       throw new Error("Can't sign without keystore");
@@ -121,6 +128,28 @@ export default class AgentService {
     } as Expression;
 
     return signedExpresssion;
+  }
+
+  signString(data: string): string {
+    if(!this.isInitialized){
+        throw new Error("Can't sign without keystore")
+    }
+    if(!this.isUnlocked()) {
+        throw new Error("Can't sign with locked keystore")
+    }
+    if(!this.#signingKeyId) {
+        throw new Error("Can't sign without signingKeyId")
+    }
+
+    const payloadBytes = Signatures.buildMessageRaw(data)
+
+    const key = this.getSigningKey()
+    const privKey = Uint8Array.from(Buffer.from(key.privateKey, key.encoding))
+
+    const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey)
+    const sigBuffer = Buffer.from(sigObj.signature)
+    const sigHex = sigBuffer.toString('hex')
+    return sigHex
   }
 
   async updateAgent(a: Agent) {

@@ -25,6 +25,10 @@ export interface OuterConfig {
   appLangAliases?: object,
   //Should the graphql server be started as mocking service
   mocks: boolean,
+  //Should we start a dApp UI server to allow connecting of crypto wallets
+  runDappServer: boolean,
+  //Optional port for the dApp UI server
+  dAppPort?: number,
   //Port for graphql server
   gqlPort?: number,
   //Port for holochain admin port
@@ -84,12 +88,14 @@ export interface SeedFileSchema {
 export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let { 
       resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
-      mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, reqCredential, swiplPath, swiplHomePath
+      mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, reqCredential, swiplPath, swiplHomePath,runDappServer,
+      dAppPort
     } = config
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
     if(!config.hcPortAdmin) config.hcPortAdmin = await getPort({ port: 2000 });
     if(!config.hcPortApp) config.hcPortApp = await getPort({ port: 1337 });
+    if(!dAppPort) dAppPort = await getPort({port: 4200})
     if(config.hcUseMdns === undefined) config.hcUseMdns = false
     if(config.hcUseProxy === undefined) config.hcUseProxy = true
     if(config.hcUseBootstrap === undefined) config.hcUseBootstrap = true
@@ -192,6 +198,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
 
     await core.startGraphQLServer(gqlPort, mocks, config);
+    if (runDappServer) { core.startDAppServer(dAppPort) };
 
     console.log("\x1b[31m", "GraphQL server started, Unlock the agent to start holohchain", "\x1b[0m");
 
