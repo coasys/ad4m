@@ -88,3 +88,32 @@ export function copyTextToClipboard(text: string) {
         navigator.clipboard.writeText(text);
       }
 }
+
+function isSupported(): boolean {
+    try {
+      localStorage.setItem("test", "");
+      localStorage.removeItem("test");
+    } catch (e) {
+      return false;
+    }
+    return true;
+  };
+
+export function setForVersion(key: string, value: string): void {
+    if (isSupported()) {
+      localStorage.setItem(`${__APP_VERSION__}/${key}`, value);
+    }
+  };
+  
+  export function getForVersion(key: string): string | null {
+    if (isSupported()) {
+      return localStorage.getItem(`${__APP_VERSION__}/${key}`);
+    }
+    return null;
+  };
+  
+  export function removeForVersion(key: string): void {
+    if (isSupported()) {
+      localStorage.removeItem(`${__APP_VERSION__}/${key}`);
+    }
+  };
