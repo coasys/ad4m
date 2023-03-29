@@ -47,5 +47,15 @@
         },
         "resource": "../bootstrap-languages/perspective-language/build/bundle.js"
     },
-    "alsoPublish": []
+    "alsoPublish": [
+        {
+            "meta": {
+                "name": "fileStorageLanguage", 
+                "description": "Holochain based language for storing files", 
+                "sourceCodeLink": "https://github.com/perspect3vism/file-storage-language",
+                "possibleTemplateParams": ["uid", "name", "description"]
+            },
+            "resource": "../bootstrap-languages/file-storage/build/bundle.js"
+        }
+    ]
 }
