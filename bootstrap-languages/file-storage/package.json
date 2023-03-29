@@ -11,7 +11,7 @@
     "build:macos": "yarn run build-icons && yarn run build-dna && tsc && rollup -c",
     "build:windows": "yarn run build-icons && cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && tsc && rollup -c",
     "build-icons": "rollup -c rollup.config.icons.js",
-    "build-dna": "cd ./hc-dna && nix-shell --run ./build.sh && cd ..",
+    "build-dna": "cd ./hc-dna && ./build.sh && cd ..",
     "dev": "tsc && rollup -c rollup.config.icons.js && rollup -c -w"
   },
   "author": "",
