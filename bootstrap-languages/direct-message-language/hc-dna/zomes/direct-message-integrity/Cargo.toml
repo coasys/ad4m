@@ -1,0 +1,17 @@
+[package]
+name = "direct-message-integrity"
+version = "0.1.0"
+authors = ["Nicolas Luck <nicolas@lucksus.eu>", "Joshua Parkin <joshuadparkin@gmail.com>"]
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "direct_message_integrity"
+
+[dependencies]
+derive_more = "0"
+serde = "1"
+chrono = { version = "0.4.22", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+
+hdi = "0.2.0"
+holo_hash = "0.1.0"
