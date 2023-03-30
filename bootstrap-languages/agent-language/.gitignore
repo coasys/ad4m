@@ -1,0 +1,13 @@
+dist/
+node_modules/
+target/
+.hc
+.cargo
+*.log
+*.dna
+build/*
+*.js
+*.js.map
+!*.config.icons.js
+!*.config.js
+!dna.js
