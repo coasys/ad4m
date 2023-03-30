@@ -1,0 +1,21 @@
+[package]
+name = "direct-message"
+version = "0.1.0"
+authors = ["Nicolas Luck <nicolas@lucksus.eu>"]
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "direct_message"
+
+[dependencies]
+derive_more = "0"
+serde = "1"
+serde_json = "1"
+chrono = { version = "0.4.22", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+hex = "0.4.3"
+
+hdk = "0.1.0"
+holo_hash = "0.1.0"
+
+direct-message-integrity = { path = "../direct-message-integrity" }

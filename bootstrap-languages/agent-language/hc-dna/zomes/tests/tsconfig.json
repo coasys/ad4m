@@ -1,0 +1,23 @@
+{
+    "compilerOptions": {
+      "module": "ESNext",
+      "target": "ESNext",
+      "moduleResolution": "Node",
+      "sourceMap": true,
+      "declaration": true,
+      "forceConsistentCasingInFileNames": true,
+      "allowSyntheticDefaultImports": true,
+      "skipLibCheck": true,
+      "strict": true,
+    "skipDefaultLibCheck": true,
+    "outDir": "dist",
+    "declarationDir": "dist",
+    },
+    "include": [
+      "ts/**/*"
+    ],
+    "ts-node": {
+      "esm": true,
+      "experimentalSpecifierResolution": "node"
+    }
+}
