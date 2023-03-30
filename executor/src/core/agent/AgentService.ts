@@ -410,8 +410,8 @@ export default class AgentService {
   // TODO, we may want to change the capability request workflow.
   // https://github.com/perspect3vism/ad4m-executor/issues/73
   permitCapability(authExt: string, capabilities: Capability[]) {
-    console.log("admin user capabilities: ", capabilities);
-    console.log("auth info: ", authExt);
+    console.log("AgentService.permitCapability(): admin user capabilities: ", capabilities);
+    console.log("AgentService.permitCapability(): auth info: ", authExt);
 
     let { requestId, auth }: AuthInfoExtended = JSON.parse(authExt);
     let rand = genRandomDigits();
@@ -424,7 +424,7 @@ export default class AgentService {
 
   async generateJwt(requestId: string, rand: string) {
     const authKey = genRequestKey(requestId, rand);
-    console.log("rand number with requestId: ", authKey);
+    console.log("AgentService.generateJwt(): rand number with requestId: ", authKey);
     const auth = this.#requests.get(authKey);
 
     if (!auth) {

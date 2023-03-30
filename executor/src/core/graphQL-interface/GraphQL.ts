@@ -838,14 +838,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     )(undefined, args)
                 },
                 resolve: async (payload: any) => {
-                    console.debug("GQL neighbourhoodSignal:", payload)
                     await core.languageController?.tagExpressionSignatureStatus(payload?.signal)
                     if (payload?.signal?.data.links) {
                         for (const link of payload?.signal.data.links) {
                             await core.languageController?.tagExpressionSignatureStatus(link);
                         }
                     };
-                    console.debug("GQL neighbourhoodSignal sent")
                     return payload?.signal
                 }
             },
