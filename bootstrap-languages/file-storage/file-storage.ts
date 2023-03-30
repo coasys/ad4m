@@ -38,11 +38,11 @@ export class FileStorage {
   }
 
   async download(chunksHashes: Array<EntryHash>): Promise<Blob> {
-    const fetchChunksPromises = chunksHashes.map((hash: Uint8Array) =>
-      this.fetchChunk(hash)
-    );
-
-    const chunks = await Promise.all(fetchChunksPromises);
+    const chunks = [];
+    for (const chunkHash of chunksHashes) {
+      let chunk = await this.fetchChunk(chunkHash);
+      chunks.push(chunk);
+    }
     return this.mergeChunks(chunks);
   }
 
