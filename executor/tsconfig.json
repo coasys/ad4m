@@ -77,7 +77,8 @@
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "allowSyntheticDefaultImports": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "declaration": true
   },
   "typedef": [ true, "call-signature", "arrow-call-signature" ],
   "ts-node": {
