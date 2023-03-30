@@ -158,7 +158,10 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       }
       
       if (data.toString().includes('AD4M init complete')) {
-        await installLanguage(child, binaryPath, bundle, meta, languageType, resolve, port, callback);
+        let installResult = await installLanguage(child, binaryPath, bundle, meta, languageType, resolve, port, callback);
+        let languageAddress = installResult!.languageAddress;
+        let perspective = installResult!.perspective;
+        let neighbourhood = installResult!.neighbourhood;
 
         const clear = () => {
           kill(child.pid!, async () => {

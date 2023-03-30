@@ -31,6 +31,10 @@
       "dependsOn": ["build-libs", "build-languages"],
       "outputs": []
     },
+    "test-runner": {
+      "dependsOn": ["build-libs", "build-languages", "@perspect3vism/ad4m-test#test"],
+      "outputs": []
+    },
     "test:windows": {
       "dependsOn": ["build-libs", "build-languages"],
       "outputs": []
