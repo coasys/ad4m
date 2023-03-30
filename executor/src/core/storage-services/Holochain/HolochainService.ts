@@ -442,7 +442,7 @@ export default class HolochainService {
 
         //4. Call the zome function
         try {
-            if (fnName != "sync") {
+            if (fnName != "sync" && fnName != "current_revision") {
                 console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
             }
             //Check that signZomeCall will be able to find the signing credentials
@@ -472,7 +472,7 @@ export default class HolochainService {
 
             const result = await this.#appWebsocket!.callZome(signedZomeCall);
 
-            if (fnName != "sync") {
+            if (fnName != "sync" && fnName != "current_revision") {
                 if (typeof result === "string") {
                     console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
                 } else if (typeof result === "object") {
