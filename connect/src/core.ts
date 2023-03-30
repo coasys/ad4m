@@ -244,7 +244,7 @@ export default class Ad4mConnect {
         },
         closed: () => {
           if (!this.requestedRestart) {
-            this.notifyConnectionChange("disconnected");
+            this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
             this.notifyAuthChange("unauthenticated");
             this.requestedRestart = false;
           }
@@ -262,6 +262,9 @@ export default class Ad4mConnect {
         query: {
           fetchPolicy: "no-cache",
         },
+        mutate: {
+          fetchPolicy: "no-cache",
+        }
       },
     });
 

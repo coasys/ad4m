@@ -15,6 +15,20 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
 
+## [0.3.4] - 27/03/2023
+
+### Added
+
+### Changed
+ 
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Fixed bug where ipfs repo.lock cleanup would use the wrong path
+ - Bug where last-seen-version would not be written after state cleanup
+
 ## [0.3.3] - 27/03/2023
 
 ### Added
