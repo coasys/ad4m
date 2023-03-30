@@ -319,7 +319,7 @@ export default class Perspective {
                 const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
                     const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
-                    console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args).substring(0, 50)})`)
+                    //console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args).substring(0, 50)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
@@ -566,7 +566,6 @@ export default class Perspective {
         const link = await this.#db.getLink(this.uuid!, oldLink);
         if (!link) {
             const allLinks = await this.#db.getAllLinks(this.uuid!);
-            console.log("all links", allLinks);
             throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
         }
 

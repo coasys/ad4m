@@ -1,0 +1,14 @@
+hc-dna/.cargo
+hc-dna/target
+hc-dna/tests/node_modules
+hc-dna/workdir/direct-message-language.dna
+
+build/*
+
+*.js
+*.js.map
+!*.config.js 
+!dna.js
+
+node_modules
+target
