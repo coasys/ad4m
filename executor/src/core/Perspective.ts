@@ -566,7 +566,6 @@ export default class Perspective {
         const link = await this.#db.getLink(this.uuid!, oldLink);
         if (!link) {
             const allLinks = await this.#db.getAllLinks(this.uuid!);
-            console.log("all links", allLinks);
             throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
         }
 
