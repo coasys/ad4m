@@ -869,8 +869,14 @@ export default class Perspective {
         lines.push(":- dynamic property/2.")
         lines.push(":- dynamic property_getter/4.")
         lines.push(":- dynamic property_setter/3.")
+        lines.push(":- dynamic property_resolve/2.")
+        lines.push(":- dynamic property_resolve_language/3.")
+        lines.push(":- dynamic property_named_option/4.")
         lines.push(":- dynamic collection_getter/4.")
         lines.push(":- dynamic collection_setter/3.")
+        lines.push(":- dynamic p3_class_icon/2.")
+        lines.push(":- dynamic p3_class_color/2.")
+        lines.push(":- dynamic p3_instance_color/3.")
 
         lines.push(":- discontiguous subject_class/2.")
         lines.push(":- discontiguous constructor/2.")
@@ -878,8 +884,14 @@ export default class Perspective {
         lines.push(":- discontiguous property/2.")
         lines.push(":- discontiguous property_getter/4.")
         lines.push(":- discontiguous property_setter/3.")
+        lines.push(":- discontiguous property_resolve/2.")
+        lines.push(":- discontiguous property_resolve_language/3.")
+        lines.push(":- discontiguous property_named_option/4.")
         lines.push(":- discontiguous collection_getter/4.")
         lines.push(":- discontiguous collection_setter/3.")
+        lines.push(":- discontiguous p3_class_icon/2.")
+        lines.push(":- discontiguous p3_class_color/2.")
+        lines.push(":- discontiguous p3_instance_color/3.")
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
