@@ -262,6 +262,9 @@ export default class Ad4mConnect {
         query: {
           fetchPolicy: "no-cache",
         },
+        mutate: {
+          fetchPolicy: "no-cache",
+        }
       },
     });
 
