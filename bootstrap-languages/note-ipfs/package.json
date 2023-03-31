@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"No tests for note-ipfs language\"",
     "build-icons": "rollup -c rollup.config.icons.js",
-    "build": "npm run build-icons && tsc && rollup -c",
+    "build": "yarn run build-icons && tsc && rollup -c",
     "dev": "tsc && rollup -c rollup.config.icons.js && rollup -c -w"
   },
   "author": "",
@@ -27,7 +27,7 @@
     "svelte-check": "^1.0.0",
     "svelte-preprocess": "^4.0.0",
     "tslib": "^2.0.0",
-    "typescript": "^3.9.3",
+    "typescript": "^4.6.2",
     "uint8arrays": "^3.0.0"
   }
 }

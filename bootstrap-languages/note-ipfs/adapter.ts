@@ -1,7 +1,7 @@
 import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext } from "@perspect3vism/ad4m";
 import { IpfsPutAdapter } from './putAdapter'
-import { toString as uint8ArrayToString } from 'uint8arrays/to-string'
-import { concat as uint8ArrayConcat } from 'uint8arrays/concat';
+import { toString as uint8ArrayToString } from 'uint8arrays'
+import { concat as uint8ArrayConcat } from 'uint8arrays';
 import type { IPFS } from "ipfs-core-types";
 
 export default class Adapter implements ExpressionAdapter {

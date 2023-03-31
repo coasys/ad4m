@@ -29,7 +29,9 @@ async function main() {
   for (const lang in languages) {
     // const targetDir = fs.readFileSync('./scripts/download-languages-path').toString()
     const dir = join('build/languages', lang)
-    await fs.ensureDir(dir + "/build");
+    while (!fs.existsSync(dir + "/build" + "/bundle.js")) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
 
     let url = "";
     let dest = "";

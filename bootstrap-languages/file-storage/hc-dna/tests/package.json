@@ -10,7 +10,7 @@
     "tape-promise": "^4.0.0",
     "ts-node": "^10.8.0",
     "@types/node": "^14.0.14",
-    "typescript": "^4.2.4"
+    "typescript": "^4.6.2"
   },
   "devDependencies": {
     "@types/faker": "^5.5.3",
