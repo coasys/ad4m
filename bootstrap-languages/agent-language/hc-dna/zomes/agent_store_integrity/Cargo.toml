@@ -1,0 +1,17 @@
+[package]
+authors = ["josh@junto.foundation"]
+edition = "2018"
+name = "agent_store_integrity"
+version = "0.0.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "agent_store_integrity"
+
+[dependencies]
+derive_more = "0"
+serde = "1"
+chrono = { version = "0.4.22", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+
+hdi = "0.2.0"
+hdk = "0.1.0"

@@ -13,6 +13,7 @@ executorsrc/tests/publishing-agent/ad4m/data/db.json
 
 core/Links.test.js
 core/lib/*
+executor/lib/*
 coverage
 .DS_store
 docs-src/api.md
@@ -53,3 +54,5 @@ tests/ad4m2
 /tests/ad4mJS
 
 test-runner/.ad4m-test
+
+temp

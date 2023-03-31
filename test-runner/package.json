@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-test",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Testing library to test ad4m languages",
   "license": "MIT",
   "bin": "./build/cli.js",
@@ -19,7 +19,7 @@
     "@apollo/client": "3.7.10",
     "@perspect3vism/ad4m": "*",
     "@types/fs-extra": "^9.0.13",
-    "@types/node": "^17.0.21",
+    "@types/node": "^18.0.0",
     "@types/node-fetch": "^2.6.1",
     "@types/unzipper": "^0.10.5",
     "@types/ws": "8.5.4",

@@ -171,7 +171,7 @@ export default class PerspectivismCore {
         while (fs.existsSync(repoPath)) {
             await sleep(1000);
             retries++;
-            if (retries > 10) {
+            if (retries >= 10) {
                 console.log("Waited long enough for repo.lock to be released, deleting...");
                 fs.rmdirSync(repoPath, { recursive: true });
                 fs.rmSync(path.join(basePath, "datastore", "LOCK"));
