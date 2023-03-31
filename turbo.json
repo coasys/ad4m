@@ -13,7 +13,8 @@
       "dependsOn": ["@perspect3vism/perspective-diff-sync#build", "@perspect3vism/agent-language#build", 
         "@perspect3vism/direct-message-language#build", "@perspect3vism/perspective-language#build", 
         "@perspect3vism/language-language#build", "@perspect3vism/neighbourhood-language#build",
-        "@perspect3vism/file-storage#build"],
+        "@perspect3vism/file-storage#build", "@perspect3vism/note-ipfs#build", 
+        "@perspect3vism/local-language-language", "@perspect3vism/local-neighbourhood-store#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 

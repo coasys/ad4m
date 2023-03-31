@@ -1,5 +1,5 @@
 {
-  "name": "note-ipfs",
+  "name": "@perspect3vism/note-ipfs",
   "version": "0.0.4",
   "description": "An AD4M Language for simple text notes build on IPFS",
   "main": "index.js",

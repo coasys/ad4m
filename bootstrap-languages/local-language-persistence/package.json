@@ -1,5 +1,5 @@
 {
-  "name": "languages",
+  "name": "@perspect3vism/local-language-language",
   "version": "0.0.10",
   "description": "An AD4M Language for storing of language bundles on IPFS",
   "main": "index.js",

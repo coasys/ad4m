@@ -1,5 +1,5 @@
 {
-  "name": "neighbourhood-store",
+  "name": "@perspect3vism/local-neighbourhood-store",
   "version": "0.0.1",
   "description": "This is a Language about Perspectives - a way to share Perspectives and create social and collaboration contexts",
   "main": "index.js",
