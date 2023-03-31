@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"No tests for local language language\"",
     "build": "tsc && rollup -c",
-    "dev": "tsc && rollup -c rollup.config.icons.js && rollup -c -w"
+    "dev": "tsc && rollup -c -w"
   },
   "author": "",
   "license": "ISC",
