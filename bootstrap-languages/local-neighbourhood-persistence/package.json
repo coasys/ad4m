@@ -4,7 +4,7 @@
   "description": "This is a Language about Perspectives - a way to share Perspectives and create social and collaboration contexts",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"No tests for local neighbourhood language\"",
     "build": "tsc && rollup -c",
     "dev": "tsc && rollup -c -w"
   },

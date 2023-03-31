@@ -4,7 +4,7 @@
   "description": "An AD4M Language for storing of language bundles on IPFS",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"No tests for local language language\"",
     "build": "tsc && rollup -c",
     "dev": "tsc && rollup -c rollup.config.icons.js && rollup -c -w"
   },
