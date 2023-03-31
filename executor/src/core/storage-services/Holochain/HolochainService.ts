@@ -17,7 +17,7 @@ import fetch from "node-fetch";
 
 export const bootstrapUrl = "https://bootstrap.holo.host"
 export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"
-const signingServiceVersion = "0.0.2";
+const signingServiceVersion = "0.0.3";
 
 export interface HolochainConfiguration {
     conductorPath?: string, 
