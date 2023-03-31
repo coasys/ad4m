@@ -6,7 +6,6 @@
   "bin": "./build/cli.js",
   "scripts": {
     "build": "tsc",
-    "postbuild": "yarn run get-languages",
     "build:util": "browserify build/client.js --standalone Bundle -p esmify > public/client.js",
     "test": "yarn run test-expression && yarn run test-link",
     "test-expression": "node build/cli.js --test ./example/expression.test.js --bundle \"../bootstrap-languages/file-storage/build/bundle.js\" --meta '{\"name\":\"holochain-file-storage\",\"description\":\"Holochain based language for storing objects\",\"sourceCodeLink\":\"https://github.com/perspect3vism/file-storage\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
