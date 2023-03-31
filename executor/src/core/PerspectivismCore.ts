@@ -122,7 +122,7 @@ export default class PerspectivismCore {
 
     get entanglementProofController(): EntanglementProofController {
         if (!this.#entanglementProofController) {
-            this.#entanglementProofController = new EntanglementProofController(Config.rootConfigPath, this.#agentService);
+            this.#entanglementProofController = new EntanglementProofController(this.#config.rootConfigPath, this.#agentService);
         }
         return this.#entanglementProofController
     }

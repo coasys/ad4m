@@ -2,9 +2,8 @@ import { ApolloClient, InMemoryCache } from "@apollo/client/core";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { createClient } from "graphql-ws";
 import Websocket from "ws";
-import main from "../main";
+import main, { OuterConfig } from "../main";
 import path from "path";
-import { OuterConfig } from "../types";
 import { Ad4mClient, LanguageMetaInput } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import { exit } from "process";
@@ -110,7 +109,8 @@ async function publish() {
         hcUseBootstrap: false,
         hcUseProxy: false,
         hcUseLocalProxy: false,
-        hcUseMdns: true
+        hcUseMdns: true,
+        runDappServer: false
     } as OuterConfig)
     
     const ad4mClient = new Ad4mClient(apolloClient(4000));
