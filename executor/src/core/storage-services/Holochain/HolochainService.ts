@@ -1,4 +1,4 @@
-import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, encodeHashToBase64, AppSignal, CellId, CellType, setSigningCredentials, AgentInfoResponse, SigningCredentials, generateSigningKeyPair, GrantedFunctionsType, signZomeCall, getSigningCredentials } from '@holochain/client'
+import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, encodeHashToBase64, AppSignal, CellId, CellType, setSigningCredentials, AgentInfoResponse, SigningCredentials, generateSigningKeyPair, GrantedFunctionsType, signZomeCall, getSigningCredentials, CellInfo } from '@holochain/client'
 import low from 'lowdb'
 import FileSync from 'lowdb/adapters/FileSync'
 import path from 'path'
@@ -180,10 +180,8 @@ export default class HolochainService {
             };
 
              //Install signing service DNA
-            const activeApps = await this.#adminWebsocket!.listApps({status_filter: AppStatusFilter.Enabled});
+            const activeApps = await this.#adminWebsocket!.listApps({});
             if (!activeApps.map(value => value.installed_app_id).includes("signing_service")) {
-                const pubKey = await this.pubKeyForLanguage("main");
-
                 const dest = path.join(this.#dataPath, "signing.dna");
                 const res = await fetch(`https://github.com/perspect3vism/signing-service/releases/download/${signingServiceVersion}/signing.dna`);
                 const fileStream = fs.createWriteStream(dest);
@@ -193,28 +191,44 @@ export default class HolochainService {
                     fileStream.on("finish", resolve);
                 });
 
-                const hash = await this.#adminWebsocket!.registerDna({
-                    path: dest
-                })
-
-                const installedApp = await this.#adminWebsocket!.installApp({
-                    installed_app_id: "signing_service", agent_key: pubKey, dnas: [{hash: hash, role_id: "crypto"}]
-                })
-                this.#signingService = installedApp.cell_data[0].cell_id;
-
-                try {
-                    await this.#adminWebsocket!.activateApp({installed_app_id: "signing_service"})
-                } catch(e) {
-                    console.error("HolochainService: ERROR activating app signing_service", " - ", e)
+                const dnas = [
+                    {
+                        file: Buffer.from(fs.readFileSync(dest)),
+                        nick: "signing_service",
+                        zomeCalls: [
+                            ["signing_service", "sign"],
+                        ]
+                    }
+                ] as Dna[];
+                const cellIds = await this.ensureInstallDNAforLanguage("signing_service", dnas, undefined);
+                if (cellIds.length > 0) {
+                    this.#signingService = cellIds[0];
+                } else {
+                    throw new Error("Could not install signing service DNA");
                 }
             } else {
-                const { cell_data } = await this.#appWebsocket!.appInfo({installed_app_id: "signing_service"})
-                const cell = cell_data.find(c => c.role_id === "crypto")
-                if(!cell) {
-                    const e = new Error(`No DNA with nick signing_service found for language signing service DNA`)
-                    throw e
+                const activeApps = await this.#adminWebsocket!.listApps({});
+                let signingService = activeApps.find(app => app.installed_app_id === "signing_service");
+                if (!signingService) {
+                    throw new Error("Could not find signing service DNA");
                 }
-                this.#signingService = cell.cell_id;
+                const cellInfo = signingService.cell_info;
+
+                Object.keys(cellInfo).forEach(async roleName => {
+                    const cellData = cellInfo[roleName];
+
+                    for (const innerCellData of cellData) {
+                        const cellId = (CellType.Provisioned in innerCellData) ? innerCellData[CellType.Provisioned].cell_id : null
+                        if (!cellId) {
+                            throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${cellInfo}`);
+                        }
+                        if(!cellId) {
+                            const e = new Error(`No DNA with nick signing_service found for language signing service DNA`)
+                            throw e
+                        }
+                        this.#signingService = cellId;
+                    }
+                })
             }
 
             resolveReady!()
@@ -342,7 +356,7 @@ export default class HolochainService {
         return signingCredentials;
     }
 
-    async ensureInstallDNAforLanguage(lang: string, dnas: Dna[], callback: AppSignalCb | undefined): Promise<void> {
+    async ensureInstallDNAforLanguage(lang: string, dnas: Dna[], callback: AppSignalCb | undefined): Promise<CellId[]> {
         await this.#ready
         if (this.#didResolveError) {
             console.error("HolochainService.ensureInstallDNAForLanguage: Warning attempting to install holochain DNA when conductor did not start error free...")
@@ -352,6 +366,7 @@ export default class HolochainService {
         const activeApps = await this.#adminWebsocket!.listApps({});
         let languageApp = activeApps.find(app => app.installed_app_id === lang);
         //console.warn("HolochainService: Found running apps:", activeApps);
+        let cellIds = [] as CellId[];
        
         if(!languageApp) {
             // 1. install app
@@ -400,7 +415,7 @@ export default class HolochainService {
                 //console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
             } catch(e) {
                 console.error("HolochainService: InstallApp, got error: ", e);
-                return;
+                return [];
             }
 
             // 2. activate app
@@ -428,6 +443,7 @@ export default class HolochainService {
                     if (!cellId) {
                         throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${cellInfo}`);
                     }
+                    cellIds.push(cellId);
 
                     let hash = cellId[0];
                     if (hash) hashes.push(hash);
@@ -453,6 +469,7 @@ export default class HolochainService {
                 this.#languageDnaHashes.set(lang, hashes);
             }
         }
+        return cellIds;
     }
 
     async removeDnaForLang(lang: string) {
