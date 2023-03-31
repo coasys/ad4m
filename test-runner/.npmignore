@@ -2,3 +2,9 @@ node_modules
 .turbo
 build/languages
 .ad4m-test*
+!build/languages/**/*.js
+build/publishedLanguages
+build/publishedNeighbourhood
+build/publishedLanguages-ad4m-test-*
+ad4m-test-*
+ad4m-test.log
