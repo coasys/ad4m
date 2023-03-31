@@ -125,6 +125,7 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
     },
     appLangAliases: JSON.parse(appLangAliases),
     mocks: false,
+    runDappServer: true,
     gqlPort,
     hcPortAdmin: hcAdminPort,
     hcPortApp: hcAppPort,
