@@ -2,7 +2,7 @@ import { ApolloClient, InMemoryCache } from "@apollo/client/core";
 import Websocket from "ws";
 import main from "../main";
 import path from "path";
-import { OuterConfig } from "../types";
+import { OuterConfig } from "../main";
 import { Ad4mClient, AuthInfoInput, CapabilityInput } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import PerspectivismCore from "../core/PerspectivismCore";
@@ -81,7 +81,8 @@ describe("Authentication integration tests", () => {
                 hcUseBootstrap: false,
                 hcUseProxy: false,
                 hcUseLocalProxy: false,
-                hcUseMdns: true
+                hcUseMdns: true,
+                runDappServer: false
             } as OuterConfig)
 
             // @ts-ignore
@@ -159,7 +160,8 @@ describe("Authentication integration tests", () => {
                 hcUseProxy: false,
                 hcUseLocalProxy: false,
                 hcUseMdns: true,
-                reqCredential: "123"
+                reqCredential: "123",
+                runDappServer: false
             } as OuterConfig)
 
             // @ts-ignore            
