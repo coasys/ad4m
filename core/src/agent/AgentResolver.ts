@@ -224,7 +224,8 @@ export default class AgentResolver {
 
 
   @Mutation((returns) => [Apps])
-  agentRemoveApp(@Arg("requestId") requestId: string): [] {
+  agentRemoveApp(@Arg("requestId") requestId: string, @PubSub() pubSub: any): [] {
+    pubSub.publish(APPS_CHANGED, { });
     return [];
   }
 

@@ -932,6 +932,18 @@ describe('Ad4mClient', () => {
                 await ad4mClientWithoutSubscription.agent.unlock("test");
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
             })
+
+            it('agent subscribeAppsChanged smoke test', async () => {
+                const appsChangedCallback = jest.fn()
+                ad4mClientWithoutSubscription.agent.addAppChangedListener(appsChangedCallback)
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                expect(appsChangedCallback).toBeCalledTimes(0)
+    
+                ad4mClientWithoutSubscription.agent.subscribeAppsChanged()
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                await ad4mClientWithoutSubscription.agent.removeApp("test");
+                expect(appsChangedCallback).toBeCalledTimes(1)
+            })
     
             it('perspective subscribePerspectiveAdded smoke test', async () => {
                 const perspectiveAddedCallback = jest.fn()
@@ -1000,6 +1012,17 @@ describe('Ad4mClient', () => {
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithSubscription.agent.unlock("test");
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
+            })
+
+            it('agent subscribeAppsChanged smoke test', async () => {
+                const appsChangedCallback = jest.fn()
+                ad4mClientWithSubscription.agent.addAppChangedListener(appsChangedCallback)
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                expect(appsChangedCallback).toBeCalledTimes(0)
+    
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                await ad4mClientWithSubscription.agent.removeApp("test");
+                expect(appsChangedCallback).toBeCalledTimes(1)
             })
     
             it('perspective subscribePerspectiveAdded smoke test', async () => {
