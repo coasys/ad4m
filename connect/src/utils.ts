@@ -1,5 +1,6 @@
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import { AuthStates } from "./core";
+const { version } = require("../package.json");
 
 function Timeout() {
   const controller = new AbortController();
@@ -95,19 +96,19 @@ function isSupported(): boolean {
 
 export function setForVersion(key: string, value: string): void {
   if (isSupported()) {
-    localStorage.setItem(`${__APP_VERSION__}/${key}`, value);
+    localStorage.setItem(`${version}/${key}`, value);
   }
 }
 
 export function getForVersion(key: string): string | null {
   if (isSupported()) {
-    return localStorage.getItem(`${__APP_VERSION__}/${key}`);
+    return localStorage.getItem(`${version}/${key}`);
   }
   return null;
 }
 
 export function removeForVersion(key: string): void {
   if (isSupported()) {
-    localStorage.removeItem(`${__APP_VERSION__}/${key}`);
+    localStorage.removeItem(`${version}/${key}`);
   }
 }
