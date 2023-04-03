@@ -1,6 +1,8 @@
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import { AuthStates } from "./core";
-const { version } = require("../package.json");
+
+// @ts-ignore
+import { version } from "../package.json";
 
 function Timeout() {
   const controller = new AbortController();
