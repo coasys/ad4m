@@ -138,7 +138,7 @@ export default class RuntimeService {
 
     getMessagesOutbox(filter?: string): Message[] {
         let messages = _getObjects(this.outboxPath()) as Message[]
-        console.log("OUTBOX:", messages)
+        // console.log("OUTBOX:", messages)
         if(filter) {
             messages = messages.filter(m => m.recipient === filter)
         }

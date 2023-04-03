@@ -1047,8 +1047,10 @@ export default class LanguageController {
     async tagExpressionSignatureStatus(expression: Expression) {
         if(expression) {
             try{
-                if(! await this.#signatures.verify(expression)) {
-                    console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expression)
+                if(!await this.#signatures.verify(expression)) {
+                    let expressionString = JSON.stringify(expression);
+                    let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
+                    console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)
                     expression.proof.invalid = true
                     expression.proof.valid = false
                 } else {
@@ -1056,7 +1058,16 @@ export default class LanguageController {
                     expression.proof.invalid = false
                 }
             } catch(e) {
-                let errMsg = `Error trying to verify signature for expression: ${expression}`
+                let expressionFormatted;
+                if (typeof expression === "string") {
+                    expressionFormatted = expression.substring(0, 50);
+                } else if (typeof expression === "object") {
+                    let expressionString = JSON.stringify(expression);
+                    expressionFormatted =  expressionString.substring(0, 50)
+                } else {
+                    expressionFormatted = expression;
+                }
+                let errMsg = `Error trying to verify signature for expression: ${expressionFormatted}`
                 console.error(errMsg)
                 console.error(e)
                 this.pubSub.publish(
