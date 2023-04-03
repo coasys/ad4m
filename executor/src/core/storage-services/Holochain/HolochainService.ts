@@ -193,7 +193,7 @@ export default class HolochainService {
 
                 const dnas = [
                     {
-                        file: Buffer.from(fs.readFileSync(dest)),
+                        file: fs.readFileSync(dest),
                         nick: "signing_service",
                         zomeCalls: [
                             ["signing_service", "sign"],
