@@ -62,8 +62,12 @@ const Apps = () => {
 
   useEffect(() => {
     getApps();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+
+    client?.agent?.addAppChangedListener(() => {
+      console.log('triggered')
+      getApps();
+    })
+  }, [client])
 
   function goToFlux() {
     open("https://app.fluxsocial.io");
