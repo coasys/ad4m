@@ -133,8 +133,8 @@ export default function agentTests(testContext: TestContext) {
 
                 //Check can generate a preflight key
                 const preFlight = await ad4mClient.agent.entanglementProofPreFlight("ethAddr", "ethereum");
-                expect(preFlight.deviceKey).to.be("ethAddr");
-                expect(preFlight.deviceKeyType).to.be("ethereum");
+                expect(preFlight.deviceKey).to.equal("ethAddr");
+                expect(preFlight.deviceKeyType).to.equal("ethereum");
                 expect(preFlight.didSignedByDeviceKey).to.be.null;
 
                 const verify = await ad4mClient.runtime.verifyStringSignedByDid(preFlight.did, preFlight.didSigningKeyId, "ethAddr", preFlight.deviceKeySignedByDid);
