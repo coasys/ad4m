@@ -179,7 +179,9 @@ export default class HolochainService {
                 console.debug("HolochainService: Holochain app interface connected on port", this.#appPort)
             };
 
-             //Install signing service DNA
+            resolveReady!()
+
+            //Install signing service DNA
             const activeApps = await this.#adminWebsocket!.listApps({});
             if (!activeApps.map(value => value.installed_app_id).includes("signing_service")) {
                 const dest = path.join(this.#dataPath, "signing.dna");
@@ -194,9 +196,10 @@ export default class HolochainService {
                 const dnas = [
                     {
                         file: fs.readFileSync(dest),
-                        nick: "signing_service",
+                        nick: "signing",
                         zomeCalls: [
-                            ["signing_service", "sign"],
+                            ["signing", "sign"],
+                            ["signing", "verify"]
                         ]
                     }
                 ] as Dna[];
@@ -231,7 +234,6 @@ export default class HolochainService {
                 })
             }
 
-            resolveReady!()
             this.#didResolveError = false;
         } catch(e) {
             console.error("HolochainService: connect Holochain process with error:", e)
@@ -267,7 +269,7 @@ export default class HolochainService {
         const result = await this.#appWebsocket!.callZome({
             cap_secret: null,
             cell_id: this.#signingService!,
-            zome_name: "crypto",
+            zome_name: "crypto_signing",
             fn_name: "sign",
             payload: data,
             provenance: pubKey
@@ -390,7 +392,7 @@ export default class HolochainService {
                 //Did should only ever be undefined when the system DNA's get init'd before agent create occurs
                 //These system DNA's do not currently need EP proof's
                 let membraneProof;
-                if(did) {
+                if(did && lang != "signing_service") {
                     const signedDid = await this.callSigningService(did);
                     const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(Buffer.from(pubKey).toString("base64"), signedDid);
                     membraneProof = {"ad4mDidEntanglement": Buffer.from(JSON.stringify(didHolochainEntanglement))};
@@ -412,7 +414,7 @@ export default class HolochainService {
                     }
                 })
                 
-                //console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
+                // console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
             } catch(e) {
                 console.error("HolochainService: InstallApp, got error: ", e);
                 return [];
