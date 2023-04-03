@@ -143,11 +143,11 @@ export default function agentTests(testContext: TestContext) {
                 //Check can save a entanglement proof
                 preFlight.didSignedByDeviceKey = "ethSignedDID";
                 const addProof = await ad4mClient.agent.addEntanglementProofs([preFlight as EntanglementProofInput]);
-                expect(addProof[0]).to.equal(preFlight);
+                expect(addProof[0]).to.deep.equal(preFlight);
 
                 //Check can get entanglment proofs
                 const getProofs = await ad4mClient.agent.getEntanglementProofs();
-                expect(getProofs[0]).to.equal(preFlight);
+                expect(getProofs[0]).to.deep.equal(preFlight);
 
                 //Check can delete entanglement proofs
                 const deleteProofs = await ad4mClient.agent.deleteEntanglementProofs([preFlight as EntanglementProofInput]);
