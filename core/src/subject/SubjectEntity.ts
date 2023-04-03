@@ -225,8 +225,6 @@ export class SubjectEntity {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
     const proxies = await this.#perspective.getAllSubjectProxies(this.#subjectClass)
 
-    console.log('wow', proxies)
-
     const instances = []
 
     if (proxies) {
