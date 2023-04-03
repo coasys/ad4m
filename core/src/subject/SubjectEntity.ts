@@ -20,6 +20,8 @@ export class SubjectEntity {
   #baseExpression: string;
   #subjectClass: string;
   #perspective: PerspectiveProxy
+  author: string;
+  timestamp: string;
 
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
     this.#baseExpression = baseExpression ? baseExpression : `entry://${makeRandomPrologAtom(24)}`;
@@ -31,17 +33,20 @@ export class SubjectEntity {
   }
 
   private async getData(id?: string) {
-    const tempId = id || this.baseExpression;
+    const tempId = id ?? this.#baseExpression;
     let isInstance = await this.#perspective.isSubjectInstance(tempId, this.#subjectClass)
     if (!isInstance) {
       throw `Not a valid subject instance of ${this.#subjectClass} for ${tempId}`
     }
-    await this.#perspective.createSubject(this.#subjectClass, tempId);
+
+    const subject = await this.#perspective.getSubjectProxy(tempId, this.#subjectClass);
+
+    if (!subject) {
+      await this.#perspective.createSubject(this.#subjectClass, tempId);
+    }
 
     let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property(C, Property)`)
     let properties = results.map(result => result.Property)
-
-    const obj = {}
 
     for (let p of properties) {
       const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve(C, "${p}")`)
@@ -52,8 +57,8 @@ export class SubjectEntity {
 
           if (resolveExpressionURI) {
             const expression = await this.#perspective.getExpression(expressionURI)
-            obj['author'] = expression.author;
-            obj['timestamp'] = expression.timestamp;
+            this['author'] = expression.author;
+            this['timestamp'] = expression.timestamp;
             try {
               return JSON.parse(expression.data)
             } catch (e) {
@@ -73,7 +78,7 @@ export class SubjectEntity {
         }
       };
 
-      obj[p] = await getProperty()
+      this[p] = await getProperty()
     }
 
     let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection(C, Collection)`)
@@ -90,12 +95,12 @@ export class SubjectEntity {
         }
       }
 
-      obj[c] = await getProperty()
+      this[c] = await getProperty()
     }
 
-    obj['id'] = tempId;
+    this.#baseExpression = tempId;
 
-    return obj;
+    return this
   }
 
   private async setProperties(key: string, value: any) {
@@ -219,6 +224,8 @@ export class SubjectEntity {
   async find() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
     const proxies = await this.#perspective.getAllSubjectProxies(this.#subjectClass)
+
+    console.log('wow', proxies)
 
     const instances = []
 
