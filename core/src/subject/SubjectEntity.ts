@@ -217,6 +217,8 @@ export class SubjectEntity {
   }
 
   async get() {
+    this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
+    
     return await this.getData()
   }
 
