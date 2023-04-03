@@ -26,3 +26,4 @@ export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./typeDefs";
 export * from "./DID";
 export * from "./utils";
+export * from './subject/SubjectEntity'
