@@ -455,6 +455,8 @@ export default class AgentService {
       const apps = [...this.#apps, { ...this.#requestingAuthInfo, token: jwt }];
       this.#apps = apps;
       fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
+
+      this.#pubsub.publish(PubSubInstance.APPS_CHANGED, null);      
     }
 
     return jwt;
@@ -469,6 +471,8 @@ export default class AgentService {
       this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId);
 
       fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
+
+      this.#pubsub.publish(PubSubInstance.APPS_CHANGED, null);
     } catch (e) {
       console.error("Error while removing app", e);
     }
@@ -481,6 +485,8 @@ export default class AgentService {
       );
 
       fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
+
+      this.#pubsub.publish(PubSubInstance.APPS_CHANGED, null);
     } catch (e) {
       console.error("Error while revoking token", e);
     }
