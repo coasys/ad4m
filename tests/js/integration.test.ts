@@ -10,6 +10,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     instanceQuery, Subject, subjectProperty,
     subjectCollection, subjectFlag,
     SDNAClass,
+    SubjectEntity,
 } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
@@ -52,7 +53,7 @@ describe("Integration", () => {
         rmSync("../ad4mJS", { recursive: true, force: true })
         console.log("Initialzing executor data directory")
         //@ts-ignore
-        execSync('../../host/dist/ad4m-macos-x64 init --dataPath ../ad4mJS', {})
+        execSync('..\\..\\host\\dist\\ad4m-windows-x64.exe init --dataPath ../ad4mJS', {})
         
         console.log("Starting executor")
         try {
@@ -62,7 +63,7 @@ describe("Integration", () => {
         }
         
         //@ts-ignore
-        executorProcess = exec('../../host/dist/ad4m-macos-x64 serve --dataPath ../ad4mJS', {})
+        executorProcess = exec('..\\..\\host\\dist\\ad4m-windows-x64.exe serve --dataPath ../ad4mJS', {})
 
         let executorReady = new Promise<void>((resolve, reject) => {
             executorProcess!.stdout!.on('data', (data) => {
@@ -82,6 +83,7 @@ describe("Integration", () => {
         console.log("Waiting for executor to settle...")
         await executorReady
         console.log("Creating ad4m client")
+        // @ts-ignore
         ad4m = new Ad4mClient(apolloClient(4000))
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
@@ -583,6 +585,73 @@ describe("Integration", () => {
                     expect(messageEntries.length).to.equal(1)
                 })
 
+            })
+
+            describe("Active record implementation", () => {
+                @SDNAClass({
+                    name: "Recipe"
+                })
+                class Recipe extends SubjectEntity {
+                    //@ts-ignore
+                    @subjectFlag({
+                        through: "ad4m://type",
+                        value: "ad4m://recipe"
+                    })
+                    type: string = ""
+
+                    //@ts-ignore
+                    @subjectProperty({
+                        through: "recipe://name", 
+                        writable: true,
+                    })
+                    name: string = ""
+                }
+
+                before(async () => {
+                    // @ts-ignore
+                    perspective!.addSdna(Recipe.generateSDNA())
+                })
+
+                it("save() & get()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test";
+
+                    await recipe.save();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test")
+                })
+
+                it("update()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test1";
+
+                    await recipe.update();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test1")
+                })
+
+                it("find()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test1";
+
+                    const recipes = await recipe.find();
+
+                    expect(recipes.length).to.equal(1)
+                })
             })
         })
     })
