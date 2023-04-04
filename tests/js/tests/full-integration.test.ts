@@ -123,7 +123,7 @@ describe("Integration tests", function () {
     describe('Social DNA', socialDNATests(testContext))
 
     describe('with Alice and Bob', () => {
-        let bob: ChildProcess | null = null
+        let bobExecutorProcess: ChildProcess | null = null
         before(async () => {
           const appDataPath = path.join(TEST_DIR, 'agents', 'bob')
           const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
@@ -137,11 +137,11 @@ describe("Integration tests", function () {
           if(!fs.existsSync(appDataPath))
             fs.mkdirSync(appDataPath)
 
-          executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
+          bobExecutorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
             gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
 
           testContext.bob = new Ad4mClient(apolloClient(gqlPort))
-          testContext.bobCore = executorProcess
+          testContext.bobCore = bobExecutorProcess
           await testContext.bob.agent.generate("passphrase")
 
           const status = await testContext.bob.agent.status()
@@ -152,15 +152,15 @@ describe("Integration tests", function () {
         })
 
         after(async () => {
-          if (executorProcess) {
-              executorProcess.kill()
+          if (bobExecutorProcess) {
+              bobExecutorProcess.kill()
           }
           await new Promise((resolve)=>setTimeout(resolve, 500))
         })
 
         describe('Agent Language', agentLanguageTests(testContext))
-        // describe('Direct Messages', directMessageTests(testContext))
-        // describe('Language', languageTests(testContext))
-        // describe('Neighbourhood', neighbourhoodTests(testContext))
+        describe('Direct Messages', directMessageTests(testContext))
+        describe('Language', languageTests(testContext))
+        describe('Neighbourhood', neighbourhoodTests(testContext))
     })
 })
