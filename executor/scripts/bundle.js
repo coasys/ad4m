@@ -37,17 +37,26 @@ function denoAliasNode(nodeModule) {
 
 esbuild
   .build({
-    entryPoints: ['lib/main.js'],
+    entryPoints: ['lib/deno.js'],
     outfile: 'lib/bundle.js',
     bundle: true,
     platform: 'node',
     target: 'es2020',
     format: 'esm',
     plugins: [
+        {
+            name: `node:net`,
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^node:net$`) }, (args) => {
+                    return { path: path.resolve(`deno_std-0.177.0/node/net.ts`), external: false };
+                });
+            },
+        },
         ...[
             'crypto', 'path', 'fs', 'child_process', 'net', 'dns', 'cluster', 'https',
             'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
             'zlib', 'assert', 'buffer', 'constants', 'querystring', 'string_decoder',
+            'global'
         ].map(denoAliasLocal),
         {
             name: `dns-promisis-alias`,
@@ -57,8 +66,15 @@ esbuild
                 });
             },
         },
-        //polyfillNodeForDeno(),
-    ]
+        {
+            name: `fs-promisis-alias`,
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^fs/promises$`) }, (args) => {
+                    return { path: path.resolve(`deno_std-0.177.0/node/fs.ts`), external: false };
+                });
+            },
+        },
+    ],
     
   })
   .catch((error) => {
