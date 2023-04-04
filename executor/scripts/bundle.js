@@ -56,7 +56,7 @@ esbuild
             'crypto', 'path', 'fs', 'child_process', 'net', 'dns', 'cluster', 'https',
             'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
             'zlib', 'assert', 'buffer', 'constants', 'querystring', 'string_decoder',
-            'global'
+            'global', 'process', 
         ].map(denoAliasLocal),
         {
             name: `dns-promisis-alias`,
