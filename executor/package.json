@@ -17,6 +17,7 @@
   "types": "lib/main.d.ts",
   "scripts": {
     "build": "tsc",
+    "bundle": "node scripts/bundle.js",
     "run": "node  --experimental-specifier-resolution=node lib/main.js",
     "prepare-test": "run-script-os",
     "prepare-test:macos": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && node scripts/get-builtin-test-langs.js && yarn run inject-language-language && yarn run publish-test-languages && yarn run inject-publishing-agent",
@@ -76,6 +77,7 @@
     "@types/ws": "8.5.4",
     "chai": "*",
     "chai-as-promised": "*",
+    "esbuild": "^0.17.15",
     "faker": "^5.1.0",
     "mocha": "*",
     "node-wget-js": "^1.0.1",
