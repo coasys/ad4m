@@ -6,9 +6,4 @@ const Buffer = globalThis.Buffer;
 const setImmediate = globalThis.setImmediate;
 const clearImmediate = globalThis.clearImmediate;
 
-console.log(process)
-console.log(Buffer)
-console.log(setImmediate)
-console.log(clearImmediate)
-
-import "./main.js"
+import { init } from "./main.js"
