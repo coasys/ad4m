@@ -23,10 +23,10 @@ fn op_remove_file(path: String) -> Result<(), AnyError> {
 }
 
 async fn run_js(file_path: &str) -> Result<(), AnyError> {
-    let main_module = deno_core::resolve_path(file_path)?;
+    let main_module = deno_core::resolve_path(file_path, std::env::current_dir()?.as_ref())?;
     let filesystem_extension = Extension::builder("runjs")
         .esm(include_js_files!(
-            "runtime.js",
+            runtime "runtime.js",
         ))
         .ops(vec![
             op_read_file::decl(),

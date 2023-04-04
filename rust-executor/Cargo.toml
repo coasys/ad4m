@@ -6,5 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-deno_core = "0.174.0"
+deno_core = "0.179.0"
 tokio = { version = "1.25.0", features = ["full"] }
