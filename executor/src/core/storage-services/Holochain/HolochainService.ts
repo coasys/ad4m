@@ -12,7 +12,7 @@ import { AsyncQueue } from './Queue'
 import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
 import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
-import fetch from "node-fetch";
+//import fetch from "node-fetch";
 
 export const bootstrapUrl = "https://bootstrap.holo.host"
 export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"
@@ -198,7 +198,9 @@ export default class HolochainService {
                 const res = await fetch(`https://github.com/perspect3vism/signing-service/releases/download/${signingServiceVersion}/signing.dna`);
                 const fileStream = fs.createWriteStream(dest);
                 await new Promise((resolve, reject) => {
+                    // @ts-ignore
                     res.body.pipe(fileStream);
+                    // @ts-ignore
                     res.body.on("error", reject);
                     fileStream.on("finish", resolve);
                 });
