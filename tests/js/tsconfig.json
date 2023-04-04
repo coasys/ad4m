@@ -1,9 +1,7 @@
 {
   "include": [
-    "src/**/*.ts",
-    "src/**/*.d.ts",
-    "src/**/*.vue"
-  ],
+    "*.ts"
+, "tests/agent-language.ts", "tests/agent.ts", "tests/app.test.ts", "tests/authentication.test.ts", "tests/direct-messages.ts", "tests/expression.ts", "tests/full-integration.test.ts", "tests/integration.test.ts", "tests/language.ts", "tests/neighbourhood.ts", "tests/perspective.ts", "tests/runtime.ts", "tests/simple.test.ts", "tests/social-dna-flow.ts", "utils/utils.ts"  ],
   "exclude": ["./src/tests/*", "./src/**/*.test.ts", "./src/testsutils/*"],
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig.json to read more about this file */
@@ -77,7 +75,8 @@
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "allowSyntheticDefaultImports": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "declaration": true
   },
   "typedef": [ true, "call-signature", "arrow-call-signature" ],
   "ts-node": {

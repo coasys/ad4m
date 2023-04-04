@@ -28,11 +28,19 @@
     },
     
     "test": {
-      "dependsOn": ["build-libs", "build-languages"],
+      "dependsOn": ["^test"],
+      "outputs": []
+    },
+    "test:macos": {
+      "dependsOn": ["ad4m-host#package-macos", "test"],
+      "outputs": []
+    },
+    "test:linux": {
+      "dependsOn": ["ad4m-host#package-linux", "test"],
       "outputs": []
     },
     "test:windows": {
-      "dependsOn": ["build-libs", "build-languages"],
+      "dependsOn": ["ad4m-host#package-windows", "test"],
       "outputs": []
     },
 
