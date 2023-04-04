@@ -22,6 +22,10 @@ type Options = {
   appLangAliases?: string;
   dataPath?: string;
   reqCredential?: string;
+  hcUseBootrap?: boolean;
+  hcUseProxy?: boolean;
+  hcUseLocalProxy?: boolean;
+  hcUseMdns?: boolean;
 };
 
 export const command: string = 'serve';
@@ -80,6 +84,26 @@ export const builder = (yargs: Argv) =>
       reqCredential: {
         type: 'string',
         describe: 'The credential for an admin client to override capability checks',
+      },
+      hcUseBootrap: {
+        type: 'boolean',
+        describe: 'Flag to use bootstrap node for holochain conductor',
+        default: true
+      }, 
+      hcUseProxy: {
+        type: 'boolean',
+        describe: 'Flag to use proxy for holochain conductor',
+        default: true
+      }, 
+      hcUseLocalProxy: {
+        type: 'boolean',
+        describe: 'Flag to use local proxy for holochain conductor',
+        default: false
+      }, 
+      hcUseMdns: {
+        type: 'boolean',
+        describe: 'Flag to use mdns for holochain conductor',
+        default: true
       }
     });
 
@@ -87,7 +111,7 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
   const {
     port, ipfsPort, hcAdminPort, hcAppPort, connectHolochain, languageLanguageOnly,
     dataPath, bootstrapLanguage, bootstrapPerspective, appLangAliases,
-    reqCredential
+    reqCredential, hcUseBootrap, hcUseProxy, hcUseLocalProxy, hcUseMdns
   } = argv;
 
   const globalConfig = getConfig(dataPath);
@@ -134,7 +158,11 @@ export const handler = async (argv: Arguments<Options>): Promise<void> => {
     connectHolochain,
     reqCredential,
     swiplPath,
-    swiplHomePath
+    swiplHomePath,
+    hcUseBootrap,
+    hcUseProxy,
+    hcUseLocalProxy,
+    hcUseMdns
   };
 
   await init(config);

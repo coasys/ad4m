@@ -10,7 +10,8 @@
     "ui",
     "connect",
     "test-runner",
-    "bootstrap-languages/*"
+    "bootstrap-languages/*",
+    "tests/js"
   ],
   "private": true,
   "scripts": {
@@ -20,7 +21,9 @@
     "serve": "turbo run serve",
     "lint": "turbo run lint",
     "test": "turbo run test --concurrency=1",
-    "test:windows": "turbo run test:windows",
+    "test:macos": "turbo run test:macos --concurrency=1",
+    "test:linux": "turbo run test:linux --concurrency=1",
+    "test:windows": "turbo run test:windows --concurrency=1",
     "fetch-binaries": "run-script-os",
     "fetch-binaries:macos": "./download-binaries-macos.sh",
     "fetch-binaries:windows": "powershell.exe -ExecutionPolicy Bypass -File download-binaries-windows.ps1",
