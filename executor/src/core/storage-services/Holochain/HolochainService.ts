@@ -1,6 +1,5 @@
 import { AdminWebsocket, AgentPubKey, AppSignalCb, AppWebsocket, encodeHashToBase64, AppSignal, CellId, CellType, setSigningCredentials, AgentInfoResponse, SigningCredentials, generateSigningKeyPair, GrantedFunctionsType, signZomeCall, getSigningCredentials, CellInfo } from '@holochain/client'
-import low from 'lowdb'
-import FileSync from 'lowdb/adapters/FileSync'
+import { Database } from 'aloedb-node'
 import path from 'path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
@@ -19,6 +18,17 @@ export const bootstrapUrl = "https://bootstrap.holo.host"
 export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"
 const signingServiceVersion = "0.0.3";
 
+interface PubKeySchema {
+    pubKey: string,
+    lang: string,
+}
+
+interface SigningCredentialsSchema {
+    cellId: string,
+    signingCredentials: string,
+}
+
+
 export interface HolochainConfiguration {
     conductorPath?: string, 
     dataPath: string, 
@@ -32,7 +42,8 @@ export interface HolochainConfiguration {
 }
 
 export default class HolochainService {
-    #db: any
+    #pubKeyDb: Database<PubKeySchema>
+    #signingCredentialsDb: Database<SigningCredentialsSchema>
     #adminPort: number
     #appPort: number
     #adminWebsocket?: AdminWebsocket
@@ -70,8 +81,9 @@ export default class HolochainService {
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
         this.#dataPath = dataPath
-        this.#db = low(new FileSync(path.join(dataPath, 'holochain-service.json')))
-        this.#db.defaults({pubKeys: [], signingCredentials: []}).write()
+        this.#pubKeyDb = new Database<PubKeySchema>(path.join(dataPath, 'holochain-service-pubkeys.json'))
+        this.#signingCredentialsDb = new Database<SigningCredentialsSchema>(path.join(dataPath, 'holochain-service-signing-credentials.json'))
+        
         this.#signalCallbacks = [];
 
         const holochainAppPort = appPort ? appPort : 1337;
@@ -307,15 +319,15 @@ export default class HolochainService {
     }
 
     async pubKeyForAllLanguages(): Promise<AgentPubKey> {
-        const alreadyExisting = this.#db.get('pubKeys').find({lang: "global"}).value()
+        const alreadyExisting = await this.#pubKeyDb.findOne({lang: "global"})
         if(alreadyExisting) {
-            const pubKey = Buffer.from(alreadyExisting.pubKey)
-            console.debug("Found existing pubKey", pubKey.toString("base64"), "for all languages")
-            return pubKey
+            console.debug("Found existing pubKey", alreadyExisting.pubKey, "for all languages")
+            return Buffer.from(alreadyExisting.pubKey, "base64")
         } else {
             const pubKey = await this.#adminWebsocket!.generateAgentPubKey()
-            this.#db.get('pubKeys').push({lang: "global", pubKey}).write()
-            console.debug("Created new pubKey", Buffer.from(pubKey).toString("base64"), "for all languages")
+            const pubKeyString = Buffer.from(pubKey).toString("base64")
+            await this.#pubKeyDb.insertOne({lang: "global", pubKey: pubKeyString})
+            console.debug("Created new pubKey", pubKeyString, "for all languages")
             return pubKey
         }
     }
@@ -324,6 +336,7 @@ export default class HolochainService {
         return this.pubKeyForAllLanguages()
 
         // TODO using the same key for all DNAs should only be a temporary thing.
+        /*
         const alreadyExisting = this.#db.get('pubKeys').find({lang}).value()
         if(alreadyExisting) {
             const pubKey = Buffer.from(alreadyExisting.pubKey)
@@ -334,7 +347,7 @@ export default class HolochainService {
             this.#db.get('pubKeys').push({lang, pubKey}).write()
             console.debug("Created new pubKey", Buffer.from(pubKey).toString("base64"), "for language", lang)
             return pubKey
-        }
+        }*/
     }
 
     private cellIdToB64(cell: CellId): string {
@@ -351,7 +364,7 @@ export default class HolochainService {
         setSigningCredentials(cell, signingCredentials);
 
         //Set the signing credentials in the database
-        this.#db.get("signingCredentials").push({cellId: cellIdB64, signingCredentials: signingCredentials}).write();
+        await this.#signingCredentialsDb.insertOne({cellId: cellIdB64, signingCredentials: JSON.stringify(signingCredentials)});
         return signingCredentials;
     }
 
@@ -448,8 +461,7 @@ export default class HolochainService {
                     if (hash) hashes.push(hash);
 
                     const cellIdB64 = this.cellIdToB64(cellId);
-                    const signingCredentials = await this.#db.get("signingKeys").find({cellId: cellIdB64}).value() as SigningCredentials | undefined;
-
+                    const signingCredentials = await this.#signingCredentialsDb.findOne({cellId: cellIdB64})
                     if (!signingCredentials) {
                         console.log("HolochainService: Did not find saved signingCredentials, generating new one...");
                         await this.generateSigningKeys(cellId);
@@ -548,14 +560,14 @@ export default class HolochainService {
             if (!signingKeyExists) {
                 const cellIdB64 = this.cellIdToB64(cellId);
                 //Check if we already have some in the database
-                let signingCredentials = await this.#db.get("signingKeys").find({cellId: cellIdB64}).value() as SigningCredentials | undefined;
+                let signingCredentials = await this.#signingCredentialsDb.findOne({cellId: cellIdB64})
                 if (!signingCredentials) {
                     console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "generating new ones...");
                     await this.generateSigningKeys(cellId);
                 } else {
                     console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "but found them in the database, setting them...", signingCredentials);
                     //We have some but they are not present in the holochain client... set them
-                    setSigningCredentials(cellId, signingCredentials);
+                    setSigningCredentials(cellId, JSON.parse(signingCredentials.signingCredentials));
                 }
             }
 
