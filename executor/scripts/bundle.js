@@ -41,7 +41,7 @@ esbuild
     outfile: 'lib/bundle.js',
     bundle: true,
     platform: 'node',
-    target: 'es2020',
+    target: 'deno1.3',
     format: 'esm',
     plugins: [
         {
@@ -71,6 +71,14 @@ esbuild
             setup(build) {
                 build.onResolve({ filter: new RegExp(`^fs/promises$`) }, (args) => {
                     return { path: path.resolve(`deno_std-0.177.0/node/fs.ts`), external: false };
+                });
+            },
+        },
+        {
+            name: `ws-alias`,
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^ws$`) }, (args) => {
+                    return { path: path.resolve(`deno-websocket/mod.ts`), external: false };
                 });
             },
         },
