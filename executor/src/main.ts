@@ -197,7 +197,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     
     console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
 
-    await core.startGraphQLServer(gqlPort, mocks, config);
+    //await core.startGraphQLServer(gqlPort, mocks, config);
     if (runDappServer) { core.startDAppServer(dAppPort) };
 
     console.log("\x1b[31m", "GraphQL server started, Unlock the agent to start holohchain", "\x1b[0m");

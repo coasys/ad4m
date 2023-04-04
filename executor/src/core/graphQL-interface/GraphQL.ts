@@ -1,25 +1,30 @@
-import { ApolloServer, gql, AuthenticationError } from 'apollo-server-express'
-import express from 'express';
-import { createServer } from 'http';
-import {
-    ApolloServerPluginDrainHttpServer,
-} from "apollo-server-core";
-import { WebSocketServer } from 'ws';
-import { useServer } from 'graphql-ws/lib/use/ws';
-import { makeExecutableSchema } from '@graphql-tools/schema';
+//import { ApolloServer, gql, AuthenticationError } from 'apollo-server-express'
+//import express from 'express';
+//import { createServer } from 'http';
+//import {
+//    ApolloServerPluginDrainHttpServer,
+//} from "apollo-server-core";
+//import { WebSocketServer } from 'ws';
+//import { useServer } from 'graphql-ws/lib/use/ws';
+//import { makeExecutableSchema } from '@graphql-tools/schema';
 import { Agent, Expression, InteractionCall, LanguageRef, PerspectiveExpression, PerspectiveHandle, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
 import * as PubSub from './PubSub'
-import { GraphQLScalarType } from "graphql";
+//import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
 import * as Auth from '../agent/Auth'
 import { checkCapability, checkTokenAuthorized } from '../agent/Auth'
-import { withFilter } from 'graphql-subscriptions';
+//import { withFilter } from 'graphql-subscriptions';
 import { OuterConfig } from '../../main';
 import path from 'path';
 import Perspective from '../Perspective';
+
+function withFilter(f1:()=>{}, f2:(payload: any, variables: any)=>{} ) {
+    return (a1: any, a2: any) => {
+    }
+}
 
 function checkLinkLanguageInstalled(perspective: Perspective) {
     if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
@@ -27,7 +32,7 @@ function checkLinkLanguageInstalled(perspective: Perspective) {
     }
 }
 
-function createResolvers(core: PerspectivismCore, config: OuterConfig) {
+export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     const pubsub = PubSub.get()
     function signPerspectiveDeep(input: PerspectiveUnsignedInput): PerspectiveExpression {
         let out = new PerspectiveExpression()
@@ -1082,6 +1087,7 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             }
         },
 
+        /*
         DateTime: new GraphQLScalarType({
             name: 'Date',
             description: 'Date custom scalar type',
@@ -1092,9 +1098,11 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
               return value.toISOString(); // value sent to the client
             }
         }),
+        */
     }
 }
 
+/*
 export interface StartServerParams {
     core: PerspectivismCore,
     mocks: boolean,
@@ -1207,3 +1215,4 @@ export async function startServer(params: StartServerParams) {
         subscriptionsUrl: `ws://localhost:${port}/graphql`
     }
 }
+*/

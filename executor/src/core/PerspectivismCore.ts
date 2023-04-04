@@ -5,7 +5,7 @@ import * as Config from './Config'
 import * as Db from './db'
 import type { PerspectivismDb } from './db'
 import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService';
-import * as IPFS from './storage-services/IPFS'
+//import * as IPFS from './storage-services/IPFS'
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
@@ -14,7 +14,7 @@ import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import * as PubSub from './graphQL-interface/PubSub'
-import { IPFS as IPFSType } from 'ipfs'
+//import { IPFS as IPFSType } from 'ipfs'
 import EntanglementProofController from './EntanglementProof'
 import runDAppServer from "./DAppServer"
 import fs from 'fs'
@@ -56,7 +56,7 @@ export interface ConnectHolochainParams {
 export default class PerspectivismCore {
     #config: MainConfig;
     #holochain?: HolochainService
-    #IPFS?: IPFSType
+    //#IPFS?: IPFSType
 
     #agentService: AgentService
     #runtimeService: RuntimeService
@@ -140,12 +140,13 @@ export default class PerspectivismCore {
             perspective.closePrologEngine()
         }
         console.log("Stopping IPFS")
-        await this.#IPFS?.stop({timeout: 15});
+        //await this.#IPFS?.stop({timeout: 15});
         console.log("Stopping Holochain conductor")
         await this.#holochain?.stop();
         console.log("Done.")
     }
 
+    /*
     async startGraphQLServer(port: number, mocks: boolean, config: OuterConfig) {
         const { url, subscriptionsUrl } = await GraphQL.startServer({
             core: this,
@@ -155,7 +156,7 @@ export default class PerspectivismCore {
         })
         console.log(`🚀  GraphQL Server ready at ${url}`)
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
-    }
+    }*/
 
     startDAppServer(port: number) {
         runDAppServer(port)
@@ -178,8 +179,8 @@ export default class PerspectivismCore {
             }
         }
 
-        let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
-        this.#IPFS = ipfs;
+        //let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
+        //this.#IPFS = ipfs;
     }
 
     async initHolochain(params: InitHolochainParams) {
@@ -237,7 +238,7 @@ export default class PerspectivismCore {
         this.#languageController = new LanguageController({
             agent: this.#agentService,
             runtime: this.#runtimeService,
-            IPFS: this.#IPFS,
+            //IPFS: this.#IPFS,
             signatures: this.#signatures,
             ad4mSignal: this.languageSignal,
             config: this.#config,
