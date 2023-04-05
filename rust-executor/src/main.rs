@@ -1,16 +1,13 @@
 
 use deno_core::ModuleSource;
 use deno_core::ResolutionKind;
-use deno_core::futures::FutureExt;
 use deno_runtime::deno_core::include_js_files;
 //use deno_runtime::deno_core::op;
 use deno_runtime::deno_core::Extension;
 use deno_runtime::deno_core::resolve_path;
-//use deno_core::{JsRuntime, RuntimeOptions};
-use deno_runtime::deno_core::FsModuleLoader;
+//use deno_core::{JsRuntime, RuntimeOptions}
 use deno_runtime::deno_web::BlobStore;
 use deno_runtime::deno_broadcast_channel::InMemoryBroadcastChannel;
-use url::Url;
 use std::rc::Rc;
 use std::sync::Arc;
 use deno_runtime::deno_core::error::AnyError;
@@ -18,17 +15,12 @@ use deno_runtime::worker::MainWorker;
 use deno_runtime::permissions::{PermissionsContainer};
 use deno_runtime::worker::WorkerOptions;
 use deno_runtime::BootstrapOptions;
-
-//use deno_core::{JsRuntime, OpState, ZeroCopyBuf};
-//use std::cell::RefCell;
-
-/*
-// Define the `op_print` op
-fn op_print(state: &mut OpState, msg: ZeroCopyBuf, _: ()) -> Result<(), ()> {
-    let stdout = &mut state.borrow::<RefCell<std::io::Stdout>>().borrow_mut();
-    stdout.write_all(&msg).map_err(|_| ())
-}
-*/
+use deno_core::{anyhow};
+use deno_core::ModuleLoader;
+use deno_core::ModuleSpecifier;
+use std::collections::HashMap;
+use std::pin::Pin;
+use deno_core::ModuleSourceFuture;
 
 /* 
 #[op]
@@ -50,12 +42,7 @@ fn op_remove_file(path: String) -> Result<(), AnyError> {
 }
 */
 
-use deno_core::{anyhow};
-use deno_core::ModuleLoader;
-use deno_core::ModuleSpecifier;
-use std::collections::HashMap;
-use std::pin::Pin;
-use deno_core::ModuleSourceFuture;
+
 
 pub struct StringModuleLoader {
     modules: HashMap<String, String>,
@@ -130,11 +117,6 @@ async fn run_js() -> Result<(), AnyError> {
         ])
         .build();
 
-
-
-    
-    //let main_module = Url::from_file_path("executor").unwrap();
-    
     let options = WorkerOptions {
         bootstrap: BootstrapOptions::default(),
         extensions: vec![executor_extension],
@@ -163,34 +145,16 @@ async fn run_js() -> Result<(), AnyError> {
     };
 
     let permissions = PermissionsContainer::allow_all();
-    //let mut worker = MainWorker::bootstrap_from_options(main_module.clone(), permissions, options);
-
     let mut worker = MainWorker::from_options(main_module.clone(), permissions, options);
     worker.bootstrap(&BootstrapOptions::default());
-
-
-    //let runtime = &mut worker.js_runtime;
-    
-    // Register the `op_print` op
-    //runtime. register_op("op_print", op_sync(op_print));
-    
-
-    //worker.execute_script("[executor]",  include_str!("../../executor/lib/bundle.js")).unwrap();
     worker.execute_main_module(&main_module).await.unwrap();
     //worker.execute_script("[rust]",  "console.log('from Rust.', executor)").unwrap();
-
-    //let mut worker: MainWorker = create_worker(file_path);
-    //let mut js_runtime = worker.js_runtime;
-    //js_runtime.register_op("read_file", op_read_file);
-    
-    
 
     //let mod_id = worker.preload_main_module(&main_module, None).await?;
     //let result = js_runtime.mod_evaluate(mod_id);
     //js_runtime.run_event_loop(false).await?;
     //result.await?
     worker.run_event_loop(false).await?;
-    //worker.execute_main_module(&main_module).await?;
     Ok(())
   }
 
