@@ -1,3 +1,53 @@
+Error.captureStackTrace = function (err, constructorOpt) {
+    if (typeof Error.prepareStackTrace === 'function') {
+      const fakeCallSite = {
+        getThis() {
+          return undefined;
+        },
+        getTypeName() {
+          return undefined;
+        },
+        getFunction() {
+          return undefined;
+        },
+        getFunctionName() {
+          return undefined;
+        },
+        getMethodName() {
+          return undefined;
+        },
+        getFileName() {
+          return err.fileName;
+        },
+        getLineNumber() {
+          return err.lineNumber;
+        },
+        getColumnNumber() {
+          return err.columnNumber;
+        },
+        getEvalOrigin() {
+          return undefined;
+        },
+        isToplevel() {
+          return false;
+        },
+        isEval() {
+          return false;
+        },
+        isNative() {
+          return false;
+        },
+        isConstructor() {
+          return false;
+        },
+      };
+      const structuredStackTrace = [fakeCallSite];
+      err.stack = Error.prepareStackTrace(err, structuredStackTrace);
+    } else {
+      err.stack = err.stack || err.toString();
+    }
+} 
+
 import { init, path, os } from 'https://ad4m.runtime/executor'
 
 console.log("Hello from main")
