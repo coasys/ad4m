@@ -37,7 +37,7 @@ impl GlobalVariableFuture {
 }
 
 impl Future for GlobalVariableFuture {
-    type Output = Result<(), ()>; // You can customize the output type.
+    type Output = Result<(), AnyError>; // You can customize the output type.
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut worker = self.worker.lock().unwrap();

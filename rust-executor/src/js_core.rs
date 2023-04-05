@@ -38,7 +38,7 @@ impl JsCore {
         event_loop
     }
 
-    pub async fn init_core(&self) -> Result<GlobalVariableFuture, AnyError> {
+    pub fn init_core(&self) -> Result<GlobalVariableFuture, AnyError> {
         let mut worker = self.worker.lock().unwrap();
         let _init_core = worker.execute_script("js_core", "initCore()")?;
         Ok(GlobalVariableFuture::new(
