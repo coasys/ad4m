@@ -66,27 +66,38 @@ const ipfsRepoPath = path.join(appDataPath, 'ipfs')
 //const bPerspective = bootstrapPerspective ? await import(path.isAbsolute(bootstrapPerspective) ? bootstrapPerspective: path.join(__dirname, bootstrapPerspective)) : [];
 
 const config = {
-appDataPath: appDataPath,
-resourcePath: binaryPath,
-networkBootstrapSeed: path.join(appDataPath, "mainnet_seed.seed"),
-languageLanguageOnly: true,
-bootstrapFixtures: {
-    languages: [],
-    perspectives: [],
-},
-appLangAliases: {},
-mocks: false,
-runDappServer: false,
-gqlPort,
-hcPortAdmin: undefined,
-hcPortApp: undefined,
-ipfsRepoPath,
-ipfsSwarmPort: undefined,
-connectHolochain: true,
-reqCredential: undefined,
-swiplPath,
-swiplHomePath
+    appDataPath: appDataPath,
+    resourcePath: binaryPath,
+    networkBootstrapSeed: path.join(appDataPath, "mainnet_seed.seed"),
+    languageLanguageOnly: true,
+    bootstrapFixtures: {
+        languages: [],
+        perspectives: [],
+    },
+    appLangAliases: {},
+    mocks: false,
+    runDappServer: false,
+    gqlPort,
+    hcPortAdmin: undefined,
+    hcPortApp: undefined,
+    ipfsRepoPath,
+    ipfsSwarmPort: undefined,
+    connectHolochain: true,
+    reqCredential: undefined,
+    swiplPath,
+    swiplHomePath
 };
 
-const core = await init(config)
-console.log(core)
+async function initCore() {
+    const core = await init(config)
+    globalThis.core = core
+    return core
+}
+
+globalThis.initCore = initCore
+//await initCore()
+
+console.log("main done")
+
+const n = 5
+globalThis.n = n

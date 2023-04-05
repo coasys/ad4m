@@ -1,6 +1,7 @@
 
 use deno_core::ModuleSource;
 use deno_core::ResolutionKind;
+use deno_core::v8;
 use deno_runtime::deno_core::include_js_files;
 //use deno_runtime::deno_core::op;
 use deno_runtime::deno_core::Extension;
@@ -104,7 +105,7 @@ async fn run_js() -> Result<(), AnyError> {
     loader.add_module(test_module.as_str(), include_str!("./testlib.js"));
     loader.add_module(main_module.as_str(), include_str!("main.js"));
     
-    let runtime_extension = Extension::builder("runtime")
+    let _runtime_extension = Extension::builder("runtime")
         //.js(include_js_files!(
         //    executor "../../executor/lib/bundle.js",
         //))
@@ -123,7 +124,7 @@ async fn run_js() -> Result<(), AnyError> {
 
     let options = WorkerOptions {
         bootstrap: BootstrapOptions::default(),
-        extensions: vec![runtime_extension],
+        extensions: vec![],
         startup_snapshot: Some(deno_runtime::js::deno_isolate_init()),
         unsafely_ignore_certificate_errors: None,
         root_cert_store: None,
@@ -151,9 +152,33 @@ async fn run_js() -> Result<(), AnyError> {
     let permissions = PermissionsContainer::allow_all();
     let mut worker = MainWorker::from_options(main_module.clone(), permissions, options);
     worker.bootstrap(&BootstrapOptions::default());
-    let main_id = worker.preload_side_module(&main_module).await.unwrap();
-    worker.evaluate_module(main_id).await.unwrap();
+    worker.execute_main_module(&main_module).await.unwrap();
 
+
+    {
+        let n = worker.execute_script("test worker", "n")?;
+        let init_core = worker.execute_script("test worker", "initCore")?;
+        //let (context_scope, scope) = get_module_handle_scope_context(&mut worker, main_id)?;
+        let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
+        let n = v8::Local::new(scope, n);
+        let init_core = v8::Local::new(scope, init_core);
+
+        println!("n.is_number: {:?}", n.is_number());
+        println!("n: {:?}", n);
+        println!("init_core.is_function: {:?}", init_core.is_function());
+        println!("init_core: {:?}", init_core);
+
+        let function: v8::Local<v8::Function> = unsafe { v8::Local::cast(init_core) };
+        // call that function with arguments
+        let recv = v8::Integer::new(scope, 2).into();
+        
+        let context = v8::Context::new(scope);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let init_return = function.call(scope, recv, &[]).unwrap();
+        let core_promise = v8::Local::<v8::Promise>::try_from(init_return).unwrap();
+        println!("core_promise: {:?}", core_promise);
+    }
+    
     worker.run_event_loop(false).await?;
     Ok(())
   }
