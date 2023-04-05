@@ -42,7 +42,7 @@ impl JsCore {
 
     pub async fn init_core(&self) -> Result<GlobalVariableFuture, AnyError> {
         let mut worker = self.worker.lock().unwrap();
-        let init_core = worker.execute_script("js_core", "initCore()")?;
+        let _init_core = worker.execute_script("js_core", "initCore()")?;
         Ok(GlobalVariableFuture::new(self.worker.clone(), "core".to_string()))
     }
 

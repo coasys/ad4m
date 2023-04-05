@@ -40,7 +40,7 @@ impl GlobalVariableFuture {
 impl Future for GlobalVariableFuture {
     type Output = Result<(), ()>; // You can customize the output type.
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut worker = self.worker.lock().unwrap();
         if let Ok(value) = worker.execute_script("global_var_future", self.name.clone()) {
             let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
