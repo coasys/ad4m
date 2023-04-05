@@ -3,6 +3,7 @@ use actix_web::{
     web::{self, Data},
     App, Error, HttpResponse, HttpServer,
 };
+use deno_core::error::AnyError;
 use juniper::RootNode;
 use juniper_actix::{graphiql_handler, graphql_handler, playground_handler};
 use std::env;
@@ -44,8 +45,7 @@ async fn graphql_route(
     graphql_handler(&schema, &(), req, payload).await
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
+pub async fn start_server() -> Result<(), AnyError> {
     env::set_var("RUST_LOG", "info");
     env_logger::init();
 
@@ -70,5 +70,5 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/playground").route(web::get().to(playground_route)))
             .service(web::resource("/graphiql").route(web::get().to(graphiql_route)))
     });
-    server.bind("127.0.0.1:8080").unwrap().run().await
+    server.bind("127.0.0.1:8080").unwrap().run().await.map_err(|e| e.into())
 }

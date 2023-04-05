@@ -3,7 +3,7 @@ use futures::stream::Stream;
 use juniper::{graphql_value, FieldError, FieldResult};
 use std::pin::Pin;
 
-use crate::graphql_types::*;
+use super::graphql_types::*;
 
 pub struct Subscription;
 

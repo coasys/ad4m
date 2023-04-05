@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 use juniper::{graphql_object, graphql_value, FieldError, FieldResult};
 
-use crate::graphql_types::*;
+use super::graphql_types::*;
 
 pub struct Query;
 

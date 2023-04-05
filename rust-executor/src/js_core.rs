@@ -46,4 +46,16 @@ impl JsCore {
             "core".to_string(),
         ))
     }
+
+    pub async fn run() -> Result<(), AnyError> {
+        let js_core = JsCore::new();
+        js_core.init_engine().await;
+        let core_init = async {
+            let result = js_core.init_core().expect("core init failed").await;
+            println!("core init done!");
+            result
+        };
+        let (event, init) = tokio::join!(core_init, js_core.event_loop());
+        event.and(init)
+    }
 }
