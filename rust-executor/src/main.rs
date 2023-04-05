@@ -14,13 +14,9 @@ async fn run() -> Result<(), AnyError> {
     event.and(init)
 }
 
-fn main() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    if let Err(error) = runtime.block_on(run()) {
+#[tokio::main]
+async fn main() {
+    if let Err(error) = run().await {
         eprintln!("error: {}", error);
     }
 }
