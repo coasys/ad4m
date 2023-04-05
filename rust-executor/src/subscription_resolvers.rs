@@ -1,13 +1,14 @@
-use futures::stream::{Stream, StreamExt};
+#![allow(non_snake_case)]
+use futures::stream::Stream;
 use juniper::{graphql_value, FieldError, FieldResult};
 use std::pin::Pin;
 
 use crate::graphql_types::*;
 
-pub struct Subscriptions;
+pub struct Subscription;
 
 #[juniper::graphql_subscription()]
-impl Subscriptions {
+impl Subscription {
     async fn agent_status_changed(
         &self,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<AgentStatus>> + Send>> {
@@ -32,7 +33,7 @@ impl Subscriptions {
 
     async fn neighbourhood_signal(
         &self,
-        perspective_uuid: String,
+        perspectiveUUID: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveExpression>> + Send>> {
         let err = FieldError::new("Unimplemented", graphql_value!({ "type": "UNIMPLEMENTED" }));
         let err_stream = futures::stream::once(async { Err(err) });

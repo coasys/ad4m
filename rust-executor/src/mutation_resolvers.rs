@@ -1,10 +1,12 @@
+#![allow(non_snake_case)]
+#![allow(unused_variables)]
 use juniper::{graphql_object, graphql_value, FieldError, FieldResult};
 
 use crate::graphql_types::*;
 
 pub struct Mutation;
 
-#[graphql_object]
+#[graphql_object()]
 impl Mutation {
     fn add_trusted_agents(&self, agents: Vec<String>) -> FieldResult<Vec<String>> {
         Err(FieldError::new(
@@ -213,7 +215,7 @@ impl Mutation {
         &self,
         link_language: String,
         meta: PerspectiveInput,
-        perspective_uuid: String,
+        perspectiveUUID: String,
     ) -> FieldResult<String> {
         Err(FieldError::new(
             "Not implemented",
@@ -224,7 +226,7 @@ impl Mutation {
     fn neighbourhood_send_broadcast(
         &self,
         payload: PerspectiveInput,
-        perspective_uuid: String,
+        perspectiveUUID: String,
     ) -> FieldResult<bool> {
         Err(FieldError::new(
             "Not implemented",
@@ -235,7 +237,7 @@ impl Mutation {
     fn neighbourhood_send_broadcast_u(
         &self,
         payload: PerspectiveUnsignedInput,
-        perspective_uuid: String,
+        perspectiveUUID: String,
     ) -> FieldResult<bool> {
         Err(FieldError::new(
             "Not implemented",
@@ -246,7 +248,7 @@ impl Mutation {
     fn neighbourhood_send_signal(
         &self,
         payload: PerspectiveInput,
-        perspective_uuid: String,
+        perspectiveUUID: String,
         remote_agent_did: String,
     ) -> FieldResult<bool> {
         Err(FieldError::new(
@@ -258,7 +260,7 @@ impl Mutation {
     fn neighbourhood_send_signal_u(
         &self,
         payload: PerspectiveUnsignedInput,
-        perspective_uuid: String,
+        perspectiveUUID: String,
         remote_agent_did: String,
     ) -> FieldResult<bool> {
         Err(FieldError::new(
@@ -269,7 +271,7 @@ impl Mutation {
 
     fn neighbourhood_set_online_status(
         &self,
-        perspective_uuid: String,
+        perspectiveUUID: String,
         status: PerspectiveInput,
     ) -> FieldResult<bool> {
         Err(FieldError::new(
@@ -280,7 +282,7 @@ impl Mutation {
 
     fn neighbourhood_set_online_status_u(
         &self,
-        perspective_uuid: String,
+        perspectiveUUID: String,
         status: PerspectiveUnsignedInput,
     ) -> FieldResult<bool> {
         Err(FieldError::new(

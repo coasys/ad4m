@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+#![allow(unused_variables)]
 use juniper::{graphql_object, graphql_value, FieldError, FieldResult};
 
 use crate::graphql_types::*;
@@ -13,6 +15,7 @@ impl Query {
         ))
     }
 
+    #[graphql(name = "agentByDID")]
     fn agent_by_did(&self, did: String) -> FieldResult<Option<Agent>> {
         Err(FieldError::new(
             "Not implemented",
@@ -111,10 +114,7 @@ impl Query {
         ))
     }
 
-    fn neighbourhood_has_telepresence_adapter(
-        &self,
-        perspective_uuid: String,
-    ) -> FieldResult<bool> {
+    fn neighbourhood_has_telepresence_adapter(&self, perspectiveUUID: String) -> FieldResult<bool> {
         Err(FieldError::new(
             "Not implemented",
             graphql_value!({ "Not implemented": true }),
@@ -123,7 +123,7 @@ impl Query {
 
     fn neighbourhood_online_agents(
         &self,
-        perspective_uuid: String,
+        perspectiveUUID: String,
     ) -> FieldResult<Vec<OnlineAgent>> {
         Err(FieldError::new(
             "Not implemented",
@@ -131,7 +131,7 @@ impl Query {
         ))
     }
 
-    fn neighbourhood_other_agents(&self, perspective_uuid: String) -> FieldResult<Vec<String>> {
+    fn neighbourhood_other_agents(&self, perspectiveUUID: String) -> FieldResult<Vec<String>> {
         Err(FieldError::new(
             "Not implemented",
             graphql_value!({ "Not implemented": true }),

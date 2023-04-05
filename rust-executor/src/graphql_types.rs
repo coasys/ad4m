@@ -53,7 +53,7 @@ pub struct AuthInfoInput {
     #[graphql(name = "appUrl")]
     app_url: Option<String>,
     #[graphql(name = "capabilities")]
-    capabilities: Vec<CapabilityInput>,
+    capabilities: Option<Vec<CapabilityInput>>,
 }
 
 #[derive(GraphQLObject, Default)]
@@ -152,7 +152,7 @@ pub struct InteractionCall {
 
 #[derive(GraphQLObject, Default)]
 pub struct InteractionMeta {
-    pub label: Option<String>,
+    pub label: String,
     pub name: String,
     pub parameters: Vec<InteractionParameter>,
 }
@@ -190,7 +190,7 @@ pub struct LanguageMeta {
 pub struct LanguageMetaInput {
     pub description: String,
     pub name: String,
-    pub possible_template_params: Vec<String>,
+    pub possible_template_params: Option<Vec<String>>,
     pub source_code_link: Option<String>,
 }
 
@@ -250,12 +250,12 @@ pub struct LinkMutations {
 
 #[derive(GraphQLInputObject, Default)]
 pub struct LinkQuery {
-    pub from_date: Option<String>,
+    pub from_date: Option<DateTime>,
     pub limit: Option<f64>,
     pub predicate: Option<String>,
     pub source: Option<String>,
     pub target: Option<String>,
-    pub until_date: Option<String>,
+    pub until_date: Option<DateTime>,
 }
 
 #[derive(GraphQLObject, Default)]
