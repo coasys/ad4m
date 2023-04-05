@@ -42,7 +42,7 @@ esbuild
     bundle: true,
     platform: 'node',
     target: 'deno1.3',
-    format: 'iife',
+    format: 'esm',
     globalName: 'executor',
     charset: 'ascii',
     plugins: [

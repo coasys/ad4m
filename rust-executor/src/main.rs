@@ -4,10 +4,10 @@ use deno_core::ResolutionKind;
 use deno_runtime::deno_core::include_js_files;
 //use deno_runtime::deno_core::op;
 use deno_runtime::deno_core::Extension;
-use deno_runtime::deno_core::resolve_path;
 //use deno_core::{JsRuntime, RuntimeOptions}
 use deno_runtime::deno_web::BlobStore;
 use deno_runtime::deno_broadcast_channel::InMemoryBroadcastChannel;
+use url::Url;
 use std::rc::Rc;
 use std::sync::Arc;
 use deno_runtime::deno_core::error::AnyError;
@@ -95,12 +95,16 @@ impl ModuleLoader for StringModuleLoader {
 }
 
 async fn run_js() -> Result<(), AnyError> {
-    let main_module = resolve_path("executor", &std::env::current_dir().unwrap()).unwrap();
-    let executor_code = include_str!("../../executor/lib/bundle.js");
+    let main_module = Url::parse("https://ad4m.runtime/main").unwrap();
+    let executor_module =  Url::parse("https://ad4m.runtime/executor").unwrap();
+    let test_module =  Url::parse("https://ad4m.runtime/test").unwrap();
+
     let mut loader = StringModuleLoader::new();
-    loader.add_module(main_module.as_str(), executor_code);
+    loader.add_module(executor_module.as_str(), include_str!("../../executor/lib/bundle.js"));
+    loader.add_module(test_module.as_str(), include_str!("./testlib.js"));
+    loader.add_module(main_module.as_str(), include_str!("main.js"));
     
-    let executor_extension = Extension::builder("runtime")
+    let runtime_extension = Extension::builder("runtime")
         //.js(include_js_files!(
         //    executor "../../executor/lib/bundle.js",
         //))
@@ -119,7 +123,7 @@ async fn run_js() -> Result<(), AnyError> {
 
     let options = WorkerOptions {
         bootstrap: BootstrapOptions::default(),
-        extensions: vec![executor_extension],
+        extensions: vec![runtime_extension],
         startup_snapshot: Some(deno_runtime::js::deno_isolate_init()),
         unsafely_ignore_certificate_errors: None,
         root_cert_store: None,
@@ -147,13 +151,9 @@ async fn run_js() -> Result<(), AnyError> {
     let permissions = PermissionsContainer::allow_all();
     let mut worker = MainWorker::from_options(main_module.clone(), permissions, options);
     worker.bootstrap(&BootstrapOptions::default());
-    worker.execute_main_module(&main_module).await.unwrap();
-    //worker.execute_script("[rust]",  "console.log('from Rust.', executor)").unwrap();
+    let main_id = worker.preload_side_module(&main_module).await.unwrap();
+    worker.evaluate_module(main_id).await.unwrap();
 
-    //let mod_id = worker.preload_main_module(&main_module, None).await?;
-    //let result = js_runtime.mod_evaluate(mod_id);
-    //js_runtime.run_event_loop(false).await?;
-    //result.await?
     worker.run_event_loop(false).await?;
     Ok(())
   }

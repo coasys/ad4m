@@ -6,4 +6,6 @@ const Buffer = globalThis.Buffer;
 const setImmediate = globalThis.setImmediate;
 const clearImmediate = globalThis.clearImmediate;
 
-import { init } from "./main.js"
+import { init as internalInit } from "./main.js"
+console.log("Hello from deno.js")
+export const init = internalInit
