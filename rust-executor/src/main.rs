@@ -1,11 +1,10 @@
-mod js_core;
 mod graphql;
-
+mod js_core;
 
 #[actix_web::main]
 async fn main() {
-    let (graphql, js_core) = tokio::join!(graphql::start_server(), js_core::JsCore::run());
-    if let Err(error) = graphql.and(js_core) {
+    let fut_res = tokio::try_join!(graphql::start_server(), js_core::JsCore::run());
+    if let Err(error) = fut_res {
         eprintln!("error: {}", error);
     }
 }
