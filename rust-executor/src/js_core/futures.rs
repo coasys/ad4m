@@ -1,10 +1,10 @@
+use deno_core::error::AnyError;
+use deno_core::v8;
+use deno_runtime::worker::MainWorker;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use deno_core::error::AnyError;
-use deno_core::v8;
-use deno_runtime::worker::MainWorker;
 
 pub struct EventLoopFuture {
     worker: Arc<Mutex<MainWorker>>,
@@ -24,7 +24,6 @@ impl Future for EventLoopFuture {
         worker.poll_event_loop(cx, false)
     }
 }
-
 
 pub struct GlobalVariableFuture {
     worker: Arc<Mutex<MainWorker>>,

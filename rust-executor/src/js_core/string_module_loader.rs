@@ -1,13 +1,12 @@
+use deno_core::anyhow;
+use deno_core::ModuleLoader;
 use deno_core::ModuleSource;
+use deno_core::ModuleSourceFuture;
+use deno_core::ModuleSpecifier;
 use deno_core::ResolutionKind;
 use deno_runtime::deno_core::error::AnyError;
-use deno_core::{anyhow};
-use deno_core::ModuleLoader;
-use deno_core::ModuleSpecifier;
 use std::collections::HashMap;
 use std::pin::Pin;
-use deno_core::ModuleSourceFuture;
-
 
 pub struct StringModuleLoader {
     modules: HashMap<String, String>,
