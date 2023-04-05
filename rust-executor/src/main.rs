@@ -1,12 +1,16 @@
 
-//use deno_runtime::deno_core::include_js_files;
+use deno_core::ModuleSource;
+use deno_core::ResolutionKind;
+use deno_core::futures::FutureExt;
+use deno_runtime::deno_core::include_js_files;
 //use deno_runtime::deno_core::op;
-//use deno_runtime::deno_core::Extension;
+use deno_runtime::deno_core::Extension;
 use deno_runtime::deno_core::resolve_path;
 //use deno_core::{JsRuntime, RuntimeOptions};
 use deno_runtime::deno_core::FsModuleLoader;
 use deno_runtime::deno_web::BlobStore;
 use deno_runtime::deno_broadcast_channel::InMemoryBroadcastChannel;
+use url::Url;
 use std::rc::Rc;
 use std::sync::Arc;
 use deno_runtime::deno_core::error::AnyError;
@@ -46,26 +50,94 @@ fn op_remove_file(path: String) -> Result<(), AnyError> {
 }
 */
 
-async fn run_js(file_path: &str) -> Result<(), AnyError> {
-    //let main_module = deno_core::resolve_path(file_path, std::env::current_dir()?.as_ref())?;
-    /*let filesystem_extension = Extension::builder("runjs")
-        .esm(include_js_files!(
+use deno_core::{anyhow};
+use deno_core::ModuleLoader;
+use deno_core::ModuleSpecifier;
+use std::collections::HashMap;
+use std::pin::Pin;
+use deno_core::ModuleSourceFuture;
+
+pub struct StringModuleLoader {
+    modules: HashMap<String, String>,
+}
+
+impl StringModuleLoader {
+    pub fn new() -> Self {
+        StringModuleLoader {
+            modules: HashMap::new(),
+        }
+    }
+
+    pub fn add_module(&mut self, specifier: &str, code: &str) {
+        self.modules.insert(specifier.to_string(), code.to_string());
+    }
+}
+
+impl ModuleLoader for StringModuleLoader {
+    fn resolve(
+        &self,
+        specifier: &str,
+        referrer: &str,
+        _kind: ResolutionKind,
+    ) -> Result<ModuleSpecifier, AnyError> {
+        let module_specifier = deno_core::resolve_import(specifier, referrer)?;
+        Ok(module_specifier)
+    }
+
+    fn load(
+        &self,
+        module_specifier: &ModuleSpecifier,
+        _maybe_referrer: Option<ModuleSpecifier>,
+        _is_dyn_import: bool,
+    ) -> Pin<Box<ModuleSourceFuture>> {
+        let module_code = self.modules.get(module_specifier.as_str()).cloned();
+        let module_specifier = module_specifier.clone();
+        let fut = async move {
+            match module_code {
+                Some(code) => Ok(ModuleSource {
+                    code: code.into(),
+                    module_type: deno_core::ModuleType::JavaScript,
+                    module_url_specified: module_specifier.clone().to_string(),
+                    module_url_found: module_specifier.clone().to_string(),
+                }),
+                None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
+            }
+        };
+        Box::pin(fut)
+    }
+}
+
+async fn run_js() -> Result<(), AnyError> {
+    let main_module = resolve_path("executor", &std::env::current_dir().unwrap()).unwrap();
+    let executor_code = include_str!("../../executor/lib/bundle.js");
+    let mut loader = StringModuleLoader::new();
+    loader.add_module(main_module.as_str(), executor_code);
+    
+    let executor_extension = Extension::builder("runtime")
+        //.js(include_js_files!(
+        //    executor "../../executor/lib/bundle.js",
+        //))
+        //.esm(include_js_files!(
+        //    executor "../../executor/lib/bundle.js",
+        //))
+        .js(include_js_files!(
             runtime "runtime.js",
-        ))
+        )) 
         .ops(vec![
-            op_read_file::decl(),
-            op_write_file::decl(),
-            op_remove_file::decl(),
+            //op_read_file::decl(),
+            //op_write_file::decl(),
+            //op_remove_file::decl(),
         ])
         .build();
-*/
 
 
-    let main_module = resolve_path(file_path, &std::env::current_dir().unwrap()).unwrap();
 
+    
+    //let main_module = Url::from_file_path("executor").unwrap();
+    
     let options = WorkerOptions {
         bootstrap: BootstrapOptions::default(),
-        extensions: vec![],
+        extensions: vec![executor_extension],
         startup_snapshot: Some(deno_runtime::js::deno_isolate_init()),
         unsafely_ignore_certificate_errors: None,
         root_cert_store: None,
@@ -78,7 +150,7 @@ async fn run_js(file_path: &str) -> Result<(), AnyError> {
         maybe_inspector_server: None,
         should_break_on_first_statement: false,
         should_wait_for_inspector_session: false,
-        module_loader: Rc::new(FsModuleLoader),
+        module_loader: Rc::new(loader),
         npm_resolver: None,
         get_error_class_fn: None,
         cache_storage_dir: None,
@@ -103,8 +175,9 @@ async fn run_js(file_path: &str) -> Result<(), AnyError> {
     //runtime. register_op("op_print", op_sync(op_print));
     
 
-    //worker.execute_script("[runjs:runtime.js]",  include_str!("./runtime.js")).unwrap();
+    //worker.execute_script("[executor]",  include_str!("../../executor/lib/bundle.js")).unwrap();
     worker.execute_main_module(&main_module).await.unwrap();
+    //worker.execute_script("[rust]",  "console.log('from Rust.', executor)").unwrap();
 
     //let mut worker: MainWorker = create_worker(file_path);
     //let mut js_runtime = worker.js_runtime;
@@ -126,7 +199,7 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    let run = run_js("../executor/lib/bundle.js");
+    let run = run_js();
     //let run = run_js("./example.js");
     if let Err(error) = runtime.block_on(run) {
         eprintln!("error: {}", error);
