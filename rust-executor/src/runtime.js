@@ -12,6 +12,9 @@
       error: (...args) => {
         core.print(`[err]: ${argsToMessage(...args)}\n`, true);
       },
+      warn: (...args) => {
+        core.print(`[warn]: ${argsToMessage(...args)}\n`, true);
+      } 
     };
 
     globalThis.runjs = {

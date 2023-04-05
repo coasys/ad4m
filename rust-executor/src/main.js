@@ -68,7 +68,7 @@ const ipfsRepoPath = path.join(appDataPath, 'ipfs')
 const config = {
 appDataPath: appDataPath,
 resourcePath: binaryPath,
-networkBootstrapSeed: appDataPath,
+networkBootstrapSeed: path.join(appDataPath, "mainnet_seed.seed"),
 languageLanguageOnly: true,
 bootstrapFixtures: {
     languages: [],
