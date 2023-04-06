@@ -12,6 +12,7 @@
     <script type="module">
       const { ipcRenderer } = require("electron");
 
+      import { getForVersion } from "../src/utils";
       import Ad4mConnectUI from "../dist/web.js";
 
       const {
@@ -39,7 +40,7 @@
           console.log(ui.token);
           ipcRenderer.send("resolve", {
             executorUrl,
-            capabilityToken: ui.token || localStorage.getItem("ad4mtoken"),
+            capabilityToken: ui.token || getForVersion("ad4mtoken"),
           });
         }
       });
