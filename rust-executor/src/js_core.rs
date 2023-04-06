@@ -20,12 +20,13 @@ pub struct Execute {
     pub script: String,
 }
 
+
 pub struct JsCore {
     worker: Arc<Mutex<MainWorker>>,
 }
 
 impl JsCore {
-    pub fn new() -> Self {
+    fn new() -> Self {
         JsCore {
             worker: Arc::new(Mutex::new(MainWorker::from_options(
                 main_module_url(),
@@ -35,7 +36,7 @@ impl JsCore {
         }
     }
 
-    pub async fn init_engine(&self) {
+    async fn init_engine(&self) {
         let mut worker = self.worker.lock().unwrap();
         worker.bootstrap(&BootstrapOptions::default());
         worker
@@ -44,12 +45,12 @@ impl JsCore {
             .unwrap();
     }
 
-    pub fn event_loop(&self) -> EventLoopFuture {
+    fn event_loop(&self) -> EventLoopFuture {
         let event_loop = EventLoopFuture::new(self.worker.clone());
         event_loop
     }
 
-    pub fn init_core(&self) -> Result<GlobalVariableFuture, AnyError> {
+    fn init_core(&self) -> Result<GlobalVariableFuture, AnyError> {
         let mut worker = self.worker.lock().unwrap();
         let _init_core = worker.execute_script("js_core", "initCore()")?;
         Ok(GlobalVariableFuture::new(
