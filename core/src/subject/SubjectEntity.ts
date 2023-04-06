@@ -148,7 +148,7 @@ export class SubjectEntity {
     
     await this.#perspective.createSubject(this, this.#baseExpression);
 
-    this.update()
+    await this.update()
   }
 
   async update() {
