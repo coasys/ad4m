@@ -7,6 +7,7 @@ import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, ag
 import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
 import getPort from 'get-port';
 import fs from "fs";
+import { createResolvers } from "./core/graphQL-interface/GraphQL";
 
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
@@ -192,15 +193,14 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       swiplHomePath
     } as CoreConfig);
 
-    console.log("\x1b[34m", "Init services...", "\x1b[0m");
-    await core.initIPFS({ ipfsSwarmPort, ipfsRepoPath });
-    
-    console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
+    core.resolvers = createResolvers(core, config)
 
+    //console.log("\x1b[34m", "Init services...", "\x1b[0m");
+    //await core.initIPFS({ ipfsSwarmPort, ipfsRepoPath });
+    //console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
     //await core.startGraphQLServer(gqlPort, mocks, config);
     if (runDappServer) { core.startDAppServer(dAppPort) };
-
-    console.log("\x1b[31m", "GraphQL server started, Unlock the agent to start holohchain", "\x1b[0m");
+    //console.log("\x1b[31m", "GraphQL server started, Unlock the agent to start holohchain", "\x1b[0m");
 
     return core
 }

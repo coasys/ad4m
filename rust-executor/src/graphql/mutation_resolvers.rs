@@ -8,6 +8,8 @@ use super::graphql_types::*;
 
 pub struct Mutation;
 
+const ALL_CAPABILITY: &str = r#"{with: {domain: "*", pointers: ["*"]},can: ["*"]}"#;
+
 #[graphql_object(context = JsCoreHandle)]
 impl Mutation {
     fn add_trusted_agents(
@@ -150,11 +152,23 @@ impl Mutation {
         ))
     }
 
-    fn agent_unlock(&self, context: &JsCoreHandle, passphrase: String) -> FieldResult<AgentStatus> {
-        Err(FieldError::new(
+    async fn agent_unlock(&self, context: &JsCoreHandle, passphrase: String) -> FieldResult<AgentStatus> {
+        let mut js = context.clone();
+        let script = format!(r#"JSON.stringify(
+            core.resolvers.Mutation.agentUnlock(
+                null, 
+                {{ passphrase: "{}" }},
+                {{ capabilities: [{}] }}
+            )
+        )"#, passphrase, ALL_CAPABILITY);
+        println!("script: {}", script);
+        let result = js.execute(script).await?;
+        let s: AgentStatus = serde_json::from_str(&result)?;
+        return Ok(s);
+        return Err(FieldError::new(
             "Not implemented",
             graphql_value!({ "Not implemented": true }),
-        ))
+        ));
     }
 
     fn agent_update_direct_message_language(

@@ -72,6 +72,8 @@ export default class PerspectivismCore {
     #languagesReady: Promise<void>
     #resolveLanguagesReady: (value: void) => void
 
+    resolvers: any
+
     constructor(config: Config.CoreConfig) {
         this.#config = Config.init(config);
 
