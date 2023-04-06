@@ -2,10 +2,10 @@ use actix::prelude::*;
 use deno_core::error::AnyError;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
-use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::task::LocalSet;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Builder;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::task::LocalSet;
 mod futures;
 mod options;
 mod string_module_loader;
@@ -19,15 +19,49 @@ use options::{main_module_url, main_worker_options};
 pub struct Execute {
     pub script: String,
 }
-pub struct JsCoreActor {
-    rx: Receiver<()>,
-    tx: Sender<()>,
+
+pub struct JsCoreHandle {
+    rx: UnboundedReceiver<JsCoreResponse>,
+    tx: UnboundedSender<JsCoreRequest>,
 }
 
-impl JsCoreActor {
+impl JsCoreHandle {
     pub async fn initialized(&mut self) {
         self.rx.recv().await.expect("couldn't receive on channel");
     }
+
+    pub async fn execute(&mut self, script: String) -> Result<String, AnyError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.tx
+            .send(JsCoreRequest {
+                script,
+                id: id.clone(),
+            })
+            .expect("couldn't send on channel");
+
+        let mut response = None;
+        while response.is_none() {
+            self.rx.recv().await.map(|r| {
+                if r.id == id {
+                    response = Some(r);
+                }
+            });
+        }
+
+        response.unwrap().result
+    }
+}
+
+#[derive(Debug)]
+struct JsCoreRequest {
+    script: String,
+    id: String,
+}
+
+#[derive(Debug)]
+struct JsCoreResponse {
+    result: Result<String, AnyError>,
+    id: String,
 }
 
 pub struct JsCore {
@@ -68,9 +102,9 @@ impl JsCore {
         ))
     }
 
-    pub fn start() -> JsCoreActor{
-        let (tx_inside, rx_outside) = mpsc::channel::<()>(1);
-        let (tx_outside, rx_inside) = mpsc::channel::<()>(1);
+    pub fn start() -> JsCoreHandle {
+        let (tx_inside, rx_outside) = mpsc::unbounded_channel::<JsCoreResponse>();
+        let (tx_outside, rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
         std::thread::spawn(move || {
             let rt = Builder::new_current_thread()
                 .enable_all()
@@ -79,19 +113,28 @@ impl JsCore {
             let _guard = rt.enter();
 
             let js_core = JsCore::new();
-            
+
             rt.block_on(js_core.init_engine());
             let local = LocalSet::new();
-            local.spawn_local(js_core.init_core().expect("couldn't spawn JS initCore()"));
+
+            let init_core_future = js_core.init_core().expect("couldn't spawn JS initCore()");
+            let tx_cloned = tx_inside.clone();
+            local.spawn_local(async move {
+                init_core_future.await;
+                tx_cloned 
+                    .send(JsCoreResponse {
+                        result: Ok(String::from("initialized")),
+                        id: String::from("initialized"),
+                    })
+                    .expect("couldn't send on channel");
+            });
             match rt.block_on(js_core.event_loop()) {
                 Ok(_) => println!("event loop finished"),
                 Err(err) => println!("event loop failed: {}", err),
             };
-            
-            rt.block_on(tx_inside.send(())).expect("couldn't send on channel");
         });
 
-        JsCoreActor {
+        JsCoreHandle {
             rx: rx_outside,
             tx: tx_outside,
         }
@@ -122,9 +165,9 @@ impl Actor for JsCore {
         //    init_core_fut.await;
         //}.into_actor(self));
 
-    
 
-        
+
+
     }
 
     fn stopped(&mut self, _: &mut Context<Self>) {
