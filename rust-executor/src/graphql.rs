@@ -8,7 +8,6 @@ use juniper::RootNode;
 use juniper_actix::{graphiql_handler, graphql_handler, playground_handler};
 use std::env;
 use std::io::Write;
-//use std::sync::Arc;
 
 mod graphql_types;
 mod mutation_resolvers;
@@ -18,6 +17,8 @@ mod subscription_resolvers;
 use mutation_resolvers::*;
 use query_resolvers::*;
 use subscription_resolvers::*;
+
+use crate::js_core::JsCoreHandle;
 
 pub struct MyContext;
 
@@ -41,15 +42,14 @@ async fn graphql_route(
     req: actix_web::HttpRequest,
     payload: actix_web::web::Payload,
     schema: web::Data<Schema>,
+    deno_connect: web::Data<JsCoreHandle>,
 ) -> Result<HttpResponse, Error> {
-    graphql_handler(&schema, &(), req, payload).await
+    graphql_handler(&schema, &deno_connect, req, payload).await
 }
 
-pub async fn start_server() -> Result<(), AnyError> {
+pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> {
     env::set_var("RUST_LOG", "info");
     env_logger::init();
-
-    //let arc_schema = Arc::new(schema());
 
     schema().as_schema_language();
     let mut file = std::fs::File::create("schema.gql").unwrap();
@@ -60,6 +60,7 @@ pub async fn start_server() -> Result<(), AnyError> {
     let server = HttpServer::new(move || {
         App::new()
             .app_data(Data::new(schema()))
+            .app_data(Data::new(js_core_handle.clone()))
             .wrap(middleware::Compress::default())
             .wrap(middleware::Logger::default())
             .service(
