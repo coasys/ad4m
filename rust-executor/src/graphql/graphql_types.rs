@@ -2,70 +2,70 @@ use juniper::{GraphQLInputObject, GraphQLObject, GraphQLScalarValue};
 
 #[derive(GraphQLObject, Default)]
 pub struct Agent {
-    did: String,
+    pub did: String,
     #[graphql(name = "directMessageLanguage")]
-    direct_message_language: Option<String>,
-    perspective: Option<Perspective>,
+    pub direct_message_language: Option<String>,
+    pub perspective: Option<Perspective>,
 }
 
 #[derive(GraphQLObject, Default)]
 pub struct AgentSignature {
-    public_key: String,
-    signature: String,
+    pub public_key: String,
+    pub signature: String,
 }
 
 #[derive(GraphQLObject, Default)]
 pub struct AgentStatus {
-    did: Option<String>,
-    did_document: Option<String>,
-    error: Option<String>,
-    is_initialized: bool,
-    is_unlocked: bool,
+    pub did: Option<String>,
+    pub did_document: Option<String>,
+    pub error: Option<String>,
+    pub is_initialized: bool,
+    pub is_unlocked: bool,
 }
 
 #[derive(GraphQLObject, Default)]
 pub struct Apps {
-    auth: AuthInfo,
-    request_id: String,
-    revoked: Option<bool>,
-    token: String,
+    pub auth: AuthInfo,
+    pub request_id: String,
+    pub revoked: Option<bool>,
+    pub token: String,
 }
 
 #[derive(GraphQLObject, Default)]
 pub struct AuthInfo {
-    app_desc: String,
-    app_icon_path: Option<String>,
-    app_name: String,
-    app_url: String,
-    capabilities: Vec<Capability>,
+    pub app_desc: String,
+    pub app_icon_path: Option<String>,
+    pub app_name: String,
+    pub app_url: String,
+    pub capabilities: Vec<Capability>,
 }
 
 #[derive(GraphQLInputObject, Default)]
 pub struct AuthInfoInput {
     #[graphql(name = "appDesc")]
-    app_desc: String,
+    pub app_desc: String,
     #[graphql(name = "appDomain")]
-    app_domain: String,
+    pub app_domain: String,
     #[graphql(name = "appIconPath")]
-    app_icon_path: Option<String>,
+    pub app_icon_path: Option<String>,
     #[graphql(name = "appName")]
-    app_name: String,
+    pub app_name: String,
     #[graphql(name = "appUrl")]
-    app_url: Option<String>,
+    pub app_url: Option<String>,
     #[graphql(name = "capabilities")]
-    capabilities: Option<Vec<CapabilityInput>>,
+    pub capabilities: Option<Vec<CapabilityInput>>,
 }
 
 #[derive(GraphQLObject, Default)]
 pub struct Capability {
-    can: Vec<String>,
-    with: Resource,
+    pub can: Vec<String>,
+    pub with: Resource,
 }
 
 #[derive(GraphQLInputObject, Default)]
 pub struct CapabilityInput {
-    can: Vec<String>,
-    with: ResourceInput,
+    pub can: Vec<String>,
+    pub with: ResourceInput,
 }
 
 #[derive(GraphQLScalarValue)]
@@ -76,57 +76,57 @@ pub struct DateTime(chrono::DateTime<chrono::Utc>);
 #[derive(GraphQLObject, Default)]
 pub struct EntanglementProof {
     #[graphql(name = "deviceKey")]
-    device_key: String,
+    pub device_key: String,
     #[graphql(name = "deviceKeySignedByDid")]
-    device_key_signed_by_did: String,
+    pub device_key_signed_by_did: String,
     #[graphql(name = "deviceKeyType")]
-    device_key_type: String,
+    pub device_key_type: String,
     #[graphql(name = "did")]
-    did: String,
+    pub did: String,
     #[graphql(name = "didSignedByDeviceKey")]
-    did_signed_by_device_key: Option<String>,
+    pub did_signed_by_device_key: Option<String>,
     #[graphql(name = "didSigningKeyId")]
-    did_signing_key_id: String,
+    pub did_signing_key_id: String,
 }
 
 #[derive(GraphQLInputObject, Default)]
 pub struct EntanglementProofInput {
     #[graphql(name = "deviceKey")]
-    device_key: String,
+    pub device_key: String,
     #[graphql(name = "deviceKeySignedByDid")]
-    device_key_signed_by_did: String,
+    pub device_key_signed_by_did: String,
     #[graphql(name = "deviceKeyType")]
-    device_key_type: String,
+    pub device_key_type: String,
     #[graphql(name = "did")]
-    did: String,
+    pub did: String,
     #[graphql(name = "didSignedByDeviceKey")]
-    did_signed_by_device_key: String,
+    pub did_signed_by_device_key: String,
     #[graphql(name = "didSigningKeyId")]
-    did_signing_key_id: String,
+    pub did_signing_key_id: String,
 }
 
 #[derive(GraphQLObject, Default)]
 pub struct ExceptionInfo {
-    addon: Option<String>,
-    message: String,
-    title: String,
-    r#type: f64,
+    pub addon: Option<String>,
+    pub message: String,
+    pub title: String,
+    pub r#type: f64,
 }
 
 #[derive(GraphQLObject, Default)]
 pub struct ExpressionProof {
-    invalid: Option<bool>,
-    key: Option<String>,
-    signature: Option<String>,
-    valid: Option<bool>,
+    pub invalid: Option<bool>,
+    pub key: Option<String>,
+    pub signature: Option<String>,
+    pub valid: Option<bool>,
 }
 
 #[derive(GraphQLInputObject, Default)]
 pub struct ExpressionProofInput {
-    invalid: Option<bool>,
-    key: Option<String>,
-    signature: Option<String>,
-    valid: Option<bool>,
+    pub invalid: Option<bool>,
+    pub key: Option<String>,
+    pub signature: Option<String>,
+    pub valid: Option<bool>,
 }
 
 #[derive(GraphQLObject, Default)]
