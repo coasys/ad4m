@@ -117,7 +117,6 @@ impl JsCore {
             rt.block_on(js_core.init_engine());
             println!("engine init complete");
             // let local = LocalSet::new();
-
             // let init_core_future = js_core.init_core().expect("couldn't spawn JS initCore()");
             // let tx_cloned = tx_inside.clone();
             // local.spawn_local(async move {
