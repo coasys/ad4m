@@ -70,5 +70,10 @@ pub async fn start_server() -> Result<(), AnyError> {
             .service(web::resource("/playground").route(web::get().to(playground_route)))
             .service(web::resource("/graphiql").route(web::get().to(graphiql_route)))
     });
-    server.bind("127.0.0.1:8080").unwrap().run().await.map_err(|e| e.into())
+    server
+        .bind("127.0.0.1:8080")
+        .unwrap()
+        .run()
+        .await
+        .map_err(|e| e.into())
 }

@@ -121,7 +121,7 @@ impl JsCore {
             let tx_cloned = tx_inside.clone();
             local.spawn_local(async move {
                 init_core_future.await;
-                tx_cloned 
+                tx_cloned
                     .send(JsCoreResponse {
                         result: Ok(String::from("initialized")),
                         id: String::from("initialized"),
