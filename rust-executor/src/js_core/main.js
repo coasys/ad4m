@@ -40,9 +40,18 @@ Error.captureStackTrace = function (err, constructorOpt) {
         isConstructor() {
           return false;
         },
+        isAsync() {
+          return false;
+        },
+        isPromiseAll() {
+          return false;
+        },
       };
+
       const structuredStackTrace = [fakeCallSite];
-      err.stack = Error.prepareStackTrace(err, structuredStackTrace);
+      if(err.code == "UNKNOWN", err.syscall == "accept") {
+        err.stack = Error.prepareStackTrace(err, structuredStackTrace);
+      }
     } else {
       err.stack = err.stack || err.toString();
     }
