@@ -3,12 +3,12 @@ use deno_core::error::AnyError;
 use deno_core::v8;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
-use tokio::sync::broadcast;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Builder;
+use tokio::sync::broadcast;
 use tokio::sync::{
     broadcast::{Receiver, Sender},
-    mpsc::{self, UnboundedSender}
+    mpsc::{self, UnboundedSender},
 };
 use tokio::task::LocalSet;
 mod futures;
@@ -220,7 +220,6 @@ impl JsCore {
             broadcast_tx: tx_inside_clone,
         }
     }
-
 }
 
 /*
