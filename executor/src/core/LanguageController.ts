@@ -1007,6 +1007,14 @@ export default class LanguageController {
         try {
             if(ref.language.address == "literal" || ref.language.name == 'literal') {
                 expr = Literal.fromUrl(`literal://${ref.expression}`).get()
+                if(! (typeof expr === 'object')) {
+                    expr = {
+                        author: '<unknown>',
+                        timestamp: '<unknown>',
+                        data: expr,
+                        proof: {}
+                    }
+                }
             } else {
                 const lang = this.languageForExpression(ref);
                 if (!lang.expressionAdapter) {
