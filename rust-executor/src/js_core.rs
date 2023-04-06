@@ -83,8 +83,6 @@ struct JsCoreResponse {
 
 pub struct JsCore {
     worker: Arc<Mutex<MainWorker>>,
-    results_sender: Option<Sender<JsCoreResponse>>,
-    requests_sender: Option<UnboundedSender<JsCoreRequest>>,
 }
 
 impl JsCore {
@@ -95,8 +93,6 @@ impl JsCore {
                 PermissionsContainer::allow_all(),
                 main_worker_options(),
             ))),
-            results_sender: None,
-            requests_sender: None,
         }
     }
 
@@ -123,11 +119,7 @@ impl JsCore {
         ))
     }
 
-    pub fn start(&mut self) -> JsCoreHandle {
-        if self.results_sender.is_some() {
-            panic!("JsCore already started");
-        }
-
+    pub fn start() -> JsCoreHandle {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
 

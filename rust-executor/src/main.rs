@@ -6,8 +6,7 @@ use js_core::JsCore;
 
 #[tokio::main]
 async fn main() {
-    let mut js_core = JsCore::new();
-    let mut js_core_handle = js_core.start();
+    let mut js_core_handle = JsCore::start();
     js_core_handle.initialized().await;
     println!("js_core initialized.");
     let mut clone = js_core_handle.clone();
