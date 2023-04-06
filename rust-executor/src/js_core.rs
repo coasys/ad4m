@@ -2,9 +2,13 @@ use actix::prelude::*;
 use deno_core::error::AnyError;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use tokio::sync::broadcast;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Builder;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    broadcast::{Receiver, Sender},
+    mpsc::{self, UnboundedSender}
+};
 use tokio::task::LocalSet;
 mod futures;
 mod options;
@@ -21,7 +25,7 @@ pub struct Execute {
 }
 
 pub struct JsCoreHandle {
-    rx: UnboundedReceiver<JsCoreResponse>,
+    rx: Receiver<JsCoreResponse>,
     tx: UnboundedSender<JsCoreRequest>,
 }
 
@@ -48,34 +52,38 @@ impl JsCoreHandle {
             });
         }
 
-        response.unwrap().result
+        Ok(response.expect("none case handle above").result)
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct JsCoreRequest {
     script: String,
     id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct JsCoreResponse {
-    result: Result<String, AnyError>,
+    result: String,
     id: String,
 }
 
 pub struct JsCore {
     worker: Arc<Mutex<MainWorker>>,
+    results_sender: Option<Sender<JsCoreResponse>>,
+    requests_sender: Option<UnboundedSender<JsCoreRequest>>,
 }
 
 impl JsCore {
-    fn new() -> Self {
+    pub fn new() -> Self {
         JsCore {
             worker: Arc::new(Mutex::new(MainWorker::from_options(
                 main_module_url(),
                 PermissionsContainer::allow_all(),
                 main_worker_options(),
             ))),
+            results_sender: None,
+            requests_sender: None,
         }
     }
 
@@ -102,9 +110,17 @@ impl JsCore {
         ))
     }
 
-    pub fn start() -> JsCoreHandle {
-        let (tx_inside, rx_outside) = mpsc::unbounded_channel::<JsCoreResponse>();
+    pub fn start(&mut self) -> JsCoreHandle {
+        if self.results_sender.is_some() {
+            panic!("JsCore already started");
+        }
+
+        let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
+
+        self.requests_sender = Some(tx_outside.clone());
+        self.results_sender = Some(tx_inside.clone());
+
         std::thread::spawn(move || {
             let rt = Builder::new_current_thread()
                 .enable_all()
@@ -130,7 +146,7 @@ impl JsCore {
                     };
                     tx_cloned
                         .send(JsCoreResponse {
-                            result: Ok(String::from("initialized")),
+                            result: String::from("initialized"),
                             id: String::from("initialized"),
                         })
                         .expect("couldn't send on channel");
@@ -144,12 +160,23 @@ impl JsCore {
                         }
                     }
                 }
+
+
             })
         });
+        
 
         JsCoreHandle {
             rx: rx_outside,
             tx: tx_outside,
+        }
+    }
+
+
+    pub fn get_handle(&self) -> JsCoreHandle {
+        JsCoreHandle {
+            rx: self.results_sender.as_ref().unwrap().subscribe(),
+            tx: self.requests_sender.as_ref().unwrap().clone(),
         }
     }
 }
