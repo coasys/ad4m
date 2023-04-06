@@ -48,9 +48,6 @@ async fn graphql_route(
 }
 
 pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> {
-    env::set_var("RUST_LOG", "info");
-    env_logger::init();
-
     schema().as_schema_language();
     let mut file = std::fs::File::create("schema.gql").unwrap();
     file.write_all(schema().as_schema_language().as_bytes())

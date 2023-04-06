@@ -5745,6 +5745,7 @@ dependencies = [
  "juniper",
  "juniper_actix",
  "juniper_subscriptions",
+ "log",
  "serde_json",
  "tokio",
  "url",
