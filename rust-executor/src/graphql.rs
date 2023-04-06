@@ -6,7 +6,6 @@ use actix_web::{
 use deno_core::error::AnyError;
 use juniper::RootNode;
 use juniper_actix::{graphiql_handler, graphql_handler, playground_handler};
-use std::env;
 use std::io::Write;
 
 mod graphql_types;
@@ -35,7 +34,7 @@ async fn graphiql_route() -> Result<HttpResponse, Error> {
 }
 
 async fn playground_route() -> Result<HttpResponse, Error> {
-    playground_handler("/graphql", None).await
+    playground_handler("/", None).await
 }
 
 async fn graphql_route(
@@ -61,7 +60,7 @@ pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> 
             .wrap(middleware::Compress::default())
             .wrap(middleware::Logger::default())
             .service(
-                web::resource("/graphql")
+                web::resource("/")
                     .route(web::post().to(graphql_route))
                     .route(web::get().to(graphql_route)),
             )
