@@ -2,7 +2,7 @@ use actix::prelude::*;
 use deno_core::error::AnyError;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::LocalSet;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Builder;
@@ -19,7 +19,16 @@ use options::{main_module_url, main_worker_options};
 pub struct Execute {
     pub script: String,
 }
+pub struct JsCoreActor {
+    rx: Receiver<()>,
+    tx: Sender<()>,
+}
 
+impl JsCoreActor {
+    pub async fn initialized(&mut self) {
+        self.rx.recv().await.expect("couldn't receive on channel");
+    }
+}
 
 pub struct JsCore {
     worker: Arc<Mutex<MainWorker>>,
@@ -59,8 +68,9 @@ impl JsCore {
         ))
     }
 
-    pub fn start() -> Receiver<()>{
-        let (sx, rx) = mpsc::channel::<()>(1);
+    pub fn start() -> JsCoreActor{
+        let (tx_inside, rx_outside) = mpsc::channel::<()>(1);
+        let (tx_outside, rx_inside) = mpsc::channel::<()>(1);
         std::thread::spawn(move || {
             let rt = Builder::new_current_thread()
                 .enable_all()
@@ -78,9 +88,13 @@ impl JsCore {
                 Err(err) => println!("event loop failed: {}", err),
             };
             
-            rt.block_on(sx.send(())).expect("couldn't send on channel");
+            rt.block_on(tx_inside.send(())).expect("couldn't send on channel");
         });
-        rx
+
+        JsCoreActor {
+            rx: rx_outside,
+            tx: tx_outside,
+        }
     }
 }
 
