@@ -1,4 +1,7 @@
+use actix::prelude::*;
+
 use deno_core::error::AnyError;
+use deno_core::v8;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use std::sync::{Arc, Mutex};
@@ -9,6 +12,14 @@ mod string_module_loader;
 
 use self::futures::{EventLoopFuture, GlobalVariableFuture};
 use options::{main_module_url, main_worker_options};
+
+/// Define message
+#[derive(Message)]
+#[rtype(result = "Result<String, AnyError>")]
+struct Execute {
+    script: String,
+}
+
 pub struct JsCore {
     worker: Arc<Mutex<MainWorker>>,
 }
@@ -55,5 +66,35 @@ impl JsCore {
             result
         };
         tokio::try_join!(core_init, js_core.event_loop())
+    }
+}
+
+// Provide Actor implementation for our actor
+impl Actor for JsCore {
+    type Context = Context<Self>;
+
+    fn started(&mut self, _: &mut Context<Self>) {
+       println!("Actor is alive");
+    }
+
+    fn stopped(&mut self, _: &mut Context<Self>) {
+       println!("Actor is stopped");
+    }
+}
+
+/// Define handler for `Ping` message
+impl Handler<Execute> for JsCore {
+    type Result = Result<String, AnyError>;
+
+    fn handle(&mut self, msg: Execute, _: &mut Context<Self>) -> Self::Result {
+        let mut worker = self.worker.lock().unwrap();
+        let result = worker.execute_script("js_core", format!("JSON.stringify({})", msg.script))?;
+        let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
+        let context = v8::Context::new(scope);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let value = v8::Local::new(scope, result);
+        //let value: v8::Local<v8::String> = unsafe { v8::Local::cast(value) };
+        let value = value.to_rust_string_lossy(scope);
+        Ok(value)
     }
 }

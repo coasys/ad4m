@@ -43,6 +43,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f728064aca1c318585bf4bb04ffcfac9e75e508ab4e8b1bd9ba5dfe04e2cbed5"
 dependencies = [
  "actix-rt",
+ "actix_derive",
  "bitflags",
  "bytes",
  "crossbeam-channel",
@@ -5733,6 +5734,7 @@ dependencies = [
 name = "rust-executor"
 version = "0.1.0"
 dependencies = [
+ "actix 0.13.0",
  "actix-rt",
  "actix-web",
  "chrono",
