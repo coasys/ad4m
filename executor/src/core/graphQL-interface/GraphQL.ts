@@ -810,6 +810,15 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
         },
 
         Subscription: {
+            agentAppsChanged: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.AGENT_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.APPS_CHANGED)
+                },
+                //@ts-ignore
+                resolve: payload => payload
+            },
             agentUpdated: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
