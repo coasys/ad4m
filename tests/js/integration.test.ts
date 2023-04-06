@@ -605,6 +605,18 @@ describe("Integration", () => {
                         writable: true,
                     })
                     name: string = ""
+
+                    // @ts-ignore
+                    @subjectCollection({
+                        through: "flux://entry_type",
+                        where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
+                    })
+                    ingredients: [] = []
+
+                    //@ts-ignore
+                    @subjectCollection({ through: "recipe://comment" })
+                    // @ts-ignore
+                    comments: string[] = []
                 }
 
                 before(async () => {
@@ -646,11 +658,37 @@ describe("Integration", () => {
                     let root = Literal.from("Active record implementation test").toUrl()
                     const recipe = new Recipe(perspective!, root)
 
-                    recipe.name = "recipe://test1";
-
                     const recipes = await recipe.find();
 
                     expect(recipes.length).to.equal(1)
+                })
+
+                it("can constrain collection entries clause", async () => {
+                    let root = Literal.from("Active record implementation collection test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://collection_test";
+
+                    recipe.comments = ['test', 'test1']
+
+                    await recipe.save()
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.comments.length).to.equal(2)
+                })
+
+                it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                    let root = Literal.from("Active record implementation collection test").toUrl()
+                    await perspective?.add(new Link({source: root, predicate: "recipe://has_ingredient", target: "recipe://test"}))
+                      
+                    const recipe = new Recipe(perspective!, root)
+
+                    await recipe.get()
+
+                    expect(recipe.ingredients.length).to.equal(1)
                 })
             })
         })
