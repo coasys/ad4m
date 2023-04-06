@@ -28,6 +28,18 @@ pub struct Execute {
 pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,
     tx: UnboundedSender<JsCoreRequest>,
+
+    broadcast_tx: Sender<JsCoreResponse>,
+}
+
+impl Clone for JsCoreHandle {
+    fn clone(&self) -> Self {
+        JsCoreHandle {
+            rx: self.broadcast_tx.subscribe(),
+            tx: self.tx.clone(),
+            broadcast_tx: self.broadcast_tx.clone(),
+        }
+    }
 }
 
 impl JsCoreHandle {
@@ -119,9 +131,7 @@ impl JsCore {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
 
-        self.requests_sender = Some(tx_outside.clone());
-        self.results_sender = Some(tx_inside.clone());
-
+        let tx_inside_clone = tx_inside.clone();
         std::thread::spawn(move || {
             let rt = Builder::new_current_thread()
                 .enable_all()
@@ -203,21 +213,14 @@ impl JsCore {
 
             })
         });
-        
 
         JsCoreHandle {
             rx: rx_outside,
             tx: tx_outside,
+            broadcast_tx: tx_inside_clone,
         }
     }
 
-
-    pub fn get_handle(&self) -> JsCoreHandle {
-        JsCoreHandle {
-            rx: self.results_sender.as_ref().unwrap().subscribe(),
-            tx: self.requests_sender.as_ref().unwrap().clone(),
-        }
-    }
 }
 
 /*

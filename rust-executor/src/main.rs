@@ -10,7 +10,8 @@ async fn main() {
     let mut js_core_handle = js_core.start();
     js_core_handle.initialized().await;
     println!("js_core initialized.");
-    let result = js_core_handle.execute("console.log('hello world'); 400 + 20".to_string()).await;
+    let mut clone = js_core_handle.clone();
+    let result = clone.execute("console.log('hello world'); process".to_string()).await;
     println!("result: {:?}", result);
     //println!("Starting GraphQL...");
     //start_server().await;
