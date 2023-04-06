@@ -115,60 +115,33 @@ impl JsCore {
             let js_core = JsCore::new();
 
             rt.block_on(js_core.init_engine());
-            println!("engine init complete");
-            // let local = LocalSet::new();
-            // let init_core_future = js_core.init_core().expect("couldn't spawn JS initCore()");
-            // let tx_cloned = tx_inside.clone();
-            // local.spawn_local(async move {
-            //     println!("start spawn local");
-            //     let core_fut = init_core_future.await;
-            //     println!("core fut got res: {:?}", core_fut);
-            //     tx_cloned
-            //         .send(JsCoreResponse {
-            //             result: Ok(String::from("initialized")),
-            //             id: String::from("initialized"),
-            //         })
-            //         .expect("couldn't send on channel");
-            // });
-            // match rt.block_on(js_core.event_loop()) {
-            //     Ok(_) => println!("event loop finished"),
-            //     Err(err) => println!("event loop failed: {}", err),
-            // };
+            println!("AD4M JS engine init completed");
 
             rt.block_on(async {
                 let local = LocalSet::new();
                 let init_core_future = js_core.init_core().expect("couldn't spawn JS initCore()");
                 let tx_cloned = tx_inside.clone();
-                // let local_handle = local.spawn_local(async move {
-                //     println!("start spawn local");
-                //     let core_fut = init_core_future.await;
-                //     println!("core fut got res: {:?}", core_fut);
-                //     tx_cloned
-                //         .send(JsCoreResponse {
-                //             result: Ok(String::from("initialized")),
-                //             id: String::from("initialized"),
-                //         })
-                //         .expect("couldn't send on channel");
-                // });
+
                 // Run the local task set.
                 let run_until = local.run_until(async move {
-                    println!("run until...");
-                    println!("start spawn local");
-                    let core_fut = init_core_future.await;
-                    println!("core fut got res: {:?}", core_fut);
+                    match init_core_future.await {
+                        Ok(_) => {}
+                        Err(err) => println!("AD4M coreInit() failed with error: {}", err),
+                    };
                     tx_cloned
                         .send(JsCoreResponse {
                             result: Ok(String::from("initialized")),
                             id: String::from("initialized"),
                         })
                         .expect("couldn't send on channel");
-                }); 
+                });
                 tokio::select! {
-                    _ = run_until => {
-                        println!("Local future completed.");
-                    }
-                    _ = js_core.event_loop() => {
-                        eprintln!("This branch should never be executed since continuous_future never ends.");
+                    _init_core_result = run_until => {}
+                    event_loop_result = js_core.event_loop() => {
+                        match event_loop_result {
+                            Ok(_) => println!("AD4M event loop finished"),
+                            Err(err) => println!("AD4M event loop closed with error: {}", err),
+                        }
                     }
                 }
             })
