@@ -1,3 +1,4 @@
+import { Literal } from "../Literal";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom } from "./SDNADecorators";
 import { singularToPlural } from "./util";
@@ -24,7 +25,7 @@ export class SubjectEntity {
   timestamp: string;
 
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
-    this.#baseExpression = baseExpression ? baseExpression : `entry://${makeRandomPrologAtom(24)}`;
+    this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomPrologAtom(24)).toUrl();
     this.#perspective = perspective
   }
 
@@ -39,12 +40,6 @@ export class SubjectEntity {
       throw `Not a valid subject instance of ${this.#subjectClass} for ${tempId}`
     }
 
-    const subject = await this.#perspective.getSubjectProxy(tempId, this.#subjectClass);
-
-    if (!subject) {
-      await this.#perspective.createSubject(this.#subjectClass, tempId);
-    }
-
     let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property(C, Property)`)
     let properties = results.map(result => result.Property)
 
@@ -57,8 +52,6 @@ export class SubjectEntity {
 
           if (resolveExpressionURI) {
             const expression = await this.#perspective.getExpression(expressionURI)
-            this['author'] = expression.author;
-            this['timestamp'] = expression.timestamp;
             try {
               return JSON.parse(expression.data)
             } catch (e) {
@@ -103,65 +96,49 @@ export class SubjectEntity {
     return this
   }
 
-  private async setProperties(key: string, value: any) {
-    const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, Property, Setter)`)
-    if (setters.length > 0) {
-      const setter = setters.find(e => e.Property === key)
-
-      if (setter) {
-        const property = setter.Property
-        const actions = eval(setter.Setter)
-        const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${property}", Language)`)
-        let resolveLanguage
-        if (resolveLanguageResults && resolveLanguageResults.length > 0) {
-          resolveLanguage = resolveLanguageResults[0].Language
-        }
-
-        if (resolveLanguage) {
-          value = await this.#perspective.createExpression(value, resolveLanguage)
-        }
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
+  private async setProperty(key: string, value: any) {
+    const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, "${key}", Setter)`)
+    if (setters && setters.length > 0) {
+      const property = setters[0].Property
+      const actions = eval(setters[0].Setter)
+      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${property}", Language)`)
+      let resolveLanguage
+      if (resolveLanguageResults && resolveLanguageResults.length > 0) {
+        resolveLanguage = resolveLanguageResults[0].Language
       }
-    } else {
-      throw Error("No setters found of the subject class")
+
+      if (resolveLanguage) {
+        value = await this.#perspective.createExpression(value, resolveLanguage)
+      }
+      await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
     }
   }
 
   private async setCollectionSetter(key: string, value: any) {
-    let collectionSetters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_setter(C, Collection, Setter)`)
+    let collectionSetters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_setter(C, "${singularToPlural(key)}", Setter)`)
     if (!collectionSetters) collectionSetters = []
 
     if (collectionSetters.length > 0) {
-      const collectionSetter = collectionSetters.find(e => e.Collection === singularToPlural(key))
+      const actions = eval(collectionSetters[0].Setter)
 
-      if (collectionSetter) {
-        const collection = collectionSetter.Collection
-        const actions = eval(collectionSetter.Setter)
-
-        if (Array.isArray(value)) {
-          await this.#perspective.executeAction(actions, this.#baseExpression, value.map(v => ({ name: "value", value: v })))
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
-        }
+      if (Array.isArray(value)) {
+        await this.#perspective.executeAction(actions, this.#baseExpression, value.map(v => ({ name: "value", value: v })))
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
       }
     }
   }
 
   private async setCollectionAdder(key: string, value: any) {
-    let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_adder(C, Collection, Adder)`)
+    let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_adder(C, "${singularToPlural(key)}", Adder)`)
     if (!adders) adders = []
 
     if (adders.length > 0) {
-      const adder = adders.find(e => e.Collection === singularToPlural(key))
-
-      if (adder) {
-        const collection = adder.Collection
-        const actions = eval(adder.Adder)
-        if (Array.isArray(value)) {
-          await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }])))
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
-        }
+      const actions = eval(adders[0].Adder)
+      if (Array.isArray(value)) {
+        await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }])))
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
       }
     }
   }
@@ -169,34 +146,18 @@ export class SubjectEntity {
   async save() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
     
-    const subject = await this.#perspective.createSubject(this, this.#baseExpression);
+    await this.#perspective.createSubject(this, this.#baseExpression);
 
-    for (const [key, value] of Object.entries(this)) {
-      await this.setProperties(key, value);
-
-      if (value?.action) {
-        switch (value?.action) {
-          case 'setter':
-            await this.setCollectionSetter(key, value.value)
-            break;
-          case "adder":
-            await this.setCollectionAdder(key, value.value)
-            break;
-          default:
-            await this.setCollectionSetter(key, value.value)
-            break;
-        }
-      } else {
-        await this.setCollectionSetter(key, value)
-      }
-    }
+    this.update()
   }
 
   async update() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
 
-    for (const [key, value] of Object.entries(this)) {
-      await this.setProperties(key, value);
+    const entries = Object.entries(this);
+
+    for (const [key, value] of entries) {
+      await this.setProperty(key, value);
 
       if (value.action) {
         switch (value.action) {
