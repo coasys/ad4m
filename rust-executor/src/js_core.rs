@@ -1,5 +1,6 @@
 use actix::prelude::*;
 use deno_core::error::AnyError;
+use deno_core::v8;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use tokio::sync::broadcast;
@@ -116,7 +117,7 @@ impl JsCore {
         }
 
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
-        let (tx_outside, rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
+        let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
 
         self.requests_sender = Some(tx_outside.clone());
         self.results_sender = Some(tx_inside.clone());
@@ -161,6 +162,44 @@ impl JsCore {
                     }
                 }
 
+                // Until stop was request via message
+                // wait for new messages, execute them
+                // and concurrently run the event loop
+                loop {
+                    tokio::select! {
+                        event_loop_result = js_core.event_loop() => {
+                            match event_loop_result {
+                                Ok(_) => println!("AD4M event loop finished"),
+                                Err(err) => println!("AD4M event loop closed with error: {}", err),
+                            }
+                        }
+                        request = rx_inside.recv() => {
+                            match request {
+                                Some(request) => {
+                                    let mut worker = js_core.worker.lock().unwrap();
+                                    let result = worker.execute_script("js_core", request.script).expect("couldn't execute script");
+                                    // evaluate deno result into String
+                                    let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
+                                    let context = v8::Context::new(scope);
+                                    let scope = &mut v8::ContextScope::new(scope, context);
+                                    let value = v8::Local::new(scope, result);
+                                    //let value: v8::Local<v8::String> = unsafe { v8::Local::cast(value) };
+                                    let value = value.to_rust_string_lossy(scope);
+                                    tx_inside
+                                        .send(JsCoreResponse {
+                                            result: value,
+                                            id: request.id,
+                                        })
+                                        .expect("couldn't send on channel");
+                                }
+                                None => {
+                                    println!("AD4M event loop closed");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
 
             })
         });
