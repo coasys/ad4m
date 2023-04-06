@@ -956,6 +956,11 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             language: async (expression) => {
                 //console.log("GQL LANGUAGE", expression)
                 let lang
+
+                if(expression.ref.language.address === "literal") {
+                    return { address: "literal", name: "literal" }
+                }
+
                 try {
                     lang = await core.languageController.languageForExpression(expression.ref) as any    
                 } catch(e) {
