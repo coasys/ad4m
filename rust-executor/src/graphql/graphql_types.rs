@@ -1,4 +1,6 @@
 use juniper::{GraphQLInputObject, GraphQLObject, GraphQLScalarValue};
+use serde::{Deserialize, Serialize};
+use serde_json::Result;
 
 #[derive(GraphQLObject, Default)]
 pub struct Agent {
@@ -14,7 +16,8 @@ pub struct AgentSignature {
     pub signature: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
     pub did: Option<String>,
     pub did_document: Option<String>,

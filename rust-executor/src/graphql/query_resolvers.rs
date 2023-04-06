@@ -49,11 +49,11 @@ impl Query {
         ))
     }
 
-    fn agent_status(&self, context: &JsCoreHandle) -> FieldResult<AgentStatus> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn agent_status(&self, context: &JsCoreHandle) -> FieldResult<AgentStatus> {
+        let mut js = context.clone();
+        let result = js.execute("JSON.stringify(core.agentService.dump())".into()).await?;
+        let s: AgentStatus = serde_json::from_str(&result)?;
+        return Ok(s);
     }
 
     fn expression(&self, context: &JsCoreHandle, url: String) -> FieldResult<ExpressionRendered> {
