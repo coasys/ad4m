@@ -7,6 +7,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Added
  - bootstrap languages to mono repo [PR#328](https://github.com/perspect3vism/ad4m/pull/328)
+- Support for new UI oriented Subject class predicates (property_named_option, p3_class_icon, etc). [PR#353](https://github.com/perspect3vism/ad4m/pull/353)
 
 ### Changed
  
@@ -15,7 +16,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Removed
 
 ### Fixed
-
+ - Expression -> get would fail when executed on a Literal expression. [PR#353](https://github.com/perspect3vism/ad4m/pull/353)
 ## [0.3.4] - 27/03/2023
 
 ### Added
