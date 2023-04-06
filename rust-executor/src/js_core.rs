@@ -1,11 +1,11 @@
 use actix::prelude::*;
-
 use deno_core::error::AnyError;
-use deno_core::v8;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use tokio::sync::mpsc::{self, Receiver};
+use tokio::task::LocalSet;
 use std::sync::{Arc, Mutex};
-
+use tokio::runtime::Builder;
 mod futures;
 mod options;
 mod string_module_loader;
@@ -16,8 +16,8 @@ use options::{main_module_url, main_worker_options};
 /// Define message
 #[derive(Message)]
 #[rtype(result = "Result<String, AnyError>")]
-struct Execute {
-    script: String,
+pub struct Execute {
+    pub script: String,
 }
 
 pub struct JsCore {
@@ -58,23 +58,58 @@ impl JsCore {
         ))
     }
 
-    pub async fn run() -> Result<((), ()), AnyError> {
-        let js_core = JsCore::new();
-        js_core.init_engine().await;
-        let core_init = async {
-            let result = js_core.init_core().expect("core init failed").await;
-            result
-        };
-        tokio::try_join!(core_init, js_core.event_loop())
+    pub fn start() -> Receiver<()>{
+        let (sx, rx) = mpsc::channel::<()>(1);
+        std::thread::spawn(move || {
+            let rt = Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create Tokio runtime");
+            let _guard = rt.enter();
+
+            let js_core = JsCore::new();
+            
+            rt.block_on(js_core.init_engine());
+            let local = LocalSet::new();
+            local.spawn_local(js_core.init_core().expect("couldn't spawn JS initCore()"));
+            match rt.block_on(js_core.event_loop()) {
+                Ok(_) => println!("event loop finished"),
+                Err(err) => println!("event loop failed: {}", err),
+            };
+            
+            rt.block_on(sx.send(())).expect("couldn't send on channel");
+        });
+        rx
     }
 }
 
+/*
 // Provide Actor implementation for our actor
 impl Actor for JsCore {
     type Context = Context<Self>;
 
-    fn started(&mut self, _: &mut Context<Self>) {
-       println!("Actor is alive");
+    fn started(&mut self, ctx: &mut Context<Self>) {
+        println!("Starting JsCore actor...");
+
+        let event_loop_fut = self.event_loop();
+        ctx.spawn(async move {
+            match event_loop_fut.await {
+                Ok(_) => println!("event loop finished"),
+                Err(err) => println!("event loop failed: {}", err),
+            }
+        }.into_actor(self));
+
+        //let init_core_fut = self.init_core().expect("couldn't call JS initCore()");
+        //actix_rt::Arbiter::spawn_blocking(init_core_fut);
+        //tokio::runtime::
+        //ctx.spawn(async move {
+            //init_engine_fut.await;
+        //    init_core_fut.await;
+        //}.into_actor(self));
+
+    
+
+        
     }
 
     fn stopped(&mut self, _: &mut Context<Self>) {
@@ -98,3 +133,4 @@ impl Handler<Execute> for JsCore {
         Ok(value)
     }
 }
+ */
