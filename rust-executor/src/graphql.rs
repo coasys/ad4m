@@ -69,7 +69,7 @@ pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> 
     });
     server
         .bind("127.0.0.1:8080")
-        .unwrap()
+        .expect("Could not bind to port 8080")
         .run()
         .await
         .map_err(|e| e.into())

@@ -11,7 +11,7 @@ deno_runtime = "0.105.0"
 tokio = { version = "1.25.0", features = ["full"] }
 url = "2.3.1"
 juniper = "0.15.11"
-chrono = "0.4.24"
+chrono = { version = "0.4.24", features = ["serde"] }
 juniper_subscriptions = "0.16.0"
 futures = "0.3.28"
 

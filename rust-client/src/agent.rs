@@ -296,6 +296,76 @@ pub async fn sign_message(
     Ok(response.agent_sign_message)
 }
 
+#[derive(GraphQLQuery, Debug, Clone)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct AddEntanglementProofs;
+
+pub async fn add_entanglement_proofs(
+    executor_url: String,
+    cap_token: String,
+    proofs: Vec<add_entanglement_proofs::EntanglementProofInput>,
+) -> Result<add_entanglement_proofs::ResponseData> {
+    query(
+        executor_url,
+        cap_token,
+        AddEntanglementProofs::build_query(add_entanglement_proofs::Variables { proofs }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-trusted-agents query")
+}
+
+#[derive(GraphQLQuery, Debug, Clone)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct DeleteEntanglementProofs;
+
+pub async fn delete_entanglement_proofs(
+    executor_url: String,
+    cap_token: String,
+    proofs: Vec<delete_entanglement_proofs::EntanglementProofInput>,
+) -> Result<delete_entanglement_proofs::ResponseData> {
+    query(
+        executor_url,
+        cap_token,
+        DeleteEntanglementProofs::build_query(delete_entanglement_proofs::Variables { proofs }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-trusted-agents query")
+}
+
+#[derive(GraphQLQuery, Debug, Clone)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct EntanglementProofPreFlight;
+
+pub async fn entanglement_proof_pre_flight(
+    executor_url: String,
+    cap_token: String,
+    device_key: String,
+    device_key_type: String,
+) -> Result<entanglement_proof_pre_flight::ResponseData> {
+    query(
+        executor_url,
+        cap_token,
+        EntanglementProofPreFlight::build_query(entanglement_proof_pre_flight::Variables {
+            device_key,
+            device_key_type,
+        }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-trusted-agents query")
+}
+
 pub struct AgentClient {
     info: Arc<ClientInfo>,
 }
@@ -386,6 +456,44 @@ impl AgentClient {
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
             message,
+        )
+        .await
+    }
+
+    pub async fn add_entanglement_proofs(
+        &self,
+        proofs: Vec<add_entanglement_proofs::EntanglementProofInput>,
+    ) -> Result<add_entanglement_proofs::ResponseData> {
+        add_entanglement_proofs(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            proofs,
+        )
+        .await
+    }
+
+    pub async fn delete_entanglement_proofs(
+        &self,
+        proofs: Vec<delete_entanglement_proofs::EntanglementProofInput>,
+    ) -> Result<delete_entanglement_proofs::ResponseData> {
+        delete_entanglement_proofs(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            proofs,
+        )
+        .await
+    }
+
+    pub async fn entanglement_proof_pre_flight(
+        &self,
+        device_key: String,
+        device_key_type: String,
+    ) -> Result<entanglement_proof_pre_flight::ResponseData> {
+        entanglement_proof_pre_flight(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            device_key,
+            device_key_type,
         )
         .await
     }

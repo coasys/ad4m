@@ -1,5 +1,5 @@
 use crate::{formatting::*, util::readline_masked};
-use ad4m_client::Ad4mClient;
+use ad4m_client::{agent::add_entanglement_proofs::EntanglementProofInput, Ad4mClient};
 use anyhow::{bail, Result};
 use clap::Subcommand;
 
@@ -18,12 +18,38 @@ pub enum AgentFunctions {
         passphrase: Option<String>,
     },
     /// Lookup agent by DID
-    ByDID { did: String },
+    ByDID {
+        did: String,
+    },
     /// Initialize a new agent
     Generate {
         /// Agent passphrase
         #[arg(short, long)]
         passphrase: Option<String>,
+    },
+    AddEntanglementProof {
+        device_key: String,
+        device_key_signed_by_did: String,
+        device_key_type: String,
+        did: String,
+        did_signed_by_device_key: String,
+        did_signing_key_id: String,
+    },
+    DeleteEntanglementProof {
+        device_key: String,
+        device_key_signed_by_did: String,
+        device_key_type: String,
+        did: String,
+        did_signed_by_device_key: String,
+        did_signing_key_id: String,
+    },
+    EntanglementProofPreFlight {
+        device_key: String,
+        device_key_type: String,
+    },
+    GenerateJwt {
+        request_id: String,
+        rand: String,
     },
 }
 
@@ -98,6 +124,67 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             } else {
                 println!("Agent generated");
             }
+        }
+        AgentFunctions::AddEntanglementProof {
+            device_key,
+            device_key_signed_by_did,
+            device_key_type,
+            did,
+            did_signed_by_device_key,
+            did_signing_key_id,
+        } => {
+            let input = EntanglementProofInput {
+                deviceKey: device_key,
+                deviceKeySignedByDid: device_key_signed_by_did,
+                deviceKeyType: device_key_type,
+                did: did,
+                didSignedByDeviceKey: did_signed_by_device_key,
+                didSigningKeyId: did_signing_key_id,
+            };
+            ad4m_client
+                .agent
+                .add_entanglement_proofs(vec![input])
+                .await?;
+            println!("Entanglement proofs added!");
+        }
+        AgentFunctions::DeleteEntanglementProof {
+            device_key,
+            device_key_signed_by_did,
+            device_key_type,
+            did,
+            did_signed_by_device_key,
+            did_signing_key_id,
+        } => {
+            let input = ad4m_client::agent::delete_entanglement_proofs::EntanglementProofInput {
+                deviceKey: device_key,
+                deviceKeySignedByDid: device_key_signed_by_did,
+                deviceKeyType: device_key_type,
+                did: did,
+                didSignedByDeviceKey: did_signed_by_device_key,
+                didSigningKeyId: did_signing_key_id,
+            };
+            ad4m_client
+                .agent
+                .delete_entanglement_proofs(vec![input])
+                .await?;
+            println!("Entanglement proofs removed!");
+        }
+        AgentFunctions::EntanglementProofPreFlight {
+            device_key,
+            device_key_type,
+        } => {
+            let result = ad4m_client
+                .agent
+                .entanglement_proof_pre_flight(device_key, device_key_type)
+                .await?;
+            println!("Add preflight!: {:#?}", result);
+        }
+        AgentFunctions::GenerateJwt { request_id, rand } => {
+            let result = ad4m_client
+                .agent
+                .retrieve_capability(request_id, rand)
+                .await?;
+            println!("JWT: {:#?}", result);
         }
     };
     Ok(())

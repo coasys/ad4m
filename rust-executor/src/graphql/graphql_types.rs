@@ -1,8 +1,8 @@
 use juniper::{GraphQLInputObject, GraphQLObject, GraphQLScalarValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Result;
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Agent {
     pub did: String,
     #[graphql(name = "directMessageLanguage")]
@@ -10,7 +10,8 @@ pub struct Agent {
     pub perspective: Option<Perspective>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentSignature {
     pub public_key: String,
     pub signature: String,
@@ -26,7 +27,8 @@ pub struct AgentStatus {
     pub is_unlocked: bool,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Apps {
     pub auth: AuthInfo,
     pub request_id: String,
@@ -34,7 +36,8 @@ pub struct Apps {
     pub token: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthInfo {
     pub app_desc: String,
     pub app_icon_path: Option<String>,
@@ -43,7 +46,8 @@ pub struct AuthInfo {
     pub capabilities: Vec<Capability>,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthInfoInput {
     #[graphql(name = "appDesc")]
     pub app_desc: String,
@@ -59,24 +63,28 @@ pub struct AuthInfoInput {
     pub capabilities: Option<Vec<CapabilityInput>>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Capability {
     pub can: Vec<String>,
     pub with: Resource,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CapabilityInput {
     pub can: Vec<String>,
     pub with: ResourceInput,
 }
 
-#[derive(GraphQLScalarValue)]
+#[derive(GraphQLScalarValue, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[graphql(transparent)]
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
     #[graphql(name = "deviceKey")]
     pub device_key: String,
@@ -92,7 +100,8 @@ pub struct EntanglementProof {
     pub did_signing_key_id: String,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EntanglementProofInput {
     #[graphql(name = "deviceKey")]
     pub device_key: String,
@@ -108,7 +117,8 @@ pub struct EntanglementProofInput {
     pub did_signing_key_id: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExceptionInfo {
     pub addon: Option<String>,
     pub message: String,
@@ -116,7 +126,8 @@ pub struct ExceptionInfo {
     pub r#type: f64,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExpressionProof {
     pub invalid: Option<bool>,
     pub key: Option<String>,
@@ -124,7 +135,8 @@ pub struct ExpressionProof {
     pub valid: Option<bool>,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExpressionProofInput {
     pub invalid: Option<bool>,
     pub key: Option<String>,
@@ -132,7 +144,8 @@ pub struct ExpressionProofInput {
     pub valid: Option<bool>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExpressionRendered {
     pub author: String,
     pub data: String,
@@ -142,31 +155,36 @@ pub struct ExpressionRendered {
     pub timestamp: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Icon {
     pub code: String,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InteractionCall {
     pub name: String,
     pub parameters_stringified: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InteractionMeta {
     pub label: String,
     pub name: String,
     pub parameters: Vec<InteractionParameter>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InteractionParameter {
     pub name: String,
     pub type_: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LanguageHandle {
     pub address: String,
     pub constructor_icon: Option<Icon>,
@@ -176,7 +194,8 @@ pub struct LanguageHandle {
     pub settings_icon: Option<Icon>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LanguageMeta {
     pub address: String,
     pub author: String,
@@ -189,7 +208,8 @@ pub struct LanguageMeta {
     pub templated: Option<bool>,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LanguageMetaInput {
     pub description: String,
     pub name: String,
@@ -197,20 +217,23 @@ pub struct LanguageMetaInput {
     pub source_code_link: Option<String>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LanguageRef {
     pub address: String,
     pub name: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Link {
     pub predicate: Option<String>,
     pub source: String,
     pub target: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkExpression {
     pub author: String,
     pub data: Link,
@@ -218,7 +241,8 @@ pub struct LinkExpression {
     pub timestamp: String,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkExpressionInput {
     pub author: String,
     pub data: LinkInput,
@@ -226,32 +250,37 @@ pub struct LinkExpressionInput {
     pub timestamp: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkExpressionMutations {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkExpressionUpdated {
     pub new_link: LinkExpression,
     pub old_link: LinkExpression,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkInput {
     pub predicate: Option<String>,
     pub source: String,
     pub target: String,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkMutations {
     pub additions: Vec<LinkInput>,
     pub removals: Vec<LinkExpressionInput>,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkQuery {
     pub from_date: Option<DateTime>,
     pub limit: Option<f64>,
@@ -261,24 +290,28 @@ pub struct LinkQuery {
     pub until_date: Option<DateTime>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OnlineAgent {
     pub did: String,
     pub status: PerspectiveExpression,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PerspectiveExpression {
     pub author: String,
     pub data: Perspective,
@@ -286,7 +319,8 @@ pub struct PerspectiveExpression {
     pub timestamp: String,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PerspectiveHandle {
     pub name: String,
     pub neighbourhood: Option<Neighbourhood>,
@@ -295,36 +329,42 @@ pub struct PerspectiveHandle {
     pub uuid: String,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PerspectiveInput {
     pub links: Vec<LinkExpressionInput>,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,
     pub pointers: Vec<String>,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourceInput {
     pub domain: String,
     pub pointers: Vec<String>,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub ad4m_executor_version: String,
     pub is_initialized: bool,
     pub is_unlocked: bool,
 }
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SentMessage {
     pub message: PerspectiveExpression,
     pub recipient: String,
