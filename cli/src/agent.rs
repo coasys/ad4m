@@ -18,7 +18,9 @@ pub enum AgentFunctions {
         passphrase: Option<String>,
     },
     /// Lookup agent by DID
-    ByDID { did: String },
+    ByDID {
+        did: String,
+    },
     /// Initialize a new agent
     Generate {
         /// Agent passphrase
@@ -44,6 +46,10 @@ pub enum AgentFunctions {
     EntanglementProofPreFlight {
         device_key: String,
         device_key_type: String,
+    },
+    GenerateJwt {
+        request_id: String,
+        rand: String,
     },
 }
 
@@ -172,6 +178,13 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
                 .entanglement_proof_pre_flight(device_key, device_key_type)
                 .await?;
             println!("Add preflight!: {:#?}", result);
+        }
+        AgentFunctions::GenerateJwt { request_id, rand } => {
+            let result = ad4m_client
+                .agent
+                .retrieve_capability(request_id, rand)
+                .await?;
+            println!("JWT: {:#?}", result);
         }
     };
     Ok(())
