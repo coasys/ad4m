@@ -1,5 +1,6 @@
 mod graphql;
 mod js_core;
+mod wallet;
 
 use std::env;
 

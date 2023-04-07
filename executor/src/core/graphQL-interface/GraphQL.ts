@@ -418,13 +418,6 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return agent;
             },
             //@ts-ignore
-            agentImport: async (parent, args, context, info) => {
-                checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
-                const { did, didDocument, keystore, passphrase } = args;
-                await core.agentService.initialize(did, didDocument, keystore, passphrase)
-                return core.agentService.dump()
-            },
-            //@ts-ignore
             agentLock: (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.AGENT_LOCK_CAPABILITY)
                 core.agentService.lock(args.passphrase)

@@ -14,6 +14,7 @@ use tokio::task::LocalSet;
 mod futures;
 mod options;
 mod string_module_loader;
+mod wallet_extension;
 
 use self::futures::{EventLoopFuture, GlobalVariableFuture};
 use options::{main_module_url, main_worker_options};

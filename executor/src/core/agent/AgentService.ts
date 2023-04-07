@@ -36,7 +36,6 @@ export default class AgentService {
   #did?: string;
   #didDocument?: string;
   #signingKeyId?: string;
-  #wallet?: object;
   #file: string;
   #appsFile: string;
   #apps: AuthInfoExtended[];
@@ -220,38 +219,13 @@ export default class AgentService {
   }
 
   private getSigningKey() {
-    // @ts-ignore
-    const keys = this.#wallet.extractByTags([this.#signingKeyId]);
-    if (keys.length === 0) {
-      throw new Error(
-        `Signing key '${
-          this.#signingKeyId
-        }' key found in keystore. Abort signing.`
-      );
-    }
-    if (keys.length > 1) {
-      throw new Error(
-        `Multiple '${
-          this.#signingKeyId
-        }' keys found in keystore. Abort signing.`
-      );
-    }
-
-    const key = keys[0];
-    //console.log(key)
-    return key;
+    return WALLET.getMainKey();
   }
 
   async createNewKeys() {
-    const key = await secp256k1DIDKey.Secp256k1KeyPair.generate({
-      // @ts-ignore
-      secureRandom: () => crypto.randomBytes(32),
-    });
-
-    if (!key.privateKeyBuffer) {
-      throw Error("Cannot create keys without privateKeyBuffer");
-    }
-
+    WALLET.createMainKey()
+    const key = WALLET.getMainKey()
+    
     this.#did = key.controller;
     this.#didDocument = JSON.stringify(await resolver.resolve(this.#did));
     this.#agent = new Agent(this.#did);
@@ -266,47 +240,6 @@ export default class AgentService {
         tags: [key.type, key.id],
       },
     ];
-
-    this.#wallet = didWallet.create({ keys });
-
-    console.debug(key);
-    console.debug(JSON.stringify(key));
-  }
-
-  async initialize(
-    did: string,
-    didDocument: string,
-    keystore: string,
-    password: string
-  ) {
-    this.#did = did;
-    this.#didDocument = didDocument;
-    this.#agent = new Agent(did);
-    this.#signingKeyId = did + "#primary";
-
-    console.debug("Creating wallet...");
-    this.#wallet = didWallet.create(keystore);
-    console.debug("done.");
-
-    console.debug("Unlocking wallet...");
-    try {
-      // @ts-ignore
-      this.#wallet.unlock(password);
-    } catch (e) {
-      console.error(e);
-      return;
-    }
-
-    console.debug("done.");
-
-    console.debug("Saving wallet...");
-    this.save(password);
-    console.debug("done.");
-
-    console.debug("Registering new DID with agent language...");
-    this.storeAgentProfile();
-    this.#pubsub.publish(PubSubInstance.AGENT_UPDATED, this.#agent);
-    this.#readyPromiseResolve!();
   }
 
   isInitialized() {
@@ -314,14 +247,12 @@ export default class AgentService {
   }
 
   isUnlocked() {
-    // @ts-ignore
-    const keys = this.#wallet.keys ? true : false;
-    return keys;
+    return WALLET.isUnlocked()
   }
 
   async unlock(password: string) {
     // @ts-ignore
-    this.#wallet.unlock(password);
+    WALLET.unlock(password);
     this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
     this.#readyPromiseResolve!();
     try {
@@ -337,27 +268,27 @@ export default class AgentService {
 
   lock(password: string) {
     // @ts-ignore
-    this.#wallet.lock(password);
+    WALLET.lock(password);
     this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
   }
 
   async save(password: string) {
     // @ts-ignore
-    this.#wallet.lock(password);
+    WALLET.lock(password);
 
     const dump = {
       did: this.#did,
       didDocument: this.#didDocument,
       signingKeyId: this.#signingKeyId,
       // @ts-ignore
-      keystore: this.#wallet.export(),
+      keystore: WALLET.export(),
       agent: this.#agent,
     };
 
     fs.writeFileSync(this.#file, JSON.stringify(dump));
 
     // @ts-ignore
-    await this.#wallet.unlock(password);
+    await WALLET.unlock(password);
     this.#readyPromiseResolve!();
   }
 
@@ -369,7 +300,7 @@ export default class AgentService {
     this.#did = dump.did;
     this.#didDocument = dump.didDocument;
     this.#signingKeyId = dump.signingKeyId;
-    this.#wallet = didWallet.create(dump.keystore);
+    WALLET.load(dump.keystore);
     if (fs.existsSync(this.#fileProfile))
       this.#agent = JSON.parse(fs.readFileSync(this.#fileProfile).toString());
     else {
@@ -378,21 +309,13 @@ export default class AgentService {
   }
 
   dump() {
-    const isInitialized = this.isInitialized();
-    let isUnlocked = false;
-    if (isInitialized) {
-      // @ts-ignore
-      isUnlocked = this.#wallet.keys ? true : false;
-    }
-
-    const dump = {
+    return {
       agent: this.#agent,
-      isInitialized,
-      isUnlocked,
+      isInitialized: this.isInitialized(),
+      isUnlocked: WALLET.isUnlocked(),
       did: this.#did,
       didDocument: this.#didDocument,
     };
-    return dump;
   }
 
   async getCapabilities(token: string) {
