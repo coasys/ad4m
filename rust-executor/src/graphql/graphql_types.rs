@@ -1,6 +1,5 @@
 use juniper::{GraphQLInputObject, GraphQLObject, GraphQLScalarValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Result;
 
 #[derive(GraphQLObject, Default)]
 pub struct Agent {
@@ -76,7 +75,8 @@ pub struct CapabilityInput {
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
 
-#[derive(GraphQLObject, Default)]
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
     #[graphql(name = "deviceKey")]
     pub device_key: String,
@@ -92,7 +92,8 @@ pub struct EntanglementProof {
     pub did_signing_key_id: String,
 }
 
-#[derive(GraphQLInputObject, Default)]
+#[derive(GraphQLInputObject, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EntanglementProofInput {
     #[graphql(name = "deviceKey")]
     pub device_key: String,

@@ -12,60 +12,113 @@ const ALL_CAPABILITY: &str = r#"{with: {domain: "*", pointers: ["*"]},can: ["*"]
 
 #[graphql_object(context = JsCoreHandle)]
 impl Mutation {
-    fn add_trusted_agents(
+    async fn add_trusted_agents(
         &self,
         context: &JsCoreHandle,
         agents: Vec<String>,
     ) -> FieldResult<Vec<String>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let script = format!(
+            r#"JSON.stringify(
+            core.resolvers.Mutation.addTrustedAgents(
+                null, 
+                {{ agents: {:?} }},
+                {{ capabilities: [{}] }}
+            )
+        )"#,
+            agents, ALL_CAPABILITY
+        );
+        let result = js.execute(script).await?;
+        let s: Vec<String> = serde_json::from_str(&result)?;
+        Ok(s)
     }
 
-    fn agent_add_entanglement_proofs(
+    async fn agent_add_entanglement_proofs(
         &self,
         context: &JsCoreHandle,
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let script = format!(
+            r#"JSON.stringify(
+            core.resolvers.Mutation.agentAddEntanglementProofs(
+                null, 
+                {{ proofs: {} }},
+                {{ capabilities: [{:?}] }}
+            )
+        )"#,
+            serde_json::to_string(&proofs).unwrap(),
+            ALL_CAPABILITY
+        );
+        let result = js.execute(script).await?;
+        let s: Vec<EntanglementProof> = serde_json::from_str(&result)?;
+        Ok(s)
     }
 
-    fn agent_delete_entanglement_proofs(
+    async fn agent_delete_entanglement_proofs(
         &self,
         context: &JsCoreHandle,
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let script = format!(
+            r#"JSON.stringify(
+            core.resolvers.Mutation.agentDeleteEntanglementProofs(
+                null, 
+                {{ proofs: {} }},
+                {{ capabilities: [{:?}] }}
+            )
+        )"#,
+            serde_json::to_string(&proofs).unwrap(),
+            ALL_CAPABILITY
+        );
+        let result = js.execute(script).await?;
+        let s: Vec<EntanglementProof> = serde_json::from_str(&result)?;
+        Ok(s)
     }
 
-    fn agent_entanglement_proof_pre_flight(
+    async fn agent_entanglement_proof_pre_flight(
         &self,
         context: &JsCoreHandle,
         device_key: String,
         device_key_type: String,
     ) -> FieldResult<EntanglementProof> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let script = format!(
+            r#"JSON.stringify(
+            core.resolvers.Mutation.agentEntanglementProofPreFlight(
+                null, 
+                {{ deviceKey: "{}", deviceKeyType: "{}" }},
+                {{ capabilities: [{}] }}
+            )
+        )"#,
+            device_key, device_key_type, ALL_CAPABILITY
+        );
+        let result = js.execute(script).await?;
+        let s: EntanglementProof = serde_json::from_str(&result)?;
+        Ok(s)
     }
 
-    fn agent_generate(
+    async fn agent_generate(
         &self,
         context: &JsCoreHandle,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let script = format!(
+            r#"JSON.stringify(
+            core.resolvers.Mutation.agentGenerate(
+                null, 
+                {{ passphrase: "{}" }},
+                {{ capabilities: [{}] }}
+            )
+        )"#,
+            passphrase, ALL_CAPABILITY
+        );
+        let result = js.execute(script).await?;
+        println!("got result back: {:?}", result);
+        let s: AgentStatus = serde_json::from_str(&result)?;
+        Ok(s)
     }
 
     fn agent_generate_jwt(
@@ -152,23 +205,25 @@ impl Mutation {
         ))
     }
 
-    async fn agent_unlock(&self, context: &JsCoreHandle, passphrase: String) -> FieldResult<AgentStatus> {
+    async fn agent_unlock(
+        &self,
+        context: &JsCoreHandle,
+        passphrase: String,
+    ) -> FieldResult<AgentStatus> {
         let mut js = context.clone();
-        let script = format!(r#"JSON.stringify(
+        let script = format!(
+            r#"JSON.stringify(
             core.resolvers.Mutation.agentUnlock(
                 null, 
                 {{ passphrase: "{}" }},
                 {{ capabilities: [{}] }}
             )
-        )"#, passphrase, ALL_CAPABILITY);
-        println!("script: {}", script);
+        )"#,
+            passphrase, ALL_CAPABILITY
+        );
         let result = js.execute(script).await?;
         let s: AgentStatus = serde_json::from_str(&result)?;
-        return Ok(s);
-        return Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ));
+        Ok(s)
     }
 
     fn agent_update_direct_message_language(
