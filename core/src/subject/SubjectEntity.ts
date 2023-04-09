@@ -157,22 +157,24 @@ export class SubjectEntity {
     const entries = Object.entries(this);
 
     for (const [key, value] of entries) {
-      await this.setProperty(key, value);
-
-      if (value.action) {
-        switch (value.action) {
-          case 'setter':
-            await this.setCollectionSetter(key, value.value)
-            break;
-          case "adder":
-            await this.setCollectionAdder(key, value.value)
-            break;
-          default:
-            await this.setCollectionSetter(key, value.value)
-            break;
+      if (value) {
+        await this.setProperty(key, value);
+    
+        if (value?.action) {
+          switch (value.action) {
+            case 'setter':
+              await this.setCollectionSetter(key, value.value)
+              break;
+            case "adder":
+              await this.setCollectionAdder(key, value.value)
+              break;
+            default:
+              await this.setCollectionSetter(key, value.value)
+              break;
+          }
+        } else {
+          await this.setCollectionSetter(key, value)
         }
-      } else {
-        await this.setCollectionSetter(key, value)
       }
     }
   }
