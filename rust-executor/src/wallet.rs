@@ -126,7 +126,7 @@ impl Wallet {
     }
 
     pub fn instance() -> Arc<Mutex<Option<Wallet>>> {
-        let wallet = unsafe { WALLET.clone() };
+        let wallet = WALLET.clone();
         {
             let mut w_lock = wallet.lock().unwrap();
             if w_lock.is_none() {
