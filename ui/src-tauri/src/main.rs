@@ -131,8 +131,6 @@ fn main() {
             open_tray
         ])
         .setup(move |app| {
-            // let wow = app.get_window("AD4M").unwrap();
-            // println!("wowo {:?}", wow);
             let splashscreen = app.get_window("splashscreen").unwrap();
 
             let splashscreen_clone = splashscreen.clone();
