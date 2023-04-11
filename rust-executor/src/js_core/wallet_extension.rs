@@ -17,7 +17,7 @@ fn wallet_get_main_key() -> Result<String, AnyError> {
     let key = wallet_ref
         .get_secret_key("main".to_string())
         .ok_or_else(|| anyhow!("main key not found"))?;
-    Ok(secret_key_to_hex(&key))
+    Ok(String::new())
 }
 
 #[op]

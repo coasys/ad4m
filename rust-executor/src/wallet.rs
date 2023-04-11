@@ -1,14 +1,12 @@
 use argon2::password_hash::Salt;
 use argon2::{self, Argon2, PasswordHasher};
 use base64::Engine;
-use crypto_box::aead::{Aead, OsRng};
+use crypto_box::aead::Aead;
 use crypto_box::{Nonce, PublicKey as cPublicKey, SalsaBox, SecretKey as cSecretKey};
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use did_key::{Ed25519KeyPair, PatchedKeyPair, KeyMaterial, DIDCore, CoreSign};
 use lazy_static::lazy_static;
-use secp256k1::ecdsa::Signature;
-use secp256k1::Message;
-use secp256k1::{PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::convert::TryInto;
@@ -99,18 +97,35 @@ fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::ae
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Key {
-    pub secret: SecretKey,
-    pub public: PublicKey,
+    pub secret: Vec<u8>,
+    pub public: Vec<u8>,
+}
+
+impl Key {
+    pub fn from(did: PatchedKeyPair) -> Key {
+        Key {
+            secret: did.private_key_bytes(),
+            public: did.public_key_bytes(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Keys {
-    keys: BTreeMap<String, Key>,
+    pub by_name: BTreeMap<String, Key>,
+}
+
+impl Keys {
+    pub fn new() -> Self {
+        Keys {
+            by_name: BTreeMap::new(),
+        }
+    }
 }
 
 pub struct Wallet {
     cipher: Option<String>,
-    keys: Option<BTreeMap<String, Key>>,
+    keys: Option<Keys>,
 }
 
 lazy_static! {
@@ -138,31 +153,36 @@ impl Wallet {
 
     pub fn generate_keypair(&mut self, name: String) {
         if self.keys.is_none() {
-            self.keys = Some(BTreeMap::new());
+            self.keys = Some(Keys::new());
         }
-        let secp = secp256k1::Secp256k1::new();
-        let (secret, public) = secp.generate_keypair(&mut OsRng);
+
+        let key = did_key::generate::<Ed25519KeyPair>(None);
         self.keys
             .clone()
             .unwrap()
-            .insert(name, Key { secret, public });
+            .by_name 
+            .insert(name, Key::from(key));
     }
 
-    pub fn get_public_key(&self, name: String) -> Option<PublicKey> {
-        self.keys.clone()?.get(&name).map(|key| key.public)
+    pub fn get_public_key(&self, name: String) -> Option<Vec<u8>> {
+        self.keys.as_ref()?.by_name.get(&name).map(|key| key.public.clone())
     }
 
-    pub fn get_secret_key(&self, name: String) -> Option<SecretKey> {
-        self.keys.clone()?.get(&name).map(|key| key.secret)
+    pub fn get_secret_key(&self, name: String) -> Option<Vec<u8>> {
+        self.keys.as_ref()?.by_name.get(&name).map(|key| key.secret.clone())
     }
 
-    pub fn sign(&self, name: String, message: &[u8]) -> Option<Signature> {
-        // hash the message
-        let message = Message::from_slice(message).expect("32 bytes");
-        // sign the hash
-        self.keys.clone()?.get(&name).map(|key| {
-            let secp = secp256k1::Secp256k1::new();
-            secp.sign_ecdsa(&message, &key.secret)
+    pub fn get_did_document(&self, name: String) -> Option<did_key::Document> {
+        self.keys.as_ref()?.by_name.get(&name).map(|key| {
+            let key = did_key::from_existing_key::<Ed25519KeyPair>(&key.public.clone(), Some(&key.secret.clone()));
+            key.get_did_document(did_key::Config::default())
+        })
+    }
+
+    pub fn sign(&self, name: String, message: &[u8]) -> Option<Vec<u8>> {
+        self.keys.as_ref()?.by_name.get(&name).map(|key| {
+            let key = did_key::from_existing_key::<Ed25519KeyPair>(&key.public.clone(), Some(&key.secret.clone()));
+            key.sign(message)
         })
     }
 
@@ -179,7 +199,7 @@ impl Wallet {
         let string = decrypt(self.cipher.clone().expect("No cypher selected"), passphrase)
             .map_err(|err| anyhow!(err))?;
         let keys: Keys = serde_json::from_str(&string)?;
-        self.keys = Some(keys.keys);
+        self.keys = Some(keys);
         Ok(())
     }
 
