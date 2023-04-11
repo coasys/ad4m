@@ -186,16 +186,17 @@ export class SubjectEntity {
   }
 
   // TODO: implement simple quering like limit, skip etc.
-  async find() {
-    this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
-    const proxies = await this.#perspective.getAllSubjectProxies(this.#subjectClass)
+  static async all(perspective: PerspectiveProxy) {
+    let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this)
+    const proxies = await perspective.getAllSubjectProxies(subjectClass)
 
     const instances = []
 
     if (proxies) {
       for (const proxy of proxies) {
         // @ts-ignore
-        instances.push(await this.getData(proxy.X))
+        const instance = new this(perspective, proxy.X)
+        instances.push(await instance.get())
       }
 
       return instances;

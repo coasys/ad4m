@@ -660,10 +660,7 @@ describe("Integration", () => {
                 })
 
                 it("find()", async () => {
-                    let root = Literal.from("Active record implementation test").toUrl()
-                    const recipe = new Recipe(perspective!, root)
-
-                    const recipes = await recipe.find();
+                    const recipes = await Recipe.all(perspective!);
 
                     expect(recipes.length).to.equal(1)
                 })
