@@ -61,12 +61,26 @@ import { init, path, os } from 'https://ad4m.runtime/executor'
 
 console.log("Hello from main")
 
-let appDataPath = path.join(os.homedir(), 'ad4m', 'tests', 'ad4m1');
-const binaryPath = path.join(appDataPath, 'binary');
-const swiplHomePath = (process.platform == "win32" ? path.join(appDataPath, 'swipl/') : path.join(appDataPath, 'swipl/lib/swipl/'))
-const swiplPath = path.join(appDataPath, 'swipl/bin/swipl');
-const gqlPort = 13000
-const ipfsRepoPath = path.join(appDataPath, 'ipfs')
+globalThis.appDataPath = path.join(os.homedir(), 'ad4m', 'tests', 'ad4m1');
+globalThis.binaryPath = path.join(appDataPath, 'binary');
+globalThis.swiplHomePath = (process.platform == "win32" ? path.join(appDataPath, 'swipl/') : path.join(appDataPath, 'swipl/lib/swipl/'))
+globalThis.swiplPath = path.join(appDataPath, 'swipl/bin/swipl');
+globalThis.ipfsSwarmPort = undefined;
+globalThis.gqlPort = 13000
+globalThis.ipfsRepoPath = path.join(appDataPath, 'ipfs')
+globalThis.networkBootstrapSeed = path.join(appDataPath, "mainnet_seed.seed")
+globalThis.languageLanugageOnly = false
+globalThis.mocks = false
+globalThis.runDappServer = false
+globalThis.hcPortAdmin = undefined
+globalThis.hcPortApp = undefined
+globalThis.appLangAliases = {}
+globalThis.bootstrapFixtures = {
+  languages: [],
+  perspectives: [],
+};
+globalThis.connectHolochain = false;
+globalThis.reqCredential = undefined;
 
 //if (!fs.existsSync(appDataPath)) {
 //  fs.mkdirSync(appDataPath);
@@ -75,26 +89,23 @@ const ipfsRepoPath = path.join(appDataPath, 'ipfs')
 //const bPerspective = bootstrapPerspective ? await import(path.isAbsolute(bootstrapPerspective) ? bootstrapPerspective: path.join(__dirname, bootstrapPerspective)) : [];
 
 const config = {
-    appDataPath: appDataPath,
-    resourcePath: binaryPath,
-    networkBootstrapSeed: path.join(appDataPath, "mainnet_seed.seed"),
-    languageLanguageOnly: true,
-    bootstrapFixtures: {
-        languages: [],
-        perspectives: [],
-    },
-    appLangAliases: {},
-    mocks: false,
-    runDappServer: false,
-    gqlPort,
-    hcPortAdmin: undefined,
-    hcPortApp: undefined,
-    ipfsRepoPath,
-    ipfsSwarmPort: undefined,
-    connectHolochain: true,
-    reqCredential: undefined,
-    swiplPath,
-    swiplHomePath
+    appDataPath: globalThis.appDataPath,
+    resourcePath: globalThis.binaryPath,
+    networkBootstrapSeed: globalThis.networkBootstrapSeed,
+    languageLanguageOnly: globalThis.languageLanugageOnly,
+    bootstrapFixtures: globalThis.bootstrapFixtures,
+    appLangAliases: globalThis.appLangAliases,
+    mocks: globalThis.mocks,
+    runDappServer: globalThis.runDappServer,
+    gqlPort: globalThis.gqlPort,
+    hcPortAdmin: globalThis.hcPortAdmin,
+    hcPortApp: globalThis.hcPortApp,
+    ipfsRepoPath: globalThis.ipfsRepoPath,
+    ipfsSwarmPort: globalThis.ipfsSwarmPort,
+    connectHolochain: globalThis.connectHolochain,
+    reqCredential: globalThis.reqCredential,
+    swiplPath: globalThis.swiplPath,
+    swiplHomePath: globalThis.swiplHomePath,
 };
 
 async function initCore() {
