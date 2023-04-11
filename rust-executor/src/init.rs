@@ -136,13 +136,13 @@ fn clean_ad4m_data(
             let languages_path = app_data_path.join("ad4m").join("languages");
             let perspective_path = app_data_path.join("ad4m").join("perspectives.json");
 
-            if fs::metadata(db_path).is_ok() {
+            if fs::metadata(&db_path).is_ok() {
                 fs::remove_file(db_path)?;
             }
-            if fs::metadata(languages_path).is_ok() {
+            if fs::metadata(&languages_path).is_ok() {
                 fs::remove_dir_all(languages_path)?;
             }
-            if fs::metadata(perspective_path).is_ok() {
+            if fs::metadata(&perspective_path).is_ok() {
                 fs::remove_file(perspective_path)?;
             }
         };
