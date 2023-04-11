@@ -110,6 +110,38 @@ enum Domain {
         #[command(subcommand)]
         command: DevFunctions,
     },
+    Init {
+        #[arg(long, action)]
+        hc_only: Option<bool>,
+        #[arg(short, long, action)]
+        data_path: Option<String>,
+        #[arg(short, long, action)]
+        network_bootstrap_seed: Option<String>,
+    },
+    Run {
+        #[arg(short, long, action)]
+        data_path: String,
+        #[arg(short, long, action)]
+        language_language_only: bool,
+        #[arg(short, long, action)]
+        run_dapp_server: bool,
+        #[arg(short, long, action)]
+        gql_port: Option<u16>,
+        #[arg(long, action)]
+        hc_admin_port: Option<u16>,
+        #[arg(long, action)]
+        hc_app_port: Option<u16>,
+        #[arg(short, long, action)]
+        ipfs_swarm_port: Option<u16>,
+        #[arg(short, long, action)]
+        connect_holochain: bool,
+        #[arg(short, long, action)]
+        admin_credential: Option<String>,
+        #[arg(long, action)]
+        swip_path: Option<String>,
+        #[arg(long, action)]
+        swipl_home_path: Option<String>,
+    },
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -146,7 +178,45 @@ async fn main() -> Result<()> {
     if let Domain::Dev { command } = args.domain {
         dev::run(command).await?;
         return Ok(());
-    }
+    };
+
+    if let Domain::Init {
+        hc_only,
+        data_path,
+        network_bootstrap_seed,
+    } = args.domain
+    {
+        match rust_executor::init::init(
+            util::option_to_bool(hc_only),
+            data_path,
+            network_bootstrap_seed,
+        ) {
+            Ok(()) => println!("Successfully initialized AD4M executor!"),
+            Err(e) => {
+                println!("Failed to initialize AD4M executor: {}", e);
+                std::process::exit(1);
+            }
+        };
+        return Ok(());
+    };
+
+    if let Domain::Run {
+        data_path,
+        language_language_only,
+        run_dapp_server,
+        gql_port,
+        hc_admin_port,
+        hc_app_port,
+        ipfs_swarm_port,
+        connect_holochain,
+        admin_credential,
+        swip_path,
+        swipl_home_path,
+    } = args.domain
+    {
+        rust_executor::run().await;
+        return Ok(());
+    };
 
     let ad4m_client = get_ad4m_client(&args).await?;
 
@@ -167,7 +237,25 @@ async fn main() -> Result<()> {
             })?;
             println!("{}", log);
         }
-        Domain::Dev{ command: _ } => unreachable!(),
+        Domain::Dev { command: _ } => unreachable!(),
+        Domain::Init {
+            hc_only: _,
+            data_path: _,
+            network_bootstrap_seed: _,
+        } => unreachable!(),
+        Domain::Run {
+            data_path: _,
+            language_language_only: _,
+            run_dapp_server: _,
+            gql_port: _,
+            hc_admin_port: _,
+            hc_app_port: _,
+            ipfs_swarm_port: _,
+            connect_holochain: _,
+            admin_credential: _,
+            swip_path: _,
+            swipl_home_path: _,
+        } => unreachable!(),
     }
 
     Ok(())

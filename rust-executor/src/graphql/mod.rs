@@ -46,6 +46,7 @@ async fn graphql_route(
     graphql_handler(&schema, &deno_connect, req, payload).await
 }
 
+/// Starts the GraphQL server
 pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> {
     schema().as_schema_language();
     let mut file = std::fs::File::create("schema.gql").unwrap();
