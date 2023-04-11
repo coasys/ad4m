@@ -252,9 +252,3 @@ fn log_error(window: &Window, message: &str) {
         message
     );
 }
-
-fn find_window(window_label: &str) -> HWND {
-    let window_class = "tauri_app_window";
-    let window_title = format!("{} ({})", window_label, window_class);
-    unsafe { FindWindowW(std::ptr::null(), window_title.encode_utf16().collect::<Vec<u16>>().as_ptr()) }
-}
