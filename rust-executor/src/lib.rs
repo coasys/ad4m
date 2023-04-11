@@ -1,15 +1,19 @@
+mod globals;
 mod graphql;
 mod js_core;
+mod utils;
 mod wallet;
 
+pub mod init;
+
+use log::{error, info};
 use std::env;
 
 use graphql::start_server;
 use js_core::JsCore;
-use log::{error, info};
 
-#[tokio::main]
-async fn main() {
+/// Runs the GraphQL server and the deno core runtime
+pub async fn run() {
     env::set_var("RUST_LOG", "info");
     env_logger::init();
 
@@ -20,9 +24,13 @@ async fn main() {
 
     info!("Starting GraphQL...");
     match start_server(js_core_handle).await {
-        Ok(_) => {}
+        Ok(_) => {
+            info!("GraphQL server stopped.");
+            std::process::exit(0);
+        }
         Err(err) => {
-            error!("GraphQL server failed with error: {}", err);
+            error!("GraphQL server stopped with error: {}", err);
+            std::process::exit(1);
         }
     }
 }
