@@ -18,6 +18,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
  - Expression -> get would fail when executed on a Literal expression. [PR#353](https://github.com/perspect3vism/ad4m/pull/353)
+ - Fixed launcher breaking on windows if a new app instance is created. [PR#362](https://github.com/perspect3vism/ad4m/pull/362)
 ## [0.3.4] - 27/03/2023
 
 ### Added
