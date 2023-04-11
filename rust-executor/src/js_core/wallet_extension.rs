@@ -10,14 +10,11 @@ fn secret_key_to_hex(secret_key: &SecretKey) -> String {
 }
 
 #[op]
-fn wallet_get_main_key() -> Result<String, AnyError> {
+fn wallet_get_main_key() -> Result<did_key::Document, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let key = wallet_ref
-        .get_secret_key("main".to_string())
-        .ok_or_else(|| anyhow!("main key not found"))?;
-    Ok(String::new())
+    wallet_ref.get_did_document("main".into()).ok_or(anyhow!("main key not found. call createMainKey() first"))
 }
 
 #[op]
