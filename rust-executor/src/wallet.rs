@@ -5,7 +5,7 @@ use crypto_box::aead::Aead;
 use crypto_box::{Nonce, PublicKey as cPublicKey, SalsaBox, SecretKey as cSecretKey};
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use did_key::{Ed25519KeyPair, PatchedKeyPair, KeyMaterial, DIDCore, CoreSign};
+use did_key::{CoreSign, DIDCore, Ed25519KeyPair, KeyMaterial, PatchedKeyPair};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -160,28 +160,42 @@ impl Wallet {
         self.keys
             .clone()
             .unwrap()
-            .by_name 
+            .by_name
             .insert(name, Key::from(key));
     }
 
     pub fn get_public_key(&self, name: String) -> Option<Vec<u8>> {
-        self.keys.as_ref()?.by_name.get(&name).map(|key| key.public.clone())
+        self.keys
+            .as_ref()?
+            .by_name
+            .get(&name)
+            .map(|key| key.public.clone())
     }
 
     pub fn get_secret_key(&self, name: String) -> Option<Vec<u8>> {
-        self.keys.as_ref()?.by_name.get(&name).map(|key| key.secret.clone())
+        self.keys
+            .as_ref()?
+            .by_name
+            .get(&name)
+            .map(|key| key.secret.clone())
     }
 
     pub fn get_did_document(&self, name: String) -> Option<did_key::Document> {
         self.keys.as_ref()?.by_name.get(&name).map(|key| {
-            let key = did_key::from_existing_key::<Ed25519KeyPair>(&key.public.clone(), Some(&key.secret.clone()));
+            let key = did_key::from_existing_key::<Ed25519KeyPair>(
+                &key.public.clone(),
+                Some(&key.secret.clone()),
+            );
             key.get_did_document(did_key::Config::default())
         })
     }
 
     pub fn sign(&self, name: String, message: &[u8]) -> Option<Vec<u8>> {
         self.keys.as_ref()?.by_name.get(&name).map(|key| {
-            let key = did_key::from_existing_key::<Ed25519KeyPair>(&key.public.clone(), Some(&key.secret.clone()));
+            let key = did_key::from_existing_key::<Ed25519KeyPair>(
+                &key.public.clone(),
+                Some(&key.secret.clone()),
+            );
             key.sign(message)
         })
     }

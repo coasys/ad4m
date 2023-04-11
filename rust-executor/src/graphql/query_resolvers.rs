@@ -51,7 +51,9 @@ impl Query {
 
     async fn agent_status(&self, context: &JsCoreHandle) -> FieldResult<AgentStatus> {
         let mut js = context.clone();
-        let result = js.execute("JSON.stringify(core.agentService.dump())".into()).await?;
+        let result = js
+            .execute("JSON.stringify(core.agentService.dump())".into())
+            .await?;
         let s: AgentStatus = serde_json::from_str(&result)?;
         return Ok(s);
     }
