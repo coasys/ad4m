@@ -1,6 +1,6 @@
 import * as path from "path";
 import * as fs from "fs";
-import didWallet from "@transmute/did-wallet";
+import { Key } from "../../wallet_extension";
 import {
   Language,
   Expression,
@@ -31,6 +31,7 @@ import * as jose from "jose";
 import * as crypto from "crypto";
 import KeyEncoder from "key-encoder";
 import * as secp from "@noble/secp256k1";
+
 
 export default class AgentService {
   #did?: string;
@@ -110,6 +111,7 @@ export default class AgentService {
     const payloadBytes = Signatures.buildMessage(data, timestamp);
 
     const key = this.getSigningKey();
+    //@ts-ignore
     const privKey = Uint8Array.from(Buffer.from(key.privateKey, key.encoding));
 
     const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey);
@@ -143,6 +145,7 @@ export default class AgentService {
     const payloadBytes = Signatures.buildMessageRaw(data)
 
     const key = this.getSigningKey()
+    //@ts-ignore
     const privKey = Uint8Array.from(Buffer.from(key.privateKey, key.encoding))
 
     const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey)
@@ -218,28 +221,19 @@ export default class AgentService {
     }
   }
 
-  private getSigningKey() {
+  private getSigningKey(): Key {
     return WALLET.getMainKey();
   }
 
   async createNewKeys() {
     WALLET.createMainKey()
-    const key = WALLET.getMainKey()
+    const didDocument = WALLET.getMainKeyDocument()
+    const key = didDocument.verificationMethod[0]
     
     this.#did = key.controller;
     this.#didDocument = JSON.stringify(await resolver.resolve(this.#did));
     this.#agent = new Agent(this.#did);
     this.#signingKeyId = key.id;
-
-    const keys = [
-      {
-        type: "assymetric",
-        encoding: "hex",
-        publicKey: key.publicKeyBuffer.toString("hex"),
-        privateKey: key.privateKeyBuffer.toString("hex"),
-        tags: [key.type, key.id],
-      },
-    ];
   }
 
   isInitialized() {

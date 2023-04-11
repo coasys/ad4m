@@ -5,6 +5,9 @@
         getMainKey: () => {
             return core.opAsync("wallet_get_main_key");
         },
+        getMainKeyDocument: () => {
+            return core.opAsync("wallet_get_main_key_document");
+        },
         createMainKey: () => {
             return core.opAsync("wallet_create_main_key");
         },

@@ -1,5 +1,7 @@
 use deno_core::{anyhow::anyhow, error::AnyError, op};
 use secp256k1::SecretKey;
+use base64::{Engine as _, engine::{self, general_purpose as base64engine}};
+use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
 
@@ -9,8 +11,31 @@ fn secret_key_to_hex(secret_key: &SecretKey) -> String {
     secret_key_hex
 }
 
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Key {
+    pub public_key: String,
+    pub private_key: String,
+    pub encoding: String,
+}
+
 #[op]
-fn wallet_get_main_key() -> Result<did_key::Document, AnyError> {
+fn wallet_get_main_key() -> Result<Key, AnyError> {
+    let wallet_instance = Wallet::instance();
+    let wallet = wallet_instance.lock().expect("wallet lock");
+    let wallet_ref = wallet.as_ref().expect("wallet instance");
+    let public_key = wallet_ref.get_public_key("main".into()).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    let private_key = wallet_ref.get_secret_key("main".into()).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    Ok(Key {
+        public_key: base64engine::STANDARD.encode(public_key),
+        private_key: base64engine::STANDARD.encode(private_key),
+        encoding: "base64".to_string(),
+    })
+}
+
+
+#[op]
+fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
