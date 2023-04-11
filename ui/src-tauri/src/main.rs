@@ -63,7 +63,8 @@ pub struct AppState {
 }
 
 fn main() {
-    if has_processes_running("AD4M") > 1 {
+    let app_name = if std::env::consts::OS == "windows" { "AD4M.exe" } else { "AD4M" };
+    if has_processes_running(app_name) > 1 {
         println!("AD4M is already running");
         return;
     }
@@ -130,6 +131,8 @@ fn main() {
             open_tray
         ])
         .setup(move |app| {
+            // let wow = app.get_window("AD4M").unwrap();
+            // println!("wowo {:?}", wow);
             let splashscreen = app.get_window("splashscreen").unwrap();
 
             let splashscreen_clone = splashscreen.clone();
@@ -248,4 +251,10 @@ fn log_error(window: &Window, message: &str) {
         "Error", 
         message
     );
+}
+
+fn find_window(window_label: &str) -> HWND {
+    let window_class = "tauri_app_window";
+    let window_title = format!("{} ({})", window_label, window_class);
+    unsafe { FindWindowW(std::ptr::null(), window_title.encode_utf16().collect::<Vec<u16>>().as_ptr()) }
 }
