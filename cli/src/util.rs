@@ -107,3 +107,10 @@ pub async fn string_2_perspective_snapshot(
 
     Ok(snapshot)
 }
+
+pub(crate) fn option_to_bool(opt: Option<bool>) -> bool {
+    match opt {
+        Some(val) => val,
+        None => false,
+    }
+}

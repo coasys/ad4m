@@ -110,6 +110,18 @@ enum Domain {
         #[command(subcommand)]
         command: DevFunctions,
     },
+    Init {
+        #[arg(long, action)]
+        hc_only: Option<bool>,
+        #[arg(short, long, action)]
+        data_path: Option<String>,
+        #[arg(short, long, action)]
+        network_bootstrap_seed: Option<String>,
+    },
+    Run {
+        #[arg(short, long, action)]
+        data_path: String,
+    },
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -146,7 +158,32 @@ async fn main() -> Result<()> {
     if let Domain::Dev { command } = args.domain {
         dev::run(command).await?;
         return Ok(());
-    }
+    };
+
+    if let Domain::Init {
+        hc_only,
+        data_path,
+        network_bootstrap_seed,
+    } = args.domain
+    {
+        match rust_executor::init::init(
+            util::option_to_bool(hc_only),
+            data_path,
+            network_bootstrap_seed,
+        ) {
+            Ok(()) => println!("Successfully initialized AD4M executor!"),
+            Err(e) => {
+                println!("Failed to initialize AD4M executor: {}", e);
+                std::process::exit(1);
+            }
+        };
+        return Ok(());
+    };
+
+    if let Domain::Run { data_path: _ } = args.domain {
+        rust_executor::run().await;
+        return Ok(());
+    };
 
     let ad4m_client = get_ad4m_client(&args).await?;
 
@@ -167,7 +204,13 @@ async fn main() -> Result<()> {
             })?;
             println!("{}", log);
         }
-        Domain::Dev{ command: _ } => unreachable!(),
+        Domain::Dev { command: _ } => unreachable!(),
+        Domain::Init {
+            hc_only: _,
+            data_path: _,
+            network_bootstrap_seed: _,
+        } => unreachable!(),
+        Domain::Run { data_path: _ } => unreachable!(),
     }
 
     Ok(())

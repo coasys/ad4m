@@ -13,6 +13,7 @@ readme = "README.md"
 
 [dependencies]
 ad4m-client = { path = "../rust-client", version = "0.3.4" }
+rust-executor = { path = "../rust-executor" }
 anyhow = "1.0.65"
 clap = { version = "4.0.8", features = ["derive"] }
 futures = "0.3"
