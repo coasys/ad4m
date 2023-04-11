@@ -1,4 +1,4 @@
-use deno_core::{anyhow::anyhow, error::AnyError, op};
+use deno_core::{anyhow::anyhow, error::AnyError, op, Extension, include_js_files};
 use secp256k1::SecretKey;
 use base64::{Engine as _, engine::{self, general_purpose as base64engine}};
 use serde::{Deserialize, Serialize};
@@ -89,4 +89,20 @@ fn wallet_load(data: String) -> Result<(), AnyError> {
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
     Ok(wallet_ref.load(data))
+}
+
+pub fn build() -> Extension {
+    Extension::builder("wallet")
+        .js(include_js_files!(wallet "wallet_extension.js",))
+        .ops(vec![
+            wallet_get_main_key::decl(),
+            wallet_get_main_key_document::decl(),
+            wallet_create_main_key::decl(),
+            wallet_is_unlocked::decl(),
+            wallet_unlock::decl(),
+            wallet_lock::decl(),
+            wallet_export::decl(),
+            wallet_load::decl(),
+        ])
+        .build()
 }

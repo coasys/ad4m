@@ -1,3 +1,4 @@
+use deno_core::{Extension, include_js_files, error::AnyError, op};
 use deno_runtime::{
     deno_broadcast_channel::InMemoryBroadcastChannel, deno_web::BlobStore, worker::WorkerOptions,
     BootstrapOptions,
@@ -5,7 +6,7 @@ use deno_runtime::{
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 use url::Url;
 
-use super::string_module_loader::StringModuleLoader;
+use super::{string_module_loader::StringModuleLoader, wallet_extension};
 
 pub fn main_module_url() -> Url {
     Url::parse("https://ad4m.runtime/main").unwrap()
@@ -34,9 +35,11 @@ pub fn main_worker_options() -> WorkerOptions {
         loader.add_module(specifier.as_str(), code.as_str());
     }
 
+    let wallet_ext = wallet_extension::build();
+
     WorkerOptions {
         bootstrap: BootstrapOptions::default(),
-        extensions: vec![],
+        extensions: vec![wallet_ext],
         startup_snapshot: Some(deno_runtime::js::deno_isolate_init()),
         unsafely_ignore_certificate_errors: None,
         root_cert_store: None,
