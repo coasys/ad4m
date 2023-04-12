@@ -24,8 +24,9 @@ fn wallet_get_main_key() -> Result<Key, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let public_key = wallet_ref.get_public_key("main".into()).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
-    let private_key = wallet_ref.get_secret_key("main".into()).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    let name = "main".to_string();
+    let public_key = wallet_ref.get_public_key(&name).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    let private_key = wallet_ref.get_secret_key(&name).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
     Ok(Key {
         public_key: base64engine::STANDARD.encode(public_key),
         private_key: base64engine::STANDARD.encode(private_key),
@@ -39,7 +40,9 @@ fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
-    wallet_ref.get_did_document("main".into()).ok_or(anyhow!("main key not found. call createMainKey() first"))
+    println!("wallet_get_main_key_document ");
+    let name = "main".to_string();
+    wallet_ref.get_did_document(&name).ok_or(anyhow!("main key not found. call createMainKey() first"))
 }
 
 #[op]
