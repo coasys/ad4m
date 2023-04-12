@@ -3,28 +3,28 @@
 
     globalThis.WALLET = {
         getMainKey: () => {
-            return core.opAsync("wallet_get_main_key");
+            return core.ops.wallet_get_main_key();
         },
         getMainKeyDocument: () => {
-            return core.opAsync("wallet_get_main_key_document");
+            return core.ops.wallet_get_main_key_document();
         },
         createMainKey: () => {
-            return core.opAsync("wallet_create_main_key");
+            return core.ops.wallet_create_main_key();
         },
         isUnlocked: () => {
-            return core.opAsync("wallet_is_unlocked", path);
+            return core.ops.wallet_is_unlocked();
         },
         unlock: (password) => {
-            return core.opAsync("wallet_unlock", password);
+            return core.ops.wallet_unlock(password);
         },
         lock: (password) => {
-            return core.opAsync("wallet_lock", password);
+            return core.ops.wallet_lock(password);
         },
-        export: () => {
-            return core.opAsync("wallet_export");
+        export: (password) => {
+            return core.ops.wallet_export(password);
         },
         load: (data) => {
-            return core.opAsync("wallet_load", data);
+            return core.ops.wallet_load(data);
         },
     };
   })(globalThis);

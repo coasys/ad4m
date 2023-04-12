@@ -104,5 +104,6 @@ pub fn build() -> Extension {
             wallet_export::decl(),
             wallet_load::decl(),
         ])
+        .force_op_registration() 
         .build()
 }
