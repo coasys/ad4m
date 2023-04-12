@@ -243,6 +243,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_slice_to_u8_array() {
+        let slice: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
+        let result = slice_to_u8_array(slice).unwrap();
+        assert_eq!(slice, &result);
+
+        let slice_short: &[u8] = &[1, 2, 3];
+        let result = slice_to_u8_array(slice_short).unwrap();
+        let expected: [u8; 32] = [1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(expected, result);
+    }
+
+    #[test]
     fn test_encrypt_decrypt_multiple() {
         let passphrase = "test".to_string();
         let payload = "test".to_string();
@@ -262,6 +274,18 @@ mod tests {
     }
 
     #[test]
+    fn test_encrypt_decrypt_wrong_passphrase() {
+        let passphrase = "test_passphrase".to_string();
+        let wrong_passphrase = "wrong_passphrase".to_string();
+        let payload = "test_payload".to_string();
+        let encrypted = encrypt(payload.clone(), passphrase.clone());
+        println!("Got encrypted: {}", encrypted);
+        assert_ne!(payload, encrypted);
+        let decrypted = decrypt(encrypted, wrong_passphrase);
+        assert_ne!(decrypted.unwrap(), payload);
+    }
+
+    #[test]
     fn test_create_and_get_key() {
         let mut wallet = Wallet::new();
         let name = "test".to_string();
@@ -272,5 +296,74 @@ mod tests {
         assert!(wallet.keys.clone().unwrap().by_name.get(&name).is_some());
         assert!(wallet.get_public_key(&name).is_some());
         assert!(wallet.get_secret_key(&name).is_some());
+    }
+
+    #[test]
+    fn test_wallet_did_document_generation() {
+        let mut wallet = Wallet::new();
+        let key_name = "test_key".to_string();
+
+        wallet.generate_keypair(key_name.clone());
+        let did_document = wallet.get_did_document(&key_name);
+
+        assert!(did_document.is_some());
+    }
+
+    #[test]
+    fn test_wallet_signing() {
+        let mut wallet = Wallet::new();
+        let key_name = "test_key".to_string();
+        let message = b"test message";
+
+        wallet.generate_keypair(key_name.clone());
+        let signature = wallet.sign(&key_name, message);
+
+        assert!(signature.is_some());
+    }
+
+    #[test]
+    fn test_wallet_lock_unlock() {
+        let mut wallet = Wallet::new();
+        let passphrase = "test_passphrase".to_string();
+        let key_name = "test_key".to_string();
+
+        wallet.generate_keypair(key_name.clone());
+        wallet.lock(passphrase.clone());
+        assert!(!wallet.is_unlocked());
+        let unlock_result = wallet.unlock(passphrase.clone());
+        assert!(unlock_result.is_ok());
+        assert!(wallet.is_unlocked());
+    }
+
+    #[test]
+    fn test_wallet_lock_unlock_wrong_passphrase() {
+        let mut wallet = Wallet::new();
+        let passphrase = "test_passphrase".to_string();
+        let wrong_passphrase = "wrong_passphrase".to_string();
+        let key_name = "test_key".to_string();
+
+        wallet.generate_keypair(key_name.clone());
+        wallet.lock(passphrase.clone());
+        assert!(!wallet.is_unlocked());
+        let unlock_result = wallet.unlock(wrong_passphrase);
+        assert!(unlock_result.is_err());
+        assert!(!wallet.is_unlocked());
+    }
+
+    #[test]
+    fn test_wallet_export_and_load() {
+        let mut wallet = Wallet::new();
+        let passphrase = "test_passphrase".to_string();
+        let key_name = "test_key".to_string();
+
+        wallet.generate_keypair(key_name.clone());
+        let exported_data = wallet.export(passphrase.clone());
+        assert!(!exported_data.is_empty());
+
+        let mut new_wallet = Wallet::new();
+        new_wallet.load(exported_data);
+        let unlock_result = new_wallet.unlock(passphrase);
+        assert!(unlock_result.is_ok());
+        assert!(new_wallet.is_unlocked());
     }
 }
