@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 
 use super::utils::ad4m_data_directory;
 use crate::globals::{
-    AD4M_VERSION, HC_BIN, HOLOCHAIN_BIN, MAINNET_JSON, OLDEST_VERSION, SWIPL_BIN,
+    AD4M_VERSION, HC_BIN, HOLOCHAIN_BIN, MAINNET_JSON, OLDEST_VERSION, SWIPL_ZIP,
 };
+use crate::utils::write_zip;
 
 /// Sets up the ad4m data directory and config files ready for the executor to consume
 pub fn init(
@@ -58,6 +59,7 @@ pub fn init(
     //Create the path for binaries if it doesn't already exist
     let binary_path = Path::new(&app_data_path).join("binary");
     if !Path::new(&binary_path).exists() {
+        info!("Creating binary path");
         fs::create_dir_all(&binary_path)?;
     }
 
@@ -70,18 +72,19 @@ pub fn init(
     if !hc_only {
         let holochain_data = HOLOCHAIN_BIN;
         let holochain_target = binary_path.join(holochain);
+        info!("writing holochain target");
         fs::write(&holochain_target, holochain_data)?;
         fs::set_permissions(holochain_target, fs::Permissions::from_mode(0o755))?;
     }
 
     let hc_data = HC_BIN;
     let hc_target = binary_path.join(hc);
+    info!("write hc target");
     fs::write(&hc_target, hc_data)?;
     fs::set_permissions(hc_target, fs::Permissions::from_mode(0o755))?;
 
-    let swipl_data = SWIPL_BIN;
-    let swipl_target = Path::new(&app_data_path).join("swipl");
-    fs::write(swipl_target, swipl_data)?;
+    info!("write swipl target");
+    write_zip(SWIPL_ZIP.to_vec(), app_data_path);
 
     Ok(())
 }
@@ -92,9 +95,10 @@ fn write_seed_config(
 ) -> Result<(), Box<dyn Error>> {
     let target_seed_path = app_data_path.join("mainnet_seed.seed");
     if network_bootstrap_seed.is_none() {
-        println!("No bootstrap seed supplied... using the one found in local files");
+        info!("No bootstrap seed supplied... using the one found in local files");
         let seed_file_data = MAINNET_JSON;
         fs::write(target_seed_path, seed_file_data)?;
+        info!("wrote seed file");
     } else {
         let seed_path = PathBuf::from(network_bootstrap_seed.unwrap());
         let seed_file_data = fs::read_to_string(seed_path)?;
@@ -115,18 +119,23 @@ fn clean_ad4m_data(
         let languages_path = app_data_path.join("ad4m").join("languages");
 
         // Delete all the data which may conflict with the new version
+        info!("Deleting binary path");
         if fs::metadata(&binary_path).is_ok() {
             fs::remove_dir_all(binary_path)?;
         }
+        info!("Deleting config path");
         if fs::metadata(&config_path).is_ok() {
             fs::remove_file(config_path)?;
         }
+        info!("Deleting bootstrap seed path");
         if fs::metadata(&bootstrap_seed_path).is_ok() {
             fs::remove_file(bootstrap_seed_path)?;
         }
+        info!("Deleting holochain data path");
         if fs::metadata(&holochain_data_path).is_ok() {
             fs::remove_dir_all(holochain_data_path)?;
         }
+        info!("Deleting languages path");
         if fs::metadata(&languages_path).is_ok() {
             fs::remove_dir_all(languages_path)?;
         }
@@ -136,12 +145,15 @@ fn clean_ad4m_data(
             let languages_path = app_data_path.join("ad4m").join("languages");
             let perspective_path = app_data_path.join("ad4m").join("perspectives.json");
 
+            info!("Deleting db path");
             if fs::metadata(&db_path).is_ok() {
                 fs::remove_file(db_path)?;
             }
+            info!("Deleting languages path");
             if fs::metadata(&languages_path).is_ok() {
                 fs::remove_dir_all(languages_path)?;
             }
+            info!("Deleting perspectives path");
             if fs::metadata(&perspective_path).is_ok() {
                 fs::remove_file(perspective_path)?;
             }
