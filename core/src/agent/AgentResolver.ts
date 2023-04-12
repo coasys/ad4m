@@ -16,7 +16,7 @@ import {
   EntanglementProofInput,
 } from "./Agent";
 import { AgentStatus } from "./AgentStatus";
-import { AGENT_STATUS_CHANGED, AGENT_UPDATED } from "../PubSub";
+import { AGENT_STATUS_CHANGED, AGENT_UPDATED, APPS_CHANGED } from "../PubSub";
 
 export const TEST_AGENT_DID = "did:ad4m:test";
 
@@ -216,8 +216,16 @@ export default class AgentResolver {
     return [];
   }
 
+  
+  @Subscription((returns) => [Apps], { topics: APPS_CHANGED, nullable: true })
+  agentAppsChanged(): null {
+    return null;
+  }
+
+
   @Mutation((returns) => [Apps])
-  agentRemoveApp(@Arg("requestId") requestId: string): [] {
+  agentRemoveApp(@Arg("requestId") requestId: string, @PubSub() pubSub: any): [] {
+    pubSub.publish(APPS_CHANGED, { });
     return [];
   }
 

@@ -20,6 +20,7 @@ import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
 import ScanQRCode from "./components/ScanQRCode";
 import Header from "./components/Header";
 import autoBind from "auto-bind";
+import { getForVersion, removeForVersion, setForVersion } from "./utils";
 
 export { getAd4mClient } from "./utils";
 
@@ -450,15 +451,15 @@ export class Ad4mConnectElement extends LitElement {
 
   // TODO: localstorage doesnt work here
   @property({ type: String })
-  token = localStorage.getItem("ad4murl") || "";
+  token = getForVersion("ad4murl") || "";
 
   // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
-  port = parseInt(localStorage.getItem("ad4mport")) || 12000;
+  port = parseInt(getForVersion("ad4mport")) || 12000;
 
   // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
-  url = localStorage.getItem("ad4murl") || "";
+  url = getForVersion("ad4murl") || "";
 
   get authState(): AuthStates {
     return this._client.authState;
@@ -483,9 +484,9 @@ export class Ad4mConnectElement extends LitElement {
       capabilities: Array.isArray(this.capabilities)
         ? this.capabilities
         : JSON.parse(this.capabilities),
-      port: this.port || parseInt(localStorage.getItem("ad4mport")) || 12000,
-      token: this.token || localStorage.getItem("ad4mtoken"),
-      url: this.url || localStorage.getItem("ad4murl"),
+      port: this.port || parseInt(getForVersion("ad4mport")) || 12000,
+      token: this.token || getForVersion("ad4mtoken"),
+      url: this.url || getForVersion("ad4murl"),
     });
 
     this._client.on("configstatechange", this.handleConfigChange);
@@ -541,9 +542,9 @@ export class Ad4mConnectElement extends LitElement {
   private handleConfigChange(name: any, val: string) {
     this[name] = val;
     if (val) {
-      localStorage.setItem("ad4m" + name, val);
+      setForVersion("ad4m" + name, val);
     } else {
-      localStorage.removeItem("ad4m" + name);
+      removeForVersion("ad4m" + name);
     }
     this.requestUpdate();
   }
