@@ -2,7 +2,6 @@ use argon2::password_hash::Salt;
 use argon2::{self, Argon2, PasswordHasher};
 use base64::Engine;
 use crypto_box::aead::Aead;
-use crypto_box::aead::generic_array::GenericArray;
 use crypto_box::{Nonce, PublicKey as cPublicKey, SalsaBox, SecretKey as cSecretKey};
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;

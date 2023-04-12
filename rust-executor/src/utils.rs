@@ -22,6 +22,7 @@ pub(crate) fn write_zip(zip_data: Vec<u8>, target_path: PathBuf) {
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).unwrap();
         let mut outpath = target_path.clone();
+        #[allow(deprecated)]
         outpath.push(file.sanitized_name());
 
         if file.is_dir() {

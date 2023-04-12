@@ -1,16 +1,8 @@
 use deno_core::{anyhow::anyhow, error::AnyError, op, Extension, include_js_files};
-use secp256k1::SecretKey;
-use base64::{Engine as _, engine::{self, general_purpose as base64engine}};
+use base64::{Engine as _, engine::{general_purpose as base64engine}};
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
-
-fn secret_key_to_hex(secret_key: &SecretKey) -> String {
-    let secret_key_bytes = secret_key.as_ref(); // Convert SecretKey to byte array
-    let secret_key_hex = hex::encode(secret_key_bytes); // Encode the byte array as a hex string
-    secret_key_hex
-}
-
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Key {
@@ -37,6 +29,7 @@ fn wallet_get_main_key() -> Result<Key, AnyError> {
 
 #[op]
 fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
+    println!("wallet_get_main_key_document 1");
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
@@ -47,10 +40,12 @@ fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
 
 #[op]
 fn wallet_create_main_key() -> Result<(), AnyError> {
+    println!("wallet_create_main_key 1");
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
     wallet_ref.generate_keypair("main".to_string());
+    println!("wallet_create_main_key 2");
     Ok(())
 }
 
@@ -94,6 +89,16 @@ fn wallet_load(data: String) -> Result<(), AnyError> {
     Ok(wallet_ref.load(data))
 }
 
+#[op]
+fn wallet_sign(payload: String) -> Result<String, AnyError> {
+    let wallet_instance = Wallet::instance();
+    let wallet = wallet_instance.lock().expect("wallet lock");
+    let wallet_ref = wallet.as_ref().expect("wallet instance");
+    let name = "main".to_string();
+    let signature = wallet_ref.sign(&name, payload.as_bytes()).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    Ok(base64engine::STANDARD.encode(signature))
+}
+
 pub fn build() -> Extension {
     Extension::builder("wallet")
         .js(include_js_files!(wallet "wallet_extension.js",))
@@ -106,6 +111,7 @@ pub fn build() -> Extension {
             wallet_lock::decl(),
             wallet_export::decl(),
             wallet_load::decl(),
+            wallet_sign::decl(),
         ])
         .force_op_registration() 
         .build()

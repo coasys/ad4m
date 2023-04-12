@@ -26,6 +26,9 @@
         load: (data) => {
             return core.ops.wallet_load(data);
         },
+        sign: (payload) => {
+            return core.ops.wallet_sign(payload);
+        }   
     };
   })(globalThis);
   

@@ -1,9 +1,5 @@
-use deno_core::{Extension, include_js_files, error::AnyError, op};
-use deno_runtime::{
-    deno_broadcast_channel::InMemoryBroadcastChannel, deno_web::BlobStore, worker::WorkerOptions,
-    BootstrapOptions,
-};
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use deno_runtime::worker::WorkerOptions;
+use std::{collections::HashMap, rc::Rc};
 use url::Url;
 
 use super::{string_module_loader::StringModuleLoader, wallet_extension};
