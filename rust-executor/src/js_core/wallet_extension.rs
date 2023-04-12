@@ -29,23 +29,19 @@ fn wallet_get_main_key() -> Result<Key, AnyError> {
 
 #[op]
 fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
-    println!("wallet_get_main_key_document 1");
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
-    println!("wallet_get_main_key_document ");
     let name = "main".to_string();
     wallet_ref.get_did_document(&name).ok_or(anyhow!("main key not found. call createMainKey() first"))
 }
 
 #[op]
 fn wallet_create_main_key() -> Result<(), AnyError> {
-    println!("wallet_create_main_key 1");
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
     wallet_ref.generate_keypair("main".to_string());
-    println!("wallet_create_main_key 2");
     Ok(())
 }
 
