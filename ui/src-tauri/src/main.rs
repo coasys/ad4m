@@ -63,7 +63,8 @@ pub struct AppState {
 }
 
 fn main() {
-    if has_processes_running("AD4M") > 1 {
+    let app_name = if std::env::consts::OS == "windows" { "AD4M.exe" } else { "AD4M" };
+    if has_processes_running(app_name) > 1 {
         println!("AD4M is already running");
         return;
     }
