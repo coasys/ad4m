@@ -15,7 +15,7 @@ use js_core::JsCore;
 
 #[tokio::main]
 async fn main() {
-    env::set_var("RUST_LOG", "info");
+    env::set_var("RUST_LOG", "rust_executor=info");
     env_logger::init();
 
     info!("Starting js_core...");
