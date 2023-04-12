@@ -2,6 +2,7 @@ use argon2::password_hash::Salt;
 use argon2::{self, Argon2, PasswordHasher};
 use base64::Engine;
 use crypto_box::aead::Aead;
+use crypto_box::aead::generic_array::GenericArray;
 use crypto_box::{Nonce, PublicKey as cPublicKey, SalsaBox, SecretKey as cSecretKey};
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -34,8 +35,19 @@ fn slice_to_u8_array(slice: &[u8]) -> Option<[u8; 32]> {
     array.ok()
 }
 
+fn padded(passphrase: String) -> String {
+    let mut passphrase = passphrase.clone();
+    while passphrase.len() < 32 {
+        passphrase.push(' ');
+    }
+    passphrase
+}
+
+
 fn encrypt(payload: String, passphrase: String) -> String {
-    let salt = Salt::from_b64("0000000000000000").expect("salt from zeros to work");
+    let passphrase = padded(passphrase);
+    let b64_passphrase = base64::engine::general_purpose::STANDARD_NO_PAD.encode(passphrase.as_bytes());
+    let salt = Salt::from_b64(&b64_passphrase).expect("salt from passphrase to work");
 
     // Derive secret key from passphrase
     let argon2 = Argon2::default();
@@ -44,26 +56,32 @@ fn encrypt(payload: String, passphrase: String) -> String {
         .hash_password(passphrase.as_bytes(), salt)
         .unwrap()
         .to_string();
+
+    let preambel = "$argon2id$v=19$m=19456,t=2,p=1$";
+    let derived_secret_key = derived_secret_key.replace(preambel, "");
+
     let derived_secret_key_bytes = derived_secret_key.as_bytes();
-    let secret_key = cSecretKey::from(
-        slice_to_u8_array(derived_secret_key_bytes).expect("Could not slice to u8 array"),
-    );
+    let slice = slice_to_u8_array(derived_secret_key_bytes).expect("Could not slice to u8 array");
+    let secret_key = cSecretKey::from(slice);
     let public_key = cPublicKey::from(&secret_key);
 
     // Create the Box (encryptor/decryptor) using the derived secret key and the public key
     let crypto_box = SalsaBox::new(&public_key, &secret_key);
 
     //let nonce = SalsaBox::generate_nonce(&mut OsRng);
+    //let nonce: GenericArray<u8, _> = [0u8; 24].into();
     let nonce = Nonce::default();
 
     // Encrypt
-    let encrypted_data = crypto_box.encrypt(&nonce, payload.as_bytes()).unwrap();
+    let encrypted_data = crypto_box.encrypt(&nonce.into(), payload.as_bytes()).unwrap();
 
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(encrypted_data)
 }
 
 fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::aead::Error> {
-    let salt = Salt::from_b64("0000000000000000").expect("salt from zeros to work");
+    let passphrase = padded(passphrase);
+    let b64_passphrase = base64::engine::general_purpose::STANDARD_NO_PAD.encode(passphrase.as_bytes());
+    let salt = Salt::from_b64(&b64_passphrase).expect("salt from passphrase to work");
 
     // Derive secret key from passphrase
     let argon2 = Argon2::default();
@@ -71,10 +89,12 @@ fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::ae
         .hash_password(passphrase.as_bytes(), salt)
         .unwrap()
         .to_string();
+
+    let preambel = "$argon2id$v=19$m=19456,t=2,p=1$";
+    let derived_secret_key = derived_secret_key.replace(preambel, "");
     let derived_secret_key_bytes = derived_secret_key.as_bytes();
-    let secret_key = cSecretKey::from(
-        slice_to_u8_array(derived_secret_key_bytes).expect("Could not slice to u8 array"),
-    );
+    let slice = slice_to_u8_array(derived_secret_key_bytes).expect("Could not slice to u8 array");
+    let secret_key = cSecretKey::from(slice);
     let public_key = cPublicKey::from(&secret_key);
 
     // Create the Box (encryptor/decryptor) using the derived secret key and the public key
@@ -89,7 +109,7 @@ fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::ae
 
     // Decrypt
     let decrypted_data = crypto_box
-        .decrypt(&nonce, payload_bytes.as_slice())
+        .decrypt(&nonce.into(), payload_bytes.as_slice())
         .map(|data| String::from_utf8(data).expect("decrypted array to be a string"));
 
     decrypted_data
@@ -282,7 +302,7 @@ mod tests {
         println!("Got encrypted: {}", encrypted);
         assert_ne!(payload, encrypted);
         let decrypted = decrypt(encrypted, wrong_passphrase);
-        assert_ne!(decrypted.unwrap(), payload);
+        assert!(decrypted.is_err());
     }
 
     #[test]
