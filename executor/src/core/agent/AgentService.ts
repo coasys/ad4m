@@ -267,22 +267,16 @@ export default class AgentService {
   }
 
   async save(password: string) {
-    // @ts-ignore
-    WALLET.lock(password);
-
     const dump = {
       did: this.#did,
       didDocument: this.#didDocument,
       signingKeyId: this.#signingKeyId,
       // @ts-ignore
-      keystore: WALLET.export(),
+      keystore: WALLET.export(password),
       agent: this.#agent,
     };
 
     fs.writeFileSync(this.#file, JSON.stringify(dump));
-
-    // @ts-ignore
-    await WALLET.unlock(password);
     this.#readyPromiseResolve!();
   }
 
