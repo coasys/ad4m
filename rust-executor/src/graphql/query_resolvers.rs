@@ -8,278 +8,442 @@ use super::graphql_types::*;
 
 pub struct Query;
 
+const ALL_CAPABILITY: &str = r#"{with: {domain: "*", pointers: ["*"]},can: ["*"]}"#;
+
 #[graphql_object(context = JsCoreHandle)]
 impl Query {
-    fn agent(&self, context: &JsCoreHandle) -> FieldResult<Agent> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn agent(&self, context: &JsCoreHandle) -> FieldResult<Agent> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.agent(null, {{ capabilities: [{}] }}))",
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let a: Agent = serde_json::from_str(&result)?;
+        return Ok(a);
     }
 
     #[graphql(name = "agentByDID")]
-    fn agent_by_did(&self, context: &JsCoreHandle, did: String) -> FieldResult<Option<Agent>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn agent_by_did(
+        &self,
+        context: &JsCoreHandle,
+        did: String,
+    ) -> FieldResult<Option<Agent>> {
+        let mut js = context.clone();
+        let result = js
+            .execute(
+                format!(
+                    r#"JSON.stringify(
+                    core.resolvers.Query.agentByDID(
+                        null, 
+                        {{ did: {} }}, 
+                        {{ capabilities: [{}] }}
+                    )
+                )"#,
+                    did, ALL_CAPABILITY
+                )
+                .into(),
+            )
+            .await?;
+        let a: Option<Agent> = serde_json::from_str(&result)?;
+        return Ok(a);
     }
 
-    fn agent_get_apps(&self, context: &JsCoreHandle) -> FieldResult<Vec<Apps>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn agent_get_apps(&self, context: &JsCoreHandle) -> FieldResult<Vec<Apps>> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.agentGetApps(null, {{ capabilities: [{}] }}))",
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let apps: Vec<Apps> = serde_json::from_str(&result)?;
+        return Ok(apps);
     }
 
-    fn agent_get_entanglement_proofs(
+    async fn agent_get_entanglement_proofs(
         &self,
         context: &JsCoreHandle,
     ) -> FieldResult<Vec<EntanglementProof>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.agentGetEntanglementProofs(null, {{ capabilities: [{}] }}))", ALL_CAPABILITY))
+            .await?;
+        let proofs: Vec<EntanglementProof> = serde_json::from_str(&result)?;
+        return Ok(proofs);
     }
 
-    fn agent_is_locked(&self, context: &JsCoreHandle) -> FieldResult<bool> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn agent_is_locked(&self, context: &JsCoreHandle) -> FieldResult<bool> {
+        let mut js = context.clone();
+        let result = js
+            .execute("JSON.stringify(core.resolvers.Query.agentIsLocked(null))".to_string())
+            .await?;
+        let is_locked: bool = serde_json::from_str(&result)?;
+        return Ok(is_locked);
     }
 
     async fn agent_status(&self, context: &JsCoreHandle) -> FieldResult<AgentStatus> {
         let mut js = context.clone();
         let result = js
-            .execute("JSON.stringify(core.agentService.dump())".into())
+            .execute(format!(
+                "JSON.stringify(core.agentService.dump(null, {{ capabilities: [{}] }}))",
+                ALL_CAPABILITY
+            ))
             .await?;
         let s: AgentStatus = serde_json::from_str(&result)?;
         return Ok(s);
     }
 
-    fn expression(&self, context: &JsCoreHandle, url: String) -> FieldResult<ExpressionRendered> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn expression(
+        &self,
+        context: &JsCoreHandle,
+        url: String,
+    ) -> FieldResult<ExpressionRendered> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.expression(null, {{ url: {} }}, {{ capabilities: [{}] }}))",
+                url,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let expression: ExpressionRendered = serde_json::from_str(&result)?;
+        return Ok(expression);
     }
 
-    fn expression_interactions(
+    async fn expression_interactions(
         &self,
         context: &JsCoreHandle,
         url: String,
     ) -> FieldResult<Vec<InteractionMeta>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.expressionInteractions(null, {{ url: {} }}, {{ capabilities: [{}] }}))",
+                url,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let interactions: Vec<InteractionMeta> = serde_json::from_str(&result)?;
+        return Ok(interactions);
     }
 
-    fn expression_many(
+    async fn expression_many(
         &self,
         context: &JsCoreHandle,
         urls: Vec<String>,
     ) -> FieldResult<Vec<ExpressionRendered>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let urls_string = urls
+            .into_iter()
+            .map(|url| format!("\"{}\"", url))
+            .collect::<Vec<String>>()
+            .join(",");
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.expressionMany(null, {{ urls: [{}] }}, {{ capabilities: [{}] }}))",
+                urls_string,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let expressions: Vec<ExpressionRendered> = serde_json::from_str(&result)?;
+        return Ok(expressions);
     }
 
-    fn expression_raw(&self, context: &JsCoreHandle, url: String) -> FieldResult<String> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn expression_raw(&self, context: &JsCoreHandle, url: String) -> FieldResult<String> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.expressionRaw(null, {{ url: {} }}, {{ capabilities: [{}] }}))",
+                url,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let expression_raw: String = serde_json::from_str(&result)?;
+        return Ok(expression_raw);
     }
 
-    fn get_trusted_agents(&self, context: &JsCoreHandle) -> FieldResult<Vec<String>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn get_trusted_agents(&self, context: &JsCoreHandle) -> FieldResult<Vec<String>> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.getTrustedAgents(null, {{ capabilities: [{}] }}))", ALL_CAPABILITY))
+            .await?;
+        let trusted_agents: Vec<String> = serde_json::from_str(&result)?;
+        return Ok(trusted_agents);
     }
 
-    fn language(&self, context: &JsCoreHandle, address: String) -> FieldResult<LanguageHandle> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn language(
+        &self,
+        context: &JsCoreHandle,
+        address: String,
+    ) -> FieldResult<LanguageHandle> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.language(null, {{ address: {}, {{ capabilities: [{}] }} }}))",
+                address,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let language_handle: LanguageHandle = serde_json::from_str(&result)?;
+        return Ok(language_handle);
     }
 
-    fn language_meta(&self, context: &JsCoreHandle, address: String) -> FieldResult<LanguageMeta> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn language_meta(
+        &self,
+        context: &JsCoreHandle,
+        address: String,
+    ) -> FieldResult<LanguageMeta> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.languageMeta(null, {{ address: {}, {{ capabilities: [{}] }} }}))",
+                address,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let language_meta: LanguageMeta = serde_json::from_str(&result)?;
+        return Ok(language_meta);
     }
 
-    fn language_source(&self, context: &JsCoreHandle, address: String) -> FieldResult<String> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn language_source(
+        &self,
+        context: &JsCoreHandle,
+        address: String,
+    ) -> FieldResult<String> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.languageSource(null, {{ address: {}, {{ capabilities: [{}] }} }}))",
+                address,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let language_source: String = serde_json::from_str(&result)?;
+        return Ok(language_source);
     }
 
-    fn languages(
+    async fn languages(
         &self,
         context: &JsCoreHandle,
         filter: Option<String>,
     ) -> FieldResult<Vec<LanguageHandle>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let filter_string = filter.map_or("null".to_string(), |f| format!("\"{}\"", f));
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.languages(null, {{ filter: {}, {{ capabilities: [{}] }} }}))",
+                filter_string,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let languages: Vec<LanguageHandle> = serde_json::from_str(&result)?;
+        return Ok(languages);
     }
 
-    fn neighbourhood_has_telepresence_adapter(
+    async fn neighbourhood_has_telepresence_adapter(
         &self,
         context: &JsCoreHandle,
-        perspectiveUUID: String,
+        perspective_uuid: String,
     ) -> FieldResult<bool> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.neighbourhoodHasTelepresenceAdapter(null, {{ perspectiveUUID: {}, {{ capabilities: [{}] }} }}))", perspective_uuid, ALL_CAPABILITY))
+            .await?;
+        let has_adapter: bool = serde_json::from_str(&result)?;
+        return Ok(has_adapter);
     }
 
-    fn neighbourhood_online_agents(
+    async fn neighbourhood_online_agents(
         &self,
         context: &JsCoreHandle,
-        perspectiveUUID: String,
+        perspective_uuid: String,
     ) -> FieldResult<Vec<OnlineAgent>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.neighbourhoodOnlineAgents(null, {{ perspectiveUUID: {}, {{ capabilities: [{}] }} }}))", perspective_uuid, ALL_CAPABILITY))
+            .await?;
+        let online_agents: Vec<OnlineAgent> = serde_json::from_str(&result)?;
+        return Ok(online_agents);
     }
 
-    fn neighbourhood_other_agents(
+    async fn neighbourhood_other_agents(
         &self,
         context: &JsCoreHandle,
-        perspectiveUUID: String,
+        perspective_uuid: String,
     ) -> FieldResult<Vec<String>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.neighbourhoodOtherAgents(null, {{ perspectiveUUID: {}, {{ capabilities: [{}] }} }}))", perspective_uuid, ALL_CAPABILITY))
+            .await?;
+        let other_agents: Vec<String> = serde_json::from_str(&result)?;
+        return Ok(other_agents);
     }
 
-    fn perspective(&self, context: &JsCoreHandle, uuid: String) -> FieldResult<PerspectiveHandle> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn perspective(
+        &self,
+        context: &JsCoreHandle,
+        uuid: String,
+    ) -> FieldResult<PerspectiveHandle> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.perspective(null, {{ uuid: {}, {{ capabilities: [{}] }} }}))",
+                uuid,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let perspective_handle: PerspectiveHandle = serde_json::from_str(&result)?;
+        return Ok(perspective_handle);
     }
 
-    fn perspective_query_links(
+    async fn perspective_query_links(
         &self,
         context: &JsCoreHandle,
         query: LinkQuery,
         uuid: String,
     ) -> FieldResult<Vec<LinkExpression>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let query_string = serde_json::to_string(&query)?;
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.perspectiveQueryLinks(null, {{ query: {}, uuid: {}, {{ capabilities: [{}] }} }}))", query_string, uuid, ALL_CAPABILITY))
+            .await?;
+        let link_expressions: Vec<LinkExpression> = serde_json::from_str(&result)?;
+        return Ok(link_expressions);
     }
 
-    fn perspective_query_prolog(
+    async fn perspective_query_prolog(
         &self,
         context: &JsCoreHandle,
         query: String,
         uuid: String,
     ) -> FieldResult<String> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.perspectiveQueryProlog(null, {{ query: {}, uuid: {}, {{ capabilities: [{}] }} }}))", query, uuid, ALL_CAPABILITY))
+            .await?;
+        let prolog_result: String = serde_json::from_str(&result)?;
+        return Ok(prolog_result);
     }
 
-    fn perspective_snapshot(
+    async fn perspective_snapshot(
         &self,
         context: &JsCoreHandle,
         uuid: String,
     ) -> FieldResult<Perspective> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.perspectiveSnapshot(null, {{ uuid: {}, {{ capabilities: [{}] }} }}))",
+                uuid,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let perspective_snapshot: Perspective = serde_json::from_str(&result)?;
+        return Ok(perspective_snapshot);
     }
 
-    fn perspectives(&self, context: &JsCoreHandle) -> FieldResult<Vec<PerspectiveHandle>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn perspectives(&self, context: &JsCoreHandle) -> FieldResult<Vec<PerspectiveHandle>> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.perspectives(null, {{ capabilities: [{}] }}))",
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let perspectives: Vec<PerspectiveHandle> = serde_json::from_str(&result)?;
+        return Ok(perspectives);
     }
 
-    fn runtime_friend_status(
+    async fn runtime_friend_status(
         &self,
         context: &JsCoreHandle,
         did: String,
     ) -> FieldResult<PerspectiveExpression> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.runtimeFriendStatus(null, {{ did: {} }}, {{ capabilities: [{}] }}))",
+                did,
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let friend_status: PerspectiveExpression = serde_json::from_str(&result)?;
+        return Ok(friend_status);
     }
 
-    fn runtime_friends(&self, context: &JsCoreHandle) -> FieldResult<Vec<String>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn runtime_friends(&self, context: &JsCoreHandle) -> FieldResult<Vec<String>> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.runtimeFriends(null, {{ capabilities: [{}] }}))", ALL_CAPABILITY))
+            .await?;
+        let friends: Vec<String> = serde_json::from_str(&result)?;
+        return Ok(friends);
     }
 
-    fn runtime_hc_agent_infos(&self, context: &JsCoreHandle) -> FieldResult<String> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn runtime_hc_agent_infos(&self, context: &JsCoreHandle) -> FieldResult<String> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.runtimeHcAgentInfos(null, {{ capabilities: [{}] }}))", ALL_CAPABILITY))
+            .await?;
+        let hc_agent_infos: String = serde_json::from_str(&result)?;
+        return Ok(hc_agent_infos);
     }
 
-    fn runtime_info(&self, context: &JsCoreHandle) -> FieldResult<RuntimeInfo> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+    async fn runtime_info(&self, context: &JsCoreHandle) -> FieldResult<RuntimeInfo> {
+        let mut js = context.clone();
+        let result = js
+            .execute(format!(
+                "JSON.stringify(core.resolvers.Query.runtimeInfo(null, {{ capabilities: [{}] }}))",
+                ALL_CAPABILITY
+            ))
+            .await?;
+        let runtime_info: RuntimeInfo = serde_json::from_str(&result)?;
+        return Ok(runtime_info);
     }
 
-    fn runtime_known_link_language_templates(
+    async fn runtime_known_link_language_templates(
         &self,
         context: &JsCoreHandle,
     ) -> FieldResult<Vec<String>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.runtimeKnownLinkLanguageTemplates(null, {{ capabilities: [{}] }}))", ALL_CAPABILITY))
+            .await?;
+        let templates: Vec<String> = serde_json::from_str(&result)?;
+        return Ok(templates);
     }
 
-    fn runtime_message_inbox(
+    async fn runtime_message_inbox(
         &self,
         context: &JsCoreHandle,
         filter: Option<String>,
     ) -> FieldResult<Vec<PerspectiveExpression>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let filter_str = filter.unwrap_or_else(|| String::from("{}"));
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.runtimeMessageInbox(null, {{ filter: {}, capabilities: [{}] }}))", filter_str, ALL_CAPABILITY))
+            .await?;
+        let inbox_messages: Vec<PerspectiveExpression> = serde_json::from_str(&result)?;
+        return Ok(inbox_messages);
     }
 
-    fn runtime_message_outbox(
+    async fn runtime_message_outbox(
         &self,
         context: &JsCoreHandle,
         filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let filter_str = filter.unwrap_or_else(|| String::from("{}"));
+        let mut js = context.clone();
+        let result = js
+            .execute(format!("JSON.stringify(core.resolvers.Query.runtimeMessageOutbox(null, {{ filter: {}, capabilities: [{}] }}))", filter_str, ALL_CAPABILITY))
+            .await?;
+        let outbox_messages: Vec<SentMessage> = serde_json::from_str(&result)?;
+        return Ok(outbox_messages);
     }
 
-    fn runtime_verify_string_signed_by_did(
+    async fn runtime_verify_string_signed_by_did(
         &self,
         context: &JsCoreHandle,
         data: String,
@@ -287,9 +451,19 @@ impl Query {
         did_signing_key_id: String,
         signed_data: String,
     ) -> FieldResult<bool> {
-        Err(FieldError::new(
-            "Not implemented",
-            graphql_value!({ "Not implemented": true }),
-        ))
+        let mut js = context.clone();
+        let result = js
+            .execute(
+                format!(
+                    r#"JSON.stringify(core.resolvers.Query.runtimeVerifyStringSignedByDID(
+                        null,
+                        {{ data: {}, did: {}, didSigningKeyId: {}, signedData: {}, capabilities: [{}] }}
+                    ))"#,
+                    data, did, did_signing_key_id, signed_data, ALL_CAPABILITY
+                ),
+            )
+            .await?;
+        let verified: bool = serde_json::from_str(&result)?;
+        return Ok(verified);
     }
 }
