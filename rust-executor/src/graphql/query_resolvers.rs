@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(unused_variables)]
-use juniper::{graphql_object, graphql_value, FieldError, FieldResult};
+use juniper::{graphql_object, FieldResult};
 
 use crate::js_core::JsCoreHandle;
 
