@@ -38,29 +38,8 @@ pub fn main_worker_options() -> WorkerOptions {
     let wallet_ext = wallet_extension::build();
 
     WorkerOptions {
-        bootstrap: BootstrapOptions::default(),
         extensions: vec![wallet_ext],
-        startup_snapshot: Some(deno_runtime::js::deno_isolate_init()),
-        unsafely_ignore_certificate_errors: None,
-        root_cert_store: None,
-        seed: None,
-        format_js_error_fn: None,
-        source_map_getter: None,
-        web_worker_preload_module_cb: Arc::new(|_| unreachable!()),
-        web_worker_pre_execute_module_cb: Arc::new(|_| unreachable!()),
-        create_web_worker_cb: Arc::new(|_| unreachable!()),
-        maybe_inspector_server: None,
-        should_break_on_first_statement: false,
-        should_wait_for_inspector_session: false,
         module_loader: Rc::new(loader),
-        npm_resolver: None,
-        get_error_class_fn: None,
-        cache_storage_dir: None,
-        origin_storage_dir: None,
-        blob_store: BlobStore::default(),
-        broadcast_channel: InMemoryBroadcastChannel::default(),
-        shared_array_buffer_store: None,
-        compiled_wasm_module_store: None,
-        stdio: Default::default(),
+        ..Default::default()
     }
 }
