@@ -7,6 +7,7 @@ mod wallet;
 pub mod init;
 
 use log::{error, info};
+use rust_executor::Ad4mConfig;
 use std::env;
 
 use graphql::start_server;
@@ -18,7 +19,7 @@ async fn main() {
     env_logger::init();
 
     info!("Starting js_core...");
-    let mut js_core_handle = JsCore::start();
+    let mut js_core_handle = JsCore::start(Ad4mConfig::default());
     js_core_handle.initialized().await;
     info!("js_core initialized.");
 

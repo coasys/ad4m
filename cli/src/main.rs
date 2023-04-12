@@ -28,6 +28,7 @@ use crate::{
 use ad4m_client::*;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use rust_executor::Ad4mConfig;
 use startup::executor_data_path;
 
 /// AD4M command line interface.
@@ -120,11 +121,15 @@ enum Domain {
     },
     Run {
         #[arg(short, long, action)]
-        data_path: String,
+        app_data_path: Option<String>,
         #[arg(short, long, action)]
-        language_language_only: bool,
+        resource_path: Option<String>,
         #[arg(short, long, action)]
-        run_dapp_server: bool,
+        network_bootstrap_seed: Option<String>,
+        #[arg(short, long, action)]
+        language_language_only: Option<bool>,
+        #[arg(long, action)]
+        run_dapp_server: Option<bool>,
         #[arg(short, long, action)]
         gql_port: Option<u16>,
         #[arg(long, action)]
@@ -134,11 +139,11 @@ enum Domain {
         #[arg(short, long, action)]
         ipfs_swarm_port: Option<u16>,
         #[arg(short, long, action)]
-        connect_holochain: bool,
-        #[arg(short, long, action)]
+        connect_holochain: Option<bool>,
+        #[arg(long, action)]
         admin_credential: Option<String>,
         #[arg(long, action)]
-        swip_path: Option<String>,
+        swipl_path: Option<String>,
         #[arg(long, action)]
         swipl_home_path: Option<String>,
     },
@@ -201,7 +206,9 @@ async fn main() -> Result<()> {
     };
 
     if let Domain::Run {
-        data_path,
+        app_data_path,
+        resource_path,
+        network_bootstrap_seed,
         language_language_only,
         run_dapp_server,
         gql_port,
@@ -210,11 +217,26 @@ async fn main() -> Result<()> {
         ipfs_swarm_port,
         connect_holochain,
         admin_credential,
-        swip_path,
+        swipl_path,
         swipl_home_path,
     } = args.domain
     {
-        rust_executor::run().await;
+        rust_executor::run(Ad4mConfig {
+            app_data_path,
+            resource_path,
+            network_bootstrap_seed,
+            language_language_only,
+            run_dapp_server,
+            gql_port,
+            hc_admin_port,
+            hc_app_port,
+            ipfs_swarm_port,
+            connect_holochain,
+            admin_credential,
+            swipl_path,
+            swipl_home_path,
+        })
+        .await;
         return Ok(());
     };
 
@@ -244,7 +266,9 @@ async fn main() -> Result<()> {
             network_bootstrap_seed: _,
         } => unreachable!(),
         Domain::Run {
-            data_path: _,
+            app_data_path: _,
+            resource_path: _,
+            network_bootstrap_seed: _,
             language_language_only: _,
             run_dapp_server: _,
             gql_port: _,
@@ -253,7 +277,7 @@ async fn main() -> Result<()> {
             ipfs_swarm_port: _,
             connect_holochain: _,
             admin_credential: _,
-            swip_path: _,
+            swipl_path: _,
             swipl_home_path: _,
         } => unreachable!(),
     }

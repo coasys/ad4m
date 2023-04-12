@@ -1,3 +1,4 @@
+mod config;
 mod globals;
 mod graphql;
 mod js_core;
@@ -12,13 +13,15 @@ use std::env;
 use graphql::start_server;
 use js_core::JsCore;
 
+pub use config::Ad4mConfig;
+
 /// Runs the GraphQL server and the deno core runtime
-pub async fn run() {
+pub async fn run(config: Ad4mConfig) {
     env::set_var("RUST_LOG", "info");
     env_logger::init();
 
     info!("Starting js_core...");
-    let mut js_core_handle = JsCore::start();
+    let mut js_core_handle = JsCore::start(config);
     js_core_handle.initialized().await;
     info!("js_core initialized.");
 

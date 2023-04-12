@@ -20,6 +20,7 @@ mod string_module_loader;
 mod wallet_extension;
 
 use self::futures::{EventLoopFuture, GlobalVariableFuture};
+use crate::Ad4mConfig;
 use options::{main_module_url, main_worker_options};
 
 /// Define message
@@ -126,19 +127,21 @@ impl JsCore {
         event_loop
     }
 
-    fn init_core(&self) -> Result<GlobalVariableFuture, AnyError> {
+    fn init_core(&self, mut config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
+        config.prepare();
         let mut worker = self
             .worker
             .lock()
             .expect("init_core(): couldn't lock worker");
-        let _init_core = worker.execute_script("js_core", "initCore()")?;
+        let _init_core =
+            worker.execute_script("js_core", format!("initCore({})", config.get_json()))?;
         Ok(GlobalVariableFuture::new(
             self.worker.clone(),
             "core".to_string(),
         ))
     }
 
-    pub fn start() -> JsCoreHandle {
+    pub fn start(config: Ad4mConfig) -> JsCoreHandle {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
 
@@ -157,8 +160,8 @@ impl JsCore {
 
             rt.block_on(async {
                 let local = LocalSet::new();
-                let init_core_future = js_core.init_core().expect("couldn't spawn JS initCore()");
                 let tx_cloned = tx_inside.clone();
+                let init_core_future = js_core.init_core(config).expect("couldn't spawn JS initCore()");
 
                 // Run the local task set.
                 let run_until = local.run_until(async move {
