@@ -441,6 +441,22 @@ export class PerspectiveProxy {
         return instances
     }
 
+    async getAllSubjectProxies<T>(subjectClass: T): Promise<T[]> {
+        let classes = []
+        if(typeof subjectClass === "string") {
+            classes = [subjectClass]
+        } else {
+            classes = await this.subjectClassesByTemplate(subjectClass as object)
+        }
+
+        let instances = []
+        for(let className of classes) {
+            instances = await this.infer(`subject_class("${className}", C), instance(C, X)`)
+        }
+        return instances
+    }
+
+
     /** Returns all subject classes that match the given template object.
      * This function looks at the properties of the template object and
      * its setters and collections to create a Prolog query that finds

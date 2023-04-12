@@ -139,7 +139,7 @@ export function subjectCollection(opts: CollectionOptions) {
     };
 }
 
-function makeRandomPrologAtom(length: number): string {
+export function makeRandomPrologAtom(length: number): string {
     let result = '';
     let characters = 'abcdefghijklmnopqrstuvwxyz';
     let charactersLength = characters.length;
