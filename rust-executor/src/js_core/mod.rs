@@ -141,6 +141,24 @@ impl JsCore {
         ))
     }
 
+    fn execute_async(&self, script: String) -> Result<GlobalVariableFuture, AnyError> {
+        let mut worker = self
+            .worker
+            .lock()
+            .expect("execute_async(): couldn't lock worker");
+        let wrapped_script = format!(r#"
+        globalThis.asyncResult = undefined
+        (async () => {{ 
+            globalThis.asyncResult = ({}); 
+        }})();
+        "#, script);
+        let _execute_async = worker.execute_script("js_core", wrapped_script)?;
+        Ok(GlobalVariableFuture::new(
+            self.worker.clone(),
+            "asyncResult".to_string(),
+        ))
+    }
+
     pub fn start(config: Ad4mConfig) -> JsCoreHandle {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
@@ -186,10 +204,25 @@ impl JsCore {
                     }
                 }
 
+                let mut current_script_future = None;
                 // Until stop was request via message
                 // wait for new messages, execute them
                 // and concurrently run the event loop
                 loop {
+                    if current_script_future.is_none() {
+                        if let Ok(request) = rx_inside.try_recv() {
+                            current_script_future = Some(js_core
+                                .execute_async(request.script)
+                                .expect("couldn't spawn JS script"));
+                        }
+                    }
+
+                    if let Some(current_script_future) = current_script_future {
+                        // run event loop and current script concurrently with select!
+                    } else {
+                        // poll event loop only
+                    }
+                    
                     tokio::select! {
                         event_loop_result = js_core.event_loop() => {
                             match event_loop_result {
