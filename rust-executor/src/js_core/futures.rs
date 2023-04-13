@@ -37,15 +37,15 @@ impl GlobalVariableFuture {
 }
 
 impl Future for GlobalVariableFuture {
-    type Output = Result<(), AnyError>; // You can customize the output type.
+    type Output = Result<String, AnyError>; // You can customize the output type.
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut worker = self.worker.lock().unwrap();
-        if let Ok(value) = worker.execute_script("global_var_future", self.name.clone()) {
+        if let Ok(global_value) = worker.execute_script("global_var_future", self.name.clone()) {
             let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
             let context = v8::Context::new(scope);
             let scope = &mut v8::ContextScope::new(scope, context);
-            let value = v8::Local::new(scope, value);
+            let value = v8::Local::new(scope, global_value.clone());
 
             if value.is_promise() {
                 let promise = v8::Local::<v8::Promise>::try_from(value).unwrap();
@@ -53,12 +53,14 @@ impl Future for GlobalVariableFuture {
                     return Poll::Pending;
                 } else {
                     //let result = promise.result();
-                    return Poll::Ready(Ok(()));
+                    let value = value.to_rust_string_lossy(scope);
+                    return Poll::Ready(Ok(value));
                 }
             } else if value.is_undefined() {
                 return Poll::Pending;
             } else {
-                return Poll::Ready(Ok(()));
+                let value = value.to_rust_string_lossy(scope);
+                return Poll::Ready(Ok(value));
             }
         } else {
             return Poll::Pending;

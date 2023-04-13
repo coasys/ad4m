@@ -65,12 +65,17 @@ pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> 
                     .route(web::post().to(graphql_route))
                     .route(web::get().to(graphql_route)),
             )
+            .service(
+                web::resource("/graphql")
+                    .route(web::post().to(graphql_route))
+                    .route(web::get().to(graphql_route)),
+            )
             .service(web::resource("/playground").route(web::get().to(playground_route)))
             .service(web::resource("/graphiql").route(web::get().to(graphiql_route)))
     });
     server
-        .bind("127.0.0.1:8080")
-        .expect("Could not bind to port 8080")
+        .bind("127.0.0.1:4000")
+        .expect("Could not bind to port 4000")
         .run()
         .await
         .map_err(|e| e.into())

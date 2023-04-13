@@ -107,7 +107,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentGenerate(
+            await core.resolvers.Mutation.agentGenerate(
                 null, 
                 {{ passphrase: "{}" }},
                 {{ capabilities: [{}] }}
@@ -116,7 +116,6 @@ impl Mutation {
             passphrase, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        println!("got result back: {:?}", result);
         let s: AgentStatus = serde_json::from_str(&result)?;
         Ok(s)
     }

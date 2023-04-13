@@ -1,7 +1,6 @@
 use actix::prelude::*;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use deno_core::v8;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use log::{error, info};
@@ -146,12 +145,15 @@ impl JsCore {
             .worker
             .lock()
             .expect("execute_async(): couldn't lock worker");
-        let wrapped_script = format!(r#"
-        globalThis.asyncResult = undefined
+        let wrapped_script = format!(
+            r#"
+        globalThis.asyncResult = undefined;
         (async () => {{ 
             globalThis.asyncResult = ({}); 
         }})();
-        "#, script);
+        "#,
+            script
+        );
         let _execute_async = worker.execute_script("js_core", wrapped_script)?;
         Ok(GlobalVariableFuture::new(
             self.worker.clone(),
@@ -179,7 +181,9 @@ impl JsCore {
             rt.block_on(async {
                 let local = LocalSet::new();
                 let tx_cloned = tx_inside.clone();
-                let init_core_future = js_core.init_core(config).expect("couldn't spawn JS initCore()");
+                let init_core_future = js_core
+                    .init_core(config)
+                    .expect("couldn't spawn JS initCore()");
 
                 // Run the local task set.
                 let run_until = local.run_until(async move {
@@ -195,7 +199,9 @@ impl JsCore {
                         .expect("couldn't send on channel");
                 });
                 tokio::select! {
-                    _init_core_result = run_until => {}
+                    _init_core_result = run_until => {
+                        info!("AD4M initCore() finished");
+                    }
                     event_loop_result = js_core.event_loop() => {
                         match event_loop_result {
                             Ok(_) => info!("AD4M event loop finished"),
@@ -204,25 +210,46 @@ impl JsCore {
                     }
                 }
 
-                let mut current_script_future = None;
-                // Until stop was request via message
-                // wait for new messages, execute them
-                // and concurrently run the event loop
-                loop {
-                    if current_script_future.is_none() {
-                        if let Ok(request) = rx_inside.try_recv() {
-                            current_script_future = Some(js_core
-                                .execute_async(request.script)
-                                .expect("couldn't spawn JS script"));
-                        }
-                    }
+                info!("AD4M init complete, starting await loop waiting for requests");
 
-                    if let Some(current_script_future) = current_script_future {
-                        // run event loop and current script concurrently with select!
-                    } else {
-                        // poll event loop only
-                    }
-                    
+                loop {
+                    let receive_fut = async {
+                        while let Some(request) = rx_inside.recv().await {
+                            let tx_cloned = tx_inside.clone();
+                            let script = request.script;
+                            let id = request.id;
+                            match js_core.execute_async(script) {
+                                Ok(execute_async_future) => match execute_async_future.await {
+                                    Ok(result) => {
+                                        tx_inside
+                                            .send(JsCoreResponse {
+                                                result: Ok(result),
+                                                id: id,
+                                            })
+                                            .expect("couldn't send on channel");
+                                    }
+                                    Err(err) => {
+                                        tx_cloned
+                                            .send(JsCoreResponse {
+                                                result: Err(err.to_string()),
+                                                id,
+                                            })
+                                            .expect("couldn't send on channel");
+                                    }
+                                },
+                                Err(err) => {
+                                    tx_cloned
+                                        .send(JsCoreResponse {
+                                            result: Err(err.to_string()),
+                                            id,
+                                        })
+                                        .expect("couldn't send on channel");
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
                     tokio::select! {
                         event_loop_result = js_core.event_loop() => {
                             match event_loop_result {
@@ -233,45 +260,12 @@ impl JsCore {
                                 }
                             }
                         }
-                        request = rx_inside.recv() => {
-                            match request {
-                                Some(request) => {
-                                    let mut worker = js_core.worker.lock().expect("request loop: couldn't lock worker");
-                                    match worker.execute_script("js_core", request.script) {
-                                        Ok(result) => {
-                                            // evaluate deno result into String
-                                            let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
-                                            let context = v8::Context::new(scope);
-                                            let scope = &mut v8::ContextScope::new(scope, context);
-                                            let value = v8::Local::new(scope, result);
-                                            //let value: v8::Local<v8::String> = unsafe { v8::Local::cast(value) };
-                                            let value = value.to_rust_string_lossy(scope);
-                                            tx_inside
-                                                .send(JsCoreResponse {
-                                                    result: Ok(value),
-                                                    id: request.id,
-                                                })
-                                                .expect("couldn't send on channel");
-                                        },
-                                        Err(err) => {
-                                            tx_inside
-                                                .send(JsCoreResponse {
-                                                    result: Err(err.to_string()),
-                                                    id: request.id,
-                                                })
-                                                .expect("couldn't send on channel");
-                                        }
-                                    }
-                                }
-                                None => {
-                                    error!("AD4M event loop closed");
-                                    break;
-                                }
-                            }
+                        _request = receive_fut => {
+                            info!("AD4M receive_fut finished");
+                            break;
                         }
                     }
                 }
-
             })
         });
 
