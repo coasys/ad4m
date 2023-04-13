@@ -1,5 +1,6 @@
 use crate::utils;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +31,7 @@ impl Ad4mConfig {
             );
         }
         if self.resource_path.is_none() {
-            let mut data_path = utils::ad4m_data_directory();
+            let mut data_path = PathBuf::from(self.app_data_path.clone().unwrap());
             data_path.push("binary");
             self.resource_path = Some(
                 data_path
@@ -40,7 +41,7 @@ impl Ad4mConfig {
             );
         }
         if self.network_bootstrap_seed.is_none() {
-            let mut data_path = utils::ad4m_data_directory();
+            let mut data_path = PathBuf::from(self.app_data_path.clone().unwrap());
             data_path.push("mainnet_seed.seed");
             self.network_bootstrap_seed = Some(
                 data_path
@@ -56,13 +57,13 @@ impl Ad4mConfig {
             self.run_dapp_server = Some(true);
         }
         if self.gql_port.is_none() {
-            self.gql_port = Some(14000);
+            self.gql_port = Some(4000);
         }
         if self.connect_holochain.is_none() {
             self.connect_holochain = Some(false);
         }
         if self.swipl_path.is_none() {
-            let mut data_path = utils::ad4m_data_directory();
+            let mut data_path = PathBuf::from(self.app_data_path.clone().unwrap());
             //If OS is windows push swipl/
             if cfg!(windows) {
                 data_path.push("swipl");
@@ -79,7 +80,7 @@ impl Ad4mConfig {
             );
         }
         if self.swipl_home_path.is_none() {
-            let mut data_path = utils::ad4m_data_directory();
+            let mut data_path = PathBuf::from(self.app_data_path.clone().unwrap());
             data_path.push("swipl/bin/swipl");
             self.swipl_home_path = Some(
                 data_path
