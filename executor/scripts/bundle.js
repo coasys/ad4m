@@ -84,6 +84,14 @@ esbuild
                 });
             },
         },
+        {
+            name: `aloe`,
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^aloedb-node$`) }, (args) => {
+                    return { path: path.resolve(`AloeDB-0.9.0/mod.ts`), external: false };
+                });
+            },
+        }
     ],
     
   })
