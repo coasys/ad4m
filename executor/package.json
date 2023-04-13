@@ -75,7 +75,7 @@
     "unzipper": "^0.10.11"
   },
   "dependencies": {
-    "@holochain/client": "perspect3vism/holochain-client-js",
+    "@holochain/client": "perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",
     "@noble/secp256k1": "^1.7.0",
     "@perspect3vism/ad4m": "*",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",

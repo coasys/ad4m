@@ -1837,6 +1837,19 @@
     lodash-es "^4.17.21"
     tweetnacl "^1.0.3"
 
+"@holochain/client@perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b":
+  version "0.12.5"
+  resolved "https://codeload.github.com/perspect3vism/holochain-client-js/tar.gz/2f3a436b6d28344b0aca883ef3dc229cd042c04b"
+  dependencies:
+    "@holochain/serialization" "^0.1.0-beta-rc.3"
+    "@msgpack/msgpack" "^2.7.2"
+    "@tauri-apps/api" "^1.2.0"
+    emittery "^1.0.1"
+    isomorphic-ws "^5.0.0"
+    js-base64 "^3.7.3"
+    lodash-es "^4.17.21"
+    tweetnacl "^1.0.3"
+
 "@holochain/serialization@^0.1.0-beta-rc.3":
   version "0.1.0-beta-rc.3"
   resolved "https://registry.yarnpkg.com/@holochain/serialization/-/serialization-0.1.0-beta-rc.3.tgz#787a785fa48e00f2d168c6d4b45a233c4800cccb"
