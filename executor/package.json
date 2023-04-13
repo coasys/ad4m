@@ -66,6 +66,7 @@
     "esbuild-plugin-polyfill-node": "^0.2.0",
     "faker": "^5.1.0",
     "mocha": "*",
+    "multiformats": "11.0.2",
     "node-wget-js": "^1.0.1",
     "react": "^17.0.1",
     "sinon": "*",
