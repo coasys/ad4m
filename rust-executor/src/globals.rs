@@ -30,3 +30,6 @@ pub const HC_BIN: &[u8] = include_bytes!("../temp/hc");
 
 /// Binary data of swipl binary, included at buildtime from the swipl binary
 pub const SWIPL_ZIP: &[u8] = include_bytes!("../temp/swipl.zip");
+
+/// Binary data of dna containing the signing service; todo this should be removed and use the lair service directly once we have that in rust
+pub const SIGNING_DNA: &[u8] = include_bytes!("../temp/signing.dna");

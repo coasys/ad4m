@@ -2,7 +2,7 @@ use deno_runtime::worker::WorkerOptions;
 use std::{collections::HashMap, rc::Rc};
 use url::Url;
 
-use super::{string_module_loader::StringModuleLoader, wallet_extension};
+use super::{string_module_loader::StringModuleLoader, utils_extension, wallet_extension};
 
 pub fn main_module_url() -> Url {
     Url::parse("https://ad4m.runtime/main").unwrap()
@@ -32,9 +32,10 @@ pub fn main_worker_options() -> WorkerOptions {
     }
 
     let wallet_ext = wallet_extension::build();
+    let utils_ext = utils_extension::build();
 
     WorkerOptions {
-        extensions: vec![wallet_ext],
+        extensions: vec![wallet_ext, utils_ext],
         module_loader: Rc::new(loader),
         ..Default::default()
     }

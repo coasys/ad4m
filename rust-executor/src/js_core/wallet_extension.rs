@@ -1,5 +1,5 @@
-use deno_core::{anyhow::anyhow, error::AnyError, op, Extension, include_js_files};
-use base64::{Engine as _, engine::{general_purpose as base64engine}};
+use base64::{engine::general_purpose as base64engine, Engine as _};
+use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension};
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
@@ -17,8 +17,12 @@ fn wallet_get_main_key() -> Result<Key, AnyError> {
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
     let name = "main".to_string();
-    let public_key = wallet_ref.get_public_key(&name).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
-    let private_key = wallet_ref.get_secret_key(&name).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    let public_key = wallet_ref
+        .get_public_key(&name)
+        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    let private_key = wallet_ref
+        .get_secret_key(&name)
+        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
     Ok(Key {
         public_key: base64engine::STANDARD.encode(public_key),
         private_key: base64engine::STANDARD.encode(private_key),
@@ -26,14 +30,15 @@ fn wallet_get_main_key() -> Result<Key, AnyError> {
     })
 }
 
-
 #[op]
 fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
     let name = "main".to_string();
-    wallet_ref.get_did_document(&name).ok_or(anyhow!("main key not found. call createMainKey() first"))
+    wallet_ref
+        .get_did_document(&name)
+        .ok_or(anyhow!("main key not found. call createMainKey() first"))
 }
 
 #[op]
@@ -91,7 +96,9 @@ fn wallet_sign(payload: String) -> Result<String, AnyError> {
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
     let name = "main".to_string();
-    let signature = wallet_ref.sign(&name, payload.as_bytes()).ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    let signature = wallet_ref
+        .sign(&name, payload.as_bytes())
+        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
     Ok(base64engine::STANDARD.encode(signature))
 }
 
@@ -109,6 +116,6 @@ pub fn build() -> Extension {
             wallet_load::decl(),
             wallet_sign::decl(),
         ])
-        .force_op_registration() 
+        .force_op_registration()
         .build()
 }

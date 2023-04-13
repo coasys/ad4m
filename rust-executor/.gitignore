@@ -1,3 +1,4 @@
 !graphql-checker/index.js
 schema.json
 schema.gql
+!src/js_core/utils_extension.js
