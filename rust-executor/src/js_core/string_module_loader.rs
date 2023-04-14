@@ -1,10 +1,13 @@
 use deno_core::anyhow;
+use deno_core::error::generic_error;
 use deno_core::ModuleLoader;
 use deno_core::ModuleSource;
 use deno_core::ModuleSourceFuture;
 use deno_core::ModuleSpecifier;
+use deno_core::ModuleType;
 use deno_core::ResolutionKind;
 use deno_runtime::deno_core::error::AnyError;
+use log::info;
 use std::collections::HashMap;
 use std::pin::Pin;
 
@@ -41,19 +44,54 @@ impl ModuleLoader for StringModuleLoader {
         _maybe_referrer: Option<ModuleSpecifier>,
         _is_dyn_import: bool,
     ) -> Pin<Box<ModuleSourceFuture>> {
-        let module_code = self.modules.get(module_specifier.as_str()).cloned();
-        let module_specifier = module_specifier.clone();
-        let fut = async move {
-            match module_code {
-                Some(code) => Ok(ModuleSource {
-                    code: code.into(),
-                    module_type: deno_core::ModuleType::JavaScript,
-                    module_url_specified: module_specifier.clone().to_string(),
-                    module_url_found: module_specifier.clone().to_string(),
-                }),
-                None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
+        let path = module_specifier.to_file_path().map_err(|_| {
+            generic_error(format!(
+                "Provided module specifier \"{module_specifier}\" is not a file URL."
+            ))
+        });
+        match path {
+            Ok(path) => {
+                let module_type = if let Some(extension) = path.extension() {
+                    let ext = extension.to_string_lossy().to_lowercase();
+                    if ext == "json" {
+                        ModuleType::Json
+                    } else {
+                        ModuleType::JavaScript
+                    }
+                } else {
+                    ModuleType::JavaScript
+                };
+
+                let code =
+                    std::fs::read_to_string(path).expect("Could not read file path to string");
+                let module_specifier = module_specifier.clone();
+                let fut = async move {
+                    Ok(ModuleSource {
+                        code: code.into(),
+                        module_type: module_type,
+                        module_url_specified: module_specifier.to_string(),
+                        module_url_found: module_specifier.to_string(),
+                    })
+                };
+                Box::pin(fut)
             }
-        };
-        Box::pin(fut)
+            Err(_err) => {
+                info!("Module is not a file path, importing as raw module string");
+                let module_code = self.modules.get(module_specifier.as_str()).cloned();
+                let module_specifier = module_specifier.clone();
+                let fut = async move {
+                    match module_code {
+                        Some(code) => Ok(ModuleSource {
+                            code: code.into(),
+                            module_type: deno_core::ModuleType::JavaScript,
+                            module_url_specified: module_specifier.clone().to_string(),
+                            module_url_found: module_specifier.clone().to_string(),
+                        }),
+                        None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
+                    }
+                };
+                Box::pin(fut)
+            }
+        }
     }
 }
