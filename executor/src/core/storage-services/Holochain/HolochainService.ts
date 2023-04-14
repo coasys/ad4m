@@ -82,6 +82,17 @@ export default class HolochainService {
 
         console.log("HolochainService: Creating low-db instance for holochain-serivce");
         this.#dataPath = dataPath
+
+        let pubKeyDbPath = path.join(dataPath, 'holochain-service-pubkeys.json')
+        let signingCredentialsDbPath = path.join(dataPath, 'holochain-service-signing-credentials.json')
+
+        if (!fs.existsSync(pubKeyDbPath)) {
+            fs.writeFileSync(pubKeyDbPath, "");
+        }
+        if (!fs.existsSync(signingCredentialsDbPath)) {
+            fs.writeFileSync(signingCredentialsDbPath, "");
+        }
+
         this.#pubKeyDb = new Database<PubKeySchema>(path.join(dataPath, 'holochain-service-pubkeys.json'))
         this.#signingCredentialsDb = new Database<SigningCredentialsSchema>(path.join(dataPath, 'holochain-service-signing-credentials.json'))
         

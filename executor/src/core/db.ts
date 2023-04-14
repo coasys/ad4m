@@ -1,5 +1,6 @@
 import { Database } from 'aloedb-node'
 import path from 'path'
+import fs from 'fs';
 import type { Expression, LinkExpression, PerspectiveDiff } from "@perspect3vism/ad4m";  
 
 interface LinkSchema {
@@ -30,6 +31,18 @@ export class PerspectivismDb {
     #diffDb: Database<PerspectiveDiffSchema>;
 
     constructor(dbPath?: string) {
+        let linkDbPath = dbPath ? path.join(dbPath, "links.json") : undefined;
+        let expressionDbPath = dbPath ? path.join(dbPath, "expression.json") : undefined;
+        let diffDbPath = dbPath ? path.join(dbPath, "diffs.json") : undefined;
+        if (linkDbPath && !fs.existsSync(linkDbPath)) {
+            fs.writeFileSync(linkDbPath, "");
+        }
+        if (expressionDbPath && !fs.existsSync(expressionDbPath)) {
+            fs.writeFileSync(expressionDbPath, "");
+        }
+        if (diffDbPath && !fs.existsSync(diffDbPath)) {
+            fs.writeFileSync(diffDbPath, "");
+        }
         this.#linkDb = new Database<LinkSchema>(dbPath ? path.join(dbPath, "links.json") : undefined);
         this.#expressionDb = new Database<ExpressionSchema>(dbPath ? path.join(dbPath, "expression.json") : undefined);
         this.#diffDb = new Database<PerspectiveDiffSchema>(dbPath ? path.join(dbPath, "diffs.json") : undefined);
