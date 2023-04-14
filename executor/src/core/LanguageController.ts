@@ -17,10 +17,6 @@ import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
 import stringify from 'json-stable-stringify'
-const crypto = require('crypto');
-const { CID } = require('multiformats');
-const { multicodec } = require('multiformats/codecs');
-const { multihash } = require('multiformats/hashes');
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
@@ -363,18 +359,12 @@ export default class LanguageController {
     }
 
     async ipfsHash(data: Buffer|string): Promise<string> {
-        // Calculate the SHA-256 hash
-        const hash = crypto.createHash('sha256');
-        hash.update(data);
-        const digest = hash.digest();
-
-        // Create a multihash
-        const mhDigest = await multihash.encode(digest, 'sha2-256');
-
-        // Create a CID
-        const cid = new CID(1, multicodec.getCode('raw'), mhDigest);
-
-        return cid.toString();
+        if (typeof data != "string") {
+            data = data.toString();
+        }
+        const hash = UTILS.hash(data);
+        console.log("generated hash", hash);
+        return hash;
     }
 
     async installLanguage(address: Address, languageMeta: null|Expression): Promise<Language | undefined> {
