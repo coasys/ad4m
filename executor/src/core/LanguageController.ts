@@ -39,24 +39,28 @@ const importModule = async (modulePath: string) => {
         return await import(path)
     }
 
-    return await import(modulePath)
-}
-
-const requireModule = async (modulePath: string) => {
-    return await require(modulePath)
+    return await import(`file://${modulePath}`)
 }
 
 const loadModule = async (modulePath: string) => {
-  try {
-    return await importModule(modulePath)
-  } catch (e1) {
+    // Check if the file exists
     try {
-        return await requireModule(modulePath)
-    } catch (e2) {
-        throw new ImportError(`Unable to import module ${modulePath}. Got error ${e1} when trying to import as es module\n 
-            and error when trying to import as commonjs ${e2}`)
+        //@ts-ignore
+        await Deno.stat(modulePath);
+    } catch (err) {
+        //@ts-ignore
+        if (err instanceof Deno.errors.NotFound) {
+        throw new Error(`File not found: ${modulePath}`);
+        }
+        throw err;
     }
-  }
+    const res  = await UTILS.loadModule(`file://${modulePath}`);
+
+    try {
+        return await importModule(`modulePath`)
+    } catch (e1) {
+        throw new ImportError(`Unable to import module at path: ${modulePath}. Got error: ${e1}}`)
+    }
 }
 
 export default class LanguageController {
@@ -219,23 +223,17 @@ export default class LanguageController {
         try {
             languageSource = await loadModule(sourceFilePath);
         } catch (e) {
-            const cjsPath = sourceFilePath.replace(".js", ".cjs");
-            fs.copyFileSync(sourceFilePath, cjsPath);
-            try {
-                languageSource = await loadModule(cjsPath);
-            } catch (e) {
-                const errMsg = `Could not load language ${e}`;
-                console.error(errMsg);
-                this.pubSub.publish(
-                    PubSub.EXCEPTION_OCCURRED_TOPIC,
-                    {
-                        title: "Failed to load installed language",
-                        message: errMsg,
-                        type: ExceptionType.LanguageIsNotLoaded
-                    } as ExceptionInfo
-                );
-                throw new Error(errMsg);
-            }
+            const errMsg = `Could not load language ${e}`;
+            console.error(errMsg);
+            this.pubSub.publish(
+                PubSub.EXCEPTION_OCCURRED_TOPIC,
+                {
+                    title: "Failed to load installed language",
+                    message: errMsg,
+                    type: ExceptionType.LanguageIsNotLoaded
+                } as ExceptionInfo
+            );
+            throw new Error(errMsg);
         }
         console.warn("LanguageController.loadLanguage: language loaded!");
         let create;

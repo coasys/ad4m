@@ -5,6 +5,8 @@ use multihash::{Code, MultihashDigest};
 
 use crate::globals::SIGNING_DNA;
 
+use super::JS_CORE_HANDLE;
+
 #[op]
 fn get_signing_dna() -> Result<Vec<u8>, AnyError> {
     Ok(SIGNING_DNA.to_vec())
@@ -24,10 +26,26 @@ fn hash(data: String) -> Result<String, AnyError> {
     Ok(format!("Qm{}", encoded_cid))
 }
 
+#[op]
+async fn load_module(path: String) -> Result<String, AnyError> {
+    println!("Trying to load module: {}", path);
+    let js_core_handle = JS_CORE_HANDLE
+        .lock()
+        .expect("Could not get lock on js_core_handle");
+
+    let res = js_core_handle.clone().unwrap().load_module(path).await;
+    println!("load module res: {:?}", res);
+    Ok(String::from("temp"))
+}
+
 pub fn build() -> Extension {
     Extension::builder("wallet")
         .js(include_js_files!(wallet "utils_extension.js",))
-        .ops(vec![get_signing_dna::decl(), hash::decl()])
+        .ops(vec![
+            get_signing_dna::decl(),
+            hash::decl(),
+            load_module::decl(),
+        ])
         .force_op_registration()
         .build()
 }

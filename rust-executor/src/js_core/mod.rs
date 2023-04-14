@@ -1,9 +1,12 @@
 use actix::prelude::*;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use lazy_static::lazy_static;
 use log::{error, info};
+use std::env::current_dir;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
@@ -23,6 +26,10 @@ use self::futures::{EventLoopFuture, GlobalVariableFuture};
 use crate::Ad4mConfig;
 use options::{main_module_url, main_worker_options};
 
+lazy_static! {
+    pub static ref JS_CORE_HANDLE: Mutex<Option<JsCoreHandle>> = Mutex::new(None);
+}
+
 /// Define message
 #[derive(Message)]
 #[rtype(result = "Result<String, AnyError>")]
@@ -32,17 +39,22 @@ pub struct Execute {
 
 pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,
+    rx_module_load: Receiver<JsCoreResponse>,
     tx: UnboundedSender<JsCoreRequest>,
-
+    tx_module_load: UnboundedSender<JsCoreRequest>,
     broadcast_tx: Sender<JsCoreResponse>,
+    broadcast_loader_tx: Sender<JsCoreResponse>,
 }
 
 impl Clone for JsCoreHandle {
     fn clone(&self) -> Self {
         JsCoreHandle {
             rx: self.broadcast_tx.subscribe(),
+            rx_module_load: self.broadcast_loader_tx.subscribe(),
             tx: self.tx.clone(),
+            tx_module_load: self.tx_module_load.clone(),
             broadcast_tx: self.broadcast_tx.clone(),
+            broadcast_loader_tx: self.broadcast_loader_tx.clone(),
         }
     }
 }
@@ -64,6 +76,36 @@ impl JsCoreHandle {
         let mut response = None;
         while response.is_none() {
             match self.rx.recv().await {
+                Ok(r) => {
+                    if r.id == id {
+                        response = Some(r);
+                    }
+                }
+                Err(err) => {
+                    error!("Error receiving on channel");
+                    return Err(anyhow!(err));
+                }
+            }
+        }
+
+        response
+            .expect("none case handle above")
+            .result
+            .map_err(|err| anyhow!(err))
+    }
+
+    pub async fn load_module(&mut self, path: String) -> Result<String, AnyError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.tx_module_load
+            .send(JsCoreRequest {
+                script: path,
+                id: id.clone(),
+            })
+            .expect("couldn't send on channel... it is likely that the main worker thread has crashed...");
+
+        let mut response = None;
+        while response.is_none() {
+            match self.rx_module_load.recv().await {
                 Ok(r) => {
                     if r.id == id {
                         response = Some(r);
@@ -108,6 +150,15 @@ impl JsCore {
                 main_worker_options(),
             ))),
         }
+    }
+
+    async fn load_module(&self, file_path: String) -> Result<(), AnyError> {
+        let mut worker = self.worker.lock().unwrap();
+        let url = resolve_url_or_path(&file_path, current_dir()?.as_path())?;
+        let _module_id = worker.js_runtime.load_side_module(&url, None).await?;
+        //TODO; this likely needs to be run (although might be handled by the import in the js code when import() is called)
+        //worker.js_runtime.mod_evaluate(module_id);
+        Ok(())
     }
 
     async fn init_engine(&self) {
@@ -166,7 +217,11 @@ impl JsCore {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
 
+        let (tx_inside_loader, rx_outside_loader) = broadcast::channel::<JsCoreResponse>(50);
+        let (tx_outside_loader, mut rx_inside_loader) = mpsc::unbounded_channel::<JsCoreRequest>();
+
         let tx_inside_clone = tx_inside.clone();
+        let tx_inside_loader_clone = tx_inside_loader.clone();
         std::thread::spawn(move || {
             let rt = Builder::new_current_thread()
                 .enable_all()
@@ -214,6 +269,37 @@ impl JsCore {
                 info!("AD4M init complete, starting await loop waiting for requests");
 
                 loop {
+                    //Listener future for loading JS modules into runtime
+                    let module_load_fut = async {
+                        while let Some(request) = rx_inside_loader.recv().await {
+                            let tx_loader_cloned = tx_inside_loader.clone();
+                            let script = request.script;
+                            let id = request.id;
+
+                            match js_core.load_module(script).await {
+                                Ok(()) => {
+                                    info!("Module loaded!");
+                                    tx_inside_loader
+                                        .send(JsCoreResponse {
+                                            result: Ok(String::from("")),
+                                            id: id,
+                                        })
+                                        .expect("couldn't send on channel");
+                                }
+                                Err(err) => {
+                                    error!("Error loading module: {:?}", err);
+                                    tx_loader_cloned
+                                        .send(JsCoreResponse {
+                                            result: Err(err.to_string()),
+                                            id,
+                                        })
+                                        .expect("couldn't send on channel");
+                                }
+                            }
+                        }
+                    };
+
+                    //Listener future for receiving script execution calls
                     let receive_fut = async {
                         while let Some(request) = rx_inside.recv().await {
                             let tx_cloned = tx_inside.clone();
@@ -251,6 +337,10 @@ impl JsCore {
                         }
                     };
 
+                    //NOTE: WARNING!!!!!: Its is possible that if we get a request such as generate agent and then another to load a module,
+                    //since the load module would complete first it will cause the request future to be "lost" and thus the graphql will not get a response
+                    //we should track this and if required change the behaviour here so that we ensure we continue to run a receive_fut even in the case where
+                    //a module_load_fut completes
                     tokio::select! {
                         event_loop_result = js_core.event_loop() => {
                             match event_loop_result {
@@ -262,7 +352,11 @@ impl JsCore {
                             }
                         }
                         _request = receive_fut => {
-                            info!("AD4M receive_fut finished");
+                            info!("AD4M receive_fut completed");
+                            break;
+                        }
+                        _module_load = module_load_fut => {
+                            info!("AD4M module load completed");
                             break;
                         }
                     }
@@ -270,10 +364,21 @@ impl JsCore {
             })
         });
 
-        JsCoreHandle {
+        let handle = JsCoreHandle {
             rx: rx_outside,
             tx: tx_outside,
+            rx_module_load: rx_outside_loader,
+            tx_module_load: tx_outside_loader,
             broadcast_tx: tx_inside_clone,
-        }
+            broadcast_loader_tx: tx_inside_loader_clone,
+        };
+
+        //Set the JsCoreHandle to a global object so we can use it inside of deno op calls
+        let mut global_handle = JS_CORE_HANDLE
+            .lock()
+            .expect("Could not get lock for JS_CORE_HANDLE");
+        *global_handle = Some(handle.clone());
+
+        handle
     }
 }
