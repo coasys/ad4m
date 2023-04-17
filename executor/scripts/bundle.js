@@ -91,6 +91,14 @@ esbuild
                     return { path: path.resolve(`AloeDB-0.9.0/mod.ts`), external: false };
                 });
             },
+        },
+        {
+            name: "https://deno.land/std@0.150.0/media_types/mod.ts",
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.150.0/media_types/mod.ts$`) }, (args) => {
+                    return { path: path.resolve(`deno_std-0.177.0/media_types/mod.ts`), external: false };
+                });
+            },
         }
     ],
     

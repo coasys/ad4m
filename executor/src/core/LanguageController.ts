@@ -56,11 +56,7 @@ const loadModule = async (modulePath: string) => {
     }
     const res  = await UTILS.loadModule(`file://${modulePath}`);
 
-    try {
-        return await importModule(modulePath)
-    } catch (e1) {
-        throw new ImportError(`Unable to import module at path: ${modulePath}. Got error: ${e1}}`)
-    }
+    return await importModule(modulePath)
 }
 
 export default class LanguageController {
@@ -98,12 +94,8 @@ export default class LanguageController {
     }
 
     async loadLanguages() {
-        try {
-            await this.loadSystemLanguages()
-            if (!this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
-        } catch (e) {
-            throw new Error(`LanguageController.loadLanguages: Error loading languages ${e}`);
-        }
+        await this.loadSystemLanguages()
+        if (!this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
     }
 
     async loadSystemLanguages() {
@@ -220,21 +212,21 @@ export default class LanguageController {
         const hash = await this.ipfsHash(bundleBytes)
         console.debug("LanguageController.loadLanguage: loading language at path", sourceFilePath, "with hash", hash);
         let languageSource;
-        try {
-            languageSource = await loadModule(sourceFilePath);
-        } catch (e) {
-            const errMsg = `Could not load language ${e}`;
-            console.error(errMsg);
-            this.pubSub.publish(
-                PubSub.EXCEPTION_OCCURRED_TOPIC,
-                {
-                    title: "Failed to load installed language",
-                    message: errMsg,
-                    type: ExceptionType.LanguageIsNotLoaded
-                } as ExceptionInfo
-            );
-            throw new Error(errMsg);
-        }
+        //try {
+        languageSource = await loadModule(sourceFilePath);
+        // } catch (e) {
+        //     const errMsg = `Could not load language ${e}`;
+        //     console.error(errMsg);
+        //     this.pubSub.publish(
+        //         PubSub.EXCEPTION_OCCURRED_TOPIC,
+        //         {
+        //             title: "Failed to load installed language",
+        //             message: errMsg,
+        //             type: ExceptionType.LanguageIsNotLoaded
+        //         } as ExceptionInfo
+        //     );
+        //     throw new Error(errMsg);
+        // }
         console.warn("LanguageController.loadLanguage: language loaded!");
         let create;
         if (!languageSource.default) {
