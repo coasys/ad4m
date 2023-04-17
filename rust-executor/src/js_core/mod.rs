@@ -341,6 +341,7 @@ impl JsCore {
                     //since the load module would complete first it will cause the request future to be "lost" and thus the graphql will not get a response
                     //we should track this and if required change the behaviour here so that we ensure we continue to run a receive_fut even in the case where
                     //a module_load_fut completes
+                    //Using join! here might work if we ensure that the receive fut & module load fut's contain loops and run forever
                     tokio::select! {
                         event_loop_result = js_core.event_loop() => {
                             match event_loop_result {

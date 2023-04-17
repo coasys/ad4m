@@ -57,7 +57,7 @@ const loadModule = async (modulePath: string) => {
     const res  = await UTILS.loadModule(`file://${modulePath}`);
 
     try {
-        return await importModule(`modulePath`)
+        return await importModule(modulePath)
     } catch (e1) {
         throw new ImportError(`Unable to import module at path: ${modulePath}. Got error: ${e1}}`)
     }
