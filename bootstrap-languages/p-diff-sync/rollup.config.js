@@ -15,7 +15,7 @@ export default {
   external: [],
   output: {
     sourcemap: true,
-    format: "cjs",
+    format: "esm",
     name: "JuntoPerspective",
     file: "build/bundle.js",
     interop: "esModule",

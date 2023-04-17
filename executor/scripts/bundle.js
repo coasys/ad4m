@@ -41,7 +41,7 @@ esbuild
     outfile: 'lib/bundle.js',
     bundle: true,
     platform: 'node',
-    target: 'deno1.3',
+    target: 'esnext',
     format: 'esm',
     globalName: 'executor',
     charset: 'ascii',
