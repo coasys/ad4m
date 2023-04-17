@@ -14,3 +14,4 @@ export const init = internalInit
 export const path = internalPath
 export const os = internalOs
 
+import "../xhr/mod.ts";
