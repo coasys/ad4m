@@ -1,6 +1,7 @@
 import type { Address, AgentService, PublicSharing, LanguageContext, LanguageLanguageInput} from "@perspect3vism/ad4m";
 import type { IPFS } from "ipfs-core-types"
-import axios from "axios";
+//@ts-ignore
+import axiod from "https://deno.land/x/axiod/mod.ts";
 import https from "https";
 import { PROXY_URL } from ".";
 
@@ -14,12 +15,8 @@ export class CloudflarePutAdapter implements PublicSharing {
   }
 
   async createPublic(language: LanguageLanguageInput): Promise<Address> {
-    const ipfsAddress = await this.#IPFS.add(
-      { content: language.bundle.toString()},
-      { onlyHash: true},
-    );
     // @ts-ignore
-    const hash = ipfsAddress.cid.toString();
+    const hash = UTILS.hash(language.bundle.toString());
 
     if(hash != language.meta.address)
       throw new Error(`Language Persistence: Can't store language. Address stated in meta differs from actual file\nWanted: ${language.meta.address}\nGot: ${hash}`)
@@ -38,7 +35,7 @@ export class CloudflarePutAdapter implements PublicSharing {
     const httpsAgent = new https.Agent({
       rejectUnauthorized: false
     });
-    const metaPostResult = await axios.post(PROXY_URL, metaPostData, { httpsAgent });
+    const metaPostResult = await axiod.post(PROXY_URL, metaPostData, { httpsAgent });
     if (metaPostResult.status != 200) {
       console.error("Upload language meta data gets error: ", metaPostResult);
     }
@@ -50,7 +47,7 @@ export class CloudflarePutAdapter implements PublicSharing {
       value: language.bundle.toString(),
     };
     //Save the language bundle to the KV store
-    const bundlePostResult = await axios.post(PROXY_URL, languageBundleBucketParams, { httpsAgent });
+    const bundlePostResult = await axiod.post(PROXY_URL, languageBundleBucketParams, { httpsAgent });
     if (bundlePostResult.status != 200) {
       console.error("Upload language bundle data gets error: ", metaPostResult);
     }

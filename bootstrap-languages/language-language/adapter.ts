@@ -1,6 +1,7 @@
 import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext } from "@perspect3vism/ad4m";
 import { CloudflarePutAdapter } from "./putAdapter";
-import axios from "axios";
+//@ts-ignore
+import axiod from "https://deno.land/x/axiod/mod.ts";
 import { PROXY_URL } from ".";
 
 export default class Adapter implements ExpressionAdapter {
@@ -20,7 +21,7 @@ export default class Adapter implements ExpressionAdapter {
     
     let presignedUrl;
     try {
-      const getPresignedUrl = await axios.get(PROXY_URL+`?key=${metaDataKey}`);
+      const getPresignedUrl = await axiod.get(PROXY_URL+`?key=${metaDataKey}`);
       presignedUrl = getPresignedUrl.data.url;
     } catch (e) {
       console.error("Get meta information failed at getting presigned url", address);
@@ -29,7 +30,7 @@ export default class Adapter implements ExpressionAdapter {
 
     let metaObject;
     try {
-      const getMetaObject = await axios.get(presignedUrl);
+      const getMetaObject = await axiod.get(presignedUrl);
       metaObject = getMetaObject.data;
     } catch (e) {
       console.error("Get meta information failed at getting meta information", presignedUrl);

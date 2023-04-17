@@ -1,18 +1,21 @@
 import svelte from "rollup-plugin-svelte";
-import resolve from "@rollup/plugin-node-resolve";
+import { nodeResolve } from "@rollup/plugin-node-resolve";
 import commonjs from "@rollup/plugin-commonjs";
 //import { terser } from 'rollup-plugin-terser';
 import sveltePreprocess from "svelte-preprocess";
 import postcss from "rollup-plugin-postcss";
 import { string } from "rollup-plugin-string";
+import builtins from 'rollup-plugin-node-builtins';
+import urlImport from 'rollup-plugin-url-import'
 
 const production = !process.env.ROLLUP_WATCH;
 
 export default {
   input: "index.js",
   output: {
-    sourcemap: true,
-    format: "cjs",
+    sourcemap: false,
+    format: "esm",
+    target: "",
     name: "LanguageLanguage",
     file: "build/bundle.js",
   },
@@ -36,11 +39,12 @@ export default {
     // some cases you'll need additional configuration -
     // consult the documentation for details:
     // https://github.com/rollup/plugins/tree/master/packages/commonjs
-    resolve({
-      browser: false,
+    commonjs({transformMixedEsModules: true}),
+    nodeResolve({
       dedupe: ["svelte"],
     }),
-    commonjs(),
+    builtins(),
+    urlImport(),
     postcss({
       extract: true,
       minimize: true,

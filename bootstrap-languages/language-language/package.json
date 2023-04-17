@@ -13,7 +13,9 @@
   "devDependencies": {
     "@perspect3vism/ad4m": "*",
     "@rollup/plugin-commonjs": "^14.0.0",
-    "@rollup/plugin-node-resolve": "^8.0.0",
+    "@rollup/plugin-node-resolve": "^8.4.0",
+    "rollup-plugin-url-import": "*",
+    "rollup-plugin-node-builtins": "*",
     "@rollup/plugin-typescript": "^4.0.0",
     "@tsconfig/svelte": "^1.0.0",
     "ipfs-core-types": "0.10.1",
