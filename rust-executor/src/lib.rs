@@ -17,7 +17,7 @@ pub use config::Ad4mConfig;
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(config: Ad4mConfig) {
-    env::set_var("RUST_LOG", "info");
+    env::set_var("RUST_LOG", "rust_executor=info");
     env_logger::init();
 
     info!("Starting js_core...");
