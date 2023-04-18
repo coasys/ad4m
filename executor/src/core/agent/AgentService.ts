@@ -112,7 +112,9 @@ export default class AgentService {
 
     const key = this.getSigningKey();
     //@ts-ignore
-    const privKey = Uint8Array.from(Buffer.from(key.privateKey, key.encoding));
+    let buf = Buffer.from(key.private_key, key.encoding);
+    //@ts-ignore
+    const privKey = Uint8Array.from(buf);
 
     const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey);
     const sigBuffer = Buffer.from(sigObj.signature);
