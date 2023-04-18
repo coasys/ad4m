@@ -1,12 +1,9 @@
-import type { Address, LanguageAdapter, PublicSharing, LanguageContext } from "@perspect3vism/ad4m";
+import type { Address, LanguageAdapter, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
 //@ts-ignore
 import axiod from "https://deno.land/x/axiod/mod.ts";
-import { PROXY_URL } from ".";
-import XMLHttpRequest from 'xhr2';
+import { PROXY_URL } from "./index.ts";
 
 export default class LangAdapter implements LanguageAdapter {
-  putAdapter: PublicSharing;
-
   constructor(context: LanguageContext) {
   }
 

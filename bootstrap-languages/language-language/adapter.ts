@@ -1,8 +1,8 @@
-import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext } from "@perspect3vism/ad4m";
-import { CloudflarePutAdapter } from "./putAdapter";
+import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import { CloudflarePutAdapter } from "./putAdapter.ts";
 //@ts-ignore
 import axiod from "https://deno.land/x/axiod/mod.ts";
-import { PROXY_URL } from ".";
+import { PROXY_URL } from "./index.ts";
 
 export default class Adapter implements ExpressionAdapter {
   putAdapter: PublicSharing;

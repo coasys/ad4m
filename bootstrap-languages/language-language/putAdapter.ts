@@ -1,17 +1,13 @@
-import type { Address, AgentService, PublicSharing, LanguageContext, LanguageLanguageInput} from "@perspect3vism/ad4m";
-import type { IPFS } from "ipfs-core-types"
+import type { Address, AgentService, PublicSharing, LanguageContext, LanguageLanguageInput} from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
 //@ts-ignore
 import axiod from "https://deno.land/x/axiod/mod.ts";
-import https from "https";
-import { PROXY_URL } from ".";
+import { PROXY_URL } from "./index.ts";
 
 export class CloudflarePutAdapter implements PublicSharing {
   #agent: AgentService;
-  #IPFS: IPFS;
 
   constructor(context: LanguageContext) {
     this.#agent = context.agent;
-    this.#IPFS = context.IPFS;
   }
 
   async createPublic(language: LanguageLanguageInput): Promise<Address> {
@@ -32,10 +28,7 @@ export class CloudflarePutAdapter implements PublicSharing {
       value: JSON.stringify(expression),
     };
     //Save the meta information to the KV store
-    const httpsAgent = new https.Agent({
-      rejectUnauthorized: false
-    });
-    const metaPostResult = await axiod.post(PROXY_URL, metaPostData, { httpsAgent });
+    const metaPostResult = await axiod.post(PROXY_URL, metaPostData);
     if (metaPostResult.status != 200) {
       console.error("Upload language meta data gets error: ", metaPostResult);
     }
@@ -47,7 +40,7 @@ export class CloudflarePutAdapter implements PublicSharing {
       value: language.bundle.toString(),
     };
     //Save the language bundle to the KV store
-    const bundlePostResult = await axiod.post(PROXY_URL, languageBundleBucketParams, { httpsAgent });
+    const bundlePostResult = await axiod.post(PROXY_URL, languageBundleBucketParams);
     if (bundlePostResult.status != 200) {
       console.error("Upload language bundle data gets error: ", metaPostResult);
     }
