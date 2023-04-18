@@ -15,8 +15,7 @@
     "build:linux": "yarn compile-dna && yarn build:common",
     "build:macos": "yarn compile-dna && yarn build:common",
     "build:windows": "yarn compile-dna-windows && yarn build:common",
-    "build:common": "yarn rollup-dna && yarn rollup-icons && yarn rollup-expression-ui && yarn deno-bundle",
-    "dev": "tsc && rollup -c rollup.config.icons.js && rollup -c -w"
+    "build:common": "yarn rollup-dna && yarn rollup-icons && yarn rollup-expression-ui && yarn deno-bundle"
   },
   "author": "",
   "license": "ISC",
