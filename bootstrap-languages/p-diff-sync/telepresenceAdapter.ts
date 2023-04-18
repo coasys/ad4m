@@ -1,5 +1,5 @@
-import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "@perspect3vism/ad4m";
-import { DNA_NICK, ZOME_NAME } from "./dna";
+import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";;
+import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
 
 export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     hcDna: HolochainLanguageDelegate;
@@ -14,6 +14,7 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     }
 
     async getOnlineAgents(): Promise<OnlineAgent[]> {
+        //@ts-ignore
         const getActiveAgents = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_active_agents", null);
         let calls = [];
         for (const activeAgent of getActiveAgents) {

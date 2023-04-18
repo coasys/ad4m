@@ -1,7 +1,7 @@
-import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "@perspect3vism/ad4m";
-import { LinkAdapter } from "./linksAdapter";
-import { TelepresenceAdapterImplementation } from "./telepresenceAdapter";
-import { DNA, DNA_NICK, ZOME_NAME } from "./dna";
+import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import { LinkAdapter } from "./linksAdapter.ts";
+import { TelepresenceAdapterImplementation } from "./telepresenceAdapter.ts";
+import { DNA, DNA_NICK, ZOME_NAME } from "./build/dna.js";
 
 function interactions(expression: Address): Interaction[] {
   return [];

@@ -6,11 +6,12 @@
   "scripts": {
     "build-dna": "cd hc-dna && ./build.sh && cd ..",
     "build": "run-script-os",
-    "build:linux": "yarn run build-dna && tsc && rollup -c",
-    "build:macos": "yarn run build-dna && tsc && rollup -c",
-    "build:windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && tsc && rollup -c",
-    "build-lang": "tsc && rollup -c",
-    "dev": "tsc && rollup -c -w",
+    "build:linux": "yarn run build-dna && yarn run build-common",
+    "build:macos": "yarn run build-dna && yarn run build-common",
+    "build:windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && yarn run build-common",
+    "deno-bundle": "deno bundle index.ts build/bundle.js",
+    "rollup-dna": "rollup -c rollup.config.hc-dna.js",
+    "build-common": "yarn run rollup-dna && yarn run deno-bundle",
     "integration-test": "node ../../test-runner/build/cli.js --test ./integration-test.js --bundle \"./build/bundle.js\" --meta '{\"name\":\"p-diff-sync\",\"description\":\"Holochain based language for sharing Perspectives\",\"sourceCodeLink\":\"https://github.com/perspect3vism/perspective-diff-sync\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'"
   },
   "author": "",

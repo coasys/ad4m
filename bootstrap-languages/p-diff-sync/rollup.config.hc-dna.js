@@ -11,13 +11,13 @@ import dna from "@perspect3vism/rollup-plugin-dna";
 const production = !process.env.ROLLUP_WATCH;
 
 export default {
-  input: "index.js",
+  input: "dna.js",
   external: [],
   output: {
     sourcemap: true,
     format: "esm",
-    name: "JuntoPerspective",
-    file: "build/bundle.js",
+    name: "PDiffSyncLanguage",
+    file: "build/dna.js",
     interop: "esModule",
     globals: {},
   },

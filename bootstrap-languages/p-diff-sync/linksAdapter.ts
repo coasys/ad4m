@@ -1,10 +1,12 @@
 import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
-  LinkExpression, DID, Perspective, PerspectiveState } from "@perspect3vism/ad4m";
-import type { SyncStateChangeObserver } from "@perspect3vism/ad4m";
-import { DNA_NICK, ZOME_NAME } from "./dna";
+  LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";;
+import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";;
+import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
 
 class PeerInfo {
+  //@ts-ignore
   currentRevision: Buffer;
+  //@ts-ignore
   lastSeen: Date;
 };
 
@@ -34,10 +36,12 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async others(): Promise<DID[]> {
+    //@ts-ignore
     return await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_others", null);
   }
 
   async currentRevision(): Promise<string> {
+    //@ts-ignore
     let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "current_revision", null);
     return res as string;
   }
@@ -45,6 +49,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   async sync(): Promise<PerspectiveDiff> {
     try {
       await this.currentRevisionMutex.lock();
+      //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
       if (current_revision && Buffer.isBuffer(current_revision)) {
         this.myCurrentRevision = current_revision; 
@@ -117,8 +122,10 @@ export class LinkAdapter implements LinkSyncAdapter {
         }
       }
 
+      //@ts-ignore
       generateRevisionStates(this.myCurrentRevision);
 
+      //@ts-ignore
       checkSyncState(this.syncStateChangeCallback);
 
       for (const hash of Array.from(revisions)) {
@@ -133,7 +140,9 @@ export class LinkAdapter implements LinkSyncAdapter {
             let myRevision = pullResult.current_revision;
             this.myCurrentRevision = myRevision;
 
+            //@ts-ignore
             generateRevisionStates(this.myCurrentRevision);
+            //@ts-ignore
             checkSyncState(this.syncStateChangeCallback);
           }
         }
@@ -167,6 +176,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async render(): Promise<Perspective> {
+    //@ts-ignore
     let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "render", null);
     return new Perspective(res.links);
   }
@@ -235,6 +245,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         DNA_NICK,
         ZOME_NAME,
         "add_active_agent_link",
+        //@ts-ignore
         null
       );
     }
