@@ -27,24 +27,34 @@ export class CloudflarePutAdapter implements PublicSharing {
       // Content of the new object.
       value: JSON.stringify(expression),
     };
-    //Save the meta information to the KV store
-    const metaPostResult = await axiod.post(PROXY_URL, metaPostData);
-    if (metaPostResult.status != 200) {
-      console.error("Upload language meta data gets error: ", metaPostResult);
-    }
+    try {
+      //Save the meta information to the KV store
+      const metaPostResult = await axiod.post(PROXY_URL, metaPostData);
+      if (metaPostResult.status != 200) {
+        console.error("Upload language meta data gets error: ", metaPostResult);
+      }
 
-    //Build the key value object for the language bundle
-    const languageBundleBucketParams = {
-      key: hash,
-      // Content of the new object.
-      value: language.bundle.toString(),
-    };
-    //Save the language bundle to the KV store
-    const bundlePostResult = await axiod.post(PROXY_URL, languageBundleBucketParams);
-    if (bundlePostResult.status != 200) {
-      console.error("Upload language bundle data gets error: ", metaPostResult);
-    }
+      //Build the key value object for the language bundle
+      const languageBundleBucketParams = {
+        key: hash,
+        // Content of the new object.
+        value: language.bundle.toString(),
+      };
+      //Save the language bundle to the KV store
+      const bundlePostResult = await axiod.post(PROXY_URL, languageBundleBucketParams);
+      if (bundlePostResult.status != 200) {
+        console.error("Upload language bundle data gets error: ", metaPostResult);
+      }
 
-    return hash as Address;
+      return hash as Address;
+    } catch (e) {
+
+      if(e.response.status == 400 && e.response.data.includes("Key already exists")) {
+        console.log("[Cloudflare-based Language Language]: Tried to replace existing language. Ignoring...")
+        return hash as Address;
+      }
+      console.error("[Cloudflare-based Language Language]: Error storing Language: ", e.response.data);
+      throw e
+    }
   }
 }
