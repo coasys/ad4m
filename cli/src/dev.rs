@@ -1,9 +1,7 @@
-
-use anyhow::{Result};
+use anyhow::Result;
 use clap::Subcommand;
-use colour::{self, blue_ln, green_ln};
+use colour::{self, green_ln};
 use std::fs;
-use std::sync::mpsc::channel;
 
 use crate::bootstrap_publish::*;
 
@@ -45,7 +43,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             if data_path_files.is_ok() {
                 fs::remove_dir_all(&data_path)?;
             }
-            //Create the ad4m directory
+            // //Create the ad4m directory
             fs::create_dir(&data_path)?;
             let ad4m_data_path = data_path.join("ad4m");
             fs::create_dir(&ad4m_data_path)?;
@@ -77,47 +75,62 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             )?;
 
             //start ad4m-host with publishing bootstrap
-            let ad4m_host_init = std::process::Command::new(&ad4m_host_path)
-                .arg("init")
-                .arg("--networkBootstrapSeed")
-                .arg(&temp_publish_bootstrap_path)
-                .arg("--dataPath")
-                .arg(&data_path)
-                .arg("--overrideConfig")
-                .output()?;
-
-            blue_ln!(
-                "ad4m-host init output: {}\n",
-                String::from_utf8_lossy(&ad4m_host_init.stdout)
-            );
+            rust_executor::init::init(
+                false,
+                Some(data_path.to_str().unwrap().to_string()),
+                Some(temp_publish_bootstrap_path.to_str().unwrap().to_string()),
+            )
+            .map_err(|err| {
+                colour::red_ln!("Error in init: {:?}", err);
+                err
+            })
+            .unwrap();
 
             green_ln!(
                 "Starting publishing with bootstrap path: {}\n",
                 temp_publish_bootstrap_path.to_str().unwrap()
             );
 
-            let (tx, rx) = channel();
-            serve_ad4m_host(ad4m_host_path, data_path, tx)?;
+            let run_fut = async move {
+                rust_executor::run(rust_executor::Ad4mConfig {
+                    app_data_path: Some(data_path.to_str().unwrap().to_string()),
+                    resource_path: None,
+                    network_bootstrap_seed: Some(
+                        temp_publish_bootstrap_path.to_str().unwrap().to_string(),
+                    ),
+                    language_language_only: Some(true),
+                    run_dapp_server: None,
+                    gql_port: None,
+                    hc_admin_port: None,
+                    hc_app_port: None,
+                    ipfs_swarm_port: None,
+                    connect_holochain: None,
+                    admin_credential: None,
+                    swipl_path: None,
+                    swipl_home_path: None,
+                })
+                .await;
+            };
 
-            for line in &rx {
-                println!("{}", line);
-                if line.contains("GraphQL server started, Unlock the agent to start holohchain") {
-                    green_ln!("AD4M Host ready for publishing\n");
-                    //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
-                    tokio::spawn(async move {
-                        start_publishing(
-                            passphrase.clone(),
-                            seed_proto.clone(),
-                            lang_lang_source.clone(),
-                        )
-                        .await;
-                    });
-                    break;
+            //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
+            let publish_fut = async move {
+                tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+                green_ln!("AD4M ready for publishing\n");
+                start_publishing(
+                    passphrase.clone(),
+                    seed_proto.clone(),
+                    lang_lang_source.clone(),
+                )
+                .await;
+            };
+
+            tokio::select! {
+                _ = run_fut => {
+                    green_ln!("AD4M finished running\n");
                 }
-            }
-
-            for line in rx {
-                println!("{}", line);
+                _ = publish_fut => {
+                    green_ln!("AD4M finished publishing\n");
+                }
             }
         }
     };
