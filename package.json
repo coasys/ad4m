@@ -45,6 +45,9 @@
     "docs:serve": "honkit serve docs-src",
     "docs:clean": "rimraf docs-src/_book",
     "docs:cp": "cp -r docs-src/_book/ docs/",
+    "docsv2:api:tsconcat": "concat-md --decrease-title-levels --dir-name-as-title docs-src/typedoc > docsv2/pages/api/index.mdx",
+    "docsv2:api": "yarn run docs:api:typedoc && yarn run docsv2:api:tsconcat",
+    "docsv2:build": "yarn run docsv2:api",
     "patchpackage": "patch-package",
     "set-version": "node setVersion.js",
     "patch-package": "^6.5.0",
@@ -59,5 +62,12 @@
   "engines": {
     "node": ">=16.0.0"
   },
-  "packageManager": "yarn@1.22.19"
+  "packageManager": "yarn@1.22.19",
+  "dependencies": {
+    "next": "^13.3.0",
+    "nextra": "^2.4.0",
+    "nextra-theme-docs": "^2.4.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
 }

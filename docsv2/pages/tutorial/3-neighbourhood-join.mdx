@@ -1,0 +1,23 @@
+# Joining a Neighbourhood (on another node/agent)
+
+Assume everything above happened on Alice's agent.
+Alice now shares the Neighbourhood's URL with Bob.
+This is what Bob does to join the Neigbourhood, access it as a (local) Perspective
+and retrieve the Expression Alice created and linked there:
+
+```js
+const joinedNeighbourhood = await ad4m.neighbourhood.joinFromUrl(
+  neighbourhoodUrl
+);
+const myPerspective = await ad4m.perspective.byUUID(joinedNeighbourhood.uuid);
+const links = await myPerspective.get(
+  new LinkQuery({
+    predicate: Literal.from("thinks").toUrl(),
+  })
+);
+links.forEach(async (link) => {
+  const who = link.data.source;
+  const what = Literal.fromUrl(link.data.target).get();
+  console.log(who, " thinks that ", what);
+});
+```

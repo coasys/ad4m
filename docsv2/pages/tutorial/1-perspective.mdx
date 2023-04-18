@@ -1,0 +1,118 @@
+import { Callout } from "nextra-theme-docs";
+
+# Tutorial
+
+<Callout type="info">
+  This will get you to a shared Neighbourhood on Holochain in less than 20
+  minutes! The code assumes an `ad4m` variable was setup as described in
+  [Getting Started](/getting-started).
+</Callout>
+
+## Create a Perspective and add content
+
+Adding a new perspective is as easy as
+
+```js
+const myPerspective = await ad4m.perspective.add("My new perspective");
+```
+
+The returned object is of type [PerspectiveProxy](api.md#class-perspectiveproxy),
+which hides all the remote calls to the AD4M executor and can be treated like a
+local database object.
+
+Perspectives are basically local graph databases.
+We can query all links on that proxy object with `get`:
+
+```js
+const allLinks = await myPerspective.get(new LinkQuery({})); // => []
+```
+
+In this case it should return an empty array since we just created that perspective.
+
+So let's add something!
+With the following code I'm creating an adhoc semantic statement
+representing what I think about AD4M...
+
+```js
+import { Literal } from "@perspect3vism/ad4m";
+
+const me = await ad4m.agent.me();
+const source = me.did;
+const predicate = Literal.from("thinks").toUrl();
+const target = Literal.from("AD4M will be the last social network").toUrl();
+
+const linkExpresion = await myPerspective.add({ source, predicate, target });
+```
+
+Links consist of 3 URIs pointing to Expressions of Languages.
+For this example, we made life easy by using the agent's DID and AD4M's `Literal` Language.
+
+### Agent DID
+
+For the source of our link, we got the user's DID URI by first getting
+the users [Agent](api.md#class-agent) object with `ad4m.agent.me()`.
+That has a DID property and DID URIs are considered valid URIs in AD4M
+(they can be looked-up using the Agent bootstrap language which resolves
+to the same Agent object we got through `ad4m.agent.me()` - just even if
+that agent behind the resolved DID isn't me).
+
+### Literal
+
+The `Literal` Language is an AD4M Language without back-end.
+It stores JavaScript literals (i.e. strings, numbers and objects)
+by encoding them into the Expression URL.
+So,
+
+```js
+Literal.from("thinks").toUrl();
+```
+
+returns `literal://string:thinks` - which is a valid URI -
+and
+
+```js
+Literal.from("AD4M will be the last social network").toUrl();
+```
+
+returns `literal://string:AD4M%20will%20be%20the%20last%20social%20network`.
+This is basically like URL parameters and let's us get around introducing Languages
+before using Perspectives and Links.
+
+We can decode the URL into a JavaScript literal like so:
+
+```js
+const string = Literal.fromUrl("literal://string:thinks").get();
+// string == 'thinks'
+```
+
+### LinkExpression
+
+We have put in a [Link](api.md#class-link) object into `myPerspective.add()`
+(`{source, predicate, target}`),
+but what this function returns is a [LinkExpression](api.md#class-linkexpression).
+
+Even though this Perspective is not shared (yet) but just our private, local
+graph database, we might want to share it [later](#2-publish-perspective-as-neighbourhood)
+as Neighbourhood.
+Then, all links added by some agent to their local Perspective will be shared
+with the other agents using a LinkLanguage - a Language which defines Expressions
+representing Links. That is LinkExpressions.
+
+Using the [generic Expression template](api.html#expressiongeneric),
+LinkExpressions wrap Links with author, timestamp and signature:
+
+```js
+{
+    author: "did:key:zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
+    timestamp: "Sun Oct 23 2022 15:31:52 GMT+0200 (Central European Summer Time)",
+    data: {
+        source: "did:key:zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
+        predicate: "literal://string:thinks",
+        target: "literal://string:AD4M%20will%20be%20the%20last%20social%20network",
+    },
+    proof: {
+        key: "#zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
+        signature: "xxxx",
+    }
+}
+```

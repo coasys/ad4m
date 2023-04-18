@@ -1,0 +1,24 @@
+# Listening to Perspective changes
+
+Perspectives that have been turned into Neighbourhoods are like entangled particles.
+Every agent still has their local copy of the Perspective, but a change from any agent
+will be shared with all other agents immediately,
+resulting in AD4M automatically updating the local Perspective with the changes by
+the others.
+
+Even with Perspectives that are not shared as Neighbourhood,
+a different UI could have access to the same Perspective and cause mutations
+on it.
+
+Apps/UIs can simply register a listener function on that
+[PerspectiveProxy](api.md#class-perspectiveproxy) object:
+
+```js
+myPerspective.addListener("link-added", (addedLink: LinkExpression) => {
+  console.log("Got a new link:", addedLink);
+});
+
+myPerspective.addListener("link-removed", (removedLink: LinkExpression) => {
+  console.log("A link was removed:", removedLink);
+});
+```
