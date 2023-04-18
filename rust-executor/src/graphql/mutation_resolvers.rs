@@ -278,7 +278,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentUnlock(
+            await core.resolvers.Mutation.agentUnlock(
                 null, 
                 {{ passphrase: "{}" }},
                 {{ capabilities: [{}] }}
@@ -433,7 +433,7 @@ impl Mutation {
         let language_meta_json = serde_json::to_string(&language_meta)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.languagePublish(
+            await core.resolvers.Mutation.languagePublish(
                 null, 
                 {{ languageMeta: {}, languagePath: "{}" }},
                 {{ capabilities: [{}] }}
