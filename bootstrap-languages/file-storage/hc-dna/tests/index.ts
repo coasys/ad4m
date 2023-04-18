@@ -3,7 +3,7 @@ import test from "tape-promise/tape.js";
 import path from "path";
 import { resolve } from "path";
 import { FileStorage } from "../../file-storage";
-import { Blob } from "buffer";
+import { Blob } from "node:buffer";
 
 const dnas = [{ source: {path: path.join("../workdir/file-storage.dna") } }];
 

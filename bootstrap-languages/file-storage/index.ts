@@ -1,7 +1,7 @@
-import type { Address, Interaction, Agent, Language, LanguageContext, HolochainLanguageDelegate } from "@perspect3vism/ad4m";
-import Adapter from './adapter'
-import { FileStorageUI } from './noteExpressionUI'
-import { DNA, DNA_NICK } from "./dna";
+import type { Address, Interaction, Language, LanguageContext, HolochainLanguageDelegate } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import Adapter from './adapter.ts'
+import { FileStorageUI } from "./build/expressionUI.js";
+import { DNA, DNA_NICK } from "./build/dna.js";
 
 function interactions(expression: Address): Interaction[] {
     return []
