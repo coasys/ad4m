@@ -38,6 +38,11 @@ pub fn init(
         fs::write(&last_seen_file, AD4M_VERSION.to_string())?;
     };
 
+    if !last_seen_file.exists() {
+        //Create the last seen version file
+        fs::write(&last_seen_file, AD4M_VERSION.to_string())?;
+    }
+
     let latest_seen_version = fs::read_to_string(&last_seen_file)?;
     info!("Current last seen version is: {}", latest_seen_version);
     let last_seen_version = Version::parse(&latest_seen_version)?;
