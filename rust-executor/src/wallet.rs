@@ -42,10 +42,10 @@ fn padded(passphrase: String) -> String {
     passphrase
 }
 
-
 fn encrypt(payload: String, passphrase: String) -> String {
     let passphrase = padded(passphrase);
-    let b64_passphrase = base64::engine::general_purpose::STANDARD_NO_PAD.encode(passphrase.as_bytes());
+    let b64_passphrase =
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(passphrase.as_bytes());
     let salt = Salt::from_b64(&b64_passphrase).expect("salt from passphrase to work");
 
     // Derive secret key from passphrase
@@ -72,14 +72,17 @@ fn encrypt(payload: String, passphrase: String) -> String {
     let nonce = Nonce::default();
 
     // Encrypt
-    let encrypted_data = crypto_box.encrypt(&nonce.into(), payload.as_bytes()).unwrap();
+    let encrypted_data = crypto_box
+        .encrypt(&nonce.into(), payload.as_bytes())
+        .unwrap();
 
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(encrypted_data)
 }
 
 fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::aead::Error> {
     let passphrase = padded(passphrase);
-    let b64_passphrase = base64::engine::general_purpose::STANDARD_NO_PAD.encode(passphrase.as_bytes());
+    let b64_passphrase =
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(passphrase.as_bytes());
     let salt = Salt::from_b64(&b64_passphrase).expect("salt from passphrase to work");
 
     // Derive secret key from passphrase
@@ -114,7 +117,7 @@ fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::ae
     decrypted_data
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Key {
     pub secret: Vec<u8>,
     pub public: Vec<u8>,
@@ -129,7 +132,7 @@ impl Key {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct Keys {
     pub by_name: BTreeMap<String, Key>,
 }
@@ -142,6 +145,7 @@ impl Keys {
     }
 }
 
+#[derive(Debug)]
 pub struct Wallet {
     cipher: Option<String>,
     keys: Option<Keys>,
@@ -263,13 +267,19 @@ mod tests {
 
     #[test]
     fn test_slice_to_u8_array() {
-        let slice: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
+        let slice: &[u8] = &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32,
+        ];
         let result = slice_to_u8_array(slice).unwrap();
         assert_eq!(slice, &result);
 
         let slice_short: &[u8] = &[1, 2, 3];
         let result = slice_to_u8_array(slice_short).unwrap();
-        let expected: [u8; 32] = [1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let expected: [u8; 32] = [
+            1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
         assert_eq!(expected, result);
     }
 
