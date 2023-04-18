@@ -1,5 +1,6 @@
 use cid::Cid;
 use deno_core::{error::AnyError, include_js_files, op, Extension};
+use log::info;
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
 
@@ -28,13 +29,12 @@ fn hash(data: String) -> Result<String, AnyError> {
 
 #[op]
 async fn load_module(path: String) -> Result<String, AnyError> {
-    println!("Trying to load module: {}", path);
+    info!("Trying to load module: {}", path);
     let js_core_handle = JS_CORE_HANDLE
         .lock()
         .expect("Could not get lock on js_core_handle");
 
-    let res = js_core_handle.clone().unwrap().load_module(path).await;
-    println!("load module res: {:?}", res);
+    let _res = js_core_handle.clone().unwrap().load_module(path).await;
     Ok(String::from("temp"))
 }
 
