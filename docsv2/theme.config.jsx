@@ -1,5 +1,4 @@
 export default {
-    logo: <span>AD4M Docs</span>,
     project: {
       link: 'https://github.com/perspect3vism/ad4m',
     },
@@ -7,5 +6,8 @@ export default {
     docsRepositoryBase: 'https://github.com/perspect3vism/ad4m',
     footer: {
         text: "AD4M - The first social network"
-    }
+    },
+    search: {
+        loading: "Loading...",
+    },
   }
