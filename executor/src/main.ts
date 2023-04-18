@@ -168,6 +168,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       "Language aliases:", languageAliases, "\n", 
       "Bootstrap fixtures:", bootstrapFixtures, "\n",
       "Resource path:", resourcePath, "\n", 
+      "Bootstrap seed:", networkBootstrapSeed, "\n",
       "\x1b[0m"
     );
 
