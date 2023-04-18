@@ -227,6 +227,7 @@ export default class HolochainService {
                     throw new Error("Could not install signing service DNA");
                 }
             } else {
+                console.debug("HolochainService: Signing service already installed... activating");
                 const activeApps = await this.#adminWebsocket!.listApps({});
                 let signingService = activeApps.find(app => app.installed_app_id === "signing_service");
                 if (!signingService) {
@@ -283,6 +284,24 @@ export default class HolochainService {
             throw new Error("Signing service DNA is not init'd yet!")
         }
         const pubKey = await this.pubKeyForLanguage("main");
+
+        //Check that signZomeCall will be able to find the signing credentials
+        const signingKeyExists = getSigningCredentials(this.#signingService!);
+
+        if (!signingKeyExists) {
+            const cellIdB64 = this.cellIdToB64(this.#signingService!);
+            //Check if we already have some in the database
+            let signingCredentials = await this.#signingCredentialsDb.findOne({cellId: cellIdB64})
+            if (!signingCredentials) {
+                console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "generating new ones...");
+                await this.generateSigningKeys(this.#signingService!);
+            } else {
+                console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "but found them in the database, setting them...", signingCredentials);
+                //We have some but they are not present in the holochain client... set them
+                setSigningCredentials(this.#signingService!, JSON.parse(signingCredentials.signingCredentials));
+            }
+        }
+
         const result = await this.#appWebsocket!.callZome({
             cap_secret: null,
             cell_id: this.#signingService!,
@@ -431,7 +450,7 @@ export default class HolochainService {
                     }
                 })
                 
-                // console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
+                console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
             } catch(e) {
                 console.error("HolochainService: InstallApp, got error: ", e);
                 return [];
