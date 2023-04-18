@@ -12,7 +12,7 @@ export default [
     input: "ConstructorIcon.svelte",
     output: {
       sourcemap: true,
-      format: "es",
+      format: "esm",
       name: "ConstructorIcon",
       file: "build/ConstructorIcon.js",
     },

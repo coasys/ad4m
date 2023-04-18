@@ -1,16 +1,16 @@
-import type { Address, Language, LanguageContext, HolochainLanguageDelegate, Interaction } from "@perspect3vism/ad4m";
-import ExpressionAdapter from "./adapter";
+import type { Address, Language, LanguageContext, HolochainLanguageDelegate, Interaction } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import ExpressionAdapter from "./adapter.ts";
 import Icon from "./build/Icon.js";
 import ConstructorIcon from "./build/ConstructorIcon.js";
-import { UI } from "./expressionUI";
-import { DNA, DNA_NICK } from "./dna";
+import { UI } from "./build/expressionUI.js";
+import { DNA, DNA_NICK } from "./build/dna.js";
 
 function iconFor(expression: Address): string {
-  return Icon;
+  return Icon as unknown as string;
 }
 
 function constructorIcon(): string {
-  return ConstructorIcon;
+  return ConstructorIcon as unknown as string;
 }
 
 function interactions(expression: Address): Interaction[] {
