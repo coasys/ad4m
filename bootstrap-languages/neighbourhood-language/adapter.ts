@@ -1,26 +1,17 @@
-import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext, AgentService } from "@perspect3vism/ad4m";
-import type { IPFS } from "ipfs-core-types"
-import axios from "axios";
-import https from "https";
-import { PROXY_URL } from ".";
+import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import axiod from "https://deno.land/x/axiod/mod.ts";
+import { PROXY_URL } from "./index.ts";
 
 class NeighbourhoodPutAdapter implements PublicSharing {
   #agent: AgentService;
-  #IPFS: IPFS
 
   constructor(context: LanguageContext) {
     this.#agent = context.agent;
-    this.#IPFS = context.IPFS;
   }
 
   async createPublic(neighbourhood: object): Promise<Address> {
-    const ipfsAddress = await this.#IPFS.add(
-      { content: JSON.stringify(neighbourhood)},
-      { onlyHash: true},
-    );
     // @ts-ignore
-    const hash = ipfsAddress.cid.toString();
-
+    const hash = UTILS.hash(JSON.stringify(neighbourhood));
     const agent = this.#agent;
     const expression = agent.createSignedExpression(neighbourhood);
 
@@ -32,10 +23,7 @@ class NeighbourhoodPutAdapter implements PublicSharing {
       value: JSON.stringify(expression),
     };
     //Save the neighbourhood information to the KV store
-    const httpsAgent = new https.Agent({
-      rejectUnauthorized: false
-    });
-    const neighbourhoodPostResult = await axios.post(PROXY_URL, neighbourhoodPostData, { httpsAgent });
+    const neighbourhoodPostResult = await axiod.post(PROXY_URL, neighbourhoodPostData);
     if (neighbourhoodPostResult.status != 200) {
       console.error("Upload neighbourhood data gets error: ", neighbourhoodPostResult);
     }
@@ -56,7 +44,7 @@ export default class Adapter implements ExpressionAdapter {
 
     let presignedUrl;
     try {
-      const getPresignedUrl = await axios.get(PROXY_URL+`?key=${cid}`);
+      const getPresignedUrl = await axiod.get(PROXY_URL+`?key=${cid}`);
       presignedUrl = getPresignedUrl.data.url;
     } catch (e) {
       console.error("Get neighbourhood failed at getting presigned url", e);
@@ -64,7 +52,7 @@ export default class Adapter implements ExpressionAdapter {
 
     let neighbourhoodObject;
     try {
-      const getneighbourhoodObject = await axios.get(presignedUrl);
+      const getneighbourhoodObject = await axiod.get(presignedUrl);
       neighbourhoodObject = getneighbourhoodObject.data;
     } catch (e) {
       console.error("Get meta information failed at getting meta information", e);
