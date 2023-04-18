@@ -1,6 +1,6 @@
-import type { Address, Interaction, Agent, Language, LanguageContext } from "@perspect3vism/ad4m";
-import Adapter from './adapter'
-import { NoteExpressionUI } from './noteExpressionUI'
+import type { Address, Interaction, Language, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import Adapter from './adapter.ts'
+import { UI } from "./build/expressionUI.js";
 
 function interactions(expression: Address): Interaction[] {
     return []
@@ -8,7 +8,7 @@ function interactions(expression: Address): Interaction[] {
 
 export default function create(context: LanguageContext): Language {
     const expressionAdapter = new Adapter(context)
-    const expressionUI = new NoteExpressionUI()
+    const expressionUI = new UI()
 
     return {
         name: 'perspective-language',

@@ -5,3 +5,4 @@ build
 
 !rollup.config.js
 !rollup.config.icons.js
+!rollup.config*
