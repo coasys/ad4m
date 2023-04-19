@@ -384,7 +384,6 @@ export class PerspectiveProxy {
         }
 
         let actions = result.map(x => eval(x.Actions))
-        console.log('mmmm3', actions)
         await this.executeAction(actions[0], exprAddr, undefined)
         return this.getSubjectProxy(exprAddr, subjectClass)
     }
