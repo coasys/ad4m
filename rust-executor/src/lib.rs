@@ -21,7 +21,7 @@ pub async fn run(config: Ad4mConfig) {
     let _ = env_logger::try_init();
 
     info!("Starting js_core...");
-    let mut js_core_handle = JsCore::start(config);
+    let mut js_core_handle = JsCore::start(config).await;
     js_core_handle.initialized().await;
     info!("js_core initialized.");
 

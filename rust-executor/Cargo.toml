@@ -48,3 +48,4 @@ zip = "0.6.4"
 multibase = "0.9.1"
 multihash = { version = "0.18.0", features = ["sha2"] }
 cid = "0.10.1"
+once_cell = "1.17.1"

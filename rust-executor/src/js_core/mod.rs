@@ -4,12 +4,14 @@ use deno_core::error::AnyError;
 use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
-use lazy_static::lazy_static;
 use log::{error, info};
+use once_cell::sync::Lazy;
 use std::env::current_dir;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{
     broadcast::{Receiver, Sender},
     mpsc::{self, UnboundedSender},
@@ -26,9 +28,8 @@ use self::futures::{EventLoopFuture, GlobalVariableFuture};
 use crate::Ad4mConfig;
 use options::{main_module_url, main_worker_options};
 
-lazy_static! {
-    pub static ref JS_CORE_HANDLE: Mutex<Option<JsCoreHandle>> = Mutex::new(None);
-}
+static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
+    Lazy::new(|| Arc::new(TokioMutex::new(None)));
 
 /// Define message
 #[derive(Message)]
@@ -213,7 +214,7 @@ impl JsCore {
         ))
     }
 
-    pub fn start(config: Ad4mConfig) -> JsCoreHandle {
+    pub async fn start(config: Ad4mConfig) -> JsCoreHandle {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
 
@@ -375,9 +376,7 @@ impl JsCore {
         };
 
         //Set the JsCoreHandle to a global object so we can use it inside of deno op calls
-        let mut global_handle = JS_CORE_HANDLE
-            .lock()
-            .expect("Could not get lock for JS_CORE_HANDLE");
+        let mut global_handle = JS_CORE_HANDLE.lock().await;
         *global_handle = Some(handle.clone());
 
         handle

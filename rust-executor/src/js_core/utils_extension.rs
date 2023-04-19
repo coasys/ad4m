@@ -30,11 +30,14 @@ fn hash(data: String) -> Result<String, AnyError> {
 #[op]
 async fn load_module(path: String) -> Result<String, AnyError> {
     info!("Trying to load module: {}", path);
-    let js_core_handle = JS_CORE_HANDLE
-        .lock()
-        .expect("Could not get lock on js_core_handle");
 
-    let _res = js_core_handle.clone().unwrap().load_module(path).await;
+    let mut js_core_handle = JS_CORE_HANDLE.lock().await;
+
+    if let Some(ref mut value) = *js_core_handle {
+        // Call mutable functions on JsCoreHandle
+        let _res = value.load_module(path).await;
+    }
+
     Ok(String::from("temp"))
 }
 

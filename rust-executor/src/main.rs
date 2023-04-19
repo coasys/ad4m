@@ -19,7 +19,7 @@ async fn main() {
     env_logger::init();
 
     info!("Starting js_core...");
-    let mut js_core_handle = JsCore::start(Ad4mConfig::default());
+    let mut js_core_handle = JsCore::start(Ad4mConfig::default()).await;
     js_core_handle.initialized().await;
     info!("js_core initialized.");
 
