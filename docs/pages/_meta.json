@@ -4,5 +4,17 @@
     "tutorial": "Tutorial",
     "languages": "AD4M Languages",
     "social-dna": "Social DNA",
-    "jsdoc": "API Reference"
+    "jsdoc": "API Reference",
+    "download": {
+        "title": "AD4M Website",
+        "type": "page",
+        "href": "https://ad4m.dev",
+        "newWindow": true
+    },
+    "community": {
+        "title": "Community",
+        "type": "page",
+        "href": "https://ad4m.dev/community/",
+        "newWindow": true
+    }
 }
