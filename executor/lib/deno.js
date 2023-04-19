@@ -15,3 +15,7 @@ export const path = internalPath
 export const os = internalOs
 
 import "../xhr/mod.ts";
+
+import {HTMLElement } from "../linkedom"
+
+globalThis.HTMLElement = HTMLElement;
