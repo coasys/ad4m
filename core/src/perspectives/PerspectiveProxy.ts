@@ -7,7 +7,7 @@ import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
 import { Subject } from "../subject/Subject";
 import { ExpressionRendered } from "../expression/Expression";
-import { collectionAdderToName, collectionSetterToName } from "../subject/util";
+import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../subject/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
@@ -384,8 +384,28 @@ export class PerspectiveProxy {
         }
 
         let actions = result.map(x => eval(x.Actions))
+        console.log('mmmm3', actions)
         await this.executeAction(actions[0], exprAddr, undefined)
         return this.getSubjectProxy(exprAddr, subjectClass)
+    }
+
+    /** Removes a subject instance by running its (SDNA defined) constructor,
+     * which means removing links around the given expression address
+     * 
+     * @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, the first subject class
+     * that matches the given properties will be used.
+     * @param exprAddr The address of the expression to be turned into a subject instance
+     */
+    async removeSubject<T>(subjectClass: T, exprAddr: string) {
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let result = await this.infer(`subject_class("${className}", C), class_remover(C, Actions)`)
+        if(!result.length) {
+            throw "No constructor found for given subject class: " + className 
+        }
+
+        let actions = result.map(x => eval(x.Actions))
+        await this.executeAction(actions[0], exprAddr, undefined)
     }
 
     /** Checks if the given expression is a subject instance of the given subject class 
@@ -516,7 +536,7 @@ export class PerspectiveProxy {
         }
 
         for(let removeFunction of removeFunctions) {
-            query += `, collection_remover(C, "${collectionAdderToName(removeFunction)}", _)`
+            query += `, collection_remover(C, "${collectionRemoverToName(removeFunction)}", _)`
         }
         
         for(let setCollectionFunction of setCollectionFunctions) {

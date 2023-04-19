@@ -167,7 +167,10 @@ export function SDNAClass(opts: SDNAClassOptions) {
             let uuid = makeRandomPrologAtom(8)
     
             sdna += `subject_class("${subjectName}", ${uuid}).\n`
-    
+
+
+            let classRemoverActions = []
+
             let constructorActions = []
             if(obj.subjectConstructor && obj.subjectConstructor.length) {
                 constructorActions = constructorActions.concat(obj.subjectConstructor)
@@ -228,6 +231,13 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         predicate: through,
                         target: initial,
                     })
+
+                    classRemoverActions = [{
+                        action: "removeLink",
+                        source: "this",
+                        predicate: through,
+                        target: initial,
+                    }]
                 }
             }
     
@@ -299,6 +309,8 @@ export function SDNAClass(opts: SDNAClassOptions) {
             sdna += `constructor(${uuid}, '${subjectContructorJSONString}').\n`
             let instanceConditionProlog = instanceConditions.join(", ")
             sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
+            sdna += "\n"
+            sdna += `class_remover(${uuid}, '${stringifyObjectLiteral(classRemoverActions)}').\n`
             sdna += "\n"
             sdna += propertiesCode.join("\n")
             sdna += "\n"

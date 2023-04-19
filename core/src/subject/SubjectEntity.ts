@@ -201,6 +201,10 @@ export class SubjectEntity {
     return await this.getData()
   }
 
+  async delete() {
+    await this.#perspective.removeSubject(this, this.#baseExpression);
+  }
+
   // TODO: implement simple quering like limit, skip etc.
   static async all(perspective: PerspectiveProxy) {
     let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this)
@@ -219,7 +223,6 @@ export class SubjectEntity {
     }
 
     return []
-
   }
 }
 
