@@ -23,7 +23,7 @@ export default class Signatures {
 
         const availableKeys = didDocument.publicKey ? didDocument.publicKey : didDocument.verificationMethod
         //@ts-ignore
-        const key = availableKeys.find(k => k.id === didSigningKeyId)
+        const key = availableKeys.find(k => k.id === didSigningKeyId.includes(k.id))
         if(!key) {
             console.debug("Key not found in DID document", didSigningKeyId, didDocument)
             return false
@@ -53,7 +53,7 @@ export default class Signatures {
 
         const availableKeys = didDocument.publicKey ? didDocument.publicKey : didDocument.verificationMethod
         //@ts-ignore
-        const key = availableKeys.find(k => k.id === expr.proof.key)
+        const key = availableKeys.find(k => expr.proof.key.includes(k.id))
         if(!key) {
             console.debug("Key not found in DID document", expr.proof.key, didDocument)
             return false
