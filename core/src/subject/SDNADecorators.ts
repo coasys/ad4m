@@ -133,6 +133,7 @@ export function subjectCollection(opts: CollectionOptions) {
         
         const value = key as string
         target[`add${capitalize(value)}`] = () => {}
+        target[`remove${capitalize(value)}`] = () => {}
         target[`setCollection${capitalize(value)}`] = () => {}
 
         Object.defineProperty(target, key, {configurable: true});
@@ -266,8 +267,15 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }
                     
-                    let action = [{
+                    let collectionAdderAction = [{
                         action: "addLink",
+                        source: "this",
+                        predicate: through,
+                        target: "value",
+                    }]
+
+                    let collectionRemoverAction = [{
+                        action: "removeLink",
                         source: "this",
                         predicate: through,
                         target: "value",
@@ -279,7 +287,8 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         predicate: through,
                         target: "value",
                     }]
-                    collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(action)}').\n`
+                    collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
+                    collectionCode += `collection_remover(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
                     collectionCode += `collection_setter(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
                 }
     

@@ -143,6 +143,20 @@ export class SubjectEntity {
     }
   }
 
+  private async setCollectionRemover(key: string, value: any) {
+    let removers = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_remover(C, "${singularToPlural(key)}", Remover)`)
+    if (!removers) removers = []
+
+    if (removers.length > 0) {
+      const actions = eval(removers[0].Remover)
+      if (Array.isArray(value)) {
+        await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }])))
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
+      }
+    }
+  }
+
   async save() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
     
@@ -168,6 +182,8 @@ export class SubjectEntity {
             case "adder":
               await this.setCollectionAdder(key, value.value)
               break;
+            case 'remover':
+              await this.setCollectionRemover(key, value.value)
             default:
               await this.setCollectionSetter(key, value.value)
               break;
@@ -208,7 +224,7 @@ export class SubjectEntity {
 }
 
 export type SubjectArray<T> = T[] | {
-  action: 'setter' | 'adder',
+  action: 'setter' | 'adder' | 'remover',
   value: T[]
 }
 

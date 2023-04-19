@@ -485,6 +485,11 @@ export class PerspectiveProxy {
         // Add all add functions of the object's prototype to that list
         addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("add")))
 
+        // Collect all remove functions of the object in a list
+        let removeFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("remove"))
+        // Add all remove functions of the object's prototype to that list
+        removeFunctions = removeFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("remove")))
+
         // Collect all add functions of the object in a list
         let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("setCollection"))
         // Add all add functions of the object's prototype to that list
@@ -508,6 +513,10 @@ export class PerspectiveProxy {
         }
         for(let addFunction of addFunctions) {
             query += `, collection_adder(C, "${collectionAdderToName(addFunction)}", _)`
+        }
+
+        for(let removeFunction of removeFunctions) {
+            query += `, collection_remover(C, "${collectionAdderToName(removeFunction)}", _)`
         }
         
         for(let setCollectionFunction of setCollectionFunctions) {
