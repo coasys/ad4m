@@ -37,6 +37,18 @@ export default {
         <meta name="og:title" content={`${config.title} – AD4m Docs`} />
         <meta name="og:image" content={image} />
         <meta name="apple-mobile-web-app-title" content="AD4m Docs" />
+        <link
+          href="/favicon-dark.ico"
+          rel="icon"
+          type="image/x-icon"
+          media="(prefers-color-scheme: light)"
+        />
+        <link
+          href="/favicon-light.ico"
+          rel="icon"
+          type="image/x-icon"
+          media="(prefers-color-scheme: dark)"
+        />
       </>
     );
   },
