@@ -129,7 +129,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentGenerateJwt(
+            await core.resolvers.Mutation.agentGenerateJwt(
                 null, 
                 {{ rand: "{}", requestId: "{}" }},
                 {{ capabilities: [{}] }}
@@ -193,7 +193,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentRemoveApp(
+            await core.resolvers.Mutation.agentRemoveApp(
                 null, 
                 {{ requestId: "{}" }},
                 {{ capabilities: [{}] }}
@@ -215,7 +215,7 @@ impl Mutation {
         let auth_info_json = serde_json::to_string(&auth_info)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentRequestCapability(
+            await core.resolvers.Mutation.agentRequestCapability(
                 null, 
                 {{ authInfo: {} }},
                 {{ capabilities: [{}] }}
@@ -236,7 +236,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentRevokeToken(
+            await core.resolvers.Mutation.agentRevokeToken(
                 null, 
                 {{ requestId: "{}" }},
                 {{ capabilities: [{}] }}
@@ -257,7 +257,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentSignMessage(
+            await core.resolvers.Mutation.agentSignMessage(
                 null, 
                 {{ message: "{}" }},
                 {{ capabilities: [{}] }}
@@ -299,7 +299,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentUpdateDirectMessageLanguage(
+            await core.resolvers.Mutation.agentUpdateDirectMessageLanguage(
                 null, 
                 {{ directMessageLanguage: "{}" }},
                 {{ capabilities: [{}] }}
@@ -321,7 +321,7 @@ impl Mutation {
         let perspective_json = serde_json::to_string(&perspective)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentUpdatePublicPerspective(
+            await core.resolvers.Mutation.agentUpdatePublicPerspective(
                 null, 
                 {{ perspective: {} }},
                 {{ capabilities: [{}] }}
@@ -365,7 +365,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.expressionCreate(
+            await core.resolvers.Mutation.expressionCreate(
                 null, 
                 {{ content: "{}", languageAddress: "{}" }},
                 {{ capabilities: [{}] }}
@@ -388,7 +388,7 @@ impl Mutation {
         let interaction_call_json = serde_json::to_string(&interaction_call)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.expressionInteract(
+            await core.resolvers.Mutation.expressionInteract(
                 null, 
                 {{ interactionCall: {}, url: "{}" }},
                 {{ capabilities: [{}] }}
@@ -410,7 +410,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.languageApplyTemplateAndPublish(
+            await core.resolvers.Mutation.languageApplyTemplateAndPublish(
                 null, 
                 {{ sourceLanguageHash: "{}", templateData: "{}" }},
                 {{ capabilities: [{}] }}
@@ -450,7 +450,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.languageRemove(
+            await core.resolvers.Mutation.languageRemove(
                 null, 
                 {{ address: "{}" }},
                 {{ capabilities: [{}] }}
@@ -472,7 +472,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.languageWriteSettings(
+            await core.resolvers.Mutation.languageWriteSettings(
                 null, 
                 {{ languageAddress: "{}", settings: "{}" }},
                 {{ capabilities: [{}] }}
@@ -493,7 +493,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.neighbourhoodJoinFromUrl(
+            await core.resolvers.Mutation.neighbourhoodJoinFromUrl(
                 null, 
                 {{ url: "{}" }},
                 {{ capabilities: [{}] }}
@@ -517,7 +517,7 @@ impl Mutation {
         let meta_json = serde_json::to_string(&meta)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.neighbourhoodPublishFromPerspective(
+            await core.resolvers.Mutation.neighbourhoodPublishFromPerspective(
                 null, 
                 {{ linkLanguage: "{}", meta: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
@@ -540,7 +540,7 @@ impl Mutation {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.neighbourhoodSendBroadcast(
+            await core.resolvers.Mutation.neighbourhoodSendBroadcast(
                 null, 
                 {{ payload: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
@@ -563,7 +563,7 @@ impl Mutation {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.neighbourhoodSendBroadcastU(
+            await core.resolvers.Mutation.neighbourhoodSendBroadcastU(
                 null, 
                 {{ payload: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
@@ -587,7 +587,7 @@ impl Mutation {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.neighbourhoodSendSignal(
+            await core.resolvers.Mutation.neighbourhoodSendSignal(
                 null, 
                 {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
                 {{ capabilities: [{}] }}
@@ -611,7 +611,7 @@ impl Mutation {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.neighbourhoodSendSignalU(
+            await core.resolvers.Mutation.neighbourhoodSendSignalU(
                 null, 
                 {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
                 {{ capabilities: [{}] }}
@@ -634,7 +634,7 @@ impl Mutation {
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.neighbourhoodSetOnlineStatus(
+            await core.resolvers.Mutation.neighbourhoodSetOnlineStatus(
                 null, 
                 {{ perspectiveUUID: "{}", status: {} }},
                 {{ capabilities: [{}] }}
@@ -657,7 +657,7 @@ impl Mutation {
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.neighbourhoodSetOnlineStatusU(
+            await core.resolvers.Mutation.neighbourhoodSetOnlineStatusU(
                 null, 
                 {{ perspectiveUUID: "{}", status: {} }},
                 {{ capabilities: [{}] }}
@@ -701,7 +701,7 @@ impl Mutation {
         let link_json = serde_json::to_string(&link)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveAddLink(
+            await core.resolvers.Mutation.perspectiveAddLink(
                 null, 
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
@@ -724,7 +724,7 @@ impl Mutation {
         let link_json = serde_json::to_string(&link)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveAddLinkExpression(
+            await core.resolvers.Mutation.perspectiveAddLinkExpression(
                 null, 
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
@@ -747,7 +747,7 @@ impl Mutation {
         let links_json = serde_json::to_string(&links)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveAddLinks(
+            await core.resolvers.Mutation.perspectiveAddLinks(
                 null, 
                 {{ links: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
@@ -770,7 +770,7 @@ impl Mutation {
         let mutations_json = serde_json::to_string(&mutations)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveLinkMutations(
+            await core.resolvers.Mutation.perspectiveLinkMutations(
                 null, 
                 {{ mutations: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
@@ -791,7 +791,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectivePublishSnapshot(
+            await core.resolvers.Mutation.perspectivePublishSnapshot(
                 null, 
                 {{ uuid: "{}" }},
                 {{ capabilities: [{}] }}
@@ -831,7 +831,7 @@ impl Mutation {
         let link_json = serde_json::to_string(&link)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveRemoveLink(
+            await core.resolvers.Mutation.perspectiveRemoveLink(
                 null, 
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
@@ -854,7 +854,7 @@ impl Mutation {
         let links_json = serde_json::to_string(&links)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveRemoveLinks(
+            await core.resolvers.Mutation.perspectiveRemoveLinks(
                 null, 
                 {{ links: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
@@ -901,7 +901,7 @@ impl Mutation {
         let old_link_json = serde_json::to_string(&old_link)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveUpdateLink(
+            await core.resolvers.Mutation.perspectiveUpdateLink(
                 null, 
                 {{ newLink: {}, oldLink: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
@@ -923,7 +923,7 @@ impl Mutation {
         let dids_json = serde_json::to_string(&dids)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeAddFriends(
+            await core.resolvers.Mutation.runtimeAddFriends(
                 null, 
                 {{ dids: {} }},
                 {{ capabilities: [{}] }}
@@ -968,7 +968,7 @@ impl Mutation {
         let message_json = serde_json::to_string(&message)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeFriendSendMessage(
+            await core.resolvers.Mutation.runtimeFriendSendMessage(
                 null, 
                 {{ did: "{}", message: {} }},
                 {{ capabilities: [{}] }}
@@ -989,7 +989,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeHcAddAgentInfos(
+            await core.resolvers.Mutation.runtimeHcAddAgentInfos(
                 null, 
                 {{ agentInfos: "{}" }},
                 {{ capabilities: [{}] }}
@@ -1089,7 +1089,7 @@ impl Mutation {
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeSetStatus(
+            await core.resolvers.Mutation.runtimeSetStatus(
                 null, 
                 {{ status: {} }},
                 {{ capabilities: [{}] }}
