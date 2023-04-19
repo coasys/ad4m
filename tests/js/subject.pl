@@ -26,7 +26,7 @@ collection_setter(c, "commentss", '[{action: "collectionSetter", source: "this",
 collection(c, "entries").
 collection_getter(c, Base, "entries", List) :- findall(C, triple(Base, "flux://entry_type", C), List).
 collection_adder(c, "entriess", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
-collection_remover(c, "entriess", '[{action: "removerLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_remover(c, "entriess", '[{action: "removeLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
 collection_setter(c, "entriess", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
 
 collection(c, "messages").
