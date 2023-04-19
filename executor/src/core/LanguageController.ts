@@ -353,7 +353,6 @@ export default class LanguageController {
             data = data.toString();
         }
         const hash = UTILS.hash(data);
-        console.log("generated hash", hash);
         return hash;
     }
 
@@ -425,7 +424,7 @@ export default class LanguageController {
             console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
             console.error("LanguageController.installLanguage: ======================================")
             console.error(e)
-            fs.rmdirSync(languagePath, {recursive: true})
+            //fs.rmdirSync(languagePath, {recursive: true})
             //@ts-ignore
             throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
         }

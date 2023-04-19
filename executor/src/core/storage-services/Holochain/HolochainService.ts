@@ -183,7 +183,7 @@ export default class HolochainService {
         let resolveReady: ((value: void | PromiseLike<void>) => void) | undefined;
         this.#ready = new Promise(resolve => resolveReady = resolve)
         
-        console.log("Connecting to holochain process.");
+        console.log("HolochainService: Connecting to holochain process.");
 
         try {
             if (this.#adminWebsocket == undefined) {
@@ -286,21 +286,7 @@ export default class HolochainService {
         const pubKey = await this.pubKeyForLanguage("main");
 
         //Check that signZomeCall will be able to find the signing credentials
-        const signingKeyExists = getSigningCredentials(this.#signingService!);
-
-        if (!signingKeyExists) {
-            const cellIdB64 = this.cellIdToB64(this.#signingService!);
-            //Check if we already have some in the database
-            let signingCredentials = await this.#signingCredentialsDb.findOne({cellId: cellIdB64})
-            if (!signingCredentials) {
-                console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "generating new ones...");
-                await this.generateSigningKeys(this.#signingService!);
-            } else {
-                console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "but found them in the database, setting them...", signingCredentials);
-                //We have some but they are not present in the holochain client... set them
-                setSigningCredentials(this.#signingService!, JSON.parse(signingCredentials.signingCredentials));
-            }
-        }
+        await this.ensureSigningKey(this.#signingService!);
 
         const signedZomeCall = await signZomeCall({
             cell_id: this.#signingService!,
@@ -381,6 +367,33 @@ export default class HolochainService {
         return encodeHashToBase64(cell[0]).concat(encodeHashToBase64(cell[1]));
     }
 
+    async ensureSigningKey(cellId: CellId) {
+        //Check that signZomeCall will be able to find the signing credentials
+        const signingKeyExists = getSigningCredentials(cellId);
+
+        if (!signingKeyExists) {
+            const cellIdB64 = this.cellIdToB64(cellId);
+            //Check if we already have some in the database
+            let signingCredentials = await this.#signingCredentialsDb.findOne({cellId: cellIdB64})
+            if (!signingCredentials) {
+                console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "generating new ones...");
+                await this.generateSigningKeys(cellId);
+            } else {
+                let credentials = JSON.parse(signingCredentials.signingCredentials);
+                credentials.capSecret = new Uint8Array(Buffer.from(credentials.capSecret, 'base64'));
+                credentials.signingKey = new Uint8Array(Buffer.from(credentials.signingKey, 'base64'));
+                credentials.keyPair = {
+                    publicKey: new Uint8Array(Buffer.from(credentials.keyPair.publicKey, 'base64')),
+                    secretKey: new Uint8Array(Buffer.from(credentials.keyPair.secretKey, 'base64'))
+                };
+                //We have some but they are not present in the holochain client... set them
+                console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "but found them in the database, setting them...");
+                setSigningCredentials(cellId, credentials);
+            }
+        }
+    }
+
+
     private async generateSigningKeys(cell: CellId): Promise<SigningCredentials> {
         const cellIdB64 = this.cellIdToB64(cell);
 
@@ -391,7 +404,15 @@ export default class HolochainService {
         setSigningCredentials(cell, signingCredentials);
 
         //Set the signing credentials in the database
-        await this.#signingCredentialsDb.insertOne({cellId: cellIdB64, signingCredentials: JSON.stringify(signingCredentials)});
+        let stringSigningCredentials = {
+            capSecret: Buffer.from(signingCredentials.capSecret).toString('base64'),
+            keyPair: {
+                publicKey: Buffer.from(signingCredentials.keyPair.publicKey).toString('base64'),
+                secretKey: Buffer.from(signingCredentials.keyPair.secretKey).toString('base64')
+            },
+            signingKey: Buffer.from(signingCredentials.signingKey).toString('base64')
+        };
+        await this.#signingCredentialsDb.insertOne({cellId: cellIdB64, signingCredentials: JSON.stringify(stringSigningCredentials)});
         return signingCredentials;
     }
 
@@ -581,22 +602,8 @@ export default class HolochainService {
             if (fnName != "sync" && fnName != "current_revision") {
                 console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
             }
-            //Check that signZomeCall will be able to find the signing credentials
-            const signingKeyExists = getSigningCredentials(cellId);
 
-            if (!signingKeyExists) {
-                const cellIdB64 = this.cellIdToB64(cellId);
-                //Check if we already have some in the database
-                let signingCredentials = await this.#signingCredentialsDb.findOne({cellId: cellIdB64})
-                if (!signingCredentials) {
-                    console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "generating new ones...");
-                    await this.generateSigningKeys(cellId);
-                } else {
-                    console.warn("HolochainService: Did not get signing keys for cell", cellIdB64, "but found them in the database, setting them...", signingCredentials);
-                    //We have some but they are not present in the holochain client... set them
-                    setSigningCredentials(cellId, JSON.parse(signingCredentials.signingCredentials));
-                }
-            }
+            await this.ensureSigningKey(cellId);
 
             const signedZomeCall = await signZomeCall({
                 cell_id: cellId,
