@@ -644,6 +644,25 @@ describe("Integration", () => {
                     expect(recipe2.name).to.equal("recipe://test")
                 })
 
+                it("delete()", async () => {
+                    let root = Literal.from("Active record implementation test delete").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test";
+
+                    await recipe.save();
+
+                    const recipe2 = await Recipe.all(perspective!);
+
+                    expect(recipe2.length).to.equal(2)
+
+                    await recipe.delete();
+
+                    const recipe3 = await Recipe.all(perspective!);
+
+                    expect(recipe3.length).to.equal(1)
+                })
+
                 it("update()", async () => {
                     let root = Literal.from("Active record implementation test").toUrl()
                     const recipe = new Recipe(perspective!, root)
