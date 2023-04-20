@@ -6,6 +6,7 @@ mod utils;
 mod wallet;
 
 pub mod init;
+mod pubsub;
 
 use log::{error, info};
 use std::env;
