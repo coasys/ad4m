@@ -51,11 +51,13 @@ pub(crate) async fn subscribe_and_process<T: DeserializeOwned + Send + 'static>(
     pubsub: Arc<PubSub>,
     topic: Topic,
 ) -> Pin<Box<dyn Stream<Item = FieldResult<T>> + Send>> {
+    println!("Subscribe and process: {:?}", topic);
     let receiver = pubsub.subscribe(&topic).await;
-    let receiver_stream = WatchStream::new(receiver);
+    println!("Got receiver: {:?}", receiver);
+    let receiver_stream = WatchStream::from_changes(receiver);
 
     let mapped_stream = receiver_stream.map(|msg| {
-        println!("Received message: {:?}", msg);
+        println!("subscribe_and_process: Received message: {:?}", msg);
         match serde_json::from_str::<T>(&msg) {
             Ok(agent_status) => Ok(agent_status),
             Err(e) => Err(FieldError::new(
