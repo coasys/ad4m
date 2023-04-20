@@ -395,4 +395,37 @@ mod tests {
         assert!(unlock_result.is_ok());
         assert!(new_wallet.is_unlocked());
     }
+
+    #[test]
+    fn test_did_sign_and_verify() {
+        let mut wallet = Wallet::new();
+        let key_name = "test_key".to_string();
+
+        wallet.generate_keypair(key_name.clone());
+        let did_document = wallet.get_did_document(&key_name);
+        assert!(did_document.is_some());
+
+        let did = did_document.unwrap().id;
+
+        let message = b"test message";
+        let signature = wallet.sign(&key_name, message);
+        assert!(signature.is_some());
+
+        let mut signature = signature.unwrap();
+        {
+            let sig_bytes = signature.as_slice();
+            let key_pair = PatchedKeyPair::try_from(did.as_str()).expect("Failed to get key pair");
+            let result = key_pair.verify(message, sig_bytes);
+            assert!(result.is_ok());
+        }
+        
+
+        signature[0] = 0;
+        {
+            let sig_bytes = signature.as_slice();
+            let key_pair = PatchedKeyPair::try_from(did.as_str()).expect("Failed to get key pair");
+            let result = key_pair.verify(message, sig_bytes);
+            assert!(result.is_err());
+        }
+    }
 }
