@@ -91,15 +91,16 @@ fn wallet_load(data: String) -> Result<(), AnyError> {
 }
 
 #[op]
-fn wallet_sign(payload: String) -> Result<String, AnyError> {
+fn wallet_sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
     let name = "main".to_string();
     let signature = wallet_ref
-        .sign(&name, payload.as_bytes())
+        .sign(&name, payload)
         .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
-    Ok(base64engine::STANDARD.encode(signature))
+    Ok(signature)
+}
 }
 
 pub fn build() -> Extension {
