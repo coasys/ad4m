@@ -10,13 +10,11 @@ export default class PerspectivesController {
     #perspectiveHandles: Map<string, PerspectiveHandle>
     #perspectiveInstances: Map<string, Perspective>
     #rootConfigPath
-    pubsub
     #context
 
     constructor(rootConfigPath: string, context: PerspectiveContext) {
         this.#context = context
         this.#rootConfigPath = rootConfigPath
-        this.pubsub = PubSub.get()
 
         this.#perspectiveHandles = new Map<string, PerspectiveHandle>()
         this.#perspectiveInstances = new Map<string, Perspective>()
@@ -44,7 +42,7 @@ export default class PerspectivesController {
                 try {
                     let perspectivePlain = perspective.plain();
                     for (const link of diff.additions) {
-                        await this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+                        await PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
                             perspective: perspectivePlain,
                             link: link
                         })
@@ -52,7 +50,7 @@ export default class PerspectivesController {
 
                     for (const linkRemoved of diff.removals) {
                         console.log("publishing removal:", linkRemoved)
-                        await this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+                        await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
                             perspective: perspectivePlain,
                             link: linkRemoved
                         })
@@ -68,7 +66,7 @@ export default class PerspectivesController {
         this.#context.languageController!.addTelepresenceSignalObserver((signal: any, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                this.pubsub.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
+                PUBSUB.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
                     signal: signal,
                     perspective: perspective.plain()
                 })
@@ -144,12 +142,12 @@ export default class PerspectivesController {
         this.#perspectiveHandles.set(perspective.uuid, perspective)
         this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood, createdFromJoin, state))
         this.save()
-        this.pubsub.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
+        PUBSUB.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
         return perspective
     }
 
     replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
-        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: perspectiveHandle })
+        PUBSUB.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: perspectiveHandle })
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
         this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
         this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin, state));
@@ -166,7 +164,7 @@ export default class PerspectivesController {
             this.#perspectiveHandles.delete(uuid)
             this.#perspectiveInstances.delete(uuid)
             this.save()
-            this.pubsub.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, { uuid })
+            PUBSUB.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, { uuid })
         } catch (e) {
             console.error("Error removing perspective:", e);
             throw new Error(`Error removing perspective: ${e}`);
@@ -187,7 +185,7 @@ export default class PerspectivesController {
             instance.updateFromId(perspective as PerspectiveHandle)
         }
 
-        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: {
+        PUBSUB.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: {
             uuid: perspective.uuid,
             name: perspective.name,
             state: perspective.state,

@@ -159,7 +159,7 @@ export default class AgentService {
   async updateAgent(a: Agent) {
     this.#agent = a;
     await this.storeAgentProfile();
-    this.#pubsub.publish(PubSubInstance.AGENT_UPDATED, a);
+    await PUBSUB.publish(PubSubInstance.AGENT_UPDATED, a);
   }
 
   setAgentLanguage(lang: Language) {
@@ -249,7 +249,7 @@ export default class AgentService {
   async unlock(password: string) {
     // @ts-ignore
     WALLET.unlock(password);
-    this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
+    await PUBSUB.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
     this.#readyPromiseResolve!();
     try {
       await this.storeAgentProfile();
@@ -262,10 +262,10 @@ export default class AgentService {
     }
   }
 
-  lock(password: string) {
+  async lock(password: string) {
     // @ts-ignore
     WALLET.lock(password);
-    this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
+    await PUBSUB.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
   }
 
   async save(password: string) {
@@ -332,14 +332,14 @@ export default class AgentService {
     return token == this.#adminCredential;
   }
 
-  requestCapability(authInfo: AuthInfo) {
+  async requestCapability(authInfo: AuthInfo) {
     let requestId = uuidv4();
     let authExtended = {
       requestId,
       auth: authInfo,
     } as AuthInfoExtended;
 
-    this.#pubsub.publish(PubSubInstance.EXCEPTION_OCCURRED_TOPIC, {
+    await PUBSUB.publish(PubSubInstance.EXCEPTION_OCCURRED_TOPIC, {
       title: "Request to authenticate application",
       message: `${authInfo.appName} is waiting for authentication, go to ad4m launcher for more information.`,
       type: ExceptionType.CapabilityRequested,

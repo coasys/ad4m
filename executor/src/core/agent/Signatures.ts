@@ -59,6 +59,8 @@ export default class Signatures {
             return false
         }
 
+        console.log("using key", key);
+
         let pubKey: Uint8Array | undefined
         if(key.publicKeyHex)
             pubKey = Uint8Array.from(Buffer.from(key.publicKeyHex, "hex"))
@@ -66,6 +68,10 @@ export default class Signatures {
             pubKey = Uint8Array.from(bs58.decode(key.publicKeyBase58))
         const sigBytes = Uint8Array.from(Buffer.from(expr.proof.signature, "hex"))
         const message = Signatures.buildMessage(expr.data, expr.timestamp)
+
+        console.log("pubKey", pubKey)
+        console.log("sigBytes", sigBytes)
+        console.log("message", message);
 
         if (!pubKey) {
             throw Error("Could not find publicKeyHex or publicKeyBase58 in did document")

@@ -1,6 +1,5 @@
 import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
-import { Link, linkEqual, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
-import { SHA3 } from "sha3";
+import { Link, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import * as PubSub from './graphQL-interface/PubSub'
@@ -10,11 +9,6 @@ import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
 import { DID } from "@perspect3vism/ad4m/lib/src/DID";
 import { PerspectivismDb } from "./db";
-
-type PerspectiveSubscription = {
-    perspective: PerspectiveHandle,
-    link: LinkExpression
-}
 
 const maxRetries = 10;
 const backoffStep = 200;
@@ -34,7 +28,6 @@ export default class Perspective {
     #db: PerspectivismDb;
     #agent: AgentService;
     #languageController?: LanguageController
-    #pubsub: any
     #config?: MainConfig;
 
     #prologEngine: PrologInstance|null
@@ -60,27 +53,8 @@ export default class Perspective {
         this.#languageController = context.languageController!
         this.#config = context.config;
 
-        this.#pubsub = PubSub.get()
         this.#prologEngine = null
         this.#prologNeedsRebuild = true
-
-        this.#pubsub.subscribe(PubSub.LINK_ADDED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
-            if (perspective.uuid === this.uuid) {
-                this.#prologNeedsRebuild = true
-            }
-        })
-
-        this.#pubsub.subscribe(PubSub.LINK_REMOVED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
-            if (perspective.uuid === this.uuid) {
-                this.#prologNeedsRebuild = true
-            }
-        })
-
-        this.#pubsub.subscribe(PubSub.LINK_UPDATED_TOPIC, ({ perspective }: PerspectiveSubscription) => {
-            if (perspective.uuid === this.uuid) {
-                this.#prologNeedsRebuild = true
-            }
-        })
 
         const that = this
 
@@ -117,7 +91,7 @@ export default class Perspective {
 
     async updatePerspectiveState(state: PerspectiveState) {
         if (this.state != state) {
-            await this.#pubsub.publish(PubSub.PERSPECTIVE_SYNC_STATE_CHANGE, {state, uuid: this.uuid})
+            await PUBSUB.publish(PubSub.PERSPECTIVE_SYNC_STATE_CHANGE, {state, uuid: this.uuid})
             this.state = state
         }
     }
@@ -475,10 +449,11 @@ export default class Perspective {
         await this.#db.addLink(this.uuid!, linkExpression);
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
-        this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+        PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: perspectivePlain,
             link: linkExpression
         })
+        this.#prologNeedsRebuild = true
 
         return linkExpression
     }
@@ -499,11 +474,12 @@ export default class Perspective {
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
-            this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+            PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
                 perspective: perspectivePlain,
                 link: link
             })
         };
+        this.#prologNeedsRebuild = true
 
         return linkExpressions
     }
@@ -523,11 +499,12 @@ export default class Perspective {
         await Promise.all(linkExpressions.map(async l => await this.#db.removeLink(this.uuid!, l)))
         this.#prologNeedsRebuild = true;
         for (const link of linkExpressions) {
-            this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+            PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             })
         };
+        this.#prologNeedsRebuild = true
 
         return linkExpressions
     }
@@ -547,17 +524,18 @@ export default class Perspective {
         await Promise.all(diff.removals.map(async l => await this.#db.removeLink(this.uuid!, l)));
         this.#prologNeedsRebuild = true;
         for (const link of diff.additions) {
-            this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+            PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             });
         };
         for (const link of diff.removals) {
-            this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+            PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             });
         };
+        this.#prologNeedsRebuild = true
 
         return diff;
     }
@@ -585,7 +563,7 @@ export default class Perspective {
 
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
-        this.#pubsub.publish(PubSub.LINK_UPDATED_TOPIC, {
+        PUBSUB.publish(PubSub.LINK_UPDATED_TOPIC, {
             perspective,
             oldLink,
             newLink: newLinkExpression
@@ -608,7 +586,7 @@ export default class Perspective {
         }
 
         this.#prologNeedsRebuild = true;
-        this.#pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+        PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
         })
