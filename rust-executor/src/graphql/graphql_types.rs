@@ -1,4 +1,4 @@
-use juniper::{GraphQLInputObject, GraphQLObject, GraphQLScalarValue};
+use juniper::{GraphQLInputObject, GraphQLObject, GraphQLScalar};
 use serde::{Deserialize, Serialize};
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
@@ -77,7 +77,7 @@ pub struct CapabilityInput {
     pub with: ResourceInput,
 }
 
-#[derive(GraphQLScalarValue, Default, Debug, Serialize, Deserialize)]
+#[derive(GraphQLScalar, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[graphql(transparent)]
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.

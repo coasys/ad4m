@@ -1,4 +1,3 @@
-use actix::prelude::*;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use deno_core::resolve_url_or_path;
@@ -31,13 +30,6 @@ use options::{main_module_url, main_worker_options};
 
 static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
     Lazy::new(|| Arc::new(TokioMutex::new(None)));
-
-/// Define message
-#[derive(Message)]
-#[rtype(result = "Result<String, AnyError>")]
-pub struct Execute {
-    pub script: String,
-}
 
 pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,

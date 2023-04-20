@@ -19,11 +19,17 @@ use super::graphql_types::*;
 
 pub struct Subscription;
 
+///TODO; many of these subscriptions are expecting to only receive the data which gets return in the subscriptions resolvers
+/// This is not always the case; sometimes the JS will return a different object than the one that was passed in
+/// the other data in this object is usually used to filter the subscriptions as is the case where we have a perspectiveUUID
+/// we should add a filter closure in subscribe_and_process which will filter the data before it is returned to the client
+/// and implement custom serialization logic for this case
+
 #[juniper::graphql_subscription(context = JsCoreHandle)]
 impl Subscription {
     async fn agent_status_changed(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<AgentStatus>> + Send>> {
         println!("incoming sub");
         let pubsub = get_global_pubsub().await;
@@ -34,8 +40,9 @@ impl Subscription {
 
     async fn agent_updated(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<Agent>> + Send>> {
+        println!("incoming sub");
         let pubsub = get_global_pubsub().await;
         let topic = &AGENT_UPDATED_TOPIC;
 
@@ -44,7 +51,7 @@ impl Subscription {
 
     async fn exception_occurred(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<ExceptionInfo>> + Send>> {
         let pubsub = get_global_pubsub().await;
         let topic = &EXCEPTION_OCCURRED_TOPIC;
@@ -54,7 +61,7 @@ impl Subscription {
 
     async fn neighbourhood_signal(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
         perspectiveUUID: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveExpression>> + Send>> {
         let pubsub = get_global_pubsub().await;
@@ -65,7 +72,7 @@ impl Subscription {
 
     async fn perspective_added(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveHandle>> + Send>> {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_ADDED_TOPIC;
@@ -75,7 +82,7 @@ impl Subscription {
 
     async fn perspective_link_added(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
         uuid: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkExpression>> + Send>> {
         let pubsub = get_global_pubsub().await;
@@ -86,7 +93,7 @@ impl Subscription {
 
     async fn perspective_link_removed(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
         uuid: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkExpression>> + Send>> {
         let pubsub = get_global_pubsub().await;
@@ -97,7 +104,7 @@ impl Subscription {
 
     async fn perspective_link_updated(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
         uuid: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkExpressionUpdated>> + Send>> {
         let pubsub = get_global_pubsub().await;
@@ -108,7 +115,7 @@ impl Subscription {
 
     async fn perspective_removed(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<String>> + Send>> {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_REMOVED_TOPIC;
@@ -118,7 +125,7 @@ impl Subscription {
 
     async fn perspective_sync_state_change(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
         uuid: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<String>> + Send>> {
         let pubsub = get_global_pubsub().await;
@@ -129,7 +136,7 @@ impl Subscription {
 
     async fn perspective_updated(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveHandle>> + Send>> {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_UPDATED_TOPIC;
@@ -139,7 +146,7 @@ impl Subscription {
 
     async fn runtime_message_received(
         &self,
-        context: &JsCoreHandle,
+        _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveExpression>> + Send>> {
         let pubsub = get_global_pubsub().await;
         let topic = &RUNTIME_MESSAGED_RECEIVED_TOPIC;

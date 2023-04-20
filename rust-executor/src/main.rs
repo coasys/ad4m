@@ -11,7 +11,7 @@ use log::{error, info};
 use rust_executor::Ad4mConfig;
 use std::env;
 
-use graphql::start_server;
+use graphql::warp_server::start_server;
 use js_core::JsCore;
 
 #[tokio::main]

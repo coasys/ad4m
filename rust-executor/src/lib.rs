@@ -11,7 +11,7 @@ mod pubsub;
 use log::{error, info};
 use std::env;
 
-use graphql::start_server;
+//use graphql::start_server;
 use js_core::JsCore;
 
 pub use config::Ad4mConfig;
@@ -27,7 +27,7 @@ pub async fn run(config: Ad4mConfig) {
     info!("js_core initialized.");
 
     info!("Starting GraphQL...");
-    match start_server(js_core_handle).await {
+    match graphql::warp_server::start_server(js_core_handle).await {
         Ok(_) => {
             info!("GraphQL server stopped.");
             std::process::exit(0);
