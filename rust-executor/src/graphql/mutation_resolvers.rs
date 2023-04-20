@@ -150,7 +150,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentLock(
+            await core.resolvers.Mutation.agentLock(
                 null, 
                 {{ passphrase: "{}" }},
                 {{ capabilities: [{}] }}

@@ -5,6 +5,7 @@ mod utils;
 mod wallet;
 
 pub mod init;
+mod pubsub;
 
 use log::{error, info};
 use rust_executor::Ad4mConfig;

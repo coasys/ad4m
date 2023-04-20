@@ -5,7 +5,6 @@ import * as Config from './Config'
 import * as Db from './db'
 import type { PerspectivismDb } from './db'
 import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService';
-//import * as IPFS from './storage-services/IPFS'
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
@@ -14,7 +13,6 @@ import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import * as PubSub from './graphQL-interface/PubSub'
-//import { IPFS as IPFSType } from 'ipfs'
 import EntanglementProofController from './EntanglementProof'
 import runDAppServer from "./DAppServer"
 import fs from 'fs'
@@ -228,12 +226,12 @@ export default class PerspectivismCore {
         return this.#languagesReady
     }
 
-    languageSignal(signal: any) {
+    async languageSignal(signal: any) {
         // //@ts-ignore
         // console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
         //NOTE (optimization): worth considering if its worth keeping around pubsub in this or if we should just get a new pubsub here
         //@ts-ignore
-        this.pubsub.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
+        await PUBSUB.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
     }
 
     initControllers() {

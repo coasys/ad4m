@@ -411,16 +411,16 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
                 const agent = core.agentService.dump();
 
-                pubsub.publish(PubSub.AGENT_STATUS_CHANGED, agent)
+                await PUBSUB.publish(PubSub.AGENT_STATUS_CHANGED, agent)
 
                 console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
 
                 return agent;
             },
             //@ts-ignore
-            agentLock: (parent, args, context, info) => {
+            agentLock: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.AGENT_LOCK_CAPABILITY)
-                core.agentService.lock(args.passphrase)
+                await core.agentService.lock(args.passphrase)
                 return core.agentService.dump()
             },
             //@ts-ignore
@@ -497,7 +497,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             agentRequestCapability: async (parent, args, context, info) => {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { authInfo } = args;
-                let token = core.agentService.requestCapability(authInfo);
+                let token = await core.agentService.requestCapability(authInfo);
                 return token;
             },
             //@ts-ignore
@@ -834,138 +834,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
         },
 
-        Subscription: {
-            agentUpdated: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.AGENT_SUBSCRIBE_CAPABILITY)
-                    return pubsub.asyncIterator(PubSub.AGENT_UPDATED)
-                },
-                //@ts-ignore
-                resolve: payload => payload
-            },
-            agentStatusChanged: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    return pubsub.asyncIterator(PubSub.AGENT_STATUS_CHANGED)
-                },
-                //@ts-ignore
-                resolve: payload => payload
-            },
-
-            neighbourhoodSignal: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return withFilter(
-                        () => pubsub.asyncIterator(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC),
-                        (payload, argsInner) => payload.perspective.uuid === argsInner.perspectiveUUID
-                    )(undefined, args)
-                },
-                resolve: async (payload: any) => {
-                    await core.languageController?.tagExpressionSignatureStatus(payload?.signal)
-                    if (payload?.signal?.data.links) {
-                        for (const link of payload?.signal.data.links) {
-                            await core.languageController?.tagExpressionSignatureStatus(link);
-                        }
-                    };
-                    return payload?.signal
-                }
-            },
-            runtimeMessageReceived: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY)
-                    return pubsub.asyncIterator(PubSub.DIRECT_MESSAGE_RECEIVED)
-                },
-                //@ts-ignore
-                resolve: payload => payload
-            },
-            perspectiveAdded: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return pubsub.asyncIterator(PubSub.PERSPECTIVE_ADDED_TOPIC)
-                },
-                //@ts-ignore
-                resolve: payload => payload?.perspective
-            },
-            perspectiveLinkAdded: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return withFilter(
-                        () => pubsub.asyncIterator(PubSub.LINK_ADDED_TOPIC),
-                        (payload, argsInner) => payload.perspective.uuid === argsInner.uuid
-                    )(undefined, args)
-                },
-                //@ts-ignore
-                resolve: payload => payload?.link
-            },
-            perspectiveLinkRemoved: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return withFilter(
-                        () => pubsub.asyncIterator(PubSub.LINK_REMOVED_TOPIC),
-                        (payload, variables) => payload.perspective.uuid === variables.uuid
-                    )(undefined, args)
-                },
-                //@ts-ignore
-                resolve: payload => payload?.link
-            },
-            perspectiveLinkUpdated: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return withFilter(
-                        () => pubsub.asyncIterator(PubSub.LINK_UPDATED_TOPIC),
-                        (payload, variables) => payload.perspective.uuid === variables.uuid
-                    )(undefined, args)
-                },
-                //@ts-ignore
-                resolve: payload => ({ oldLink: payload?.oldLink, newLink: payload.newLink })
-            },
-            perspectiveUpdated: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return pubsub.asyncIterator(PubSub.PERSPECTIVE_UPDATED_TOPIC)
-                },
-                //@ts-ignore
-                resolve: payload => payload?.perspective
-            },
-            perspectiveRemoved: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return pubsub.asyncIterator(PubSub.PERSPECTIVE_REMOVED_TOPIC)
-                },
-                //@ts-ignore
-                resolve: payload => payload?.uuid
-            },
-            exceptionOccurred: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY)
-                    return pubsub.asyncIterator(PubSub.EXCEPTION_OCCURRED_TOPIC)
-                },
-                //@ts-ignore
-                resolve: payload => payload
-            },
-            perspectiveSyncStateChange: {
-                //@ts-ignore
-                subscribe: (parent, args, context, info) => {
-                    checkCapability(context.capabilities, Auth.PERSPECTIVE_SUBSCRIBE_CAPABILITY)
-                    return withFilter(
-                        () => pubsub.asyncIterator(PubSub.PERSPECTIVE_SYNC_STATE_CHANGE),
-                        (payload, variables) => payload.uuid === variables.uuid
-                    )(undefined, args)
-                },
-                //@ts-ignore
-                resolve: payload => payload.state
-            }
-        },
+        Subscription: {},
 
         ExpressionRendered: {
             //@ts-ignore

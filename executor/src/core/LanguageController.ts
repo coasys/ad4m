@@ -76,7 +76,6 @@ export default class LanguageController {
     #languageLanguage?: Language
     #neighbourhoodLanguage?: Language
     #perspectiveLanguage?: Language
-    pubSub
 
     constructor(context: object, services: Services) {
         this.#context = context
@@ -89,7 +88,6 @@ export default class LanguageController {
         this.#linkObservers = []
         this.#telepresenceSignalObservers = []
         this.#syncStateChangeObservers = []
-        this.pubSub = PubSub.get()
         this.#config = (context as any).config;
     }
 
@@ -165,7 +163,7 @@ export default class LanguageController {
                         let errMsg = `LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE: ${bundlePath}`
                         console.error(errMsg)
                         console.error(e)
-                        this.pubSub.publish(
+                        await PUBSUB.publish(
                             PubSub.EXCEPTION_OCCURRED_TOPIC,
                             {
                                 title: "Failed to load installed language",
@@ -217,7 +215,7 @@ export default class LanguageController {
         // } catch (e) {
         //     const errMsg = `Could not load language ${e}`;
         //     console.error(errMsg);
-        //     this.pubSub.publish(
+        //     await PUBSUB.publish(
         //         PubSub.EXCEPTION_OCCURRED_TOPIC,
         //         {
         //             title: "Failed to load installed language",
@@ -243,7 +241,7 @@ export default class LanguageController {
         const storageDirectory = this.getLanguageStoragePath(hash)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.pubSub});
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: PUBSUB});
         const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {
@@ -266,8 +264,8 @@ export default class LanguageController {
 
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
-            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
-                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+            language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
+                await PUBSUB.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
             })
         }
 
@@ -290,7 +288,7 @@ export default class LanguageController {
         const storageDirectory = this.getLanguageStoragePath(hash)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: this.pubSub});
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: PUBSUB});
         //@ts-ignore
         const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings})
 
@@ -315,8 +313,8 @@ export default class LanguageController {
 
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
-            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
-                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+            language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
+                await PUBSUB.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
             })
         }
 
@@ -505,7 +503,7 @@ export default class LanguageController {
                 ) {
                     let errMsg = `Language not created by trusted agent: ${languageAuthor} and is not templated... aborting language install. Language metadata: ${stringify(languageMetaData)}`
                     console.error(errMsg)
-                    this.pubSub.publish(
+                    await PUBSUB.publish(
                         PubSub.EXCEPTION_OCCURRED_TOPIC,
                         {
                             title: "Failed to install language",
@@ -544,7 +542,7 @@ export default class LanguageController {
                     }
                 } else {
                     let errMsg = "Agent which created source language for language trying to be installed is not a trustedAgent... aborting language install";
-                    this.pubSub.publish(
+                    await PUBSUB.publish(
                         PubSub.EXCEPTION_OCCURRED_TOPIC,
                         {
                             title: "Failed to install language",
@@ -1070,7 +1068,7 @@ export default class LanguageController {
                 let errMsg = `Error trying to verify signature for expression: ${expressionFormatted}`
                 console.error(errMsg)
                 console.error(e)
-                this.pubSub.publish(
+                await PUBSUB.publish(
                     PubSub.EXCEPTION_OCCURRED_TOPIC,
                     {
                         title: "Failed to get expression",
