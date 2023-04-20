@@ -1,9 +1,10 @@
 {
     "index": "Introduction",
     "getting-started": "Getting Started",
-    "tutorial": "Tutorial",
+    "concepts": "Concepts",
     "languages": "AD4M Languages",
     "social-dna": "Social DNA",
+    "tutorial": "Tutorial",
     "jsdoc": "API Reference",
     "download": {
         "title": "AD4M Website",
