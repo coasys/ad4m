@@ -22,12 +22,8 @@ futures = "0.3.28"
 tokio-stream = { version = "0.1.12", features = ["sync"] }
 lazy_static = "1.4.0"
 
-juniper = "0.15.0"
-juniper_subscriptions = "0.16.0"
-juniper_actix = "0.4.0"
-actix-web = "4.2.1"
-actix-rt = "2.2.0"
-actix = "0.13.0"
+juniper = { path = "../../juniper/juniper", features = ["chrono"] }
+juniper_subscriptions = { path = "../../juniper/juniper_subscriptions" }
 
 chrono = { version = "0.4.24", features = ["serde"] }
 env_logger = "0.10.0"
@@ -51,3 +47,7 @@ multibase = "0.9.1"
 multihash = { version = "0.18.0", features = ["sha2"] }
 cid = "0.10.1"
 once_cell = "1.17.1"
+
+juniper_graphql_transport_ws = { path = "../../juniper/juniper_graphql_transport_ws" }
+juniper_warp = { path = "../../juniper/juniper_warp", features = ["subscriptions"] }
+warp = "0.3.4"
