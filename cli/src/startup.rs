@@ -43,7 +43,7 @@ pub fn get_executor_port() -> Result<u16> {
 
 pub fn get_executor_url() -> Result<String> {
     let port = get_executor_port()?;
-    Ok(format!("http://localhost:{}/graphql", port))
+    Ok(format!("http://127.0.0.1:{}/graphql", port))
 }
 
 pub async fn get_cap_token(executor_url: String) -> Result<String> {
