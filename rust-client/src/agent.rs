@@ -1,8 +1,13 @@
 use std::sync::Arc;
 
-use crate::{types::Capability, util::query, ClientInfo};
+use crate::{
+    types::Capability,
+    util::{create_websocket_client, query},
+    ClientInfo,
+};
 use anyhow::{anyhow, Context, Result};
 use graphql_client::{GraphQLQuery, Response};
+use graphql_ws_client::graphql::StreamingOperation;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -366,6 +371,50 @@ pub async fn entanglement_proof_pre_flight(
     .with_context(|| "Failed to run runtime->add-trusted-agents query")
 }
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct SubscriptionAgentUpdated;
+
+pub async fn watch(executor_url: String, cap_token: String) -> Result<()> {
+    use futures::StreamExt;
+
+    let mut client = create_websocket_client(executor_url, cap_token)
+        .await
+        .with_context(|| "Failed to create websocket client")?;
+
+    println!("Successfully created websocket client");
+    let mut stream = client
+        .streaming_operation(StreamingOperation::<SubscriptionAgentUpdated>::new(
+            subscription_agent_updated::Variables {},
+        ))
+        .await
+        .with_context(|| "Failed to subscribe to agentUpdated")?;
+
+    println!("Successfully subscribed agentUpdated",);
+    println!("Waiting for events...");
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(response) => {
+                if let Some(data) = response.data.and_then(|data| data.agent_updated) {
+                    println!("Received agentUpdated: {:?}", data);
+                }
+            }
+            Err(e) => {
+                println!("Received Error: {:?}", e);
+            }
+        }
+    }
+
+    println!("Stream ended. Exiting...");
+
+    Ok(())
+}
+
 pub struct AgentClient {
     info: Arc<ClientInfo>,
 }
@@ -496,5 +545,9 @@ impl AgentClient {
             device_key_type,
         )
         .await
+    }
+
+    pub async fn watch(&self) -> Result<()> {
+        watch(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 }

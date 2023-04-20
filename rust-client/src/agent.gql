@@ -196,3 +196,27 @@ mutation EntanglementProofPreFlight(
     didSignedByDeviceKey
   }
 }
+
+subscription SubscriptionAgentUpdated {
+  agentUpdated {
+    did
+    directMessageLanguage
+    perspective {
+      links {
+        author
+        timestamp
+        proof {
+          signature
+          key
+          valid
+          invalid
+        }
+        data {
+          source
+          predicate
+          target
+        }
+      }
+    }
+  }
+}
