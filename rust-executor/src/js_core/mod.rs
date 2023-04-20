@@ -20,6 +20,7 @@ use tokio::task::LocalSet;
 
 mod futures;
 mod options;
+mod pubsub_extension;
 mod string_module_loader;
 mod utils_extension;
 mod wallet_extension;
