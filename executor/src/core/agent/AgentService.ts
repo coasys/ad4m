@@ -96,7 +96,7 @@ export default class AgentService {
     return this.#signingKeyId!
   }
 
-  createSignedExpression(data: any): Expression {
+  signingChecks() {
     if (!this.isInitialized) {
       throw new Error("Can't sign without keystore");
     }
@@ -106,20 +106,19 @@ export default class AgentService {
     if (!this.#signingKeyId) {
       throw new Error("Can't sign without signingKeyId");
     }
+  }
+
+  createSignedExpression(data: any): Expression {
+    this.signingChecks()
 
     const timestamp = new Date().toISOString();
     const payloadBytes = Signatures.buildMessage(data, timestamp);
 
-    const key = this.getSigningKey();
-    //@ts-ignore
-    let buf = Buffer.from(key.private_key, key.encoding);
-    //@ts-ignore
-    const privKey = Uint8Array.from(buf);
-
-    const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey);
-    const sigBuffer = Buffer.from(sigObj.signature);
+    const signature = WALLET.sign(payloadBytes);
+    const sigBuffer = Buffer.from(signature);
     const sigHex = sigBuffer.toString("hex");
-    let proof = new ExpressionProof(sigHex, this.#signingKeyId);
+
+    let proof = new ExpressionProof(sigHex.toString(), this.#signingKeyId!);
     proof.valid = true;
     proof.invalid = false;
 
@@ -134,25 +133,12 @@ export default class AgentService {
   }
 
   signString(data: string): string {
-    if(!this.isInitialized){
-        throw new Error("Can't sign without keystore")
-    }
-    if(!this.isUnlocked()) {
-        throw new Error("Can't sign with locked keystore")
-    }
-    if(!this.#signingKeyId) {
-        throw new Error("Can't sign without signingKeyId")
-    }
+    this.signingChecks()
 
     const payloadBytes = Signatures.buildMessageRaw(data)
-
-    const key = this.getSigningKey()
-    //@ts-ignore
-    const privKey = Uint8Array.from(Buffer.from(key.private_key, key.encoding))
-
-    const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey)
-    const sigBuffer = Buffer.from(sigObj.signature)
-    const sigHex = sigBuffer.toString('hex')
+    const signature = WALLET.sign(payloadBytes);
+    const sigBuffer = Buffer.from(signature);
+    const sigHex = sigBuffer.toString("hex");
     return sigHex
   }
 

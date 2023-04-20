@@ -1,76 +1,19 @@
 import type { Expression } from "@perspect3vism/ad4m"
-import type { DIDResolver } from ".//DIDs"
 import sha256 from 'sha256'
-import secp256k1 from 'secp256k1'
-import baseX from 'base-x'
 import stringify from 'json-stable-stringify'
-const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-const bs58 = baseX(BASE58)
 export default class Signatures {
-    #didResolver: DIDResolver
-
-    constructor(didResolver: DIDResolver) {
-        this.#didResolver = didResolver
-    }
+    constructor() {}
 
     async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
-        // @ts-ignore
-        const { didDocument } = await this.#didResolver.resolve(did)
-        if(!didDocument) {
-            console.debug("DID document not found for", did)
-            return false
-        }
-
-        const availableKeys = didDocument.publicKey ? didDocument.publicKey : didDocument.verificationMethod
-        //@ts-ignore
-        const key = availableKeys.find(k => k.id === didSigningKeyId.includes(k.id))
-        if(!key) {
-            console.debug("Key not found in DID document", didSigningKeyId, didDocument)
-            return false
-        }
-
-        let pubKey: Uint8Array | undefined
-        if(key.publicKeyHex)
-            pubKey = Uint8Array.from(Buffer.from(key.publicKeyHex, "hex"))
-        if(key.publicKeyBase58)
-            pubKey = Uint8Array.from(bs58.decode(key.publicKeyBase58))
         const sigBytes = Uint8Array.from(Buffer.from(signedData, "hex"))
         const message = Signatures.buildMessageRaw(data)
-
-        if (!pubKey) {
-            throw Error("Could not find publicKeyHex or publicKeyBase58 in did document")
-        }
-        return secp256k1.ecdsaVerify(sigBytes, message, pubKey)
+        return WALLET.verify(did, message, sigBytes)
     }
 
     async verify(expr: Expression): Promise<boolean> {
-        // @ts-ignore
-        const { didDocument } = await this.#didResolver.resolve(expr.author)
-        if(!didDocument) {
-            console.debug("DID document not found for", expr.author)
-            return false
-        }
-
-        const availableKeys = didDocument.publicKey ? didDocument.publicKey : didDocument.verificationMethod
-        //@ts-ignore
-        const key = availableKeys.find(k => expr.proof.key.includes(k.id))
-        if(!key) {
-            console.debug("Key not found in DID document", expr.proof.key, didDocument)
-            return false
-        }
-
-        let pubKey: Uint8Array | undefined
-        if(key.publicKeyHex)
-            pubKey = Uint8Array.from(Buffer.from(key.publicKeyHex, "hex"))
-        if(key.publicKeyBase58)
-            pubKey = Uint8Array.from(bs58.decode(key.publicKeyBase58))
         const sigBytes = Uint8Array.from(Buffer.from(expr.proof.signature, "hex"))
         const message = Signatures.buildMessage(expr.data, expr.timestamp)
-
-        if (!pubKey) {
-            throw Error("Could not find publicKeyHex or publicKeyBase58 in did document")
-        }
-        return secp256k1.ecdsaVerify(sigBytes, message, pubKey)
+        return WALLET.verify(expr.author, message, sigBytes)
     }
 
     static buildMessage(data: any, timestamp: string): Uint8Array {

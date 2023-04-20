@@ -85,7 +85,7 @@ export default class PerspectivismCore {
         this.#agentService.load()
         this.#db = Db.init(this.#config.dataPath)
         this.#didResolver = DIDs.init(this.#config.dataPath)
-        this.#signatures = new Signatures(this.#didResolver)
+        this.#signatures = new Signatures()
         const that = this
         this.#resolveLanguagesReady = () => {}
         this.#languagesReady = new Promise(resolve => {
