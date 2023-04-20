@@ -1,5 +1,7 @@
 use base64::{engine::general_purpose as base64engine, Engine as _};
 use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension};
+use did_key::{Ed25519KeyPair, PatchedKeyPair, CoreSign};
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
@@ -101,6 +103,28 @@ fn wallet_sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
         .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
     Ok(signature)
 }
+
+#[op]
+fn wallet_verify(did: String, message: &[u8], signature: &[u8]) -> bool {
+    info!("Verifying signature for DID: {}", did);
+    info!("Message: {:?}", message);
+    info!("Signature: {:?}", signature);
+    if let Ok(key_pair) = PatchedKeyPair::try_from(did.as_str()) {
+        info!("got key");
+        match key_pair.verify(message, signature) {
+            Ok(_) => {
+                info!("Signature verified");
+                true
+            }
+            Err(e) => {
+                error!("Signature verification failed: {:?}", e);
+                false
+            }
+        }
+    } else {
+        error!("Failed to parse DID as key method: {}", did);
+        false
+    }
 }
 
 pub fn build() -> Extension {
@@ -116,6 +140,7 @@ pub fn build() -> Extension {
             wallet_export::decl(),
             wallet_load::decl(),
             wallet_sign::decl(),
+            wallet_verify::decl(),
         ])
         .force_op_registration()
         .build()

@@ -69,6 +69,8 @@ declare global {
         lock: (password: String) => void;
         export: () => String;
         load: (data: String) => void;
+        sign: (payload: Uint8Array) => Uint8Array;
+        verify: (did: String, message: Uint8Array, signature: Uint8Array) => boolean;
     }
 
     const WALLET: RustWallet;

@@ -28,7 +28,13 @@
         },
         sign: (payload) => {
             return core.ops.wallet_sign(payload);
-        }   
+        },
+        verify: (publicKey, message, signature) => {
+            if(typeof signature === "string") {
+                signature = Uint8Array.from(signature);
+            }
+            return core.ops.wallet_verify(publicKey, message, signature);
+        }
     };
   })(globalThis);
   
