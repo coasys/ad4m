@@ -35,7 +35,7 @@
     "build-all-linux": "turbo run build-all-linux",
     "build-all-windows": "turbo run build-all-windows",
     "docs:api": "typedoc --plugin typedoc-plugin-markdown --options typedoc.json --tsconfig core/tsconfig.json core/src",
-    "docs:build": "yarn run docsv2:api",
+    "docs:build": "yarn run docs:api && cd docs && yarn build",
     "patchpackage": "patch-package",
     "set-version": "node setVersion.js",
     "patch-package": "^6.5.0",

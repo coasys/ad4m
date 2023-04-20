@@ -3,7 +3,7 @@
   "excludeInternal": true,
   "entryPoints": ["./core/src/index.ts"],
   "entryPointStrategy": "resolve",
-  "out": "docsv2/pages/jsdoc/",
+  "out": "docs/pages/jsdoc/",
   "excludeExternals": true,
   "exclude": ["**/*+(index|.spec|.e2e|.test).ts"]
 }
