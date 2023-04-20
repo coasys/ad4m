@@ -1,5 +1,5 @@
 .next
 node_modules
-out
+out/**
 pages/jsdoc
 !next.config.js
