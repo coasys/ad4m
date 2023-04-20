@@ -51,6 +51,8 @@ pub enum AgentFunctions {
         request_id: String,
         rand: String,
     },
+    /// Stay connected and print any agent status changed events
+    Watch {},
 }
 
 pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()> {
@@ -185,6 +187,9 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
                 .retrieve_capability(request_id, rand)
                 .await?;
             println!("JWT: {:#?}", result);
+        }
+        AgentFunctions::Watch {} => {
+            ad4m_client.agent.watch().await?;
         }
     };
     Ok(())
