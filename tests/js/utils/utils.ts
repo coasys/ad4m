@@ -28,7 +28,7 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
     })
   }
 
-export async function startExecutor(relativeDataPath: string, 
+export async function startExecutor(dataPath: string, 
     bootstrapSeedPath: string, 
     gqlPort: number,
     hcAdminPort: number,
@@ -38,10 +38,11 @@ export async function startExecutor(relativeDataPath: string,
     reqCredential?: string
 ): Promise<ChildProcess> {
     console.log(bootstrapSeedPath);
+    console.log(dataPath);
     let executorProcess = null as ChildProcess | null;
-    rmSync(relativeDataPath, { recursive: true, force: true })
+    rmSync(dataPath, { recursive: true, force: true })
     console.log("Initialzing executor data directory")
-    execSync(`../../target/release/ad4m init --data-path ${relativeDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {})
+    execSync(`../../target/release/ad4m init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {})
     
     console.log("Starting executor")
     try {
@@ -51,9 +52,9 @@ export async function startExecutor(relativeDataPath: string,
     }
     
     if (!reqCredential) {
-        executorProcess = exec(`../../target/release/ad4m serve --data-path ${relativeDataPath} --port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly}`, {})
+        executorProcess = exec(`../../target/release/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly}`, {})
     } else {
-        executorProcess = exec(`../../target/release/ad4m serve --data-path ${relativeDataPath} --port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${reqCredential}`, {})
+        executorProcess = exec(`../../target/release/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${reqCredential}`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
