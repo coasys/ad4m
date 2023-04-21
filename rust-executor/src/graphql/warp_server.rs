@@ -27,7 +27,7 @@ fn schema() -> Schema {
     Schema::new(Query, Mutation, Subscription)
 }
 
-pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> {
+pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(), AnyError> {
     let log = warp::log("warp_subscriptions");
 
     let mut file = std::fs::File::create("schema.gql").unwrap();
@@ -47,7 +47,7 @@ pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> 
 
     let root_node = Arc::new(schema());
 
-    log::info!("Listening on 127.0.0.1:4000");
+    log::info!("Listening on 127.0.0.1:{port}");
 
     let routes = (warp::path("graphql")
         .and(warp::ws())
@@ -81,6 +81,6 @@ pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> 
     .or(homepage)
     .with(log);
 
-    warp::serve(routes).run(([127, 0, 0, 1], 4000)).await;
+    warp::serve(routes).run(([127, 0, 0, 1], port)).await;
     Ok(())
 }

@@ -172,8 +172,7 @@ impl JsCore {
         event_loop
     }
 
-    fn init_core(&self, mut config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
-        config.prepare();
+    fn init_core(&self, config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
         let mut worker = self
             .worker
             .lock()
