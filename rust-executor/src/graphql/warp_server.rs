@@ -28,7 +28,7 @@ fn schema() -> Schema {
 }
 
 pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(), AnyError> {
-    let log = warp::log("warp_subscriptions");
+    let log = warp::log("warp::server");
 
     let mut file = std::fs::File::create("schema.gql").unwrap();
     file.write_all(schema().as_schema_language().as_bytes())
@@ -46,8 +46,6 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(),
     let qm_graphql_filter = juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
 
     let root_node = Arc::new(schema());
-
-    log::info!("Listening on 127.0.0.1:{port}");
 
     let routes = (warp::path("graphql")
         .and(warp::ws())

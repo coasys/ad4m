@@ -58,7 +58,7 @@ export async function startExecutor(dataPath: string,
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
-            if (data.includes("GraphQL server started")) {
+            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
                 resolve()
             }
         });
@@ -90,7 +90,7 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
     }));
 
     const link = new HttpLink({
-        uri: "http://127.0.0.1:4000/graphql",
+        uri: `http://127.0.0.1:${port}/graphql`,
         //@ts-ignore
         fetch
     });

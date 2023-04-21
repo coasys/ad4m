@@ -18,7 +18,7 @@ pub use config::Ad4mConfig;
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) {
-    env::set_var("RUST_LOG", "rust_executor=info");
+    env::set_var("RUST_LOG", "rust_executor=trace,warp::server");
     let _ = env_logger::try_init();
     config.prepare();
 
