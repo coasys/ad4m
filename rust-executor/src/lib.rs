@@ -28,7 +28,7 @@ pub async fn run(mut config: Ad4mConfig) {
     info!("js_core initialized.");
 
     info!("Starting GraphQL...");
-    match graphql::warp_server::start_server(
+    match graphql::start_server(
         js_core_handle,
         config.gql_port.expect("Did not get gql port"),
     )

@@ -11,7 +11,6 @@ use log::{error, info};
 use rust_executor::Ad4mConfig;
 use std::env;
 
-use graphql::warp_server::start_server;
 use js_core::JsCore;
 
 #[tokio::main]
@@ -28,7 +27,7 @@ async fn main() {
     info!("js_core initialized.");
 
     info!("Starting GraphQL...");
-    match start_server(
+    match graphql::start_server(
         js_core_handle,
         config.gql_port.expect("Did not get gql port"),
     )
