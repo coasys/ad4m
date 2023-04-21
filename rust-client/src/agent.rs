@@ -399,7 +399,6 @@ pub async fn watch(executor_url: String, cap_token: String) -> Result<()> {
     println!("Waiting for events...");
 
     while let Some(item) = stream.next().await {
-        println!("Received item: {:#?}", item);
         match item {
             Ok(response) => {
                 if let Some(data) = response.data.and_then(|data| data.agent_status_changed) {
