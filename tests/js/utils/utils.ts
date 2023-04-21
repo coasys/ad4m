@@ -59,9 +59,16 @@ export async function startExecutor(dataPath: string,
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
             if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
+                console.log("going to resolve");
                 resolve()
             }
         });
+        executorProcess!.stderr!.on('data', (data) => {
+            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
+                console.log("going to resolve");
+                resolve()
+            }
+        }); 
     })
 
     executorProcess!.stdout!.on('data', (data) => {
