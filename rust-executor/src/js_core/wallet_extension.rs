@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose as base64engine, Engine as _};
 use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension};
-use did_key::{Ed25519KeyPair, PatchedKeyPair, CoreSign};
-use log::{error, info};
+use did_key::{CoreSign, PatchedKeyPair};
+use log::error;
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
@@ -108,9 +108,7 @@ fn wallet_sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
 fn wallet_verify(did: String, message: &[u8], signature: &[u8]) -> bool {
     if let Ok(key_pair) = PatchedKeyPair::try_from(did.as_str()) {
         match key_pair.verify(message, signature) {
-            Ok(_) => {
-                true
-            }
+            Ok(_) => true,
             Err(e) => {
                 error!("Signature verification failed: {:?}", e);
                 false

@@ -51,10 +51,7 @@ pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> 
 
     let routes = (warp::path("graphql")
         .and(warp::ws())
-        .and(warp::header::headers_cloned())
-        .map(move |ws: warp::ws::Ws, headers: warp::http::HeaderMap| {
-            log::info!("Incoming WebSocket headers: {:?}", headers);
-
+        .map(move |ws: warp::ws::Ws| {
             let root_node = root_node.clone();
             let js_core_handle = js_core_handle.clone();
             ws.on_upgrade(move |websocket| async move {
@@ -71,10 +68,10 @@ pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> 
                 .await
             })
         }))
-    // .map(|reply| {
-    //     // TODO#584: remove this workaround
-    //     warp::reply::with_header(reply, "Sec-WebSocket-Protocol", "graphql-transport-ws")
-    // })
+    .map(|reply| {
+        // TODO#584: remove this workaround
+        warp::reply::with_header(reply, "Sec-WebSocket-Protocol", "graphql-transport-ws")
+    })
     .or(warp::post()
         .and(warp::path("graphql"))
         .and(qm_graphql_filter))

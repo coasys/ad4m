@@ -51,9 +51,7 @@ pub(crate) async fn subscribe_and_process<T: DeserializeOwned + Send + 'static>(
     pubsub: Arc<PubSub>,
     topic: Topic,
 ) -> Pin<Box<dyn Stream<Item = FieldResult<T>> + Send>> {
-    println!("Subscribe and process: {:?}", topic);
     let receiver = pubsub.subscribe(&topic).await;
-    println!("Got receiver: {:?}", receiver);
     let receiver_stream = WatchStream::from_changes(receiver);
 
     let mapped_stream = receiver_stream.map(|msg| {

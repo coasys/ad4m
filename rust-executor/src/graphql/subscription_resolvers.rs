@@ -31,7 +31,6 @@ impl Subscription {
         &self,
         _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<AgentStatus>> + Send>> {
-        println!("incoming sub");
         let pubsub = get_global_pubsub().await;
         let topic = &AGENT_STATUS_CHANGED_TOPIC;
 
@@ -42,7 +41,6 @@ impl Subscription {
         &self,
         _context: &JsCoreHandle,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<Agent>> + Send>> {
-        println!("incoming sub");
         let pubsub = get_global_pubsub().await;
         let topic = &AGENT_UPDATED_TOPIC;
 
