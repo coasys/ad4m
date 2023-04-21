@@ -22,7 +22,7 @@ pub async fn run(mut config: Ad4mConfig) {
     let _ = env_logger::try_init();
     config.prepare();
 
-    info!("Starting js_core... with config: {:#?}", config);
+    info!("Starting js_core...");
     let mut js_core_handle = JsCore::start(config.clone()).await;
     js_core_handle.initialized().await;
     info!("js_core initialized.");
