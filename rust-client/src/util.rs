@@ -81,8 +81,10 @@ pub async fn create_websocket_client(
     let (connection, _) = async_tungstenite::tokio::connect_async(request).await?;
 
     let (sink, stream) = connection.split();
-    Ok(GraphQLClientClientBuilder::new()
+    let client = GraphQLClientClientBuilder::new()
         .build(stream, sink, TokioSpawner::current())
         .await
-        .unwrap())
+        .unwrap();
+
+    Ok(client)
 }

@@ -197,26 +197,12 @@ mutation EntanglementProofPreFlight(
   }
 }
 
-subscription SubscriptionAgentUpdated {
-  agentUpdated {
+subscription SubscriptionAgentStatusChanged {
+  agentStatusChanged {
     did
-    directMessageLanguage
-    perspective {
-      links {
-        author
-        timestamp
-        proof {
-          signature
-          key
-          valid
-          invalid
-        }
-        data {
-          source
-          predicate
-          target
-        }
-      }
-    }
+    didDocument
+    error
+    isInitialized
+    isUnlocked
   }
 }

@@ -6,6 +6,7 @@ use crate::{
     ClientInfo,
 };
 use anyhow::{anyhow, Context, Result};
+use futures::StreamExt;
 use graphql_client::{GraphQLQuery, Response};
 use graphql_ws_client::graphql::StreamingOperation;
 
@@ -28,11 +29,11 @@ pub async fn request_capability(
 ) -> Result<String> {
     let query = RequestCapability::build_query(request_capability::Variables {
         auth_info: request_capability::AuthInfoInput {
-            appName: app_name,
-            appDesc: app_desc,
-            appDomain: app_domain,
-            appUrl: app_url,
-            appIconPath: app_icon_path,
+            app_name: app_name,
+            app_desc: app_desc,
+            app_domain: app_domain,
+            app_url: app_url,
+            app_icon_path: app_icon_path,
             capabilities: capabilities.map(|val| val.into_iter().map(|val| val.into()).collect()),
         },
     });
@@ -377,31 +378,32 @@ pub async fn entanglement_proof_pre_flight(
     query_path = "src/agent.gql",
     response_derives = "Debug"
 )]
-pub struct SubscriptionAgentUpdated;
+pub struct SubscriptionAgentStatusChanged;
 
 pub async fn watch(executor_url: String, cap_token: String) -> Result<()> {
-    use futures::StreamExt;
-
     let mut client = create_websocket_client(executor_url, cap_token)
         .await
         .with_context(|| "Failed to create websocket client")?;
 
     println!("Successfully created websocket client");
     let mut stream = client
-        .streaming_operation(StreamingOperation::<SubscriptionAgentUpdated>::new(
-            subscription_agent_updated::Variables {},
-        ))
+        .streaming_operation({
+            StreamingOperation::<SubscriptionAgentStatusChanged>::new(
+                subscription_agent_status_changed::Variables {},
+            )
+        })
         .await
-        .with_context(|| "Failed to subscribe to agentUpdated")?;
+        .with_context(|| "Failed to subscribe to agentStatusChanged")?;
 
-    println!("Successfully subscribed agentUpdated",);
+    println!("Successfully subscribed agentStatusChanged",);
     println!("Waiting for events...");
 
     while let Some(item) = stream.next().await {
+        println!("Received item: {:#?}", item);
         match item {
             Ok(response) => {
-                if let Some(data) = response.data.and_then(|data| data.agent_updated) {
-                    println!("Received agentUpdated: {:?}", data);
+                if let Some(data) = response.data.and_then(|data| data.agent_status_changed) {
+                    println!("Received agentStatusChanged: {:?}", data);
                 }
             }
             Err(e) => {
