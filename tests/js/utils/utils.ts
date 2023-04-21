@@ -41,7 +41,7 @@ export async function startExecutor(relativeDataPath: string,
     let executorProcess = null as ChildProcess | null;
     rmSync(relativeDataPath, { recursive: true, force: true })
     console.log("Initialzing executor data directory")
-    execSync(`../../host/dist/ad4m-macos-x64 init --dataPath ${relativeDataPath} --networkBootstrapSeed ${bootstrapSeedPath} --overrideConfig true`, {})
+    execSync(`../../target/release/ad4m init --data-path ${relativeDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {})
     
     console.log("Starting executor")
     try {
@@ -51,9 +51,9 @@ export async function startExecutor(relativeDataPath: string,
     }
     
     if (!reqCredential) {
-        executorProcess = exec(`../../host/dist/ad4m-macos-x64 serve --dataPath ${relativeDataPath} --port ${gqlPort} --hcAdminPort ${hcAdminPort} --hcAppPort ${hcAppPort} --ipfsPort ${ipfsSwarmPort} --hcUseBootrap false --hcUseProxy false --hcUseLocalProxy false --hcUseMdns true --languageLanguageOnly ${languageLanguageOnly}`, {})
+        executorProcess = exec(`../../target/release/ad4m serve --data-path ${relativeDataPath} --port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly}`, {})
     } else {
-        executorProcess = exec(`../../host/dist/ad4m-macos-x64 serve --dataPath ${relativeDataPath} --port ${gqlPort} --hcAdminPort ${hcAdminPort} --hcAppPort ${hcAppPort} --ipfsPort ${ipfsSwarmPort} --hcUseBootrap false --hcUseProxy false --hcUseLocalProxy false --hcUseMdns true --languageLanguageOnly ${languageLanguageOnly} --reqCredential ${reqCredential}`, {})
+        executorProcess = exec(`../../target/release/ad4m serve --data-path ${relativeDataPath} --port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${reqCredential}`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
@@ -77,7 +77,7 @@ export async function startExecutor(relativeDataPath: string,
 
 export function apolloClient(port: number, token?: string): ApolloClient<any> {
     const wsLink = new GraphQLWsLink(createClient({
-        url: `ws://localhost:${port}/graphql`,
+        url: `ws://127.0.0.1:${port}/graphql`,
         webSocketImpl: Websocket,
         connectionParams: () => {
             return {
@@ -89,7 +89,7 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
     }));
 
     const link = new HttpLink({
-        uri: "http://localhost:4000/graphql",
+        uri: "http://127.0.0.1:4000/graphql",
         //@ts-ignore
         fetch
     });
