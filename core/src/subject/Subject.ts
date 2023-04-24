@@ -128,10 +128,10 @@ export class Subject {
         let removers = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_remover(C, Collection, Remover)`)
         if(!removers) removers = []
 
-        for(let adder of adders) {
-            if(adder) {
-                const collection = adder.Collection
-                const actions = eval(adder.Remover)
+        for(let remover of removers) {
+            if(remover) {
+                const collection = remover.Collection
+                const actions = eval(remover.Remover)
                 this[collectionToRemoverName(collection)] = async (value: any) => {
                     if (Array.isArray(value)) {
                         await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value: v}])))
