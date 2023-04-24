@@ -53,7 +53,7 @@ describe("Integration", () => {
         rmSync("../ad4mJS", { recursive: true, force: true })
         console.log("Initialzing executor data directory")
         //@ts-ignore
-        execSync('..\\..\\host\\dist\\ad4m-windows-x64.exe init --dataPath ../ad4mJS', {})
+        execSync('../../host/dist/ad4m-macos-x64 init --dataPath ../ad4mJS', {})
         
         console.log("Starting executor")
         try {
@@ -63,7 +63,7 @@ describe("Integration", () => {
         }
         
         //@ts-ignore
-        executorProcess = exec('..\\..\\host\\dist\\ad4m-windows-x64.exe serve --dataPath ../ad4mJS', {})
+        executorProcess = exec('../../host/dist/ad4m-macos-x64 serve --dataPath ../ad4mJS', {})
 
         let executorReady = new Promise<void>((resolve, reject) => {
             executorProcess!.stdout!.on('data', (data) => {
