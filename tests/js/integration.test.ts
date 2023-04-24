@@ -53,7 +53,7 @@ describe("Integration", () => {
         rmSync("../ad4mJS", { recursive: true, force: true })
         console.log("Initialzing executor data directory")
         //@ts-ignore
-        execSync('../../host/dist/ad4m-macos-x64 init --dataPath ../ad4mJS', {})
+        execSync('..\\..\\host\\dist\\ad4m-windows-x64.exe init --dataPath ../ad4mJS', {})
         
         console.log("Starting executor")
         try {
@@ -63,7 +63,7 @@ describe("Integration", () => {
         }
         
         //@ts-ignore
-        executorProcess = exec('../../host/dist/ad4m-macos-x64 serve --dataPath ../ad4mJS', {})
+        executorProcess = exec('..\\..\\host\\dist\\ad4m-windows-x64.exe serve --dataPath ../ad4mJS', {})
 
         let executorReady = new Promise<void>((resolve, reject) => {
             executorProcess!.stdout!.on('data', (data) => {
@@ -166,7 +166,7 @@ describe("Integration", () => {
 
             it("should work with a property that is not set initially and that auto-resolves", async () => {
                 //@ts-ignore
-                expect(await subject.title).to.be.false
+                expect(await subject.title).to.be.undefined
         
                 let title = "test title"
                 //@ts-ignore
@@ -472,7 +472,7 @@ describe("Integration", () => {
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
                 let todo = todos[0]
-                expect(await todo.title).to.equal(false)
+                expect(await todo.title).to.be.undefined
 
                 // @ts-ignore
                 await todo.setTitle("new title")
@@ -529,7 +529,7 @@ describe("Integration", () => {
 
                 // @ts-ignore
                 const liked1 = await todo.isLiked
-                expect(liked1).to.be.false
+                expect(liked1).to.be.undefined
 
                 await perspective?.add(new Link({source: root, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
 
