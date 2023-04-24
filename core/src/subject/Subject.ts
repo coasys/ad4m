@@ -45,12 +45,8 @@ export class Subject {
                         } else {
                             return expressionURI
                         }
-                    } else if(results!=undefined) {
-                        if(results) {
-                            return results
-                        } else {
-                            return false
-                        }
+                    } else if(results) {
+                        return results
                     } else {
                         return undefined
                     }
