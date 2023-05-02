@@ -279,7 +279,7 @@ export default class PerspectivismCore {
         perspectiveID.sharedUrl = neighbourhoodUrl
         perspectiveID.neighbourhood = neighbourhood;
         perspectiveID.state = PerspectiveState.Synced;
-        this.#perspectivesController!.replace(perspectiveID, neighbourhood, false, PerspectiveState.Synced)
+        await this.#perspectivesController!.replace(perspectiveID, neighbourhood, false, PerspectiveState.Synced)
         return neighbourhoodUrl
     }
 

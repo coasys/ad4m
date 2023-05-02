@@ -1,6 +1,7 @@
 use futures::Stream;
 use futures::StreamExt;
 use juniper::{graphql_value, FieldError, FieldResult};
+use log::debug;
 use log::error;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -47,19 +48,31 @@ impl PubSub {
     }
 }
 
-pub(crate) async fn subscribe_and_process<T: DeserializeOwned + Send + 'static>(
+pub(crate) async fn subscribe_and_process<
+    T: DeserializeOwned + Send + 'static + std::fmt::Debug,
+>(
     pubsub: Arc<PubSub>,
     topic: Topic,
 ) -> Pin<Box<dyn Stream<Item = FieldResult<T>> + Send>> {
+    debug!("Subscribing to topic: {}", topic);
     let receiver = pubsub.subscribe(&topic).await;
     let receiver_stream = WatchStream::from_changes(receiver);
 
-    let mapped_stream = receiver_stream.map(|msg| match serde_json::from_str::<T>(&msg) {
-        Ok(agent_status) => Ok(agent_status),
-        Err(e) => Err(FieldError::new(
-            e,
-            graphql_value!({ "type": "INTERNAL_ERROR_COULD_NOT_SERIALIZE" }),
-        )),
+    let mapped_stream = receiver_stream.map(|msg| {
+        debug!("Received message: {:?}", msg);
+        match serde_json::from_str::<T>(&msg) {
+            Ok(data) => {
+                debug!("Deserialized message: {:?}", data);
+                Ok(data)
+            }
+            Err(e) => {
+                error!("Failed to deserialize message: {:?}", e);
+                Err(FieldError::new(
+                    e,
+                    graphql_value!({ "type": "INTERNAL_ERROR_COULD_NOT_SERIALIZE" }),
+                ))
+            }
+        }
     });
 
     Box::pin(mapped_stream)

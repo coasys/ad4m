@@ -17,7 +17,7 @@ pub struct AgentSignature {
     pub signature: String,
 }
 
-#[derive(GraphQLObject, Default, Serialize, Deserialize)]
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
     pub did: Option<String>,

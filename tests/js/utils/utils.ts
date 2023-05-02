@@ -2,6 +2,7 @@ import { ChildProcess, exec, ExecException, execSync } from "node:child_process"
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
 import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
+import { onError } from "@apollo/client/link/error";
 import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
@@ -42,7 +43,7 @@ export async function startExecutor(dataPath: string,
     let executorProcess = null as ChildProcess | null;
     rmSync(dataPath, { recursive: true, force: true })
     console.log("Initialzing executor data directory")
-    execSync(`../../target/release/ad4m init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {})
+    execSync(`../../target/debug/ad4m init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {})
     
     console.log("Starting executor")
     try {
@@ -52,9 +53,9 @@ export async function startExecutor(dataPath: string,
     }
     
     if (!reqCredential) {
-        executorProcess = exec(`../../target/release/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly}`, {})
+        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly}`, {})
     } else {
-        executorProcess = exec(`../../target/release/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${reqCredential}`, {})
+        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${reqCredential}`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
@@ -102,7 +103,7 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
         fetch
     });
   
-    return new ApolloClient({
+    let client = new ApolloClient({
         link: wsLink,
         cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
         defaultOptions: {
@@ -117,6 +118,17 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
             }
         },
     });
+    onError(({ graphQLErrors, networkError }) => {
+        if (graphQLErrors)
+            graphQLErrors.forEach(({ message, locations, path }) =>
+            console.log(
+                `[GraphQL error]: Message: ${message}, Location: ${locations}, Path: ${path}`
+            )
+            );
+        if (networkError) console.log(`[Network error]: ${networkError}`);
+    });
+    
+    return client;
 }
 
 export function sleep(ms: number) {

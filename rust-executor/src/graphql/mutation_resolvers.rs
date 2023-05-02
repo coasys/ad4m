@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(unused_variables)]
 use juniper::{graphql_object, FieldResult};
+use log::{debug, info};
 
 use crate::js_core::JsCoreHandle;
 
@@ -21,7 +22,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.addTrustedAgents(
-                null, 
                 {{ agents: {:?} }},
                 {{ capabilities: [{}] }}
             )
@@ -42,7 +42,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.agentAddEntanglementProofs(
-                null, 
                 {{ proofs: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -64,7 +63,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.agentDeleteEntanglementProofs(
-                null, 
                 {{ proofs: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -87,7 +85,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.agentEntanglementProofPreFlight(
-                null, 
                 {{ deviceKey: "{}", deviceKeyType: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -108,7 +105,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentGenerate(
-                null, 
                 {{ passphrase: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -130,7 +126,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentGenerateJwt(
-                null, 
                 {{ rand: "{}", requestId: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -151,7 +146,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentLock(
-                null, 
                 {{ passphrase: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -173,7 +167,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.agentPermitCapability(
-                null, 
                 {{ auth: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -194,7 +187,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentRemoveApp(
-                null, 
                 {{ requestId: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -216,7 +208,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentRequestCapability(
-                null, 
                 {{ authInfo: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -237,7 +228,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentRevokeToken(
-                null, 
                 {{ requestId: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -258,7 +248,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentSignMessage(
-                null, 
                 {{ message: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -279,7 +268,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentUnlock(
-                null, 
                 {{ passphrase: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -300,7 +288,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentUpdateDirectMessageLanguage(
-                null, 
                 {{ directMessageLanguage: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -322,7 +309,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.agentUpdatePublicPerspective(
-                null, 
                 {{ perspective: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -344,7 +330,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.deleteTrustedAgents(
-                null, 
                 {{ agents: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -366,7 +351,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.expressionCreate(
-                null, 
                 {{ content: "{}", languageAddress: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -389,7 +373,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.expressionInteract(
-                null, 
                 {{ interactionCall: {}, url: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -411,7 +394,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.languageApplyTemplateAndPublish(
-                null, 
                 {{ sourceLanguageHash: "{}", templateData: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -434,7 +416,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.languagePublish(
-                null, 
                 {{ languageMeta: {}, languagePath: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -451,7 +432,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.languageRemove(
-                null, 
                 {{ address: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -473,7 +453,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.languageWriteSettings(
-                null, 
                 {{ languageAddress: "{}", settings: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -494,7 +473,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.neighbourhoodJoinFromUrl(
-                null, 
                 {{ url: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -518,7 +496,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.neighbourhoodPublishFromPerspective(
-                null, 
                 {{ linkLanguage: "{}", meta: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -541,7 +518,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.neighbourhoodSendBroadcast(
-                null, 
                 {{ payload: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -564,7 +540,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.neighbourhoodSendBroadcastU(
-                null, 
                 {{ payload: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -588,7 +563,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.neighbourhoodSendSignal(
-                null, 
                 {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -612,7 +586,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.neighbourhoodSendSignalU(
-                null, 
                 {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -635,7 +608,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.neighbourhoodSetOnlineStatus(
-                null, 
                 {{ perspectiveUUID: "{}", status: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -658,7 +630,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.neighbourhoodSetOnlineStatusU(
-                null, 
                 {{ perspectiveUUID: "{}", status: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -675,11 +646,11 @@ impl Mutation {
         context: &JsCoreHandle,
         name: String,
     ) -> FieldResult<PerspectiveHandle> {
+        info!("creating perspective {}", name);
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveAdd(
-                null, 
+            await core.resolvers.Mutation.perspectiveAdd(
                 {{ name: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -687,6 +658,7 @@ impl Mutation {
             name, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
+        debug!("created perspective w result: {:?}", result);
         let s: PerspectiveHandle = serde_json::from_str(&result)?;
         Ok(s)
     }
@@ -702,7 +674,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.perspectiveAddLink(
-                null, 
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -725,7 +696,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.perspectiveAddLinkExpression(
-                null, 
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -748,7 +718,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.perspectiveAddLinks(
-                null, 
                 {{ links: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -771,7 +740,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.perspectiveLinkMutations(
-                null, 
                 {{ mutations: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -792,7 +760,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.perspectivePublishSnapshot(
-                null, 
                 {{ uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -809,7 +776,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.perspectiveRemove(
-                null, 
                 {{ uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -832,7 +798,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.perspectiveRemoveLink(
-                null, 
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -855,7 +820,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.perspectiveRemoveLinks(
-                null, 
                 {{ links: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -877,7 +841,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.perspectiveUpdate(
-                null, 
                 {{ name: "{}", uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -902,7 +865,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.perspectiveUpdateLink(
-                null, 
                 {{ newLink: {}, oldLink: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -924,7 +886,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.runtimeAddFriends(
-                null, 
                 {{ dids: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -946,7 +907,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.runtimeAddKnownLinkLanguageTemplates(
-                null, 
                 {{ addresses: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -969,7 +929,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.runtimeFriendSendMessage(
-                null, 
                 {{ did: "{}", message: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -990,7 +949,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.runtimeHcAddAgentInfos(
-                null, 
                 {{ agentInfos: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -1007,12 +965,10 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.runtimeOpenLink(
-                null, 
-                {{ url: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ url: "{}" }}
             )
         )"#,
-            url, ALL_CAPABILITY
+            url
         );
         let result = js.execute(script).await?;
         let s: bool = serde_json::from_str(&result)?;
@@ -1024,8 +980,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.runtimeQuit(
-                null,
-                null,
                 {{ capabilities: [{}] }}
             )
         )"#,
@@ -1046,7 +1000,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.runtimeRemoveFriends(
-                null, 
                 {{ dids: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -1068,7 +1021,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             core.resolvers.Mutation.runtimeRemoveKnownLinkLanguageTemplates(
-                null, 
                 {{ addresses: {} }},
                 {{ capabilities: [{}] }}
             )
@@ -1090,7 +1042,6 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.runtimeSetStatus(
-                null, 
                 {{ status: {} }},
                 {{ capabilities: [{}] }}
             )
