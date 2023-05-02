@@ -6,6 +6,7 @@ import faker from 'faker'
 
 function constructDummyLinkExpression(): LinkExpressionInput {
     return {
+        hash: () => 0,
         data: {
             source: faker.internet.url(),
             target: faker.internet.url(),
