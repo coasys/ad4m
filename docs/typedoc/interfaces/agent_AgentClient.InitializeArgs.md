@@ -21,7 +21,7 @@
 
 #### Defined in
 
-[agent/AgentClient.ts:48](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentClient.ts#L48)
+[agent/AgentClient.ts:66](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentClient.ts#L66)
 
 ___
 
@@ -31,7 +31,7 @@ ___
 
 #### Defined in
 
-[agent/AgentClient.ts:49](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentClient.ts#L49)
+[agent/AgentClient.ts:67](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentClient.ts#L67)
 
 ___
 
@@ -41,7 +41,7 @@ ___
 
 #### Defined in
 
-[agent/AgentClient.ts:50](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentClient.ts#L50)
+[agent/AgentClient.ts:68](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentClient.ts#L68)
 
 ___
 
@@ -51,4 +51,4 @@ ___
 
 #### Defined in
 
-[agent/AgentClient.ts:51](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/agent/AgentClient.ts#L51)
+[agent/AgentClient.ts:69](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/agent/AgentClient.ts#L69)

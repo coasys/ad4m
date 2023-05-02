@@ -40,7 +40,7 @@
 
 #### Defined in
 
-[language/LanguageClient.ts:31](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L31)
+[language/LanguageClient.ts:31](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L31)
 
 ## Properties
 
@@ -50,7 +50,7 @@
 
 #### Defined in
 
-[language/LanguageClient.ts:29](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L29)
+[language/LanguageClient.ts:29](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L29)
 
 ## Methods
 
@@ -64,7 +64,7 @@
 
 #### Defined in
 
-[language/LanguageClient.ts:59](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L59)
+[language/LanguageClient.ts:59](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L59)
 
 ___
 
@@ -85,7 +85,7 @@ ___
 
 #### Defined in
 
-[language/LanguageClient.ts:76](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L76)
+[language/LanguageClient.ts:76](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L76)
 
 ___
 
@@ -105,7 +105,7 @@ ___
 
 #### Defined in
 
-[language/LanguageClient.ts:35](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L35)
+[language/LanguageClient.ts:35](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L35)
 
 ___
 
@@ -125,7 +125,7 @@ ___
 
 #### Defined in
 
-[language/LanguageClient.ts:47](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L47)
+[language/LanguageClient.ts:47](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L47)
 
 ___
 
@@ -145,7 +145,7 @@ ___
 
 #### Defined in
 
-[language/LanguageClient.ts:114](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L114)
+[language/LanguageClient.ts:114](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L114)
 
 ___
 
@@ -166,7 +166,7 @@ ___
 
 #### Defined in
 
-[language/LanguageClient.ts:95](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L95)
+[language/LanguageClient.ts:95](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L95)
 
 ___
 
@@ -186,7 +186,7 @@ ___
 
 #### Defined in
 
-[language/LanguageClient.ts:146](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L146)
+[language/LanguageClient.ts:146](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L146)
 
 ___
 
@@ -206,7 +206,7 @@ ___
 
 #### Defined in
 
-[language/LanguageClient.ts:131](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L131)
+[language/LanguageClient.ts:131](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L131)
 
 ___
 
@@ -227,4 +227,4 @@ ___
 
 #### Defined in
 
-[language/LanguageClient.ts:63](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/LanguageClient.ts#L63)
+[language/LanguageClient.ts:63](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/LanguageClient.ts#L63)

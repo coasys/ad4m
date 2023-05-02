@@ -10,7 +10,6 @@
 - [InteractionMeta](../classes/language_Language.InteractionMeta.md)
 - [InteractionParameter](../classes/language_Language.InteractionParameter.md)
 - [OnlineAgent](../classes/language_Language.OnlineAgent.md)
-- [TelepresenceRpcCall](../classes/language_Language.TelepresenceRpcCall.md)
 
 ### Interfaces
 
@@ -33,7 +32,7 @@
 - [MessageCallback](language_Language.md#messagecallback)
 - [PerspectiveDiffObserver](language_Language.md#perspectivediffobserver)
 - [StatusCallback](language_Language.md#statuscallback)
-- [TelepresenceRpcCallback](language_Language.md#telepresencerpccallback)
+- [TelepresenceSignalCallback](language_Language.md#telepresencesignalcallback)
 
 ## Type Aliases
 
@@ -57,7 +56,7 @@
 
 #### Defined in
 
-[language/Language.ts:178](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L178)
+[language/Language.ts:187](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L187)
 
 ___
 
@@ -81,7 +80,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:141](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L141)
+[language/Language.ts:150](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L150)
 
 ___
 
@@ -105,28 +104,28 @@ ___
 
 #### Defined in
 
-[language/Language.ts:179](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L179)
+[language/Language.ts:188](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L188)
 
 ___
 
-### TelepresenceRpcCallback
+### TelepresenceSignalCallback
 
-Ƭ **TelepresenceRpcCallback**: (`call`: [`TelepresenceRpcCall`](../classes/language_Language.TelepresenceRpcCall.md)) => `object`
+Ƭ **TelepresenceSignalCallback**: (`payload`: [`PerspectiveExpression`](../classes/perspectives_Perspective.PerspectiveExpression.md)) => `void`
 
 #### Type declaration
 
-▸ (`call`): `object`
+▸ (`payload`): `void`
 
 ##### Parameters
 
 | Name | Type |
 | :------ | :------ |
-| `call` | [`TelepresenceRpcCall`](../classes/language_Language.TelepresenceRpcCall.md) |
+| `payload` | [`PerspectiveExpression`](../classes/perspectives_Perspective.PerspectiveExpression.md) |
 
 ##### Returns
 
-`object`
+`void`
 
 #### Defined in
 
-[language/Language.ts:246](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L246)
+[language/Language.ts:253](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L253)

@@ -150,3 +150,23 @@ setup() {
     run echo $perspective_link_output
     assert_line --partial "nh_test://source"
 }
+
+@test "can create and get expressions, using note-ipfs language" {
+    wget https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js -O ./tests/note-ipfs.js
+    pwd=`pwd`
+    publish_output=`./target/release/ad4m -n -e http://localhost:4000/graphql languages publish $pwd/tests/note-ipfs.js -n "note-ipfs" -d "Stores text expressions in IPFS" -p "", -s "https://github.com/perspect3vism/lang-note-ipfs"`
+    echo $publish_output
+    run echo $publish_output
+    assert_line --partial "Language published with address:"
+    language_address=`echo $publish_output | cut -d ":" -f 2`
+    echo "Language address: $language_address"
+    
+    create_output=`./target/release/ad4m -n -e http://localhost:4000/graphql expression create $language_address "test content"`
+    echo $create_output
+    run echo $create_output
+    assert_line --partial "Expression created with url:"
+    expression_url=`echo $create_output | awk '{print substr($0,30)}'`
+    
+    run ./target/release/ad4m -n -e http://localhost:4000/graphql expression get-raw $expression_url
+    assert_output --partial "test content"
+}

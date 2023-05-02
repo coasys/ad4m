@@ -7,56 +7,45 @@
     <title>Document</title>
   </head>
   <body>
-    <h1 id="title">This is a mockup app</h1>
-    <p>
-      Lorem ipsum dolor sit amet consectetur adipisicing elit. Cupiditate
-      doloribus saepe maxime quis modi nemo sint earum dolore obcaecati! Quasi
-      quo quod ut. Repellendus sed, saepe a quo quos mollitia.
-    </p>
-    <p>
-      Lorem ipsum dolor sit amet consectetur adipisicing elit. Cupiditate
-      doloribus saepe maxime quis modi nemo sint earum dolore obcaecati! Quasi
-      quo quod ut. Repellendus sed, saepe a quo quos mollitia.
-    </p>
-    <p>
-      Lorem ipsum dolor sit amet consectetur adipisicing elit. Cupiditate
-      doloribus saepe maxime quis modi nemo sint earum dolore obcaecati! Quasi
-      quo quod ut. Repellendus sed, saepe a quo quos mollitia.
-    </p>
-    <p>
-      Lorem ipsum dolor sit amet consectetur adipisicing elit. Cupiditate
-      doloribus saepe maxime quis modi nemo sint earum dolore obcaecati! Quasi
-      quo quod ut. Repellendus sed, saepe a quo quos mollitia.
-    </p>
+    <h1 id="auth"></h1>
+    <h1 id="connection"></h1>
 
-    <button id="connectButton">Connect with ad4m</button>
+    <button id="button">Connect with AD4M</button>
 
-    <ad4m-connect
-      theme="dark"
-      appName="ad4m-react-example"
-      appDesc="ad4m-react-example"
-      appDomain="http://localhost:3000"
-      capabilities='[{"with":{"domain":"*","pointers":["*"]},"can": ["*"]}]'
-      appiconpath="https://i.ibb.co/GnqjPJP/icon.png"
-    ></ad4m-connect>
     <script type="module">
-      import "../dist/web.js";
-      import {
-        isConnected,
-        onAuthStateChanged,
-        getAd4mClient,
-      } from "../dist/utils.js";
+      import Ad4mConnectUI from "./src/web.ts";
 
-      document.getElementById("connectButton").addEventListener("click", () => {
-        document.querySelector("ad4m-connect").connect();
+      const ui = Ad4mConnectUI({
+        appName: "AD4M Connect",
+        appDesc: "A description of the app",
+        appUrl: "http://localhost:3000",
+        appDomain: "dev.ad4m.connect.example",
+        appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+        capabilities: [
+          {
+            with: { domain: "*", pointers: ["*"] },
+            can: ["*"],
+          },
+        ],
       });
 
-      onAuthStateChanged((state) => {
-        console.log(state);
-        const isConnected = state === "connected_with_capabilities";
-        document.getElementById("title").innerText = isConnected
-          ? "Is Connected to AD4M"
-          : "Is Not Connected to AD4M";
+      const authTitle = document.getElementById("auth");
+      const connectionTitle = document.getElementById("connection");
+      const button = document.getElementById("button");
+
+      connectionTitle.innerText = ui.connectionState;
+      authTitle.innerText = ui.authState;
+
+      button.addEventListener("click", () => {
+        ui.connect();
+      });
+
+      ui.addEventListener("connectionstatechange", (e) => {
+        connectionTitle.innerText = ui.connectionState;
+      });
+
+      ui.addEventListener("authstatechange", (e) => {
+        authTitle.innerText = ui.authState;
       });
     </script>
   </body>

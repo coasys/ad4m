@@ -1,6 +1,7 @@
 import { 
-    Address, Expression, Language, LanguageContext, 
-    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective, Literal 
+    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta, 
+    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, 
+    parseExprUrl, Literal, TelepresenceAdapter, PerspectiveState
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
@@ -15,8 +16,11 @@ import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
+import stringify from 'json-stable-stringify'
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
+type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
+type SyncStateChangeObserver = (state: PerspectiveState, lang: LanguageRef)=>void;
 
 interface Services {
     holochainService: HolochainService,
@@ -45,11 +49,12 @@ const requireModule = async (modulePath: string) => {
 const loadModule = async (modulePath: string) => {
   try {
     return await importModule(modulePath)
-  } catch (e) {
+  } catch (e1) {
     try {
         return await requireModule(modulePath)
-    } catch (e) {
-        throw new ImportError(`Unable to import module ${modulePath}`)
+    } catch (e2) {
+        throw new ImportError(`Unable to import module ${modulePath}. Got error ${e1} when trying to import as es module\n 
+            and error when trying to import as commonjs ${e2}`)
     }
   }
 }
@@ -59,6 +64,8 @@ export default class LanguageController {
     #languageConstructors: Map<string, (context: LanguageContext)=>Language>
     #context: object;
     #linkObservers: LinkObservers[];
+    #telepresenceSignalObservers: TelepresenceSignalObserver[];
+    #syncStateChangeObservers: SyncStateChangeObserver[];
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
     #signatures: Signatures;
@@ -80,6 +87,8 @@ export default class LanguageController {
         this.#languages = new Map()
         this.#languageConstructors = new Map()
         this.#linkObservers = []
+        this.#telepresenceSignalObservers = []
+        this.#syncStateChangeObservers = []
         this.pubSub = PubSub.get()
         this.#config = (context as any).config;
     }
@@ -180,6 +189,18 @@ export default class LanguageController {
         })
     }
 
+    callSyncStateChangeObservers(syncState: PerspectiveState, ref: LanguageRef) {
+        this.#syncStateChangeObservers.forEach(o => {
+            o(syncState, ref)
+        })
+    }
+
+    callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
+        this.#telepresenceSignalObservers.forEach(o => {
+            o(signal, ref)
+        })
+    }
+
     async loadLanguage(sourceFilePath: string): Promise<{
         language: Language,
         hash: string,
@@ -236,6 +257,18 @@ export default class LanguageController {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
+
+            if (language.linksAdapter.addSyncStateChangeCallback) {
+                language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+                })
+            }
+        }
+
+        if(language.telepresenceAdapter) {
+            language.telepresenceAdapter.registerSignalCallback((payload: PerspectiveExpression) => {
+                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
+            })
         }
 
         //@ts-ignore
@@ -271,6 +304,19 @@ export default class LanguageController {
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name});
+            })
+
+            if (language.linksAdapter.addSyncStateChangeCallback) {
+                language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+                })
+            }
+        }
+
+        if(language.telepresenceAdapter) {
+            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression) => {
+                await this.tagPerspectiveExpressionSignatureStatus(payload)
+                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
             })
         }
 
@@ -434,8 +480,9 @@ export default class LanguageController {
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
             const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
+            const agentService = (this.#context as LanguageContext).agent as AgentService;
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
-            if (trustedAgents.find((agent) => agent === languageAuthor)) {
+            if (trustedAgents.find((agent) => agent === languageAuthor) || agentService.agent! === languageAuthor) {
                 //Get the language source so we can generate a hash and check against the hash given in the language meta information
                 const languageSource = await this.getLanguageSource(address);
                 if (!languageSource) {
@@ -461,7 +508,8 @@ export default class LanguageController {
                     Object.keys(languageMetaData.templateAppliedParams).length == 0 ||
                     !languageMetaData.templateSourceLanguageAddress
                 ) {
-                    let errMsg = `Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${languageMetaData}`
+                    let errMsg = `Language not created by trusted agent: ${languageAuthor} and is not templated... aborting language install. Language metadata: ${stringify(languageMetaData)}`
+                    console.error(errMsg)
                     this.pubSub.publish(
                         PubSub.EXCEPTION_OCCURRED_TOPIC,
                         {
@@ -959,6 +1007,14 @@ export default class LanguageController {
         try {
             if(ref.language.address == "literal" || ref.language.name == 'literal') {
                 expr = Literal.fromUrl(`literal://${ref.expression}`).get()
+                if(! (typeof expr === 'object')) {
+                    expr = {
+                        author: '<unknown>',
+                        timestamp: '<unknown>',
+                        data: expr,
+                        proof: {}
+                    }
+                }
             } else {
                 const lang = this.languageForExpression(ref);
                 if (!lang.expressionAdapter) {
@@ -968,14 +1024,14 @@ export default class LanguageController {
                 const langIsImmutable = await this.isImmutableExpression(ref);
                 if (langIsImmutable) {
                     console.log("Calling cache for expression...");
-                    const cachedExpression = this.#db.getExpression(ref.expression);
+                    const cachedExpression = await this.#db.getExpression(ref.expression);
                     if (cachedExpression) {
                         console.log("Cache hit...");
-                        expr = JSON.parse(cachedExpression) as Expression
+                        expr = cachedExpression;
                     } else {
                         console.log("Cache miss...");
                         expr = await lang.expressionAdapter.get(ref.expression);
-                        if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
+                        if (expr) { await this.#db.addExpression(ref.expression, expr) };
                     };
                 } else {
                     expr = await lang.expressionAdapter.get(ref.expression);
@@ -987,17 +1043,36 @@ export default class LanguageController {
         }
 
         if(expr) {
+            await this.tagExpressionSignatureStatus(expr);
+        }
+
+        return expr
+    }
+
+    async tagExpressionSignatureStatus(expression: Expression) {
+        if(expression) {
             try{
-                if(! await this.#signatures.verify(expr)) {
-                    console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expr)
-                    expr.proof.invalid = true
-                    delete expr.proof.valid
+                if(!await this.#signatures.verify(expression)) {
+                    let expressionString = JSON.stringify(expression);
+                    let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
+                    console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)
+                    expression.proof.invalid = true
+                    expression.proof.valid = false
                 } else {
-                    expr.proof.valid = true
-                    delete expr.proof.invalid
+                    expression.proof.valid = true
+                    expression.proof.invalid = false
                 }
             } catch(e) {
-                let errMsg = `Error trying to verify signature for expression: ${expr}`
+                let expressionFormatted;
+                if (typeof expression === "string") {
+                    expressionFormatted = expression.substring(0, 50);
+                } else if (typeof expression === "object") {
+                    let expressionString = JSON.stringify(expression);
+                    expressionFormatted =  expressionString.substring(0, 50)
+                } else {
+                    expressionFormatted = expression;
+                }
+                let errMsg = `Error trying to verify signature for expression: ${expressionFormatted}`
                 console.error(errMsg)
                 console.error(e)
                 this.pubSub.publish(
@@ -1010,8 +1085,15 @@ export default class LanguageController {
                 );
             }
         }
+    }
 
-        return expr
+    async tagPerspectiveExpressionSignatureStatus(perspective: PerspectiveExpression) {
+        await this.tagExpressionSignatureStatus(perspective);
+        if (perspective.data.links) {
+            for (const link of perspective.data.links) {
+                await this.tagExpressionSignatureStatus(link);
+            }
+        }
     }
 
     async getLinksAdapter(lang: LanguageRef): Promise<LinkSyncAdapter | null> {
@@ -1025,11 +1107,31 @@ export default class LanguageController {
         } catch(e) {
             return null
         }
+    }
 
+    async getTelepresenceAdapter(lang: LanguageRef): Promise<TelepresenceAdapter | null> {
+        try {
+            let gotLang = await this.languageByRef(lang)
+            if (gotLang.telepresenceAdapter) {
+                return gotLang.telepresenceAdapter
+            } else {
+                return null
+            }
+        } catch(e) {
+            return null
+        }
     }
 
     addLinkObserver(observer: LinkObservers) {
         this.#linkObservers.push(observer)
+    }
+
+    addTelepresenceSignalObserver(observer: TelepresenceSignalObserver) {
+        this.#telepresenceSignalObservers.push(observer)
+    }
+
+    addSyncStateChangeObserver(listener: SyncStateChangeObserver) {
+        this.#syncStateChangeObservers.push(listener)
     }
 
     async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {

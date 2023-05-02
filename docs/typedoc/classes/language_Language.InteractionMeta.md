@@ -30,7 +30,7 @@
 
 #### Defined in
 
-[language/Language.ts:204](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L204)
+[language/Language.ts:213](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L213)
 
 ___
 
@@ -40,7 +40,7 @@ ___
 
 #### Defined in
 
-[language/Language.ts:207](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L207)
+[language/Language.ts:216](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L216)
 
 ___
 
@@ -50,4 +50,4 @@ ___
 
 #### Defined in
 
-[language/Language.ts:210](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L210)
+[language/Language.ts:219](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L219)

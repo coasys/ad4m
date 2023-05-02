@@ -5,6 +5,7 @@ import sleep from './sleep';
 import { Ad4mClient, LanguageMetaInput, LanguageRef } from '@perspect3vism/ad4m';
 import { expect } from "chai";
 import { fileURLToPath } from 'url';
+import stringify from 'json-stable-stringify'
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,6 +35,8 @@ export default function languageTests(testContext: TestContext) {
                     sourceLanguageMeta
                 )
                 expect(sourceLanguage.name).to.be.equal(sourceLanguageMeta.name);
+                // @ts-ignore
+                sourceLanguageMeta.address = sourceLanguage.address;
             })
 
             it('Alice can get the source of her own templated language', async () => {
@@ -125,7 +128,7 @@ export default function languageTests(testContext: TestContext) {
                 }
 
                 //@ts-ignore
-                expect(error.toString()).to.be.equal(`Error: Language not created by trusted agent and is not templated... aborting language install. Language metadata: ${sourceLanguageMeta}`)
+                expect(error.toString()).to.be.equal(`ApolloError: Language not created by trusted agent: ${(await ad4mClient.agent.me()).did} and is not templated... aborting language install. Language metadata: ${stringify(sourceLanguageMeta)}`)
             })
 
             describe('with Bob having added Alice to list of trusted agents', () => {

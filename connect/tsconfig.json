@@ -3,7 +3,8 @@
     "experimentalDecorators": true,
     "emitDeclarationOnly": true,
     "declaration": true,
-    "outDir": "dist",
+    "outDir": "./dist",
+    "rootDir": "./src",
     "target": "es6",
     "moduleResolution": "Node",
     "resolveJsonModule": true,
@@ -11,11 +12,6 @@
     "types": ["node", "jest"],
     "skipLibCheck": true
   },
-  "include": ["**/*"],
-  "exclude": [
-    "node_modules/*",
-    "**/*.spec.ts",
-    "dist",
-    "node_modules/ipfs-core-types"
-  ]
+  "include": ["./src"],
+  "exclude": ["node_modules/*", "**/*.spec.ts", "dist"]
 }

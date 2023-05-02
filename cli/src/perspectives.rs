@@ -1,5 +1,5 @@
 use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
-use ad4m_client::{Ad4mClient, perspective_proxy::PerspectiveProxy};
+use ad4m_client::Ad4mClient;
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 
@@ -69,16 +69,34 @@ pub enum PerspectiveFunctions {
     SubjectClasses { id: String },
 
     /// Construct a new Subject instance of given class over given base
-    SubjectConstruct { id: String, class: String, base: String },
+    SubjectConstruct {
+        id: String,
+        class: String,
+        base: String,
+    },
 
     /// Get the value of the subject instance's given property
-    SubjectGetProperty { id: String, base: String, property: String },
+    SubjectGetProperty {
+        id: String,
+        base: String,
+        property: String,
+    },
 
     /// Set the value of the subject instance's given property
-    SubjectSetProperty { id: String, base: String, property: String, value: String },
+    SubjectSetProperty {
+        id: String,
+        base: String,
+        property: String,
+        value: String,
+    },
 
     /// Add the given value to the subject instance's collection
-    SubjectAddCollection { id: String, base: String, collection: String, value: String },
+    SubjectAddCollection {
+        id: String,
+        base: String,
+        collection: String,
+        value: String,
+    },
 }
 
 pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>) -> Result<()> {
@@ -203,48 +221,67 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
                         let props = subject.get_property_values().await?;
                         if let Some(value) = props.get(&property) {
                             println!("{:#?}", value);
-                            return Ok(())
+                            return Ok(());
                         }
                     }
                     _ => {}
                 }
             }
 
-            println!("\x1b[91mNone of the found classes have a property '{}'", property);
+            println!(
+                "\x1b[91mNone of the found classes have a property '{}'",
+                property
+            );
             println!("The found classes are: {}", classes.join(", "));
         }
-        PerspectiveFunctions::SubjectSetProperty { id, base, property, value } => {
+        PerspectiveFunctions::SubjectSetProperty {
+            id,
+            base,
+            property,
+            value,
+        } => {
             let perspective = ad4m_client.perspectives.get(id).await?;
             let classes = perspective.get_subject_classes(&base).await?;
             for class in &classes {
                 match perspective.get_subject(&class, &base).await {
                     Ok(subject) => {
                         if subject.set_property(&property, &value).await.is_ok() {
-                            return Ok(())
+                            return Ok(());
                         }
                     }
                     _ => {}
                 }
             }
 
-            println!("\x1b[91mNone of the found classes have a property '{}'", property);
+            println!(
+                "\x1b[91mNone of the found classes have a property '{}'",
+                property
+            );
             println!("The found classes are: {}", classes.join(", "));
         }
-        PerspectiveFunctions::SubjectAddCollection { id, base, collection, value } => {
+        PerspectiveFunctions::SubjectAddCollection {
+            id,
+            base,
+            collection,
+            value,
+        } => {
             let perspective = ad4m_client.perspectives.get(id).await?;
             let classes = perspective.get_subject_classes(&base).await?;
             for class in &classes {
                 match perspective.get_subject(&class, &base).await {
                     Ok(subject) => {
                         if subject.add_collection(&collection, &value).await.is_ok() {
-                            return Ok(())
+                            return Ok(());
                         }
                     }
                     _ => {}
                 }
             }
 
-            println!("\x1b[91mNone of the found classes have a collection '{}'", collection);
+            println!(
+                "\x1b[91mNone of the found classes have a collection '{}'",
+                collection
+            );
             println!("The found classes are: {}", classes.join(", "));
         }
     }

@@ -14,16 +14,17 @@ import express from 'express';
 
 import AgentResolver from "./agent/AgentResolver"
 import { Ad4mClient } from "./Ad4mClient";
-import { Perspective } from "./perspectives/Perspective";
+import { Perspective, PerspectiveUnsignedInput } from "./perspectives/Perspective";
 import { Link, LinkExpression, LinkExpressionInput, LinkInput, LinkMutations } from "./links/Links";
 import LanguageResolver from "./language/LanguageResolver";
 import NeighbourhoodResolver from "./neighbourhood/NeighbourhoodResolver";
 import PerspectiveResolver from "./perspectives/PerspectiveResolver";
 import RuntimeResolver from "./runtime/RuntimeResolver";
 import ExpressionResolver from "./expression/ExpressionResolver";
-import { EntanglementProofInput } from "./agent/Agent";
+import { AuthInfoInput, EntanglementProofInput, CapabilityInput, ResourceInput } from "./agent/Agent";
 import { LanguageMetaInput } from "./language/LanguageMeta";
 import { InteractionCall } from "./language/Language";
+import { PerspectiveState } from "./perspectives/PerspectiveHandle";
 
 jest.setTimeout(15000)
 
@@ -238,7 +239,21 @@ describe('Ad4mClient', () => {
         })
 
         it('requestCapability() smoke tests', async () => {
-            const requestId = await ad4mClient.agent.requestCapability("demo-app", "demo-desc", "https://demo-link", '[{"with":{"domain":"agent","pointers":["*"]},"can":["QUERY"]}]')
+            const requestId = await ad4mClient.agent.requestCapability({
+                appName: "demo-app",
+                appDesc: "demo-desc",
+                appDomain: "demo.test.org",
+                appUrl: "https://demo-link",
+                appIconPath: "/some/image/path", 
+                capabilities: [
+                    { 
+                        with: {
+                            "domain":"agent",
+                            "pointers":["*"]
+                        } as ResourceInput,
+                        can: ["QUERY"]
+                }] as CapabilityInput[]
+            } as AuthInfoInput)
             expect(requestId).toBe("test-request-id")
         })
 
@@ -256,6 +271,17 @@ describe('Ad4mClient', () => {
         it('agentGenerateJwt() smoke tests', async () => {
             const jwt = await ad4mClient.agent.generateJwt("test-request-id", "123")
             expect(jwt).toBe("test-jwt")
+        })
+
+        it('agentRevokeToken() smoke tests', async () => {
+            const newApps = await ad4mClient.agent.revokeToken('test-request-id')
+            expect(newApps.length).toBe(1)
+            expect(newApps[0].revoked).toBe(true)
+        })
+
+        it('agentRemoveToken() smoke tests', async () => {
+            const newApps = await ad4mClient.agent.removeApp('test-request-id')
+            expect(newApps.length).toBe(0)
         })
 
         it('agentIsLocked() smoke tests', async () => {
@@ -414,6 +440,20 @@ describe('Ad4mClient', () => {
     })
 
     describe('.neighbourhood', () => {
+        const testPerspective = new Perspective()
+        const linkExpr = new LinkExpression()
+        linkExpr.author = 'did:method:12345'
+        linkExpr.timestamp = new Date().toString()
+        linkExpr.data = new Link({source: 'root', target: 'perspective://Qm34589a3ccc0'})
+        linkExpr.proof = { signature: 'asdfasdf', key: 'asdfasdf' }
+        testPerspective.links.push(linkExpr)
+
+        const testUnsignedPerspective = new PerspectiveUnsignedInput()
+        const link = new Link({
+            source: 'root', target: 'perspective://Qm34589a3ccc0'
+        })
+        testUnsignedPerspective.links.push(link)
+
         it('publishFromPerspective() smoke test', async () => {
             const expressionRef = await ad4mClient.neighbourhood.publishFromPerspective('UUID', 'test-link-lang', new Perspective())
             expect(expressionRef).toBe('neighbourhood://neighbourhoodAddress')
@@ -424,6 +464,75 @@ describe('Ad4mClient', () => {
             expect(perspective.sharedUrl).toBe('neighbourhood://Qm3sdf3dfwhsafd')
             expect(perspective.uuid).toBeTruthy()
             expect(perspective.name).toBeTruthy()
+        })
+
+        it('hasTelepresenceAdapter() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.hasTelepresenceAdapter('01234')
+            expect(result).toBe(true)
+        })
+
+        it('otherAgents() smoke test', async () => {
+            const agents = await ad4mClient.neighbourhood.otherAgents('01234')
+            expect(agents.length).toBe(1)
+            expect(agents[0]).toBe('did:test:other')
+        })
+
+        it('onlineAgents() smoke test', async () => {
+            const agents = await ad4mClient.neighbourhood.onlineAgents('01234')
+            expect(agents.length).toBe(1)
+            expect(agents[0].did).toBe('did:test:online')
+            const status = agents[0].status
+            expect(status.author).toBe('did:ad4m:test')
+            expect(status.data.links.length).toBe(1)
+            const link = status.data.links[0]
+            expect(link.author).toBe('did:ad4m:test')
+            expect(link.data.source).toBe('root')
+        })
+
+        it('setOnlineStatus() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.setOnlineStatus('01234', testPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('setOnlineStatusU() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.setOnlineStatusU('01234', testUnsignedPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('sendSignal() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.sendSignal('01234', "did:test:recipient", testPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('sendSignaU() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.sendSignalU('01234', "did:test:recipient", testUnsignedPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('sendBroadcast() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.sendBroadcast('01234', testPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('sendBroadcastU() smoke test', async () => {
+            const result = await ad4mClient.neighbourhood.sendBroadcastU('01234', testUnsignedPerspective)
+            expect(result).toBe(true)
+        })
+
+        it('can be accessed via NeighbourhoodProxy', async () => {
+            const perspective = await ad4mClient.perspective.byUUID('00001')
+            const nh = await perspective.getNeighbourhoodProxy()
+
+            expect(await nh.hasTelepresenceAdapter()).toBe(true)
+            expect(await nh.otherAgents()).toStrictEqual(['did:test:other'])
+            expect((await nh.onlineAgents())[0].did).toStrictEqual('did:test:online')
+            expect(await nh.setOnlineStatus(testPerspective)).toBe(true)
+            expect(await nh.sendSignal('did:test:recipient', testPerspective)).toBe(true)
+            expect(await nh.sendBroadcast(testPerspective)).toBe(true)
+
+            nh.addSignalHandler((perspective) => {
+                //..
+            })
         })
     })
 
@@ -641,6 +750,18 @@ describe('Ad4mClient', () => {
             expect(linkAdded).toBeCalledTimes(1)
         })
 
+        it('addSyncStateChangeListener() smoke test', async () => {
+            let perspective = await ad4mClient.perspective.byUUID('00004')
+
+            const syncState = jest.fn()
+
+            await perspective.addSyncStateChangeListener(syncState)
+            await perspective.add({source: 'root', target: 'neighbourhood://Qm12345'})
+
+            expect(syncState).toBeCalledTimes(1)
+            expect(syncState).toBeCalledWith(PerspectiveState.Synced)
+        })
+
         it('updateLink() smoke test', async () => {
             const link = await ad4mClient.perspective.updateLink(
                 '00001', 
@@ -821,6 +942,18 @@ describe('Ad4mClient', () => {
                 await ad4mClientWithoutSubscription.agent.unlock("test");
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
             })
+
+            it('agent subscribeAppsChanged smoke test', async () => {
+                const appsChangedCallback = jest.fn()
+                ad4mClientWithoutSubscription.agent.addAppChangedListener(appsChangedCallback)
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                expect(appsChangedCallback).toBeCalledTimes(0)
+    
+                ad4mClientWithoutSubscription.agent.subscribeAppsChanged()
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                await ad4mClientWithoutSubscription.agent.removeApp("test");
+                expect(appsChangedCallback).toBeCalledTimes(1)
+            })
     
             it('perspective subscribePerspectiveAdded smoke test', async () => {
                 const perspectiveAddedCallback = jest.fn()
@@ -889,6 +1022,17 @@ describe('Ad4mClient', () => {
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithSubscription.agent.unlock("test");
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
+            })
+
+            it('agent subscribeAppsChanged smoke test', async () => {
+                const appsChangedCallback = jest.fn()
+                ad4mClientWithSubscription.agent.addAppChangedListener(appsChangedCallback)
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                expect(appsChangedCallback).toBeCalledTimes(0)
+    
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                await ad4mClientWithSubscription.agent.removeApp("test");
+                expect(appsChangedCallback).toBeCalledTimes(1)
             })
     
             it('perspective subscribePerspectiveAdded smoke test', async () => {

@@ -1,5 +1,5 @@
-import type { Address, PublicSharing, PerspectiveHandle, Language, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression  } from '@perspect3vism/ad4m'
-import { parseExprUrl, LanguageRef, Neighbourhood } from '@perspect3vism/ad4m'
+import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language  } from '@perspect3vism/ad4m'
+import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
 import * as Db from './db'
@@ -22,6 +22,8 @@ import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
 import { OuterConfig } from '../main'
+import path from "path";
+import { sleep } from "./utils";
 
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
@@ -137,6 +139,20 @@ export default class PerspectivismCore {
 
     async initIPFS(params: InitIPFSParams) {
         console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
+        let basePath = params.ipfsRepoPath ? params.ipfsRepoPath : path.join(this.#config.dataPath, "ipfs");
+        let repoPath = path.join(basePath, "repo.lock");
+        console.log("Check if repo.lock exists at: ", repoPath);
+
+        let retries = 0;
+        while (fs.existsSync(repoPath)) {
+            await sleep(1000);
+            retries++;
+            if (retries >= 10) {
+                console.log("Waited long enough for repo.lock to be released, deleting...");
+                fs.rmdirSync(repoPath, { recursive: true });
+                fs.rmSync(path.join(basePath, "datastore", "LOCK"));
+            }
+        }
 
         let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
         this.#IPFS = ipfs;
@@ -186,8 +202,8 @@ export default class PerspectivismCore {
     }
 
     languageSignal(signal: any) {
-        //@ts-ignore
-        console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
+        // //@ts-ignore
+        // console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
         //NOTE (optimization): worth considering if its worth keeping around pubsub in this or if we should just get a new pubsub here
         //@ts-ignore
         this.pubsub.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
@@ -235,20 +251,33 @@ export default class PerspectivismCore {
         //Add shared perspective to original perpspective and then update controller
         perspectiveID.sharedUrl = neighbourhoodUrl
         perspectiveID.neighbourhood = neighbourhood;
-        this.#perspectivesController!.replace(perspectiveID, neighbourhood, false)
+        perspectiveID.state = PerspectiveState.Synced;
+        this.#perspectivesController!.replace(perspectiveID, neighbourhood, false, PerspectiveState.Synced)
         return neighbourhoodUrl
     }
 
     async installNeighbourhood(url: Address): Promise<PerspectiveHandle> {
+        const perspectives = this.#perspectivesController!.allPerspectiveHandles();
+        if (perspectives.some(p => p.sharedUrl === url)) {
+            throw Error(`Neighbourhood with URL ${url} already installed`);
+        }
+
         let neighbourHoodExp = await this.languageController.getPerspective(parseExprUrl(url).expression);
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
         console.log("Core.installNeighbourhood(): Got neighbourhood", neighbourHoodExp);
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
-        await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
+        let state = PerspectiveState.NeighbourhoodJoinInitiated;
 
-        return this.#perspectivesController!.add("", url, neighbourhood);
+        try {
+            await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
+            state = PerspectiveState.LinkLanguageInstalledButNotSynced;
+        } catch (e) {
+            state = PerspectiveState.LinkLanguageFailedToInstall;
+        }
+
+        return this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
@@ -331,7 +360,7 @@ export default class PerspectivismCore {
         console.log("Agent's direct message language successfully cloned, installed and published!")
     }
 
-    async friendsDirectMessageLanguage(did: string): Promise<Language|null> {
+    async friendsDirectMessageLanguage(did: string): Promise<Language | null> {
         const expression = await this.#languageController!.getAgentLanguage().expressionAdapter?.get(did)! as AgentExpression
         //console.log("AGENT EXPRESSION:", expression)
         if(!expression) return null

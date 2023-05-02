@@ -1,7 +1,8 @@
-import { Ad4mClient, Link, LinkQuery, PerspectiveProxy } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, PerspectiveState } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import { expect } from "chai";
 import * as sinon from "sinon";
+import sleep from "./sleep";
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -134,9 +135,13 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(create.name).to.equal("test-links-time");
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
+                await sleep(10);
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
+                await sleep(10);
                 let addLink3 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
+                await sleep(10);
                 let addLink4 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
+                await sleep(10);
                 let addLink5 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
 
                 // Get all the links
@@ -251,26 +256,26 @@ export default function perspectiveTests(testContext: TestContext) {
                 const pSeenInUpdateCB = perspectiveUpdated.getCall(0).args[0];
                 expect(pSeenInUpdateCB.uuid).to.equal(p1.uuid)
                 expect(pSeenInUpdateCB.name).to.equal(p1.name)
+                expect(pSeenInUpdateCB.state).to.equal(PerspectiveState.Private)
 
                 const linkAdded = sinon.fake()
                 await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
                 const linkRemoved = sinon.fake()
                 await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
+                const linkUpdated = sinon.fake()
+                await ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
 
                 const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'root', target: 'lang://123'})
                 expect(linkAdded.calledOnce).to.be.true;
                 expect(linkAdded.getCall(0).args[0]).to.eql(linkExpression)
 
                 const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'root', target: 'lang://456'})
-                expect(linkAdded.calledTwice).to.be.true;
-                expect(linkAdded.getCall(1).args[0]).to.eql(updatedLinkExpression)
-
-                expect(linkRemoved.calledOnce).to.be.true;
-                expect(linkRemoved.getCall(0).args[0]).to.eql(linkExpression)
+                expect(linkUpdated.calledOnce).to.be.true;
+                expect(linkUpdated.getCall(0).args[0].newLink).to.eql(updatedLinkExpression)
 
                 await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
-                expect(linkRemoved.calledTwice).to.be.true;
-                expect(linkRemoved.getCall(1).args[0]).to.eql(updatedLinkExpression)
+                expect(linkRemoved.calledOnce).to.be.true;
+                expect(linkRemoved.getCall(0).args[0]).to.eql(updatedLinkExpression)
             })
 
             it('can run Prolog queries', async () => {

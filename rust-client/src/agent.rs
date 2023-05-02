@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{util::query, ClientInfo};
+use crate::{types::Capability, util::query, ClientInfo};
 use anyhow::{anyhow, Context, Result};
 use graphql_client::{GraphQLQuery, Response};
 
@@ -16,14 +16,20 @@ pub async fn request_capability(
     executor_url: String,
     app_name: String,
     app_desc: String,
-    app_url: String,
-    capabilities: String,
+    app_domain: String,
+    app_url: Option<String>,
+    app_icon_path: Option<String>,
+    capabilities: Option<Vec<Capability>>,
 ) -> Result<String> {
     let query = RequestCapability::build_query(request_capability::Variables {
-        app_name,
-        app_desc,
-        app_url,
-        capabilities,
+        auth_info: request_capability::AuthInfoInput {
+            appName: app_name,
+            appDesc: app_desc,
+            appDomain: app_domain,
+            appUrl: app_url,
+            appIconPath: app_icon_path,
+            capabilities: capabilities.map(|val| val.into_iter().map(|val| val.into()).collect()),
+        },
     });
     let response_body: Response<request_capability::ResponseData> = reqwest::Client::new()
         .post(executor_url)
@@ -92,12 +98,64 @@ pub async fn me(executor_url: String, cap_token: String) -> Result<me::MeAgent> 
 )]
 pub struct GetApps;
 
-pub async fn get_apps(executor_url: String, cap_token: String,) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
-    let response_data: get_apps::ResponseData =
-        query(executor_url, cap_token, GetApps::build_query(get_apps::Variables {}))
-            .await
-            .with_context(|| "Failed to run agent->me query")?;
+pub async fn get_apps(
+    executor_url: String,
+    cap_token: String,
+) -> Result<Vec<get_apps::GetAppsAgentGetApps>> {
+    let response_data: get_apps::ResponseData = query(
+        executor_url,
+        cap_token,
+        GetApps::build_query(get_apps::Variables {}),
+    )
+    .await
+    .with_context(|| "Failed to run agent->get apps query")?;
     Ok(response_data.agent_get_apps)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct RevokeToken;
+
+pub async fn revoke_token(
+    executor_url: String,
+    cap_token: String,
+    request_id: String,
+) -> Result<Vec<revoke_token::RevokeTokenAgentRevokeToken>> {
+    let response_data: revoke_token::ResponseData = query(
+        executor_url,
+        cap_token,
+        RevokeToken::build_query(revoke_token::Variables { request_id }),
+    )
+    .await
+    .with_context(|| "Failed to run agent->revoke_token query")?;
+    Ok(response_data.agent_revoke_token)
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct RemoveApp;
+
+pub async fn remove_app(
+    executor_url: String,
+    cap_token: String,
+    request_id: String,
+) -> Result<Vec<remove_app::RemoveAppAgentRemoveApp>> {
+    let response_data: remove_app::ResponseData = query(
+        executor_url,
+        cap_token,
+        RemoveApp::build_query(remove_app::Variables { request_id }),
+    )
+    .await
+    .with_context(|| "Failed to run agent->remove_app query")?;
+    Ok(response_data.agent_remove_app)
 }
 
 #[derive(GraphQLQuery)]
@@ -251,14 +309,18 @@ impl AgentClient {
         &self,
         app_name: String,
         app_desc: String,
-        app_url: String,
-        capabilities: String,
+        app_domain: String,
+        app_url: Option<String>,
+        app_icon_path: Option<String>,
+        capabilities: Option<Vec<Capability>>,
     ) -> Result<String> {
         request_capability(
             self.info.executor_url.clone(),
             app_name,
             app_desc,
+            app_domain,
             app_url,
+            app_icon_path,
             capabilities,
         )
         .await

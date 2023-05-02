@@ -1,8 +1,8 @@
-import { Image } from "@mantine/core";
 import { useContext, useEffect, useState } from "react";
 import { AgentContext } from "../context/AgentContext";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { useNavigate } from "react-router-dom";
+import Logo from "./Logo";
 
 const Login = (props: any) => {
   const {
@@ -94,300 +94,297 @@ const Login = (props: any) => {
     if (!connected && !connectedLaoding) {
       navigate("/connect");
     } else if (connected && isUnlocked) {
-      navigate("/settings");
+      navigate("/apps");
     } else if (isInitialized) {
       setCurrentIndex(5);
     }
   }, [connected, isUnlocked, navigate, isInitialized, connectedLaoding]);
 
   return (
-    <div
-      className="center"
-      style={{
-        width: "100%",
-        height: "100%",
-        paddingLeft: "var(--j-space-400)",
-        paddingRight: "var(--j-space-400)",
-      }}
-    >
-      <div className="slider">
-        {currentIndex === 0 && (
-          <div className="slider__slide">
-            <div className="slider__slide-content text-center">
-              <j-box pt="500" pb="800">
-                <Image
-                  style={{ width: "200px", margin: "auto" }}
-                  src="ad4msquarelogo2_white_colouremblem.png"
-                ></Image>
-              </j-box>
-              <j-box pt="500">
-                <j-text size="800" color="black">
-                  P2P Framework Beyond Apps
-                </j-text>
-              </j-box>
-              <j-box py="500">
-                <j-flex direction="column" gap="200">
-                  <j-button
-                    size="xl"
-                    onClick={() => setCurrentIndex(1)}
-                    variant="primary"
-                  >
-                    Get Started
-                  </j-button>
-                  {!isInitialized ? (
-                    <j-button
-                      size="lg"
-                      variant="link"
-                      onClick={() => setCurrentIndex(4)}
-                    >
-                      Sign up
-                    </j-button>
-                  ) : (
-                    <j-button
-                      size="lg"
-                      variant="link"
-                      onClick={() => {
-                        setCurrentIndex(5);
-                      }}
-                    >
-                      Sign in
-                    </j-button>
-                  )}
-                </j-flex>
-              </j-box>
-            </div>
+    <div className="slider">
+      {currentIndex === 0 && (
+        <div className="slider__slide">
+          <div className="slider__slide-content center text-center">
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
+
+            <j-text size="800" color="black">
+              The First Social Network
+            </j-text>
+
+            <j-flex direction="column" gap="200">
+              <j-button
+                size="xl"
+                onClick={() => setCurrentIndex(1)}
+                variant="primary"
+              >
+                Get Started
+              </j-button>
+            </j-flex>
           </div>
-        )}
-        {currentIndex === 1 && (
-          <div className="slider__slide">
-            <div className="slider__slide-content text-center">
-              <j-box pt="500" pb="800">
-                <Image
-                  style={{ width: "200px", margin: "auto" }}
-                  src="ad4msquarelogo2_white_colouremblem.png"
-                ></Image>
-              </j-box>
+        </div>
+      )}
+      {currentIndex === 1 && (
+        <div className="slider__slide">
+          <div className="slider__slide-content text-center">
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
+
+            <div>
               <j-text variant="heading">Privacy and Security</j-text>
-              <j-text variant="ingress">
+              <j-text variant="ingress" nomargin>
                 AD4M generates keys on your device, so only you have access to
                 your account and data. No third parties can snoop on your data
                 without your consent.
               </j-text>
-              <j-box py="600">
-                <j-flex j="center" a="center" gap="500">
-                  <j-button
-                    variant="link"
-                    size="xl"
-                    onClick={() => setCurrentIndex(0)}
-                  >
-                    Previous
-                  </j-button>
-                  <j-button
-                    variant="primary"
-                    size="xl"
-                    onClick={() => setCurrentIndex(2)}
-                  >
-                    Next
-                  </j-button>
-                </j-flex>
-              </j-box>
             </div>
+
+            <j-flex j="center" a="center" gap="500">
+              <j-button
+                variant="link"
+                size="xl"
+                onClick={() => setCurrentIndex(0)}
+              >
+                Previous
+              </j-button>
+              <j-button
+                variant="primary"
+                size="xl"
+                onClick={() => setCurrentIndex(2)}
+              >
+                Next
+              </j-button>
+            </j-flex>
           </div>
-        )}
-        {currentIndex === 2 && (
-          <div className="slider__slide">
-            <div className="slider__slide-content text-center">
-              <j-box pt="500" pb="800">
-                <Image
-                  style={{ width: "200px", margin: "auto" }}
-                  src="ad4msquarelogo2_white_colouremblem.png"
-                ></Image>
-              </j-box>
+        </div>
+      )}
+      {currentIndex === 2 && (
+        <div className="slider__slide">
+          <div className="slider__slide-content text-center">
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
+
+            <div>
               <j-text variant="heading">Agent centric</j-text>
-              <j-text variant="ingress">
+              <j-text variant="ingress" nomargin>
                 With AD4M you own your data and decide what apps get to use it.
                 No more app silos with you as the central authority. Censorship
                 free.
               </j-text>
-              <j-box py="600">
-                <j-flex j="center" a="center" gap="500">
-                  <j-button
-                    variant="link"
-                    size="xl"
-                    onClick={() => setCurrentIndex(1)}
-                  >
-                    Previous
-                  </j-button>
-                  <j-button
-                    variant="primary"
-                    size="xl"
-                    onClick={() => setCurrentIndex(3)}
-                  >
-                    Next
-                  </j-button>
-                </j-flex>
-              </j-box>
             </div>
+
+            <j-flex j="center" a="center" gap="500">
+              <j-button
+                variant="link"
+                size="xl"
+                onClick={() => setCurrentIndex(1)}
+              >
+                Previous
+              </j-button>
+              <j-button
+                variant="primary"
+                size="xl"
+                onClick={() => setCurrentIndex(3)}
+              >
+                Next
+              </j-button>
+            </j-flex>
           </div>
-        )}
-        {currentIndex === 3 && (
-          <div className="slider__slide">
-            <div className="slider__slide-content text-center">
-              <j-box pt="500" pb="800">
-                <Image
-                  style={{ width: "200px", margin: "auto" }}
-                  src="ad4msquarelogo2_white_colouremblem.png"
-                ></Image>
-              </j-box>
+        </div>
+      )}
+      {currentIndex === 3 && (
+        <div className="slider__slide">
+          <div className="slider__slide-content text-center">
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
+
+            <div>
               <j-text variant="heading">Censorship free</j-text>
-              <j-text variant="ingress">
+              <j-text variant="ingress" nomargin>
                 AD4M allows you to express yourself without fear of censorship
                 or suppression. You can share your thoughts and opinions without
                 worrying about being silenced by a central authority.
               </j-text>
-              <j-box py="600">
-                <j-flex j="center" a="center" gap="500">
+            </div>
+
+            <j-flex j="center" a="center" gap="500">
+              <j-button
+                variant="link"
+                size="xl"
+                onClick={() => setCurrentIndex(2)}
+              >
+                Previous
+              </j-button>
+              {!isInitialized ? (
+                <j-button
+                  size="xl"
+                  full
+                  variant="primary"
+                  onClick={() => setCurrentIndex(4)}
+                >
+                  Create account
+                </j-button>
+              ) : (
+                <j-button
+                  size="xl"
+                  variant="primary"
+                  full
+                  onClick={() => {
+                    setCurrentIndex(5);
+                  }}
+                >
+                  Sign in
+                </j-button>
+              )}
+            </j-flex>
+          </div>
+        </div>
+      )}
+      {currentIndex === 4 && (
+        <div className="slider__slide">
+          <div className="slider__slide-content center">
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
+            {currentSignupIndex === 0 && (
+              <j-flex direction="column" gap="500" style="width: 100%">
+                <j-input
+                  full
+                  autofocus
+                  size="lg"
+                  label="Username"
+                  minlength={10}
+                  maxlength={30}
+                  autovalidate
+                  required
+                  type="text"
+                  onInput={(e: any) => setUsername(e.target.value)}
+                ></j-input>
+                <j-input
+                  size="lg"
+                  label="Password"
+                  minlength={10}
+                  maxlength={30}
+                  autovalidate
+                  required
+                  type={showPassword ? "text" : "password"}
+                  full
+                  onInput={(e: any) => setPassword(e.target.value)}
+                  onKeyDown={onSignupStepOneKeyDown}
+                >
                   <j-button
+                    onClick={() => setShowPassword(!showPassword)}
+                    slot="end"
                     variant="link"
-                    size="xl"
-                    onClick={() => setCurrentIndex(2)}
+                    square
                   >
-                    Previous
+                    <j-icon
+                      name={showPassword ? "eye-slash" : "eye"}
+                      size="sm"
+                    ></j-icon>
                   </j-button>
-                  {!isInitialized ? (
-                    <j-button
-                      size="xl"
-                      variant="primary"
-                      onClick={() => setCurrentIndex(4)}
-                    >
-                      Sign up
-                    </j-button>
-                  ) : (
-                    <j-button
-                      size="xl"
-                      variant="primary"
-                      onClick={() => {
-                        setCurrentIndex(5);
-                      }}
-                    >
-                      Sign in
-                    </j-button>
-                  )}
-                </j-flex>
-              </j-box>
-            </div>
+                </j-input>
+                <j-button
+                  full
+                  class="full-button"
+                  size="lg"
+                  variant="primary"
+                  style={{ alignSelf: "center" }}
+                  onClick={() => gotoNextSignUpStep()}
+                  loading={loading}
+                >
+                  Next
+                </j-button>
+              </j-flex>
+            )}
+            {currentSignupIndex === 1 && (
+              <j-flex direction="column" gap="500" style="width: 100%">
+                <j-input
+                  full
+                  autofocus
+                  size="lg"
+                  label="First name (optional)"
+                  minlength={10}
+                  maxlength={30}
+                  autovalidate
+                  type="text"
+                  onKeyDown={onSignupStepTwoKeyDown}
+                  onInput={(e: any) => setFirstName(e.target.value)}
+                ></j-input>
+                <j-input
+                  full
+                  size="lg"
+                  label="Last name (optional)"
+                  minlength={10}
+                  maxlength={30}
+                  autovalidate
+                  type="text"
+                  onKeyDown={onSignupStepTwoKeyDown}
+                  onInput={(e: any) => setLastName(e.target.value)}
+                ></j-input>
+                <j-button
+                  class="full-button"
+                  full
+                  size="lg"
+                  variant="primary"
+                  style={{ alignSelf: "center" }}
+                  onClick={() => generate()}
+                  loading={loading}
+                >
+                  Generate Agent
+                </j-button>
+              </j-flex>
+            )}
           </div>
-        )}
-        {currentIndex === 4 && (
-          <div className="slider__slide">
-            <div className="slider__slide-content slider__slide-content--small">
-              <Image
-                style={{ width: "140px", margin: "auto" }}
-                src="ad4msquarelogo2_white_colouremblem.png"
-              ></Image>
-              <j-box p="500"></j-box>
-              {currentSignupIndex === 0 && (
-                <>
-                  <j-input
-                    full
-                    autofocus
-                    size="lg"
-                    label="Username"
-                    minlength={10}
-                    maxlength={30}
-                    autovalidate
-                    required
-                    type="text"
-                    onInput={(e: any) => setUsername(e.target.value)}
-                  ></j-input>
-                  <j-box p="200"></j-box>
-                  <j-input
-                    size="lg"
-                    label="Password"
-                    minlength={10}
-                    maxlength={30}
-                    autovalidate
-                    required
-                    type={showPassword ? "text" : "password"}
-                    full
-                    onInput={(e: any) => setPassword(e.target.value)}
-                    onKeyDown={onSignupStepOneKeyDown}
-                  >
-                    <j-button
-                      onClick={() => setShowPassword(!showPassword)}
-                      slot="end"
-                      variant="link"
-                      square
-                    >
-                      <j-icon
-                        name={showPassword ? "eye-slash" : "eye"}
-                        size="sm"
-                      ></j-icon>
-                    </j-button>
-                  </j-input>
-                  <j-box p="200"></j-box>
-                  <j-button
-                    full
-                    size="lg"
-                    variant="primary"
-                    style={{ alignSelf: "center" }}
-                    onClick={() => gotoNextSignUpStep()}
-                    loading={loading}
-                  >
-                    Next
-                  </j-button>
-                </>
-              )}
-              {currentSignupIndex === 1 && (
-                <>
-                  <j-input
-                    full
-                    autofocus
-                    size="lg"
-                    label="First name (optional)"
-                    minlength={10}
-                    maxlength={30}
-                    autovalidate
-                    type="text"
-                    onKeyDown={onSignupStepTwoKeyDown}
-                    onInput={(e: any) => setFirstName(e.target.value)}
-                  ></j-input>
-                  <j-box p="200"></j-box>
-                  <j-input
-                    full
-                    size="lg"
-                    label="Last name (optional)"
-                    minlength={10}
-                    maxlength={30}
-                    autovalidate
-                    type="text"
-                    onKeyDown={onSignupStepTwoKeyDown}
-                    onInput={(e: any) => setLastName(e.target.value)}
-                  ></j-input>
-                  <j-box p="200"></j-box>
-                  <j-button
-                    full
-                    size="lg"
-                    variant="primary"
-                    style={{ alignSelf: "center" }}
-                    onClick={() => generate()}
-                    loading={loading}
-                  >
-                    Generate Agent
-                  </j-button>
-                </>
-              )}
-            </div>
-          </div>
-        )}
-        {currentIndex === 5 && (
-          <div className="slider__slide center" style={{ height: "100vh" }}>
-            <div className="slider__slide-content slider__slide-content--small">
-              <Image
-                style={{ width: "140px", margin: "auto" }}
-                src="ad4msquarelogo2_white_colouremblem.png"
-              ></Image>
-              <j-box p="500"></j-box>
+        </div>
+      )}
+      {currentIndex === 5 && (
+        <div className="slider__slide" style={{ height: "100vh" }}>
+          <div className="slider__slide-content center">
+            <Logo
+              style={{
+                width: "80px",
+                height: "80px",
+                margin: "0 auto",
+                marginBottom: "var(--j-space-500)",
+              }}
+              gradient
+            ></Logo>
+            <j-flex direction="column" gap="500" style="width: 100%">
               <j-input
                 autofocus
                 size="lg"
@@ -400,6 +397,8 @@ const Login = (props: any) => {
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
                 onKeyDown={onKeyDown}
+                errortext={passwordError}
+                error={passwordError}
               >
                 <j-button
                   onClick={() => setShowPassword(!showPassword)}
@@ -413,10 +412,10 @@ const Login = (props: any) => {
                   ></j-icon>
                 </j-button>
               </j-input>
-              <j-box p="200"></j-box>
               <j-button
                 full
                 size="lg"
+                class="full-button"
                 variant="primary"
                 style={{ alignSelf: "center" }}
                 onClick={() => unlockAgent(password)}
@@ -424,10 +423,10 @@ const Login = (props: any) => {
               >
                 Unlock Agent
               </j-button>
-            </div>
+            </j-flex>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

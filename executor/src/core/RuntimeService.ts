@@ -103,7 +103,9 @@ export default class RuntimeService {
     }
 
     getTrustedAgents(): string[] {
-        return [this.#did!, ...this.#config.trustedAgents, ..._get(this.trustedAgentsPath())]
+        let agents = [this.#did!, ...this.#config.trustedAgents, ..._get(this.trustedAgentsPath())]
+        let dedupAgents = [...new Set(agents)]
+        return dedupAgents
     }
 
     addKnowLinkLanguageTemplates(addresses: string[]): void {
@@ -136,7 +138,7 @@ export default class RuntimeService {
 
     getMessagesOutbox(filter?: string): Message[] {
         let messages = _getObjects(this.outboxPath()) as Message[]
-        console.log("OUTBOX:", messages)
+        // console.log("OUTBOX:", messages)
         if(filter) {
             messages = messages.filter(m => m.recipient === filter)
         }

@@ -33,12 +33,13 @@ mod commands;
 
 use tauri::api::dialog;
 use tauri::Manager;
-use crate::commands::proxy::{get_proxy, setup_proxy, stop_proxy};
+use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
-use crate::commands::app::{close_application, close_main_window, clear_state};
+use crate::commands::app::{close_application, close_main_window, clear_state, open_tray};
 use crate::config::data_path;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
+use crate::util::has_processes_running;
 use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
 
 // the payload type must implement `Serialize` and `Clone`.
@@ -47,11 +48,13 @@ struct Payload {
   message: String,
 }
 
-pub struct ProxyState(Mutex<Option<ProxyService>>);
+pub struct ProxyState(Mutex<ProxyService>);
 
+#[derive(Default)]
 pub struct ProxyService {
-    endpoint: String,
-    shutdown_signal: broadcast::Sender<()>,
+    credential: Option<String>,
+    endpoint: Option<String>,
+    shutdown_signal: Option<broadcast::Sender<()>>,
 }
 
 pub struct AppState {
@@ -60,12 +63,14 @@ pub struct AppState {
 }
 
 fn main() {
-    if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
-        let _ = remove_dir_all(data_path());
+    let app_name = if std::env::consts::OS == "windows" { "AD4M.exe" } else { "AD4M" };
+    if has_processes_running(app_name) > 1 {
+        println!("AD4M is already running");
+        return;
     }
 
-    if data_path().join("ad4m").join("ipfs").join("repo.lock").exists() {
-        let _ = remove_dir_all(data_path().join("ad4m").join("ipfs").join("repo.lock"));
+    if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
+        let _ = remove_dir_all(data_path());
     }
     
     if let Err(err) = setup_logs() {
@@ -81,6 +86,13 @@ fn main() {
     find_and_kill_processes("ad4m-host");
 
     find_and_kill_processes("holochain");
+
+    let prepare = Command::new_sidecar("ad4m-host")
+        .expect("Failed to create ad4m command")
+        .args(["prepare"])
+        .status()
+        .expect("Failed to run ad4m prepare");
+    assert!(prepare.success());
 
     if !holochain_binary_path().exists() {
         log::info!("init command by copy holochain binary");
@@ -109,12 +121,14 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_port,
             request_credential,
+            login_proxy,
             setup_proxy,
             get_proxy,
             stop_proxy,
             close_application,
             close_main_window,
-            clear_state
+            clear_state,
+            open_tray
         ])
         .setup(move |app| {
             let splashscreen = app.get_window("splashscreen").unwrap();
@@ -153,7 +167,12 @@ fn main() {
                                 main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
                             }
                         },
-                        CommandEvent::Stderr(line) => log::error!("{}", line),
+                        CommandEvent::Stderr(line) => {
+                            let is_prolog_redefined_line = line.starts_with("Warning: /var") || line.starts_with("Warning:    Redefined") || line.starts_with("Warning:    Previously");
+                            if !is_prolog_redefined_line {
+                                log::error!("{}", line);
+                            }
+                        }
                         CommandEvent::Terminated(line) => {
                             log::info!("Terminated {:?}", line);
                             let main = get_main_window(&handle);

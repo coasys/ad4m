@@ -5,11 +5,10 @@ import {
   PREDICATE_LASTNAME,
   PREDICATE_USERNAME,
 } from "../constants/triples";
-import { cardStyle, gridButton, MainContainer } from "./styles";
+import { cardStyle } from "./styles";
 import { Ad4minContext } from "../context/Ad4minContext";
-import { buildAd4mClient } from "../util";
+import { buildAd4mClient, copyTextToClipboard } from "../util";
 import { useCallback } from "react";
-import { showNotification } from "@mantine/notifications";
 import { invoke } from "@tauri-apps/api";
 import QRCode from "react-qr-code";
 import { AgentContext } from "../context/AgentContext";
@@ -50,7 +49,7 @@ export const fetchProfile = async (agent: Agent) => {
 const Profile = (props: Props) => {
   const {
     state: { loading },
-    methods: { lockAgent }
+    methods: { lockAgent },
   } = useContext(AgentContext);
 
   const {
@@ -72,13 +71,10 @@ const Profile = (props: Props) => {
 
   const [showPassword, setShowPassword] = useState(false);
 
+  const [loadingProxy, setLoadingProxy] = useState(false);
+
   function openLogs() {
     appWindow.emit("copyLogs");
-
-    showNotification({
-      message: "Opened logs folder... Please send ad4m.log to support on Discord",
-      autoClose: 20000,
-    });
   }
 
   const [profile, setProfile] = useState({
@@ -157,12 +153,8 @@ const Profile = (props: Props) => {
     );
   };
 
-  const copyProxy = () => {
-    navigator.clipboard.writeText(proxy);
-    showNotification({
-      message: "Proxy endpoint copied to clipboard",
-      autoClose: 1000,
-    });
+  const copyText = (text: string) => {
+    copyTextToClipboard(text);
   };
 
   const showProxyQRCode = () => {
@@ -178,96 +170,107 @@ const Profile = (props: Props) => {
     }
   };
 
-  const copyUrl = () => {
-    navigator.clipboard.writeText(url);
-    showNotification({
-      message: "URL copied to clipboard",
-      autoClose: 1000,
-    });
-  };
-
-  const setupProxy = async () => {
+  const setupProxy = async (event: any) => {
     try {
+      setLoadingProxy(true);
       const proxy: string = await invoke("setup_proxy", { subdomain: did });
       console.log("Finish setup proxy, ", proxy);
       setProxy(formatProxy(proxy));
+      event.target.checked = true;
     } catch (e) {
-      showNotification({
-        color: "red",
-        message: "Error while starting proxy",
-        autoClose: 5000,
-      });
+      event.target.checked = false;
+      setProxy("");
+    } finally {
+      setLoadingProxy(false);
     }
   };
 
-  const stopProxy = async () => {
-    await invoke("stop_proxy");
-    setProxy("");
-  };
-
-  const showProxy = () => {
-    return (
-      <>
-        <ActionButton
-          iconColor={proxy.length === 0 ? undefined : "success-500"}
-          title={proxy.length === 0 ? "Proxy" : "Stop proxy"}
-          onClick={() => (proxy.length === 0 ? setupProxy() : stopProxy())}
-          icon="wifi"
-        />
-        {proxy && (
-          <>
-            <ActionButton
-              title="Proxy URL"
-              onClick={copyProxy}
-              icon="clipboard"
-            />
-            <ActionButton
-              title="QR Code"
-              onClick={showProxyQRCode}
-              icon="qr-code-scan"
-            />
-            <ActionButton
-              title="Open GraphQL"
-              onClick={() => open(url.replace("ws", "http"))}
-              icon="box-arrow-up-right"
-            />
-          </>
-        )}
-      </>
-    );
+  const stopProxy = async (event: any) => {
+    try {
+      await invoke("stop_proxy");
+      setProxy("");
+      event.target.checked = false;
+    } catch (e) {
+      event.target.checked = true;
+    }
   };
 
   return (
-    <div style={MainContainer}>
-      <div style={{ padding: "20px 30px 0 30px" }}>
+    <div>
+      <j-box px="500" my="500">
         <j-toggle
           full=""
           checked={expertMode}
           onChange={(e) => toggleExpertMode()}
         >
-          Expert mode
+          Advanced mode
         </j-toggle>
-      </div>
-      <div style={{ ...gridButton, paddingTop: 20 }}>
-        {showProxy()}
-        <ActionButton
-          title="Trusted agents"
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-toggle
+          checked={!!proxy}
+          onChange={(e) => {
+            e.target.checked ? setupProxy(e) : stopProxy(e);
+          }}
+        >
+          Proxy
+        </j-toggle>
+
+        {loadingProxy && <j-spinner size="sm"></j-spinner>}
+
+        {proxy && (
+          <j-box pb="500">
+            <j-flex a="center">
+              <ActionButton
+                title="Proxy URL"
+                onClick={() => copyText(proxy)}
+                icon="clipboard"
+              />
+              <ActionButton
+                title="QR Code"
+                onClick={showProxyQRCode}
+                icon="qr-code-scan"
+              />
+              <ActionButton
+                title="Open GraphQL"
+                onClick={() => open(url.replace("ws", "http"))}
+                icon="box-arrow-up-right"
+              />
+            </j-flex>
+          </j-box>
+        )}
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button
           onClick={() => settrustedAgentModalOpen(true)}
-          icon="shield-check"
-        />
-        <ActionButton title="Open Logs" onClick={openLogs} icon="clipboard" />
-        <ActionButton
-          title="Docs"
-          onClick={() => open("https://docs.ad4m.dev/")}
-          icon="file-earmark-richtext"
-        />
-        <ActionButton
-          title="Delete Agent"
+          full
+          variant="secondary"
+        >
+          <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+          Show trusted agents
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button onClick={openLogs} full variant="secondary">
+          <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+          Show logs
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button
           onClick={() => setClearAgentModalOpen(true)}
-          icon="trash"
-        />
-        <j-box p="200" />
-      </div>
+          full
+          variant="primary"
+        >
+          <j-icon size="sm" slot="start" name="trash"></j-icon>
+          Delete Agent
+        </j-button>
+      </j-box>
+
       {trustedAgentModalOpen && (
         <j-modal
           size="fullscreen"
@@ -297,7 +300,7 @@ const Profile = (props: Props) => {
                     <j-button
                       size="xs"
                       variant="transparent"
-                      onClick={() => console.log("wow")}
+                      onClick={() => copyText(e?.did)}
                     >
                       <j-icon size="xs" slot="end" name="clipboard"></j-icon>
                     </j-button>

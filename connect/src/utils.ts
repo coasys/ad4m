@@ -1,10 +1,34 @@
 import { Ad4mClient } from "@perspect3vism/ad4m";
-import { ClientStates } from "./core";
+import { AuthStates } from "./core";
+
+// @ts-ignore
+import { version } from "../package.json";
 
 function Timeout() {
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 20);
   return controller;
+}
+
+export async function connectWebSocket(url, timeout = 5000) {
+  return Promise.race([
+    new Promise((resolve, reject) => {
+      const websocket = new WebSocket(url);
+
+      websocket.onopen = () => {
+        resolve(websocket);
+      };
+
+      websocket.onerror = (error) => {
+        reject(error);
+      };
+    }),
+    new Promise((resolve, reject) => {
+      setTimeout(() => {
+        reject(new Error("WebSocket connection timed out"));
+      }, timeout);
+    }),
+  ]);
 }
 
 export async function checkPort(port: number) {
@@ -17,10 +41,10 @@ export async function checkPort(port: number) {
     if (res.status === 400 || res.status === 0) {
       return port;
     } else {
-      return null;
+      throw new Error(`Could not connect to port ${port}`);
     }
   } catch (e) {
-    throw e;
+    throw new Error(`Could not connect to port ${port}`);
   }
 }
 
@@ -42,15 +66,9 @@ export function getAd4mClient(): Promise<Ad4mClient> {
 export function onAuthStateChanged(callback) {
   const el = document.querySelector("ad4m-connect");
 
-  el?.addEventListener("authStateChange", (e: CustomEvent) => {
-    callback(e.detail as ClientStates);
+  el?.addEventListener("authstatechange", (e: CustomEvent) => {
+    callback(e.detail as AuthStates);
   });
-}
-
-export function isConnected() {
-  const el = document.querySelector("ad4m-connect");
-  //@ts-ignore
-  return el.connected();
 }
 
 export function detectOS(): string {
@@ -66,4 +84,33 @@ export function detectOS(): string {
     finalOs = "Linux";
   }
   return finalOs;
+}
+
+function isSupported(): boolean {
+  try {
+    localStorage.setItem("test", "");
+    localStorage.removeItem("test");
+  } catch (e) {
+    return false;
+  }
+  return true;
+}
+
+export function setForVersion(key: string, value: string): void {
+  if (isSupported()) {
+    localStorage.setItem(`${version}/${key}`, value);
+  }
+}
+
+export function getForVersion(key: string): string | null {
+  if (isSupported()) {
+    return localStorage.getItem(`${version}/${key}`);
+  }
+  return null;
+}
+
+export function removeForVersion(key: string): void {
+  if (isSupported()) {
+    localStorage.removeItem(`${version}/${key}`);
+  }
 }

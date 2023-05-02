@@ -27,13 +27,14 @@ export class Ad4mClient {
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
-        this.#agentClient = new AgentClient(client, subscribe)
-        this.#expressionClient = new ExpressionClient(client)
-        this.#languageClient = new LanguageClient(client)
-        this.#neighbourhoodClient = new NeighbourhoodClient(client)
-        this.#perspectiveClient = new PerspectiveClient(client, subscribe)
+        this.#agentClient = new AgentClient(this.#apolloClient, subscribe)
+        this.#expressionClient = new ExpressionClient(this.#apolloClient)
+        this.#languageClient = new LanguageClient(this.#apolloClient)
+        this.#neighbourhoodClient = new NeighbourhoodClient(this.#apolloClient)
+        this.#perspectiveClient = new PerspectiveClient(this.#apolloClient, subscribe)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
-        this.#runtimeClient = new RuntimeClient(client, subscribe)
+        this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
+        this.#runtimeClient = new RuntimeClient(this.#apolloClient, subscribe)
     }
 
     get agent(): AgentClient {

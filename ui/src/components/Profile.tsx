@@ -1,31 +1,11 @@
-import {
-  ActionIcon,
-  Button,
-  createStyles,
-  Group,
-  Space,
-  Text,
-} from "@mantine/core";
-import { showNotification } from "@mantine/notifications";
 import { useCallback, useContext, useEffect, useState } from "react";
-import { Copy, Qrcode as QRCodeIcon } from "tabler-icons-react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
 import { invoke } from "@tauri-apps/api";
-import QRCode from "react-qr-code";
 import { buildAd4mClient } from "../util";
 import { fetchProfile } from "./Settings";
-import CardItems from "./CardItems";
-
-const useStyles = createStyles((theme) => ({
-  label: {
-    color: theme.colors.dark[1],
-  },
-}));
 
 function Profile() {
-  const { classes } = useStyles();
-
   const {
     state: { loading },
     methods: { lockAgent },
@@ -77,7 +57,7 @@ function Profile() {
 
   return (
     <div>
-      <j-popover placement="top">
+      <j-popover placement="bottom">
         <j-button slot="trigger" variant="ghost" size="sm">
           <j-flex a="center">
             {profile.username}
@@ -100,41 +80,42 @@ function Profile() {
           </j-menu-item>
         </j-menu>
       </j-popover>
-      <j-modal
-        size="fullscreen"
-        open={lockAgentModalOpen}
-        onToggle={(e: any) => setLockAgentModalOpen(e.target.open)}
-      >
-        <j-box px="400" py="600">
-          <j-box pb="500">
-            <j-text nomargin size="600" color="black" weight="600">
-              Lock Agent
-            </j-text>
-          </j-box>
-          <j-box p="200"></j-box>
-          <j-input
-            placeholder="Password"
-            label="Input your passphrase"
-            type={showPassword ? "text" : "password"}
-            size="lg"
-            required
-            onInput={onPasswordChange}
-            onKeyDown={onKeyDown}
-            autovalidate
-          >
-            <j-button
-              onClick={() => setShowPassword(!showPassword)}
-              slot="end"
-              variant="link"
-              square
+      {lockAgentModalOpen && (
+        <j-modal
+          size="fullscreen"
+          open={lockAgentModalOpen}
+          onToggle={(e: any) => setLockAgentModalOpen(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Lock Agent
+              </j-text>
+            </j-box>
+            <j-box p="200"></j-box>
+            <j-input
+              placeholder="Password"
+              label="Input your passphrase"
+              type={showPassword ? "text" : "password"}
+              size="lg"
+              required
+              onInput={onPasswordChange}
+              onKeyDown={onKeyDown}
+              autovalidate
             >
-              <j-icon
-                name={showPassword ? "eye-slash" : "eye"}
-                size="sm"
-              ></j-icon>
-            </j-button>
-          </j-input>
-          <j-box p="200"></j-box>
+              <j-button
+                onClick={() => setShowPassword(!showPassword)}
+                slot="end"
+                variant="link"
+                square
+              >
+                <j-icon
+                  name={showPassword ? "eye-slash" : "eye"}
+                  size="sm"
+                ></j-icon>
+              </j-button>
+            </j-input>
+            <j-box p="200"></j-box>
             <j-button
               variant="primary"
               onClick={() => lockAgent(password)}
@@ -142,41 +123,41 @@ function Profile() {
             >
               Lock agent
             </j-button>
-        </j-box>
-      </j-modal>
-      <j-modal
-        size="fullscreen"
-        open={showProfileInfo}
-        onToggle={(e: any) => setShowProfileInfo(e.target.open)}
-      >
-        <j-box px="400" py="600">
-          <j-box pb="900">
-            <j-text nomargin color="black" size="600" weight="600">
-              Profile details
-            </j-text>
           </j-box>
-          <div style={{ padding: "24px" }}>
-            <CardItems title="Agent ID" value={did as string} titleUnderline />
-            <j-box p="200" />
-            <CardItems
-              title="Username"
-              value={profile?.username}
-              titleUnderline
-            />
-            <j-box p="200" />
-            <CardItems
-              title="Name"
-              value={`${profile.firstName} ${profile.lastName}`}
-              titleUnderline
-            />
-            <j-box p="200" />
-          </div>
-          <j-box p="200"></j-box>
-          <j-flex>
+        </j-modal>
+      )}
+      {showProfileInfo && (
+        <j-modal
+          size="fullscreen"
+          open={showProfileInfo}
+          onToggle={(e: any) => setShowProfileInfo(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="900">
+              <j-text nomargin color="black" size="600" weight="600">
+                Profile details
+              </j-text>
+            </j-box>
+
+            <j-box>
+              <j-text variant="label">Agent DID</j-text>
+              <j-text wrap>{did}</j-text>
+            </j-box>
+
+            <j-box>
+              <j-text variant="label">Username</j-text>
+              <j-text>{profile?.username || "No username"}</j-text>
+            </j-box>
+
+            <j-box>
+              <j-text variant="label">Name</j-text>
+              <j-text>{`${profile.firstName} ${profile.lastName}`}</j-text>
+            </j-box>
+
             <j-button onClick={() => setShowProfileInfo(false)}>Close</j-button>
-          </j-flex>
-        </j-box>
-      </j-modal>
+          </j-box>
+        </j-modal>
+      )}
     </div>
   );
 }

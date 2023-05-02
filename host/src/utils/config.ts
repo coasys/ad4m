@@ -26,3 +26,11 @@ export function getConfig(dataPath = ''): GetConfigReturntype {
     return {}
   }
 }
+
+export function getAd4mHostVersion(): string {
+  const packageJson = path.join(__dirname, `../package.json`);
+  const packageJsonParsed = JSON.parse(fs.readFileSync(packageJson, { encoding: 'utf-8' }));
+  const version = packageJsonParsed["version"];
+  console.log("Got ad4mHost version: ", version);
+  return version;
+}

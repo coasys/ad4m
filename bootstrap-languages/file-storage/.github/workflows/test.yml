@@ -1,0 +1,87 @@
+# This workflow will do a clean install of node dependencies, cache/restore them, build the source code and run tests across different versions of node
+# For more information see: https://help.github.com/actions/language-and-framework-guides/using-nodejs-with-github-actions
+
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  zome-test:
+    name: Holochain Zome Test
+
+    strategy:
+      matrix:
+        platform: [ubuntu-22.04]
+        node-version: [16.x]
+        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: 1.63.0
+    - name: Cache cargo
+      id: cache-cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v2
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    - run: rustup target add wasm32-unknown-unknown
+    - run: npm install -g npm
+    - run: cd hc-dna/tests && ./download-hc-binaries.sh
+    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
+    - run: cp ./hc-dna/tests/hc /usr/local/bin && cp ./hc-dna/tests/holochain /usr/local/bin && cd hc-dna/tests && npm i && npm run build-ci && npm run test
+
+  integration:
+    name: Integration Test
+    
+    strategy:
+      matrix:
+        platform: [ubuntu-22.04]
+        node-version: [16.x]
+        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: 1.63.0
+    - name: Cache cargo
+      id: cache-cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v2
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    - run: rustup target add wasm32-unknown-unknown
+    - run: npm install -g npm
+    - run: ./hc-dna/tests/download-hc-binaries.sh && mv ./hc /usr/local/bin
+    - run: npm install && cd hc-dna && ./build.sh
+    - run: npm run build-lang && npm test

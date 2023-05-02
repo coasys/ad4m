@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Neighbourhood, LinkQuery, PerspectiveHandle } from '@perspect3vism/ad4m'
+import { Neighbourhood, LinkQuery, PerspectiveHandle, PerspectiveState } from '@perspect3vism/ad4m'
 import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
 import Memory from 'lowdb/adapters/Memory'
 import path from "path";
@@ -56,12 +56,13 @@ describe('Perspective', () => {
     beforeEach(() => {
         const TEST_DIR = `${__dirname}/../tst-tmp`
         const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
-        const db = new PerspectivismDb(new Memory(""))
+        const db = new PerspectivismDb();
         perspective = new Perspective(
             {
                 uuid: uuidv4(),
                 name: "Test Perspective",
-                sharedUrl: undefined
+                sharedUrl: undefined,
+                state: PerspectiveState.Private
             } as PerspectiveHandle,
             //@ts-ignore
             {
@@ -107,7 +108,7 @@ describe('Perspective', () => {
             const result = await perspective!.getLinks({} as LinkQuery)
 
             expect(result.length).to.be.equal(5)
-            expect(result).to.have.members(allLinks!);
+            expect(result).to.have.deep.members(allLinks!);
         })
 
         it('can get links by source', async () => {

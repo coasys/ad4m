@@ -29,14 +29,14 @@
 
 #### Defined in
 
-[language/Language.ts:237](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L237)
+[language/Language.ts:248](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L248)
 
 ___
 
 ### status
 
-• **status**: `string`
+• **status**: [`PerspectiveExpression`](perspectives_Perspective.PerspectiveExpression.md)
 
 #### Defined in
 
-[language/Language.ts:238](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/language/Language.ts#L238)
+[language/Language.ts:250](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/language/Language.ts#L250)

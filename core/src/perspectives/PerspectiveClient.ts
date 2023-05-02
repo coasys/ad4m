@@ -1,12 +1,13 @@
 import { ApolloClient, gql } from "@apollo/client/core";
-import { Expression, ExpressionRendered } from "../expression/Expression";
+import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
-import { ExpressionRef } from "../expression/ExpressionRef";
 import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
+import { NeighbourhoodClient } from "../neighbourhood/NeighbourhoodClient";
+import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
-import { PerspectiveHandle } from "./PerspectiveHandle";
+import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 
 const LINK_EXPRESSION_FIELDS = `
@@ -21,6 +22,7 @@ const PERSPECTIVE_HANDLE_FIELDS = `
 uuid
 name
 sharedUrl
+state
 neighbourhood { 
     linkLanguage 
     meta { 
@@ -38,18 +40,23 @@ neighbourhood {
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
+export type SyncStateChangeCallback = (state: PerspectiveState) => null
+
 export class PerspectiveClient {
     #apolloClient: ApolloClient<any>
     #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
     #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
     #perspectiveRemovedCallbacks: UuidCallback[]
+    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #expressionClient?: ExpressionClient
+    #neighbourhoodClient?: NeighbourhoodClient
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
         this.#perspectiveAddedCallbacks = []
         this.#perspectiveUpdatedCallbacks = []
         this.#perspectiveRemovedCallbacks = []
+        this.#perspectiveSyncStateChangeCallbacks = []
 
         if(subscribe) {
             this.subscribePerspectiveAdded()
@@ -60,6 +67,10 @@ export class PerspectiveClient {
 
     setExpressionClient(client: ExpressionClient) {
         this.#expressionClient = client
+    }
+
+    setNeighbourhoodClient(client: NeighbourhoodClient) {
+        this.#neighbourhoodClient = client
     }
 
     async all(): Promise<PerspectiveProxy[]> {
@@ -312,6 +323,27 @@ export class PerspectiveClient {
         })
     }
 
+    addPerspectiveSyncedListener(cb: SyncStateChangeCallback) {
+        this.#perspectiveSyncStateChangeCallbacks.push(cb)
+    }
+
+    async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
+        this.#apolloClient.subscribe({
+            query: gql` subscription {
+                perspectiveSyncStateChange(uuid: "${uuid}")
+            }
+        `}).subscribe({
+            next: result => {
+                cb.forEach(c => {
+                    c(result.data.perspectiveSyncStateChange)
+                })
+            },
+            error: (e) => console.error(e)
+        })
+
+        await new Promise<void>(resolve => setTimeout(resolve, 500))
+    }
+
     addPerspectiveRemovedListener(cb: UuidCallback) {
         this.#perspectiveRemovedCallbacks.push(cb)
     }
@@ -363,5 +395,33 @@ export class PerspectiveClient {
         })
 
         await new Promise<void>(resolve => setTimeout(resolve, 500))
+    }
+
+    async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
+        this.#apolloClient.subscribe({
+            query: gql` subscription {
+                perspectiveLinkUpdated(uuid: "${uuid}") { 
+                    oldLink {
+                        ${LINK_EXPRESSION_FIELDS}
+                    } 
+                    newLink {
+                        ${LINK_EXPRESSION_FIELDS}
+                    } 
+                }
+            }   
+        `}).subscribe({
+            next: result => {
+                cb.forEach(c => {
+                    c(result.data.perspectiveLinkUpdated)
+                })
+            },
+            error: (e) => console.error(e)
+        })
+
+        await new Promise<void>(resolve => setTimeout(resolve, 500))
+    }
+
+    getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
+        return new NeighbourhoodProxy(this.#neighbourhoodClient, uuid)
     }
 }

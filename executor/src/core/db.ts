@@ -1,162 +1,184 @@
-import low from 'lowdb'
-import FileSync from 'lowdb/adapters/FileSync'
+import { Database } from 'aloedb-node'
 import path from 'path'
-import type { PerspectiveDiff } from "@perspect3vism/ad4m";  
+import type { Expression, LinkExpression, PerspectiveDiff } from "@perspect3vism/ad4m";  
+
+interface LinkSchema {
+    perspective: string,
+    linkExpression: LinkExpression,
+    source: string,
+    predicate: string,
+    target: string,
+    author: string,
+    timestamp: string
+}
+
+interface ExpressionSchema {
+    url: string
+    data: Expression
+}
+
+interface PerspectiveDiffSchema {
+    perspective: string,
+    additions: LinkExpression[],
+    removals: LinkExpression[],
+    isPending: boolean
+}
 
 export class PerspectivismDb {
-    #db: any
+    #linkDb: Database<LinkSchema>;
+    #expressionDb: Database<ExpressionSchema>;
+    #diffDb: Database<PerspectiveDiffSchema>;
 
-    constructor(adapter: typeof FileSync) {
-        const db = low(adapter)
-        this.#db = db
+    constructor(dbPath?: string) {
+        this.#linkDb = new Database<LinkSchema>(dbPath ? path.join(dbPath, "links.json") : undefined);
+        this.#expressionDb = new Database<ExpressionSchema>(dbPath ? path.join(dbPath, "expression.json") : undefined);
+        this.#diffDb = new Database<PerspectiveDiffSchema>(dbPath ? path.join(dbPath, "diffs.json") : undefined);
     }
 
-    linkKey(pUUID: string, linkName: string) {
-        return `${pUUID}-link-${linkName}`
+    //Link Methods
+
+    async addLink(perspectiveUuid: string, link: LinkExpression) {
+        await this.#linkDb.insertOne({
+            perspective: perspectiveUuid,
+            linkExpression: link,
+            source: link.data.source,
+            predicate: link.data.predicate,
+            target: link.data.target,
+            author: link.author,
+            timestamp: link.timestamp
+        } as LinkSchema)
     }
 
-    allLinksKey(pUUID: string) {
-        return `${pUUID}-all_links`
+    async addManyLinks(perspectiveUuid: string, links: LinkExpression[]) {
+        await this.#linkDb.insertMany(links.map((link) => {
+            return {
+                perspective: perspectiveUuid,
+                linkExpression: link,
+                source: link.data.source,
+                predicate: link.data.predicate,
+                target: link.data.target,
+                author: link.author,
+                timestamp: link.timestamp
+            } as LinkSchema
+        }));
     }
 
-    sourceKey(pUUID: string, source: string) {
-        return `${pUUID}-from_source-${source}`
+    async updateLink(perspectiveUuid: string, oldLink: LinkExpression, newLink: LinkExpression) {
+        await this.#linkDb.updateOne({
+            perspective: perspectiveUuid,
+            linkExpression: oldLink,
+            source: oldLink.data.source,
+            predicate: oldLink.data.predicate,
+            target: oldLink.data.target,
+            author: oldLink.author,
+            timestamp: oldLink.timestamp,
+        }, {
+            perspective: perspectiveUuid,
+            linkExpression: newLink,
+            source: newLink.data.source,
+            predicate: newLink.data.predicate,
+            target: newLink.data.target,
+            author: newLink.author,
+            timestamp: newLink.timestamp,
+        } as LinkSchema);
     }
 
-    targetKey(pUUID: string, target: string) {
-        return `${pUUID}-to_target-${target}`
+    async removeLink(perspectiveUuid: string, link: LinkExpression) {
+        await this.#linkDb.deleteOne({
+            perspective: perspectiveUuid,
+            linkExpression: link,
+            source: link.data.source,
+            predicate: link.data.predicate,
+            target: link.data.target,
+            author: link.author,
+            timestamp: link.timestamp,
+        } as LinkSchema)
     }
 
-    pendingLinkKey(pUUID: string) {
-        return `${pUUID}-pending_links`
+    async getLink(perspectiveUuid: string, link: LinkExpression): Promise<LinkExpression | undefined> {
+        if (link.data.source == null) {
+            delete link.data.source;
+        };
+        if (link.data.predicate == null) {
+            delete link.data.predicate;
+        };
+        if (link.data.target == null) {
+            delete link.data.target;
+        };
+        return (await this.#linkDb.findOne({ perspective: perspectiveUuid, linkExpression: link }))?.linkExpression;
     }
 
-    storeLink(pUUID: string, link: object, linkName: string): void {
-        this.#db.set(this.linkKey(pUUID, linkName), [link]).write()
+    async getAllLinks(perspectiveUuid: string): Promise<LinkExpression[]> {
+        const links = ( await this.#linkDb.findMany({ perspective: perspectiveUuid })).map((val) => {
+            return val.linkExpression;
+        })
+        .filter((val) => val !== undefined) as LinkExpression[];
+        return links
+    }
 
-        const key = this.allLinksKey(pUUID)
-        if(!this.#db.has(key).value()) {
-            this.#db.set(key, []).write()
+    async getLinksBySource(perspectiveUuid: string, source: string): Promise<LinkExpression[]> {
+        const links = ( await this.#linkDb.findMany({ perspective: perspectiveUuid, source })).map((val) => {
+            return val.linkExpression;
+        })
+        .filter((val) => val !== undefined) as LinkExpression[];
+        return links
+    }
+
+    async getLinksByTarget(perspectiveUuid: string, target: string): Promise<LinkExpression[]> {
+        const links = ( await this.#linkDb.findMany({ perspective: perspectiveUuid, target })).map((val) => {
+            return val.linkExpression;
+        })
+        .filter((val) => val !== undefined) as LinkExpression[];
+        return links
+    }
+
+    async addPendingDiff(perspectiveUuid: string, diff: PerspectiveDiff) {
+        await this.#diffDb.insertOne({
+            perspective: perspectiveUuid,
+            additions: diff.additions,
+            removals: diff.removals,
+            isPending: true
+        } as PerspectiveDiffSchema)
+    }
+
+    async getPendingDiffs(perspectiveUuid: string): Promise<PerspectiveDiff> {
+        let additions: LinkExpression[]  = [];
+        let removals: LinkExpression[] = [];
+        const diffs = ( await this.#diffDb.findMany({ perspective: perspectiveUuid, isPending: true }));
+        for (const diff of diffs) {
+            additions = additions.concat(diff.additions);
+            removals = removals.concat(diff.removals);
+        };
+        return {
+            additions: additions,
+            removals: removals
+        } as PerspectiveDiff;
+    }
+
+    async clearPendingDiffs(pUUID: string) {
+        await this.#diffDb.deleteMany({ perspective: pUUID, isPending: true });
+    }
+
+    // Expression Methods
+
+    async addExpression(url: string, expression: Expression) {
+        await this.#expressionDb.insertOne({
+            url,
+            data: expression
+        } as ExpressionSchema)
+    }
+
+    async getExpression(url: string): Promise<Expression | undefined> {
+        let expression = await this.#expressionDb.findOne({ url });
+        if (expression) {
+            return expression.data;
+        } else {
+            return undefined;
         }
-
-        this.#db.get(key)
-            .push(linkName)
-            .write()
-    }
-
-    updateLink(pUUID: string, link: object, linkName: string): void {
-        const key = this.linkKey(pUUID, linkName)
-
-        if(!this.#db.has(key).value()) {
-            this.storeLink(pUUID, link, linkName)
-            return
-        }
-
-        this.#db.get(key)
-            .push(link)
-            .write()
-    }
-
-    getLink(pUUID: string, linkName: string): object | null {
-        const key = this.linkKey(pUUID, linkName)
-        const versions = this.#db.get(key).value()
-        return versions[versions.length-1]
-    }
-
-    getAllLinks(pUUID: string): object[] {
-        return this.getLinksByKey(pUUID, this.allLinksKey(pUUID))
-    }
-
-    getLinksBySource(pUUID: string, source: string): object[] {
-        const key = this.sourceKey(pUUID, source)
-        return this.getLinksByKey(pUUID, key)
-    }
-
-    getLinksByTarget(pUUID: string, target: string): object[] {
-        const key = this.targetKey(pUUID, target)
-        return this.getLinksByKey(pUUID, key)
-    }
-
-    getLinksByKey(pUUID: string, key: string): object[] {
-        let allLinkNames = this.#db.get(key).value()
-        if(!allLinkNames) {
-            allLinkNames = []
-        }
-
-        const allLinks = []
-        for(const linkName of allLinkNames) {
-            allLinks.push({
-                name: linkName,
-                link: this.getLink(pUUID, linkName)
-            })
-        }
-        return allLinks
-    }
-
-    attachSource(pUUID: string, source: string, linkName: string): void {
-        const key = this.sourceKey(pUUID, source)
-        this.attach(key, linkName)
-    }
-
-    attachTarget(pUUID: string, target: string, linkName: string): void {
-        const key = this.targetKey(pUUID, target)
-        this.attach(key, linkName)
-    }
-
-    attach(key: string, linkName: string): void {
-        if(!this.#db.has(key).value()) {
-            this.#db.set(key, []).write()
-        }
-
-        if(!this.#db.get(key).includes(linkName).value()) {
-            this.#db.get(key)
-                .push(linkName)
-                .write()
-        }
-    }
-
-    removeSource(pUUID: string, source: string, linkName: string): void {
-        const key = this.sourceKey(pUUID, source)
-        this.remove(key, linkName)
-    }
-
-    removeTarget(pUUID: string, target: string, linkName: string): void {
-        const key = this.targetKey(pUUID, target)
-        this.remove(key, linkName)
-    }
-
-    remove(key: string, linkName: string): void {
-        //@ts-ignore
-        this.#db.get(key).remove(l => l===linkName).write()
-    }
-
-    addExpression(key: string, expression: string): void {
-        this.#db.set(key, expression).write()
-    }
-
-    getExpression(key: string): string | undefined {
-        return this.#db.get(key).value()
-    }
-
-    addPendingDiff(pUUID: string, diff: PerspectiveDiff): void {
-        const key = this.pendingLinkKey(pUUID);
-        if(!this.#db.has(key).value()) {
-            this.#db.set(key, []).write()
-        }
-
-        this.#db.get(key)
-            .push(diff)
-            .write()
-    }
-
-    getPendingDiffs(pUUID: string): PerspectiveDiff[] {
-        const key = this.pendingLinkKey(pUUID);
-        return this.#db.get(key).value()
     }
 }
 
 export function init(dbFilePath: string): PerspectivismDb {
-    const adapter = new FileSync(path.join(dbFilePath, 'db.json'))
-    return new PerspectivismDb(adapter)
+    return new PerspectivismDb(dbFilePath)
 }
 

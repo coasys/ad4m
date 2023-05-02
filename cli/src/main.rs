@@ -14,13 +14,17 @@ mod util;
 
 mod agent;
 mod bootstrap_publish;
+mod dev;
+mod expression;
 mod languages;
 mod neighbourhoods;
 mod perspectives;
 mod repl;
 mod runtime;
 
-use crate::{agent::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*};
+use crate::{
+    agent::*, dev::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
+};
 use ad4m_client::*;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -95,8 +99,17 @@ enum Domain {
         #[command(subcommand)]
         command: RuntimeFunctions,
     },
+    /// Create and get language expressions
+    Expression {
+        #[command(subcommand)]
+        command: ExpressionFunctions,
+    },
     /// Print the executor log
     Log,
+    Dev {
+        #[command(subcommand)]
+        command: DevFunctions,
+    },
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -130,6 +143,11 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
+    if let Domain::Dev { command } = args.domain {
+        dev::run(command).await?;
+        return Ok(());
+    }
+
     let ad4m_client = get_ad4m_client(&args).await?;
 
     match args.domain {
@@ -138,6 +156,7 @@ async fn main() -> Result<()> {
         Domain::Perspectives { command } => perspectives::run(ad4m_client, command).await?,
         Domain::Neighbourhoods { command } => neighbourhoods::run(ad4m_client, command).await?,
         Domain::Runtime { command } => runtime::run(ad4m_client, command).await?,
+        Domain::Expression { command } => expression::run(ad4m_client, command).await?,
         Domain::Log => {
             let file = executor_data_path().join("ad4m.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {
@@ -148,6 +167,7 @@ async fn main() -> Result<()> {
             })?;
             println!("{}", log);
         }
+        Domain::Dev{ command: _ } => unreachable!(),
     }
 
     Ok(())

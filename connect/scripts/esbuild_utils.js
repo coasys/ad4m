@@ -1,4 +1,6 @@
-require("esbuild")
+const esbuild = require("esbuild");
+
+esbuild
   .build({
     entryPoints: ["./src/utils.ts"],
     bundle: true,

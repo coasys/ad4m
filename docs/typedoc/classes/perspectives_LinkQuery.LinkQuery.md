@@ -37,7 +37,7 @@
 
 #### Defined in
 
-[perspectives/LinkQuery.ts:25](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/LinkQuery.ts#L25)
+[perspectives/LinkQuery.ts:25](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/LinkQuery.ts#L25)
 
 ## Properties
 
@@ -47,7 +47,7 @@
 
 #### Defined in
 
-[perspectives/LinkQuery.ts:17](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/LinkQuery.ts#L17)
+[perspectives/LinkQuery.ts:17](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/LinkQuery.ts#L17)
 
 ___
 
@@ -57,7 +57,7 @@ ___
 
 #### Defined in
 
-[perspectives/LinkQuery.ts:23](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/LinkQuery.ts#L23)
+[perspectives/LinkQuery.ts:23](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/LinkQuery.ts#L23)
 
 ___
 
@@ -67,7 +67,7 @@ ___
 
 #### Defined in
 
-[perspectives/LinkQuery.ts:14](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/LinkQuery.ts#L14)
+[perspectives/LinkQuery.ts:14](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/LinkQuery.ts#L14)
 
 ___
 
@@ -77,7 +77,7 @@ ___
 
 #### Defined in
 
-[perspectives/LinkQuery.ts:8](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/LinkQuery.ts#L8)
+[perspectives/LinkQuery.ts:8](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/LinkQuery.ts#L8)
 
 ___
 
@@ -87,7 +87,7 @@ ___
 
 #### Defined in
 
-[perspectives/LinkQuery.ts:11](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/LinkQuery.ts#L11)
+[perspectives/LinkQuery.ts:11](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/LinkQuery.ts#L11)
 
 ___
 
@@ -97,7 +97,7 @@ ___
 
 #### Defined in
 
-[perspectives/LinkQuery.ts:20](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/LinkQuery.ts#L20)
+[perspectives/LinkQuery.ts:20](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/LinkQuery.ts#L20)
 
 ## Methods
 
@@ -117,4 +117,4 @@ ___
 
 #### Defined in
 
-[perspectives/LinkQuery.ts:51](https://github.com/perspect3vism/ad4m/blob/e76a46f1/core/src/perspectives/LinkQuery.ts#L51)
+[perspectives/LinkQuery.ts:51](https://github.com/perspect3vism/ad4m/blob/d9ddd7e2/core/src/perspectives/LinkQuery.ts#L51)

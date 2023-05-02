@@ -7,8 +7,10 @@ import Websocket from "ws";
 import { createClient } from "graphql-ws";
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
-    instanceQuery, Subject, subjectProperty, subjectPropertySetter,
-    subjectCollection, sdnaOutput,
+    instanceQuery, Subject, subjectProperty,
+    subjectCollection, subjectFlag,
+    SDNAClass,
+    SubjectEntity,
 } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
@@ -81,6 +83,7 @@ describe("Integration", () => {
         console.log("Waiting for executor to settle...")
         await executorReady
         console.log("Creating ad4m client")
+        // @ts-ignore
         ad4m = new Ad4mClient(apolloClient(4000))
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
@@ -128,7 +131,7 @@ describe("Integration", () => {
         it("should be able to construct a subject instance from a literal", async () => {
             let root = Literal.from("construct test").toUrl()
             expect(await perspective!.createSubject("Todo", root)).to.not.be.undefined
-            expect(await perspective!.isSubjectInstance(root, "Todo")).to.be.true
+            expect(await perspective!.isSubjectInstance(root, "Todo")).to.not.be.false
         })
 
         it("can get subject instance proxy via class string", async () => {
@@ -163,7 +166,7 @@ describe("Integration", () => {
 
             it("should work with a property that is not set initially and that auto-resolves", async () => {
                 //@ts-ignore
-                expect(await subject.title).to.be.undefined
+                expect(await subject.title).to.be.false
         
                 let title = "test title"
                 //@ts-ignore
@@ -215,12 +218,14 @@ describe("Integration", () => {
                 let c2 = Literal.from("new comment 2").toUrl()
 
                 //@ts-ignore
-                subject.addComment(c1)
+                await subject.addComments(c1)
+                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1])
 
                 //@ts-ignore
-                subject.addComment(c2)
+                await subject.addComments(c2)
+                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1, c2])
             })
@@ -243,7 +248,8 @@ describe("Integration", () => {
 
                 setState(state: string) {}
                 setTitle(title: string) {}
-                addComment(comment: string) {}
+                addComments(comment: string) {}
+                setCollectionComments(comment: string) {}
             }
 
             // This class doesn not match the SDNA in ./subject.pl
@@ -297,27 +303,35 @@ describe("Integration", () => {
         })
 
         describe("SDNA creation decorators", () => {
+            @SDNAClass({
+                name: "Message"
+            })
             class Message {
+                //@ts-ignore
+                @subjectFlag({
+                    through: "ad4m://type",
+                    value: "ad4m://message"
+                })
+                type: string = ""
+
+                //@ts-ignore
+                @instanceQuery()
+                static async all(perspective: PerspectiveProxy): Promise<Message[]> { return [] }
+
                 //@ts-ignore
                 @subjectProperty({
                     through: "todo://state", 
-                    initial:"todo://ready",
-                    required: true,
-                    resolve: true,
+                    initial: "todo://ready",
+                    writable: true,
                 })
                 body: string = ""
-
-                @subjectPropertySetter({
-                    resolveLanguage: 'literal'
-                })
-                setBody(title: string) {}
-
-                @sdnaOutput
-                static generateSDNA(): string { return "" }
             }
 
             // This class matches the SDNA in ./subject.pl
             // and this test proves the decorators create the exact same SDNA code
+            @SDNAClass({
+                name: "Todo"
+            })
             class Todo {
                 // Setting this member "subjectConstructer" allows for adding custom
                 // actions that will be run when a subject is constructed.
@@ -350,39 +364,32 @@ describe("Integration", () => {
                 @subjectProperty({
                     through: "todo://state", 
                     initial:"todo://ready",
-                    required: true,
+                    writable: true,
+                    required: true
                 })
                 state: string = ""
-
-                // This function need to be present (next to the "through" parameter on the property itself)
-                // in order to trigger the creation of setter code in the SDNA.
-                // It can be left emtpy when used with PerspectiveProxy.subjectInstancesByTemplate()
-                // since an implementation will also be auto-generated there.
-                //
-                // NOTE thate the name must be `set${capitalize(propertyName)}`.
-                setState(state: string) {}
 
                 //@ts-ignore
                 @subjectProperty({
                     through: "todo://has_title",
-                    resolve: true,
+                    writable: true,
+                    resolveLanguage: "literal"
                 })
                 title: string = ""
 
-                @subjectPropertySetter({
-                    resolveLanguage: 'literal'
+                @subjectProperty({
+                    getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
                 })
-                setTitle(title: string) {}
+                isLiked: boolean = false
 
                 //@ts-ignore
                 @subjectCollection({ through: "todo://comment" })
+                // @ts-ignore
                 comments: string[] = []
-                addComment(comment: string) {}
 
                 //@ts-ignore
                 @subjectCollection({ through: "flux://entry_type" })
                 entries: string[] = []
-                addEntry(entry: string) {}
 
                 //@ts-ignore
                 @subjectCollection({
@@ -391,13 +398,25 @@ describe("Integration", () => {
                 })
                 messages: string[] = []
 
-                @sdnaOutput
-                static generateSDNA(): string { return "" }
+                //@ts-ignore
+                @subjectCollection({
+                    through: "flux://entry_type",
+                    where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
+                })
+                likedMessages: string[] = []
             }
 
             it("should generate correct SDNA from a JS class", async () => {
+                // @ts-ignore
                 let sdna = Todo.generateSDNA()
-                expect(sdna).to.equal(readFileSync("./subject.pl").toString())
+                
+                const regExp = /\("Todo", ([^)]+)\)/;
+                const matches = regExp.exec(sdna);
+                const value = matches![1];
+                
+                const equal = readFileSync("./subject.pl").toString().replace(/c\)/g, `${value})`).replace(/\(c/g, `(${value}`);
+
+                expect(sdna.normalize('NFC')).to.equal(equal.normalize('NFC'))
             })
 
             it("should be possible to use that class for type-safe interaction with subject instances", async () => {
@@ -406,18 +425,19 @@ describe("Integration", () => {
                 // get instance with type information
                 let todo = await perspective!.createSubject(new Todo(), root)
 
-                expect(await perspective!.isSubjectInstance(root, new Todo())).to.be.true
+                expect(await perspective!.isSubjectInstance(root, new Todo())).to.not.be.false
                 let todo2 = await perspective!.getSubjectProxy(root, new Todo())
                 expect(todo2).to.have.property("state")
                 expect(todo2).to.have.property("title")
                 expect(todo2).to.have.property("comments")
-
+                // @ts-ignore
                 await todo.setState("todo://review")
                 expect(await todo.state).to.equal("todo://review")
                 expect(await todo.comments).to.be.empty
 
                 let comment = Literal.from("new comment").toUrl()
-                await todo.addComment(comment)
+                // @ts-ignore
+                await todo.addComments(comment)
                 expect(await todo.comments).to.deep.equal([comment])
             })
 
@@ -443,7 +463,7 @@ describe("Integration", () => {
                 todos = await Todo.all(perspective!)
                 let todo = todos[0]
                 //@ts-ignore
-                perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
+                await perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
                 
                 todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(1)
@@ -452,8 +472,9 @@ describe("Integration", () => {
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
                 let todo = todos[0]
-                expect(await todo.title).to.equal(undefined)
+                expect(await todo.title).to.equal(false)
 
+                // @ts-ignore
                 await todo.setTitle("new title")
                 expect(await todo.title).to.equal("new title")
 
@@ -467,13 +488,12 @@ describe("Integration", () => {
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
                 expect(await perspective!.getSdna()).to.have.lengthOf(1)
 
+                @SDNAClass({
+                    name: "Test"
+                })
                 class Test {
                     @subjectProperty({through: "test://test_numer"})
                     number: number = 0
-
-
-                    @sdnaOutput
-                    static generateSDNA(): string { return "" }
                 }
 
                 await perspective!.ensureSDNASubjectClass(Test)
@@ -482,25 +502,209 @@ describe("Integration", () => {
                 //console.log((await perspective!.getSdna())[1])
             })
 
-            it("can constrain collection entries through 'where' clause", async () => {
-                perspective!.addSdna(Message.generateSDNA())
-                let root = Literal.from("Collection where test").toUrl()
+            it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                let root = Literal.from("Collection where test with prolog condition").toUrl()
                 let todo = await perspective!.createSubject(new Todo(), root)
 
                 let messageEntry = Literal.from("test message").toUrl()
 
-                await todo.addEntry(messageEntry)
+                // @ts-ignore
+                await todo.addEntries(messageEntry)
 
                 let entries = await todo.entries
                 expect(entries.length).to.equal(1)
 
-                let messageEntries = await todo.messages
+                let messageEntries = await todo.likedMessages
                 expect(messageEntries.length).to.equal(0)
 
-                await perspective!.createSubject(new Message(), messageEntry)
+                await perspective?.add(new Link({source: messageEntry, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
 
-                messageEntries = await todo.messages
+                messageEntries = await todo.likedMessages
                 expect(messageEntries.length).to.equal(1)
+            })
+
+            it("can use properties with custom getter prolog code", async () => {
+                let root = Literal.from("Custom getter test").toUrl()
+                let todo = await perspective!.createSubject(new Todo(), root)
+
+                // @ts-ignore
+                const liked1 = await todo.isLiked
+                expect(liked1).to.be.false
+
+                await perspective?.add(new Link({source: root, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
+
+                // @ts-ignore
+                const liked2 = await todo.isLiked
+                expect(liked2).to.be.true
+            })
+
+            describe("with Message subject class registered", () => {
+                before(async () => {
+                    // @ts-ignore
+                    perspective!.addSdna(Message.generateSDNA())
+                })
+
+                it("can find instances through the exact flag link", async() => {
+                    await perspective!.add(new Link({
+                        source: "test://message", 
+                        predicate: "ad4m://type",
+                        target: "ad4m://undefined"
+                    }))
+
+                    const first = await Message.all(perspective!)
+                    expect(first.length).to.be.equal(0)
+
+                    await perspective!.add(new Link({
+                        source: "test://message", 
+                        predicate: "ad4m://type",
+                        target: "ad4m://message"
+                    }))
+
+                    const second = await Message.all(perspective!)
+                    expect(second.length).to.be.equal(1)
+                })
+
+                it("can constrain collection entries through 'where' clause", async () => {
+                    let root = Literal.from("Collection where test").toUrl()
+                    let todo = await perspective!.createSubject(new Todo(), root)
+    
+                    let messageEntry = Literal.from("test message").toUrl()
+    
+                    // @ts-ignore
+                    await todo.addEntries(messageEntry)
+    
+                    let entries = await todo.entries
+                    expect(entries.length).to.equal(1)
+    
+                    let messageEntries = await todo.messages
+                    expect(messageEntries.length).to.equal(0)
+    
+                    await perspective!.createSubject(new Message(), messageEntry)
+    
+                    messageEntries = await todo.messages
+                    expect(messageEntries.length).to.equal(1)
+                })
+
+            })
+
+            describe("Active record implementation", () => {
+                @SDNAClass({
+                    name: "Recipe"
+                })
+                class Recipe extends SubjectEntity {
+                    //@ts-ignore
+                    @subjectFlag({
+                        through: "ad4m://type",
+                        value: "ad4m://recipe"
+                    })
+                    type: string = ""
+
+                    //@ts-ignore
+                    @subjectProperty({
+                        through: "recipe://name", 
+                        writable: true,
+                    })
+                    name: string = ""
+
+                    //@ts-ignore
+                    @subjectCollection({ through: "recipe://entries" })
+                    entries: string[] = []
+
+                    // @ts-ignore
+                    @subjectCollection({
+                        through: "recipe://entries",
+                        where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
+                    })
+                    // @ts-ignore
+                    ingredients: [];
+
+                    //@ts-ignore
+                    @subjectCollection({ through: "recipe://comment" })
+                    // @ts-ignore
+                    comments: string[] = []
+                }
+
+                before(async () => {
+                    // @ts-ignore
+                    perspective!.addSdna(Recipe.generateSDNA())
+                })
+
+                it("save() & get()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test";
+
+                    await recipe.save();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test")
+                })
+
+                it("update()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test1";
+
+                    await recipe.update();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test1")
+                })
+
+                it("find()", async () => {
+                    const recipes = await Recipe.all(perspective!);
+
+                    expect(recipes.length).to.equal(1)
+                })
+
+                it("can constrain collection entries clause", async () => {
+                    let root = Literal.from("Active record implementation collection test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://collection_test";
+
+                    recipe.comments = ['test', 'test1']
+
+                    await recipe.save()
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.comments.length).to.equal(2)
+                })
+
+                it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                    let root = Literal.from("Active record implementation collection test 1").toUrl()
+
+                    const recipe = new Recipe(perspective!, root)
+                    
+                    let recipeEntries = Literal.from("test recipes").toUrl()
+                    
+                    recipe.entries = [recipeEntries]
+                    recipe.comments = ['test', 'test1']
+                    recipe.name = "recipe://collection_test";
+
+                    await recipe.save()
+                    
+                    await perspective?.add(new Link({source: recipeEntries, predicate: "recipe://has_ingredient", target: "recipe://test"}))
+                    
+                    await recipe.get()
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.ingredients.length).to.equal(1)
+                })
             })
         })
     })
@@ -558,3 +762,7 @@ describe("Integration", () => {
     })
 
 })
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

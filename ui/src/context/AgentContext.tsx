@@ -100,8 +100,10 @@ export function AgentProvider({ children }: any) {
     setLoading(false);
 
     await invoke('close_main_window');
+    await invoke('open_tray');
+    await invoke('login_proxy', { subdomain: agentStatus.did! });
     
-    navigate('/settings');
+    navigate('/apps');
   };
 
   const unlockAgent = async (password: string) => {
@@ -115,7 +117,9 @@ export function AgentProvider({ children }: any) {
       handleLogin(client!, agentStatus!.isUnlocked, agentStatus!.did!);
       console.log("agent status in unlock: ", agentStatus);
       await invoke('close_main_window');
-      navigate('/settings');
+      await invoke('open_tray');
+      await invoke('login_proxy', { subdomain: agentStatus!.did });
+      navigate('/apps');
     } else {
       setState((prev) => ({ ...prev, hasLoginError: true }));
     }

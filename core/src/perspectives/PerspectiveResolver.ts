@@ -1,13 +1,13 @@
-import { Arg, Mutation, PubSub, PubSubEngine, Query, Resolver, Subscription } from "type-graphql";
-import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkInput, LinkMutations } from "../links/Links";
+import { Arg, Mutation, PubSub, Query, Resolver, Subscription } from "type-graphql";
+import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkExpressionUpdated, LinkInput, LinkMutations } from "../links/Links";
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
-import { PerspectiveHandle } from "./PerspectiveHandle";
-import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from '../PubSub'
 import { LinkStatus } from "./PerspectiveProxy";
+import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
+import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE } from '../PubSub'
 
-const testLink = new LinkExpression()
+export const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
 testLink.timestamp = Date.now()
 testLink.data = {
@@ -38,6 +38,7 @@ export default class PerspectiveResolver {
         p2.uuid = '00002'
         p2.sharedUrl = 'neighbourhood://Qm12345'
         p2.neighbourhood = new Neighbourhood("language://Qm12345", new Perspective())
+        p2.state = PerspectiveState.Synced
         return [p1, p2]
     }
 
@@ -97,6 +98,7 @@ export default class PerspectiveResolver {
         l.status = status
 
         pubSub.publish(LINK_ADDED_TOPIC, { link: l })
+        pubSub.publish(PERSPECTIVE_SYNC_STATE_CHANGE, PerspectiveState.LinkLanguageInstalledButNotSynced)
         return l
     }
 
@@ -195,5 +197,15 @@ export default class PerspectiveResolver {
     @Subscription({topics: LINK_REMOVED_TOPIC, nullable: true})
     perspectiveLinkRemoved(@Arg('uuid') uuid: string): LinkExpression {
         return testLink
+    }
+
+    @Subscription({topics: LINK_UDATED_TOPIC, nullable: true})
+    perspectiveLinkUpdated(@Arg('uuid') uuid: string): LinkExpressionUpdated {
+        return {oldLink: testLink, newLink: testLink}
+    }
+
+    @Subscription({topics: PERSPECTIVE_SYNC_STATE_CHANGE, nullable: false})
+    perspectiveSyncStateChange(@Arg('uuid') uuid: string): PerspectiveState {
+        return PerspectiveState.Synced
     }
 }
