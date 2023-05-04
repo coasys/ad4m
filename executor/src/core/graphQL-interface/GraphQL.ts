@@ -91,6 +91,26 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     expression.ref = ref
                     expression.url = url
                     expression.data = JSON.stringify(expression.data)
+
+                    //Add the expression icon
+                    expression.icon = { code: await core.languageController.getIcon(ref.language) }
+
+                    //Add the language information
+                    let lang
+
+                    if(expression.ref.language.address === "literal") {
+                        return { address: "literal", name: "literal" }
+                    }
+
+                    try {
+                        lang = await core.languageController.languageForExpression(expression.ref) as any    
+                    } catch(e) {
+                        console.error("While trying to get language for expression", expression, ":", e)
+                        lang = {}
+                    }
+                    
+                    lang.address = expression.ref.language.address
+                    expression.language = lang
                 }
                 return expression
             },
@@ -104,11 +124,31 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 };
                 const results = await Promise.all(expressionPromises);
 
-                return results.map((expression: Expression|null, index) => {
+                return results.map(async (expression: Expression|null, index) => {
                     if(expression) {
                         expression.ref = parseExprUrl(urls[index]);
                         expression.url = urls[index];
                         expression.data = JSON.stringify(expression.data);
+
+                        //Add the expression icon
+                        expression.icon = { code: await core.languageController.getIcon(expression.ref.language) }
+
+                        //Add the language information
+                        let lang
+
+                        if(expression.ref.language.address === "literal") {
+                            return { address: "literal", name: "literal" }
+                        }
+
+                        try {
+                            lang = await core.languageController.languageForExpression(expression.ref) as any    
+                        } catch(e) {
+                            console.error("While trying to get language for expression", expression, ":", e)
+                            lang = {}
+                        }
+                        
+                        lang.address = expression.ref.language.address
+                        expression.language = lang
                     }
                     return expression
                 })
@@ -266,7 +306,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             runtimeHcAgentInfos: async (context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
-                return JSON.stringify(await core.holochainRequestAgentInfos())
+                return JSON.stringify(await core.holochainRequestAgentInfos());
             },
 
             //@ts-ignore
@@ -524,8 +564,14 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             expressionCreate: async (args, context) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_CREATE_CAPABILITY)
                 const { languageAddress, content } = args
+
+                //@ts-ignore
+                function stringifyIfObject(value) {
+                    return typeof value === 'object' && value !== null ? JSON.stringify(value) : value;
+                }
+
                 const langref = { address: languageAddress } as LanguageRef
-                const expref = await core.languageController.expressionCreate(langref, JSON.parse(content))
+                const expref = await core.languageController.expressionCreate(langref, JSON.parse(stringifyIfObject(content)))
                 return exprRef2String(expref)
             },
             //@ts-ignore
@@ -782,11 +828,11 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const parsed = JSON.parse(agentInfos).map(info => {
                     return {
                         //@ts-ignore
-                        agent: Buffer.from(info.agent.data),
+                        agent: Buffer.from(Object.values(info.agent)),
                         //@ts-ignore
-                        signature: Buffer.from(info.signature.data),
+                        signature: Buffer.from(Object.values(info.signature)),
                         //@ts-ignore
-                        agent_info: Buffer.from(info.agent_info.data)
+                        agent_info: Buffer.from(Object.values(info.agent_info))
                     }
                 })
 
@@ -835,33 +881,6 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
         },
 
         Subscription: {},
-
-        ExpressionRendered: {
-            //@ts-ignore
-            language: async (expression) => {
-                //console.log("GQL LANGUAGE", expression)
-                let lang
-
-                if(expression.ref.language.address === "literal") {
-                    return { address: "literal", name: "literal" }
-                }
-
-                try {
-                    lang = await core.languageController.languageForExpression(expression.ref) as any    
-                } catch(e) {
-                    console.error("While trying to get language for expression", expression, ":", e)
-                    lang = {}
-                }
-                
-                lang.address = expression.ref.language.address
-                return lang
-            },
-
-            //@ts-ignore
-            icon: async (expression) => {
-                return { code: await core.languageController.getIcon(expression.ref.language) }
-            }
-        },
 
         LanguageHandle: {
             // @ts-ignore

@@ -351,7 +351,7 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.expressionCreate(
-                {{ content: "{}", languageAddress: "{}" }},
+                {{ content: {}, languageAddress: "{}" }},
                 {{ capabilities: [{}] }}
             )
         )"#,
@@ -775,7 +775,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveRemove(
+            await core.resolvers.Mutation.perspectiveRemove(
                 {{ uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
@@ -949,7 +949,7 @@ impl Mutation {
         let script = format!(
             r#"JSON.stringify(
             await core.resolvers.Mutation.runtimeHcAddAgentInfos(
-                {{ agentInfos: "{}" }},
+                {{ agentInfos: JSON.stringify({}) }},
                 {{ capabilities: [{}] }}
             )
         )"#,
