@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(unused_variables)]
 use juniper::{graphql_object, FieldResult};
+use log::debug;
 
 use crate::js_core::JsCoreHandle;
 
@@ -31,12 +32,13 @@ impl Query {
         did: String,
     ) -> FieldResult<Option<Agent>> {
         let mut js = context.clone();
+        debug!("agent_by_did: {}", did);
         let result = js
             .execute(
                 format!(
                     r#"JSON.stringify(
                     await core.resolvers.Query.agentByDID(
-                        {{ did: {} }}, 
+                        {{ did: "{}" }}, 
                         {{ capabilities: [{}] }}
                     )
                 )"#,
@@ -45,6 +47,7 @@ impl Query {
                 .into(),
             )
             .await?;
+        debug!("agent_by_did result: {}", result);
         let a: Option<Agent> = serde_json::from_str(&result)?;
         return Ok(a);
     }
@@ -100,16 +103,16 @@ impl Query {
         &self,
         context: &JsCoreHandle,
         url: String,
-    ) -> FieldResult<ExpressionRendered> {
+    ) -> FieldResult<Option<ExpressionRendered>> {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.expression({{ url: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.expression({{ url: "{}" }}, {{ capabilities: [{}] }}))"#,
                 url,
                 ALL_CAPABILITY
             ))
             .await?;
-        let expression: ExpressionRendered = serde_json::from_str(&result)?;
+        let expression: Option<ExpressionRendered> = serde_json::from_str(&result)?;
         return Ok(expression);
     }
 
@@ -121,7 +124,7 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.expressionInteractions({{ url: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.expressionInteractions({{ url: "{}" }}, {{ capabilities: [{}] }}))"#,
                 url,
                 ALL_CAPABILITY
             ))
@@ -134,7 +137,7 @@ impl Query {
         &self,
         context: &JsCoreHandle,
         urls: Vec<String>,
-    ) -> FieldResult<Vec<ExpressionRendered>> {
+    ) -> FieldResult<Vec<Option<ExpressionRendered>>> {
         let urls_string = urls
             .into_iter()
             .map(|url| format!("\"{}\"", url))
@@ -143,25 +146,29 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.expressionMany({{ urls: [{}] }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.expressionMany({{ urls: [{}] }}, {{ capabilities: [{}] }}))"#,
                 urls_string,
                 ALL_CAPABILITY
             ))
             .await?;
-        let expressions: Vec<ExpressionRendered> = serde_json::from_str(&result)?;
+        let expressions: Vec<Option<ExpressionRendered>> = serde_json::from_str(&result)?;
         return Ok(expressions);
     }
 
-    async fn expression_raw(&self, context: &JsCoreHandle, url: String) -> FieldResult<String> {
+    async fn expression_raw(
+        &self,
+        context: &JsCoreHandle,
+        url: String,
+    ) -> FieldResult<Option<String>> {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.expressionRaw({{ url: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.expressionRaw({{ url: "{}" }}, {{ capabilities: [{}] }}))"#,
                 url,
                 ALL_CAPABILITY
             ))
             .await?;
-        let expression_raw: String = serde_json::from_str(&result)?;
+        let expression_raw: Option<String> = serde_json::from_str(&result)?;
         return Ok(expression_raw);
     }
 
@@ -169,7 +176,7 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(core.resolvers.Query.getTrustedAgents({{ capabilities: [{}] }}))",
+                r#"JSON.stringify(core.resolvers.Query.getTrustedAgents({{ capabilities: [{}] }}))"#,
                 ALL_CAPABILITY
             ))
             .await?;
@@ -185,7 +192,7 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.language({{ address: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.language({{ address: "{}" }}, {{ capabilities: [{}] }}))"#,
                 address,
                 ALL_CAPABILITY
             ))
@@ -202,7 +209,7 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.languageMeta({{ address: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.languageMeta({{ address: "{}" }}, {{ capabilities: [{}] }}))"#,
                 address,
                 ALL_CAPABILITY
             ))
@@ -219,7 +226,7 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.languageSource({{ address: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.languageSource({{ address: "{}" }}, {{ capabilities: [{}] }}))"#,
                 address,
                 ALL_CAPABILITY
             ))
@@ -237,7 +244,7 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(core.resolvers.Query.languages({{ filter: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(core.resolvers.Query.languages({{ filter: "{}" }}, {{ capabilities: [{}] }}))"#,
                 filter_string,
                 ALL_CAPABILITY
             ))
@@ -253,7 +260,7 @@ impl Query {
     ) -> FieldResult<bool> {
         let mut js = context.clone();
         let result = js
-            .execute(format!("JSON.stringify(await core.resolvers.Query.neighbourhoodHasTelepresenceAdapter({{ perspectiveUUID: {} }}, {{ capabilities: [{}] }}))", perspective_uuid, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.neighbourhoodHasTelepresenceAdapter({{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspective_uuid, ALL_CAPABILITY))
             .await?;
         let has_adapter: bool = serde_json::from_str(&result)?;
         return Ok(has_adapter);
@@ -266,7 +273,7 @@ impl Query {
     ) -> FieldResult<Vec<OnlineAgent>> {
         let mut js = context.clone();
         let result = js
-            .execute(format!("JSON.stringify(await core.resolvers.Query.neighbourhoodOnlineAgents({{ perspectiveUUID: {} }}, {{ capabilities: [{}] }}))", perspective_uuid, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.neighbourhoodOnlineAgents({{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspective_uuid, ALL_CAPABILITY))
             .await?;
         let online_agents: Vec<OnlineAgent> = serde_json::from_str(&result)?;
         return Ok(online_agents);
@@ -279,7 +286,7 @@ impl Query {
     ) -> FieldResult<Vec<String>> {
         let mut js = context.clone();
         let result = js
-            .execute(format!("JSON.stringify(await core.resolvers.Query.neighbourhoodOtherAgents({{ perspectiveUUID: {} }}, {{ capabilities: [{}] }}))", perspective_uuid, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.neighbourhoodOtherAgents({{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspective_uuid, ALL_CAPABILITY))
             .await?;
         let other_agents: Vec<String> = serde_json::from_str(&result)?;
         return Ok(other_agents);
@@ -293,7 +300,7 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(core.resolvers.Query.perspective({{ uuid: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(core.resolvers.Query.perspective({{ uuid: "{}" }}, {{ capabilities: [{}] }}))"#,
                 uuid,
                 ALL_CAPABILITY
             ))
@@ -311,7 +318,7 @@ impl Query {
         let query_string = serde_json::to_string(&query)?;
         let mut js = context.clone();
         let result = js
-            .execute(format!("JSON.stringify(await core.resolvers.Query.perspectiveQueryLinks({{ query: {}, uuid: {} }}, {{ capabilities: [{}] }}))", query_string, uuid, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.perspectiveQueryLinks({{ query: "{}", uuid: "{}" }}, {{ capabilities: [{}] }}))"#, query_string, uuid, ALL_CAPABILITY))
             .await?;
         let link_expressions: Vec<LinkExpression> = serde_json::from_str(&result)?;
         return Ok(link_expressions);
@@ -325,7 +332,7 @@ impl Query {
     ) -> FieldResult<String> {
         let mut js = context.clone();
         let result = js
-            .execute(format!("JSON.stringify(await core.resolvers.Query.perspectiveQueryProlog({{ query: {}, uuid: {} }}, {{ capabilities: [{}] }}))", query, uuid, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.perspectiveQueryProlog({{ query: "{}", uuid: "{}" }}, {{ capabilities: [{}] }}))"#, query, uuid, ALL_CAPABILITY))
             .await?;
         let prolog_result: String = serde_json::from_str(&result)?;
         return Ok(prolog_result);
@@ -337,13 +344,15 @@ impl Query {
         uuid: String,
     ) -> FieldResult<Perspective> {
         let mut js = context.clone();
+        debug!("perspective_snapshot: {}", uuid);
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.perspectiveSnapshot({{ uuid: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.perspectiveSnapshot({{ uuid: "{}" }}, {{ capabilities: [{}] }}))"#,
                 uuid,
                 ALL_CAPABILITY
             ))
             .await?;
+        debug!("perspective_snapshot: {}", result);
         let perspective_snapshot: Perspective = serde_json::from_str(&result)?;
         return Ok(perspective_snapshot);
     }
@@ -368,7 +377,7 @@ impl Query {
         let mut js = context.clone();
         let result = js
             .execute(format!(
-                "JSON.stringify(await core.resolvers.Query.runtimeFriendStatus({{ did: {} }}, {{ capabilities: [{}] }}))",
+                r#"JSON.stringify(await core.resolvers.Query.runtimeFriendStatus({{ did: "{}" }}, {{ capabilities: [{}] }}))"#,
                 did,
                 ALL_CAPABILITY
             ))
@@ -430,7 +439,7 @@ impl Query {
         let filter_str = filter.unwrap_or_else(|| String::from("{}"));
         let mut js = context.clone();
         let result = js
-            .execute(format!("JSON.stringify(await core.resolvers.Query.runtimeMessageInbox({{ filter: {} }}, {{ capabilities: [{}] }}))", filter_str, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.runtimeMessageInbox({{ filter: "{}" }}, {{ capabilities: [{}] }}))"#, filter_str, ALL_CAPABILITY))
             .await?;
         let inbox_messages: Vec<PerspectiveExpression> = serde_json::from_str(&result)?;
         return Ok(inbox_messages);
@@ -444,7 +453,7 @@ impl Query {
         let filter_str = filter.unwrap_or_else(|| String::from("{}"));
         let mut js = context.clone();
         let result = js
-            .execute(format!("JSON.stringify(await core.resolvers.Query.runtimeMessageOutbox({{ filter: {} }}, {{ capabilities: [{}] }}))", filter_str, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.runtimeMessageOutbox({{ filter: "{}" }}, {{ capabilities: [{}] }}))"#, filter_str, ALL_CAPABILITY))
             .await?;
         let outbox_messages: Vec<SentMessage> = serde_json::from_str(&result)?;
         return Ok(outbox_messages);
@@ -459,15 +468,19 @@ impl Query {
         signed_data: String,
     ) -> FieldResult<bool> {
         let mut js = context.clone();
+        debug!("runtime_verify_string_signed_by_did");
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.resolvers.Query.runtimeVerifyStringSignedByDID(
-                        {{ data: {}, did: {}, didSigningKeyId: {}, signedData: {} }},
-                        {{ capabilities: [{}] }}
-                    ))"#,
+                r#"JSON.stringify(
+                await core.resolvers.Query.runtimeVerifyStringSignedByDid(
+                    {{ data: "{}", did: "{}", didSigningKeyId: "{}", signedData: "{}" }},
+                    {{ capabilities: [{}] }}
+                )
+            )"#,
                 data, did, did_signing_key_id, signed_data, ALL_CAPABILITY
             ))
             .await?;
+        debug!("runtime_verify_string_signed_by_did result: {}", result);
         let verified: bool = serde_json::from_str(&result)?;
         return Ok(verified);
     }
