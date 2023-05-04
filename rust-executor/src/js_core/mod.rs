@@ -292,12 +292,15 @@ impl JsCore {
                         }
                     };
 
+                    let mut global_req_id = None;
+
                     //Listener future for receiving script execution calls
                     let receive_fut = async {
                         while let Some(request) = rx_inside.recv().await {
                             let tx_cloned = tx_inside.clone();
                             let script = request.script;
                             let id = request.id;
+                            global_req_id = Some(id.clone());
                             match js_core.execute_async(script) {
                                 Ok(execute_async_future) => match execute_async_future.await {
                                     Ok(result) => {
@@ -340,7 +343,18 @@ impl JsCore {
                             match event_loop_result {
                                 Ok(_) => info!("AD4M event loop finished"),
                                 Err(err) => {
+                                    let tx_cloned = tx_inside.clone();
                                     error!("AD4M event loop closed with error: {}", err);
+                                    if global_req_id.is_some() {
+                                        //TODO: this error should also cause the graphql server to error since right now we are just killing
+                                        //the event loop completely and this should be reflected in the main thread
+                                        tx_cloned
+                                            .send(JsCoreResponse {
+                                                result: Err(err.to_string()),
+                                                id: global_req_id.unwrap(),
+                                            })
+                                            .expect("couldn't send on channel");
+                                    }
                                     break;
                                 }
                             }
