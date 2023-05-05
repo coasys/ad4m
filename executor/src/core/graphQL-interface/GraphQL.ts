@@ -124,7 +124,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 };
                 const results = await Promise.all(expressionPromises);
 
-                return results.map(async (expression: Expression|null, index) => {
+                return await Promise.all(results.map(async (expression: Expression|null, index) => {
                     if(expression) {
                         expression.ref = parseExprUrl(urls[index]);
                         expression.url = urls[index];
@@ -151,7 +151,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                         expression.language = lang
                     }
                     return expression
-                })
+                }))
             },
             //@ts-ignore
             expressionRaw: async (args, context) => {
@@ -566,12 +566,12 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const { languageAddress, content } = args
 
                 //@ts-ignore
-                function stringifyIfObject(value) {
-                    return typeof value === 'object' && value !== null ? JSON.stringify(value) : value;
+                function prepareExpressionData(value) {
+                    return typeof value === 'object' && value !== null ? JSON.parse(JSON.stringify(value)) : value;
                 }
 
                 const langref = { address: languageAddress } as LanguageRef
-                const expref = await core.languageController.expressionCreate(langref, JSON.parse(stringifyIfObject(content)))
+                const expref = await core.languageController.expressionCreate(langref, prepareExpressionData(content))
                 return exprRef2String(expref)
             },
             //@ts-ignore
