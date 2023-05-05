@@ -72,9 +72,9 @@ impl Ad4mConfig {
             if cfg!(windows) {
                 data_path.push("swipl");
             }
-            //If os is other push swipl/lib/swipl/
+            //If os is other push swipl/bin/swipl/
             else {
-                data_path.push("swipl/lib/swipl");
+                data_path.push("swipl/bin/swipl");
             }
             self.swipl_path = Some(
                 data_path
@@ -85,7 +85,7 @@ impl Ad4mConfig {
         }
         if self.swipl_home_path.is_none() {
             let mut data_path = PathBuf::from(self.app_data_path.clone().unwrap());
-            data_path.push("swipl/bin/swipl");
+            data_path.push("swipl/lib/swipl");
             self.swipl_home_path = Some(
                 data_path
                     .into_os_string()
