@@ -6,6 +6,12 @@ const Buffer = globalThis.Buffer;
 const setImmediate = globalThis.setImmediate;
 const clearImmediate = globalThis.clearImmediate;
 
+const __dirname = new URL('.', import.meta.url).pathname;
+const __filename = new URL('', import.meta.url).pathname;
+
+globalThis.__dirname = __dirname;
+globalThis.__filename = __filename;
+
 import { init as internalInit } from "./main.js"
 import * as internalPath from "../deno_std-0.177.0/node/path.ts";
 import * as internalOs from "../deno_std-0.177.0/node/os.ts"
