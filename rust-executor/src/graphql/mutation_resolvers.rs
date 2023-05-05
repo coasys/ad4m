@@ -840,7 +840,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.perspectiveUpdate(
+            await core.resolvers.Mutation.perspectiveUpdate(
                 {{ name: "{}", uuid: "{}" }},
                 {{ capabilities: [{}] }}
             )
