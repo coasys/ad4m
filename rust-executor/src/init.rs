@@ -89,7 +89,12 @@ pub fn init(
     fs::set_permissions(hc_target, fs::Permissions::from_mode(0o755))?;
 
     info!("write swipl target");
-    write_zip(SWIPL_ZIP.to_vec(), app_data_path);
+    write_zip(SWIPL_ZIP.to_vec(), app_data_path.clone());
+
+    fs::set_permissions(
+        app_data_path.join("swipl").join("bin").join("swipl"),
+        fs::Permissions::from_mode(0o755),
+    )?;
 
     Ok(())
 }
