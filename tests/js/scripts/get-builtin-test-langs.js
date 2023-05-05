@@ -6,7 +6,7 @@ import os from "os";
 
 const languages = {
   "agent-expression-store": {
-    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.2.2/bundle.js",
+    bundle: "../../bootstrap-languages/agent-language/build/bundle.js",
   },
   languages: {
     bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.9/bundle.js",
@@ -16,9 +16,6 @@ const languages = {
   },
   "perspective-diff-sync": {
     bundle: "../../bootstrap-languages/p-diff-sync/build/bundle.js",
-  },
-  "note-ipfs": {
-    bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
   },
   "direct-message-language": {
     bundle: "../../bootstrap-languages/direct-message-language/build/bundle.js"

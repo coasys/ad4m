@@ -5,8 +5,7 @@ mkdir tst-tmp
 cd tst-tmp
 mkdir agents
 mkdir languages
-mkdir languages\test-language
-cp -r ..\test-language\build languages\test-language\build
+mkdir note
 
 wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.1.0/hc-windows-0.1.0.exe -O ./hc.exe
 
