@@ -158,7 +158,7 @@ pub struct ExpressionRendered {
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Icon {
-    pub code: String,
+    pub code: Option<String>,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
