@@ -462,7 +462,6 @@ export default class Perspective {
 
     async addLink(link: LinkInput | LinkExpressionInput, status: LinkStatus = 'shared'): Promise<LinkExpression> {
         const linkExpression = this.ensureLinkExpression(link);
-        linkExpression.status = status;
 
         if (status === 'shared') {
             const diff = {
@@ -476,7 +475,8 @@ export default class Perspective {
             }
         }
 
-        await this.#db.addLink(this.uuid!, linkExpression);
+        await this.#db.addLink(this.uuid!, linkExpression, status);
+
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
@@ -484,10 +484,12 @@ export default class Perspective {
             link: linkExpression
         })
 
+        linkExpression.status = status;
+
         return linkExpression
     }
 
-    async addLinks(links: (LinkInput | LinkExpressionInput)[]): Promise<LinkExpression[]> {
+    async addLinks(links: (LinkInput | LinkExpressionInput)[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
         const linkExpressions = links.map(l => this.ensureLinkExpression(l));
         const diff = {
             additions: linkExpressions,
@@ -499,7 +501,7 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
-        await this.#db.addManyLinks(this.uuid!, linkExpressions);
+        await this.#db.addManyLinks(this.uuid!, linkExpressions, status);
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
@@ -509,7 +511,8 @@ export default class Perspective {
             })
         };
 
-        return linkExpressions
+        // @ts-ignore
+        return linkExpressions.map(l => ({...l, status}))
     }
 
     async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
@@ -574,6 +577,8 @@ export default class Perspective {
         }
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
+
+        console.log("wwwwww", link, oldLink)
 
         await this.#db.updateLink(this.uuid!, link, newLinkExpression);
 
