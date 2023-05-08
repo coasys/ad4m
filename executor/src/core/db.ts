@@ -39,6 +39,8 @@ export class PerspectivismDb {
     //Link Methods
 
     async addLink(perspectiveUuid: string, link: LinkExpression, status: LinkStatus = 'shared') {
+        delete link.status
+        
         await this.#linkDb.insertOne({
             perspective: perspectiveUuid,
             linkExpression: link,

@@ -267,6 +267,7 @@ export class PerspectiveClient {
         delete link.__typename
         delete link.data.__typename
         delete link.proof.__typename
+        delete link.status
         return unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveRemoveLink($link: LinkExpressionInput!, $uuid: String!) {
                 perspectiveRemoveLink(link: $link, uuid: $uuid)
