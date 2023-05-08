@@ -260,6 +260,11 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, oldLink, newLink }
         }))
+
+        if (!perspectiveUpdateLink.status) {
+            delete perspectiveUpdateLink.status
+        }
+
         return perspectiveUpdateLink
     }
 
@@ -389,6 +394,9 @@ export class PerspectiveClient {
         `}).subscribe({
             next: result => {
                 cb.forEach(c => {
+                    if (!result.data.perspectiveLinkUpdated.status) {
+                        delete result.data.perspectiveLinkUpdated.status
+                    }
                     c(result.data.perspectiveLinkRemoved)
                 })
             },
@@ -413,6 +421,12 @@ export class PerspectiveClient {
         `}).subscribe({
             next: result => {
                 cb.forEach(c => {
+                    if (!result.data.perspectiveLinkUpdated.newLink.status) {
+                        delete result.data.perspectiveLinkUpdated.newLink.status
+                    }
+                    if (!result.data.perspectiveLinkUpdated.oldLink.status) {
+                        delete result.data.perspectiveLinkUpdated.oldLink.status
+                    }
                     c(result.data.perspectiveLinkUpdated)
                 })
             },

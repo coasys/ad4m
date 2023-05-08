@@ -578,8 +578,6 @@ export default class Perspective {
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
 
-        console.log("wwwwww", link, oldLink)
-
         await this.#db.updateLink(this.uuid!, link, newLinkExpression);
 
         const diff = {
@@ -599,6 +597,10 @@ export default class Perspective {
             oldLink,
             newLink: newLinkExpression
         });
+
+        if (link.status) {
+            newLinkExpression.status = link.status
+        }
 
         return newLinkExpression
     }

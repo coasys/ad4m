@@ -464,7 +464,17 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 if (!currentAgent) {
                     throw Error("No current agent init'd")
                 }
-                currentAgent.perspective = perspective;
+
+                currentAgent.perspective = {
+                    ...perspective,
+                    links: perspective.links.map((l: any) => {
+                        const link = {...l};
+                        delete link.status
+                  
+                        return link
+                    })
+                };
+
                 await core.agentService.updateAgent(currentAgent);
                 return currentAgent;
             },
