@@ -1,4 +1,4 @@
-mod graphql_types;
+pub mod graphql_types;
 mod mutation_resolvers;
 mod query_resolvers;
 mod subscription_resolvers;

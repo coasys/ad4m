@@ -63,10 +63,10 @@ export default class PerspectivesController {
             }
         })
 
-        this.#context.languageController!.addTelepresenceSignalObserver((signal: any, lang: LanguageRef) => {
+        this.#context.languageController!.addTelepresenceSignalObserver(async (signal: any, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                PUBSUB.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
+                await PUBSUB.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
                     signal: signal,
                     perspective: perspective.plain()
                 })

@@ -1,6 +1,6 @@
 mod config;
 mod globals;
-mod graphql;
+pub mod graphql;
 mod js_core;
 mod utils;
 mod wallet;

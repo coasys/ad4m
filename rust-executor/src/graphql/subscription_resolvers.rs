@@ -34,7 +34,7 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &AGENT_STATUS_CHANGED_TOPIC;
 
-        subscribe_and_process::<AgentStatus>(pubsub, topic.to_string()).await
+        subscribe_and_process::<AgentStatus>(pubsub, topic.to_string(), None).await
     }
 
     async fn agent_updated(
@@ -44,7 +44,7 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &AGENT_UPDATED_TOPIC;
 
-        subscribe_and_process::<Agent>(pubsub, topic.to_string()).await
+        subscribe_and_process::<Agent>(pubsub, topic.to_string(), None).await
     }
 
     async fn exception_occurred(
@@ -54,18 +54,23 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &EXCEPTION_OCCURRED_TOPIC;
 
-        subscribe_and_process::<ExceptionInfo>(pubsub, topic.to_string()).await
+        subscribe_and_process::<ExceptionInfo>(pubsub, topic.to_string(), None).await
     }
 
     async fn neighbourhood_signal(
         &self,
         _context: &JsCoreHandle,
         perspectiveUUID: String,
-    ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveExpression>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkExpression>> + Send>> {
         let pubsub = get_global_pubsub().await;
         let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
 
-        subscribe_and_process::<PerspectiveExpression>(pubsub, topic.to_string()).await
+        subscribe_and_process::<NeighbourhoodSignalFilter>(
+            pubsub,
+            topic.to_string(),
+            Some(perspectiveUUID),
+        )
+        .await
     }
 
     async fn perspective_added(
@@ -75,7 +80,7 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_ADDED_TOPIC;
 
-        subscribe_and_process::<PerspectiveHandle>(pubsub, topic.to_string()).await
+        subscribe_and_process::<PerspectiveHandle>(pubsub, topic.to_string(), None).await
     }
 
     async fn perspective_link_added(
@@ -86,7 +91,7 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_LINK_ADDED_TOPIC;
 
-        subscribe_and_process::<LinkExpression>(pubsub, topic.to_string()).await
+        subscribe_and_process::<PerspectiveLinkFilter>(pubsub, topic.to_string(), Some(uuid)).await
     }
 
     async fn perspective_link_removed(
@@ -97,18 +102,19 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_LINK_REMOVED_TOPIC;
 
-        subscribe_and_process::<LinkExpression>(pubsub, topic.to_string()).await
+        subscribe_and_process::<PerspectiveLinkFilter>(pubsub, topic.to_string(), Some(uuid)).await
     }
 
     async fn perspective_link_updated(
         &self,
         _context: &JsCoreHandle,
         uuid: String,
-    ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkExpressionUpdated>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkUpdated>> + Send>> {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_LINK_UPDATED_TOPIC;
 
-        subscribe_and_process::<LinkExpressionUpdated>(pubsub, topic.to_string()).await
+        subscribe_and_process::<PerspectiveLinkUpdatedFilter>(pubsub, topic.to_string(), Some(uuid))
+            .await
     }
 
     async fn perspective_removed(
@@ -118,7 +124,7 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_REMOVED_TOPIC;
 
-        subscribe_and_process::<String>(pubsub, topic.to_string()).await
+        subscribe_and_process::<String>(pubsub, topic.to_string(), None).await
     }
 
     async fn perspective_sync_state_change(
@@ -129,7 +135,7 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC;
 
-        subscribe_and_process::<String>(pubsub, topic.to_string()).await
+        subscribe_and_process::<PerspectiveStateFilter>(pubsub, topic.to_string(), Some(uuid)).await
     }
 
     async fn perspective_updated(
@@ -139,7 +145,7 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_UPDATED_TOPIC;
 
-        subscribe_and_process::<PerspectiveHandle>(pubsub, topic.to_string()).await
+        subscribe_and_process::<PerspectiveHandle>(pubsub, topic.to_string(), None).await
     }
 
     async fn runtime_message_received(
@@ -149,6 +155,6 @@ impl Subscription {
         let pubsub = get_global_pubsub().await;
         let topic = &RUNTIME_MESSAGED_RECEIVED_TOPIC;
 
-        subscribe_and_process::<PerspectiveExpression>(pubsub, topic.to_string()).await
+        subscribe_and_process::<PerspectiveExpression>(pubsub, topic.to_string(), None).await
     }
 }
