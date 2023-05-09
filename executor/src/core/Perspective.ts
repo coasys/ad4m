@@ -194,9 +194,9 @@ export default class Perspective {
 
 
     plain(): PerspectiveHandle {
-        const { name, uuid, author, timestamp, sharedUrl, neighbourhood } = this
+        const { name, uuid, author, timestamp, sharedUrl, neighbourhood, state } = this
         return JSON.parse(JSON.stringify({
-            name, uuid, author, timestamp, sharedUrl, neighbourhood
+            name, uuid, author, timestamp, sharedUrl, neighbourhood, state
         }))
     }
 
