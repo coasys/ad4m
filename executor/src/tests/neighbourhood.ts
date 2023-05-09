@@ -94,7 +94,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobLinks.length).to.be.equal(1)
             })
 
-            it('local link created by Alice received by Bob', async () => {
+            it('local link created by Alice NOT received by Bob', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob
 
