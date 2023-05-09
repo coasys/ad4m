@@ -449,7 +449,7 @@ export default class Perspective {
         await this.#db.addLink(this.uuid!, linkExpression);
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
-        PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
+        await PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
             perspective: perspectivePlain,
             link: linkExpression
         })
@@ -474,7 +474,7 @@ export default class Perspective {
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
-            PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
+            await PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
                 perspective: perspectivePlain,
                 link: link
             })
@@ -499,7 +499,7 @@ export default class Perspective {
         await Promise.all(linkExpressions.map(async l => await this.#db.removeLink(this.uuid!, l)))
         this.#prologNeedsRebuild = true;
         for (const link of linkExpressions) {
-            PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
+            await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             })
@@ -524,13 +524,13 @@ export default class Perspective {
         await Promise.all(diff.removals.map(async l => await this.#db.removeLink(this.uuid!, l)));
         this.#prologNeedsRebuild = true;
         for (const link of diff.additions) {
-            PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
+            await PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             });
         };
         for (const link of diff.removals) {
-            PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
+            await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             });
@@ -563,7 +563,7 @@ export default class Perspective {
 
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
-        PUBSUB.publish(PubSub.LINK_UPDATED_TOPIC, {
+        await PUBSUB.publish(PubSub.LINK_UPDATED_TOPIC, {
             perspective,
             oldLink,
             newLink: newLinkExpression
@@ -586,7 +586,7 @@ export default class Perspective {
         }
 
         this.#prologNeedsRebuild = true;
-        PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
+        await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
         })
@@ -613,17 +613,17 @@ export default class Perspective {
 
         function fromDateFilter(link: LinkExpression) {
             if (reverse) {
-                return new Date(link.timestamp) <= query.fromDate!
+                return new Date(link.timestamp) <= new Date(query.fromDate!)
             } else {
-                return new Date(link.timestamp) >= query.fromDate!
+                return new Date(link.timestamp) >= new Date(query.fromDate!)
             }
         }
 
         function untilDateFilter(link: LinkExpression) {
             if (reverse) {
-                return new Date(link.timestamp) >= query.untilDate!
+                return new Date(link.timestamp) >= new Date(query.untilDate!)
             } else {
-                return new Date(link.timestamp) <= query.untilDate!
+                return new Date(link.timestamp) <= new Date(query.untilDate!)
             }
         }
 
@@ -640,13 +640,21 @@ export default class Perspective {
         if(query.source) {
             let result = await this.#db.getLinksBySource(this.uuid!, query.source);
             // @ts-ignore
-            if(query.target) result = result.filter(l => l.data.target === query.target)
+            if(query.target) {
+                result = result.filter(l => l.data.target === query.target)
+            }
             // @ts-ignore
-            if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
+            if(query.predicate) {
+                result = result.filter(l => l.data.predicate === query.predicate)
+            }
             //@ts-ignore
-            if (query.fromDate) result = result.filter(fromDateFilter)
+            if (query.fromDate) {
+                result = result.filter(fromDateFilter)
+            }
             // @ts-ignore
-            if (query.untilDate) result = result.filter(untilDateFilter)
+            if (query.untilDate) {
+                result = result.filter(untilDateFilter)
+            }
             result = limitFilter(result);
             return result
         }
@@ -677,7 +685,6 @@ export default class Perspective {
         let values = Object.values(links).sort((a, b) => {
             return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
         });
-
 
         if (query.limit) {
             const startLimit = reverse ? values.length - query.limit : 0;
