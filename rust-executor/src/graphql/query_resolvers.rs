@@ -296,7 +296,7 @@ impl Query {
         &self,
         context: &JsCoreHandle,
         uuid: String,
-    ) -> FieldResult<PerspectiveHandle> {
+    ) -> FieldResult<Option<PerspectiveHandle>> {
         let mut js = context.clone();
         let result = js
             .execute(format!(
@@ -305,7 +305,7 @@ impl Query {
                 ALL_CAPABILITY
             ))
             .await?;
-        let perspective_handle: PerspectiveHandle = serde_json::from_str(&result)?;
+        let perspective_handle: Option<PerspectiveHandle> = serde_json::from_str(&result)?;
         return Ok(perspective_handle);
     }
 
@@ -317,9 +317,11 @@ impl Query {
     ) -> FieldResult<Vec<LinkExpression>> {
         let query_string = serde_json::to_string(&query)?;
         let mut js = context.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.perspectiveQueryLinks({{ query: "{}", uuid: "{}" }}, {{ capabilities: [{}] }}))"#, query_string, uuid, ALL_CAPABILITY))
-            .await?;
+        let script = format!(
+            r#"JSON.stringify(await core.resolvers.Query.perspectiveQueryLinks({{ query: {}, uuid: "{}" }}, {{ capabilities: [{}] }}))"#,
+            query_string, uuid, ALL_CAPABILITY
+        );
+        let result = js.execute(script).await?;
         let link_expressions: Vec<LinkExpression> = serde_json::from_str(&result)?;
         return Ok(link_expressions);
     }
