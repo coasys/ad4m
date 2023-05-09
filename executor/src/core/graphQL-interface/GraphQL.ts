@@ -253,7 +253,12 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             perspective: (args, context) => {
                 const id = args.uuid
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
-                return core.perspectivesController.perspectiveID(id)
+                let perspective = core.perspectivesController.perspectiveID(id);
+                if (perspective == undefined) {
+                    return null;
+                } else {
+                    return perspective
+                }
             },
             //@ts-ignore
             perspectiveQueryLinks: async (args, context) => {

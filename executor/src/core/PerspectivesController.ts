@@ -97,7 +97,7 @@ export default class PerspectivesController {
         fs.writeFileSync(FILEPATH, JSON.stringify(obj))
     }
 
-    perspectiveID(uuid: string): PerspectiveHandle|void {
+    perspectiveID(uuid: string): PerspectiveHandle|undefined {
         const pID = this.#perspectiveHandles.get(uuid)
         // console.log("pID:", pID)
         return pID
