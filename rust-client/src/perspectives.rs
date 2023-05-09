@@ -142,6 +142,7 @@ pub async fn remove_link(
                     invalid: link.proof.invalid,
                     valid: link.proof.valid,
                 },
+                status: link.status
             },
         }),
     )
