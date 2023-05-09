@@ -394,8 +394,8 @@ export class PerspectiveClient {
         `}).subscribe({
             next: result => {
                 cb.forEach(c => {
-                    if (!result.data.perspectiveLinkUpdated.status) {
-                        delete result.data.perspectiveLinkUpdated.status
+                    if (!result.data.perspectiveLinkRemoved.status) {
+                        delete result.data.perspectiveLinkRemoved.status
                     }
                     c(result.data.perspectiveLinkRemoved)
                 })
