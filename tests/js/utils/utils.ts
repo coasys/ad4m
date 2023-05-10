@@ -53,9 +53,9 @@ export async function startExecutor(dataPath: string,
     }
     
     if (!reqCredential) {
-        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly}`, {})
+        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
     } else {
-        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${reqCredential}`, {})
+        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${reqCredential} --run-dapp-server false`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
@@ -96,6 +96,14 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
             }
         },
     }));
+    // wsLink.client.on('message' as any, (data: any) => {
+    //     console.log(data);
+    //     if (data.payload) {
+    //         if (data.payload.errors) {
+    //             console.dir(data.payload.errors, { depth: null });
+    //         }
+    //     }
+    // });
 
     const link = new HttpLink({
         uri: `http://127.0.0.1:${port}/graphql`,
