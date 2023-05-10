@@ -470,10 +470,20 @@ export class PerspectiveProxy {
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
         // Collect all string properties of the object in a list
-        let properties = Object.keys(Object.getPrototypeOf(obj).__properties).filter(key => !Array.isArray(obj[key]))
+        let properties = Object.keys(obj).filter(key => !Array.isArray(obj[key]))
 
         // Collect all collections of the object in a list
-        let collections = Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance')
+        let collections = Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance')
+
+        // Collect all string properties of the object in a list
+        if(Object.getPrototypeOf(obj).__properties) {
+            properties = properties.concat(Object.keys(Object.getPrototypeOf(obj).__properties).filter(key => !Array.isArray(obj[key])))
+        }
+
+        // Collect all collections of the object in a list
+        if (Object.getPrototypeOf(obj).__collections) {
+            collections = collections.concat(Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance'))
+        }
 
         // Collect all set functions of the object in a list
         let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
