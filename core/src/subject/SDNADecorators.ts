@@ -90,7 +90,7 @@ export function subjectProperty(opts: PropertyOptions) {
             target[`set${capitalize(value)}`] = () => {}
         }
 
-        Object.defineProperty(target, key, {});
+        Object.defineProperty(target, key, {configurable: true, writable: true});
     };
 }
 
@@ -113,7 +113,7 @@ export function subjectFlag(opts: FlagOptions) {
         // @ts-ignore
         target[key] = opts.value;
 
-        Object.defineProperty(target, key, {configurable: true});
+        Object.defineProperty(target, key, {configurable: true, writable: true});
     };
 }
 
@@ -135,7 +135,7 @@ export function subjectCollection(opts: CollectionOptions) {
         target[`add${capitalize(value)}`] = () => {}
         target[`setCollection${capitalize(value)}`] = () => {}
 
-        Object.defineProperty(target, key, {configurable: true});
+        Object.defineProperty(target, key, {configurable: true, writable: true});
     };
 }
 
