@@ -8,18 +8,21 @@ use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::{
-    ExternIO, InstallAppPayload, Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned,
+    ExternIO, InstallAppPayload, Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned, Signal,
 };
 use log::info;
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use holochain::prelude::kitsune_p2p::dependencies::kitsune_p2p_types::dependencies::lair_keystore_api::dependencies::tokio::sync::broadcast::Receiver;
+use tokio::sync::Mutex;
 
 pub(crate) mod holochain_service_extension;
 
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
+    pub signal_receivers: Arc<Mutex<Vec<Receiver<Signal>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +52,12 @@ impl HolochainService {
             .build()
             .await
             .map_err(|err| anyhow!("Could not build conductor: {:?}", err))?;
-        let service = Self { conductor };
+        let signal_broadcaster = conductor.signal_broadcaster();
+
+        let service = Self {
+            conductor,
+            signal_receivers: Arc::new(Mutex::new(signal_broadcaster.subscribe_separately())),
+        };
 
         let set_res = HOLOCHAIN_CONDUCTOR.set(Arc::new(service.clone()));
         if set_res.is_err() {
@@ -206,4 +214,8 @@ pub async fn get_global_conductor() -> Arc<HolochainService> {
         .get()
         .expect("Conductor not initialized")
         .clone()
+}
+
+pub async fn maybe_get_global_conductor() -> Option<Arc<HolochainService>> {
+    HOLOCHAIN_CONDUCTOR.get().map(|c| c.clone())
 }

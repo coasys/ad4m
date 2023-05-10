@@ -25,6 +25,7 @@ mod utils_extension;
 mod wallet_extension;
 
 use self::futures::{EventLoopFuture, GlobalVariableFuture};
+use crate::holochain_service::maybe_get_global_conductor;
 use crate::Ad4mConfig;
 use options::{main_module_url, main_worker_options};
 
@@ -333,6 +334,27 @@ impl JsCore {
                         }
                     };
 
+                    let holochain_signal_receiver_fut = async {
+                        if let Some(holochain_service) = maybe_get_global_conductor().await {
+                            let signal_receivers = holochain_service.signal_receivers.clone();
+                            let mut signal_receivers = signal_receivers.lock().await;
+
+                            for receiver in signal_receivers.iter_mut() {
+                                match receiver.try_recv() {
+                                    Ok(signal) => {
+                                        // Handle the received signal here
+                                        println!("Received signal: {:?}", signal);
+                                    }
+                                    Err(_err) => {
+                                        // The channel is empty; no signal is available
+                                    }
+                                }
+                            }
+                        } else {
+                            println!("HolochainService is not available.");
+                        }
+                    };
+
                     //NOTE: WARNING!!!!!: Its is possible that if we get a request such as generate agent and then another to load a module,
                     //since the load module would complete first it will cause the request future to be "lost" and thus the graphql will not get a response
                     //we should track this and if required change the behaviour here so that we ensure we continue to run a receive_fut even in the case where
@@ -365,6 +387,10 @@ impl JsCore {
                         }
                         _module_load = module_load_fut => {
                             info!("AD4M module load completed");
+                            break;
+                        }
+                        _holochain_signal_receivers = holochain_signal_receiver_fut => {
+                            info!("AD4M holochain signal receiver completed");
                             break;
                         }
                     }
