@@ -3,12 +3,16 @@ use std::sync::Arc;
 
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use holochain::conductor::api::{CellInfo, ZomeCall};
 use holochain::conductor::config::{AdminInterfaceConfig, ConductorConfig};
 use holochain::conductor::interface::InterfaceDriver;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
-use holochain::prelude::InstallAppPayload;
+use holochain::prelude::{
+    ExternIO, InstallAppPayload, Timestamp, ZomeCallResponse, ZomeCallUnsigned,
+};
 use log::info;
 use once_cell::sync::OnceCell;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod holochain_service_extension;
@@ -81,6 +85,75 @@ impl HolochainService {
 
         info!("Installed app with result: {:?}", activate.0);
         Ok(())
+    }
+
+    pub async fn call_zome_function(
+        &self,
+        app_id: String,
+        cell_name: String,
+        zome_name: String,
+        fn_name: String,
+        payload: serde_json::Value,
+    ) -> Result<ZomeCallResponse, AnyError> {
+        let app_info = self.conductor.get_app_info(&app_id).await?;
+
+        if app_info.is_none() {
+            return Err(anyhow!("App not installed with id: {:?}", app_id));
+        }
+
+        let app_info = app_info.unwrap();
+
+        let cell_entry = app_info.cell_info.get(&cell_name);
+
+        if cell_entry.is_none() {
+            return Err(anyhow!(
+                "Cell not installed with name: {:?} in app: {:?}",
+                cell_name,
+                app_id
+            ));
+        }
+
+        if cell_entry.unwrap().len() == 0 {
+            return Err(anyhow!(
+                "No cells for cell name: {:?} in app: {:?}",
+                cell_name,
+                app_id
+            ));
+        }
+
+        let cell_info = cell_entry.unwrap().first().unwrap().clone();
+        let cell_id = match cell_info {
+            CellInfo::Provisioned(cell) => cell.cell_id,
+            CellInfo::Cloned(cell) => cell.cell_id,
+            CellInfo::Stem(_cell) => return Err(anyhow!("Cell is not provisioned or cloned",)),
+        };
+
+        let agent_pub_key = app_info.agent_pub_key;
+
+        //Get the agents pub key from the conductor
+
+        let mut rng = rand::thread_rng();
+        let random_bytes: [u8; 32] = rng.gen();
+
+        let zome_call_unsigned = ZomeCallUnsigned {
+            cell_id: cell_id,
+            zome_name: zome_name.into(),
+            fn_name: fn_name.into(),
+            payload: ExternIO::from(serde_json::to_vec(&payload).unwrap()),
+            cap_secret: None,
+            provenance: agent_pub_key,
+            nonce: random_bytes.into(),
+            expires_at: Timestamp::from_micros(300000000),
+        };
+
+        let keystore = self.conductor.keystore();
+        let signed_zome_call = ZomeCall::try_from_unsigned_zome_call(keystore, zome_call_unsigned)
+            .await
+            .map_err(|err| anyhow!("Could not sign zome call: {:?}", err))?;
+
+        let result = self.conductor.call_zome(signed_zome_call).await??;
+
+        Ok(result)
     }
 }
 
