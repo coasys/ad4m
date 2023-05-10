@@ -10,8 +10,8 @@ async fn publish(topic: String, data: String) -> Result<(), AnyError> {
 }
 
 pub fn build() -> Extension {
-    Extension::builder("wallet")
-        .js(include_js_files!(wallet "pubsub_extension.js",))
+    Extension::builder("pubsub")
+        .js(include_js_files!(pub_sub "pubsub_extension.js",))
         .ops(vec![publish::decl()])
         .force_op_registration()
         .build()

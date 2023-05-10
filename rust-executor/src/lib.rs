@@ -5,6 +5,7 @@ mod js_core;
 mod utils;
 mod wallet;
 
+mod holochain_service;
 pub mod init;
 mod pubsub;
 

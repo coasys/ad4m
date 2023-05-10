@@ -5,6 +5,7 @@ use url::Url;
 use super::{
     pubsub_extension, string_module_loader::StringModuleLoader, utils_extension, wallet_extension,
 };
+use crate::holochain_service::holochain_service_extension;
 
 pub fn main_module_url() -> Url {
     Url::parse("https://ad4m.runtime/main").unwrap()
@@ -36,9 +37,10 @@ pub fn main_worker_options() -> WorkerOptions {
     let wallet_ext = wallet_extension::build();
     let utils_ext = utils_extension::build();
     let sub_ext = pubsub_extension::build();
+    let holochain_ext = holochain_service_extension::build();
 
     WorkerOptions {
-        extensions: vec![wallet_ext, utils_ext, sub_ext],
+        extensions: vec![wallet_ext, utils_ext, sub_ext, holochain_ext],
         module_loader: Rc::new(loader),
         ..Default::default()
     }
