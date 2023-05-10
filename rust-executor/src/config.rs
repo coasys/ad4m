@@ -11,7 +11,9 @@ pub struct Ad4mConfig {
     pub language_language_only: Option<bool>,
     pub run_dapp_server: Option<bool>,
     pub gql_port: Option<u16>,
+    #[serde(rename = "hcPortAdmin")]
     pub hc_admin_port: Option<u16>,
+    #[serde(rename = "hcPortApp")]
     pub hc_app_port: Option<u16>,
     pub hc_use_local_proxy: Option<bool>,
     pub hc_use_mdns: Option<bool>,
