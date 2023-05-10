@@ -333,9 +333,11 @@ impl Query {
         uuid: String,
     ) -> FieldResult<String> {
         let mut js = context.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.resolvers.Query.perspectiveQueryProlog({{ query: "{}", uuid: "{}" }}, {{ capabilities: [{}] }}))"#, query, uuid, ALL_CAPABILITY))
-            .await?;
+        let script = format!(
+            r#"await core.resolvers.Query.perspectiveQueryProlog({{ query: '{}', uuid: "{}" }}, {{ capabilities: [{}] }})"#,
+            query, uuid, ALL_CAPABILITY
+        );
+        let result = js.execute(script).await?;
         let prolog_result: String = serde_json::from_str(&result)?;
         return Ok(prolog_result);
     }
@@ -346,7 +348,6 @@ impl Query {
         uuid: String,
     ) -> FieldResult<Perspective> {
         let mut js = context.clone();
-        debug!("perspective_snapshot: {}", uuid);
         let result = js
             .execute(format!(
                 r#"JSON.stringify(await core.resolvers.Query.perspectiveSnapshot({{ uuid: "{}" }}, {{ capabilities: [{}] }}))"#,
@@ -354,7 +355,6 @@ impl Query {
                 ALL_CAPABILITY
             ))
             .await?;
-        debug!("perspective_snapshot: {}", result);
         let perspective_snapshot: Perspective = serde_json::from_str(&result)?;
         return Ok(perspective_snapshot);
     }
