@@ -4,11 +4,11 @@ use std::sync::Arc;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use holochain::conductor::api::{CellInfo, ZomeCall};
-use holochain::conductor::config::{AdminInterfaceConfig, ConductorConfig};
-use holochain::conductor::interface::InterfaceDriver;
+use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
+use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::{
-    ExternIO, InstallAppPayload, Timestamp, ZomeCallResponse, ZomeCallUnsigned,
+    ExternIO, InstallAppPayload, Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned,
 };
 use log::info;
 use once_cell::sync::OnceCell;
@@ -76,6 +76,7 @@ impl HolochainService {
             .install_app_bundle(install_app_payload)
             .await
             .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
+
         let activate = self
             .conductor
             .clone()
@@ -154,6 +155,47 @@ impl HolochainService {
         let result = self.conductor.call_zome(signed_zome_call).await??;
 
         Ok(result)
+    }
+
+    pub async fn remove_app(&self, app_id: String) -> Result<(), AnyError> {
+        //Check that the app exists on the conductor
+        let app_info = self.conductor.get_app_info(&app_id).await?;
+
+        if app_info.is_none() {
+            return Err(anyhow!("App not installed with id: {:?}", app_id));
+        }
+
+        self.conductor
+            .clone()
+            .uninstall_app(&app_id)
+            .await
+            .map_err(|e| anyhow!("Could not remove app: {:?}", e))?;
+
+        info!("Removed app with id: {:?}", app_id);
+        Ok(())
+    }
+
+    pub async fn agent_infos(&self) -> Result<Vec<AgentInfoSigned>, AnyError> {
+        Ok(self.conductor.get_agent_infos(None).await?)
+    }
+
+    pub async fn add_agent_infos(&self, agent_infos: Vec<AgentInfoSigned>) -> Result<(), AnyError> {
+        Ok(self.conductor.add_agent_infos(agent_infos).await?)
+    }
+
+    pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
+        let keystore = self.conductor.keystore();
+        let pub_keys = keystore.list_public_keys().await?;
+        if pub_keys.len() == 0 {
+            return Err(anyhow!("No public keys found"));
+        }
+        let agent = pub_keys.first().unwrap();
+
+        let vec_u8 = data.into_bytes();
+        let data = Arc::from(vec_u8.into_boxed_slice());
+
+        let signature = keystore.sign(agent.clone(), data).await?;
+        Ok(signature)
     }
 }
 

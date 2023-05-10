@@ -13,6 +13,18 @@
         },
         call_zome_function: async (app_id, cell_name, zome_name, fn_name, payload) => {
             return core.opAsync("call_zome_function", app_id, cell_name, zome_name, fn_name, payload);
+        },
+        agent_infos: async () => {
+            return core.opAsync("agent_infos");
+        },
+        add_agent_infos: async (agent_infos) => {
+            return core.opAsync("add_agent_infos", agent_info);
+        },
+        remove_app: async (app_id) => {
+            return core.opAsync("remove_app", app_id);
+        },
+        sign_string: async (string) => {
+            return core.opAsync("sign_string", string);
         }
     };
   })(globalThis);
