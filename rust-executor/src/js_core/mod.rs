@@ -336,7 +336,9 @@ impl JsCore {
                     };
 
                     let holochain_signal_receiver_fut = async {
+                        //loop {
                         if let Some(holochain_service) = maybe_get_global_conductor().await {
+                            info!("Found holochain service");
                             let signal_receivers = holochain_service.signal_receivers.clone();
                             let mut signal_receivers = signal_receivers.lock().await;
 
@@ -382,8 +384,9 @@ impl JsCore {
                                 }
                             }
                         } else {
-                            println!("HolochainService is not available.");
+                            //println!("HolochainService is not available.");
                         }
+                        //}
                     };
 
                     tokio::select! {
@@ -416,8 +419,7 @@ impl JsCore {
                             break;
                         }
                         _holochain_signal_receivers = holochain_signal_receiver_fut => {
-                            info!("AD4M holochain signal receiver completed");
-                            break;
+                            //info!("AD4M holochain signal receiver completed");
                         }
                     }
                 }

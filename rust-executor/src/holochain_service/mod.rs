@@ -1,4 +1,3 @@
-use std::os;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,8 +8,9 @@ use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
+use holochain::prelude::kitsune_p2p::dependencies::url2::Url2;
 use holochain::prelude::{
-    ExternIO, InstallAppPayload, Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned, Signal, HoloHash,
+    ExternIO, InstallAppPayload, Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned, Signal, HoloHash, KitsuneP2pConfig, NetworkType, TransportConfig, ProxyConfig,
 };
 use log::info;
 use once_cell::sync::OnceCell;
@@ -37,6 +37,8 @@ pub struct LocalConductorConfig {
     pub use_proxy: bool,
     pub use_local_proxy: bool,
     pub use_mdns: bool,
+    pub proxy_url: String,
+    pub bootstrap_url: String,
 }
 
 impl HolochainService {
@@ -50,10 +52,41 @@ impl HolochainService {
             let mut config = ConductorConfig::default();
             config.environment_path = PathBuf::from(local_config.conductor_path.clone()).into();
             config.admin_interfaces = None;
+
+            let mut kitsune_config = KitsuneP2pConfig::default();
+
+            if local_config.use_bootstrap {
+                kitsune_config.bootstrap_service = Some(Url2::parse(local_config.bootstrap_url));
+            } else {
+                kitsune_config.bootstrap_service = None;
+            }
+            if local_config.use_mdns {
+                kitsune_config.network_type = NetworkType::QuicMdns;
+            } else {
+                kitsune_config.network_type = NetworkType::QuicBootstrap;
+            }
+            if local_config.use_proxy {
+                kitsune_config.transport_pool = vec![TransportConfig::Proxy {
+                    sub_transport: Box::new(TransportConfig::Quic {
+                        bind_to: None,
+                        override_host: None,
+                        override_port: None,
+                    }),
+                    proxy_config: ProxyConfig::RemoteProxyClient {
+                        proxy_url: Url2::parse(local_config.proxy_url),
+                    },
+                }];
+            } else {
+                kitsune_config.transport_pool = vec![TransportConfig::Quic {
+                    bind_to: None,
+                    override_host: None,
+                    override_port: None,
+                }];
+            }
+            config.network = Some(kitsune_config);
+
             config
         };
-
-        //TODO; handle using proxy/bootstrap/mdns
 
         info!("Starting holochain conductor with config: {:?}", config);
         let conductor = ConductorBuilder::new()
@@ -62,7 +95,10 @@ impl HolochainService {
             .build()
             .await
             .map_err(|err| anyhow!("Could not build conductor: {:?}", err))?;
+
+        info!("Started holochain conductor");
         let signal_broadcaster = conductor.signal_broadcaster();
+        info!("Got signal broadcaster");
 
         let service = Self {
             conductor,
@@ -70,6 +106,7 @@ impl HolochainService {
         };
 
         let set_res = HOLOCHAIN_CONDUCTOR.set(Arc::new(service.clone()));
+        info!("Set global conductor");
         if set_res.is_err() {
             panic!("Could not set global conductor");
         }
