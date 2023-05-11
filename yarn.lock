@@ -17878,7 +17878,7 @@ split-string@^3.0.1, split-string@^3.0.2:
   dependencies:
     extend-shallow "^3.0.0"
 
-split@^1.0.0, split@^1.0.1:
+split@^1.0.1:
   version "1.0.1"
   resolved "https://registry.yarnpkg.com/split/-/split-1.0.1.tgz#605bd9be303aa59fb35f9229fbea0ddec9ea07d9"
   integrity sha512-mTyOoPbrivtXnwnIxZRFYRrPNtEFKlpB2fvjSnCQUiAA6qAZzqwna5envK4uk6OIeP17CsdF3rSBGYVBsU0Tkg==
@@ -18403,12 +18403,11 @@ svgo@^2.7.0:
     picocolors "^1.0.0"
     stable "^0.1.8"
 
-"swipl-stdio@https://github.com/perspect3vism/node-swipl-stdio.git":
+"swipl-stdio@file:../node-swipl-stdio":
   version "1.0.4"
-  resolved "https://github.com/perspect3vism/node-swipl-stdio.git#a00dbfb99aeacf99cb59448e2a9c92b40a889545"
   dependencies:
     debug "^2.6.4"
-    split "^1.0.0"
+    split "^1.0.1"
 
 symbol-observable@^1.0.2, symbol-observable@^1.0.4, symbol-observable@^1.1.0:
   version "1.2.0"
