@@ -3,6 +3,7 @@ use deno_core::error::AnyError;
 use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use holochain::prelude::Signal;
 use log::{error, info};
 use once_cell::sync::Lazy;
 use std::env::current_dir;
@@ -342,25 +343,36 @@ impl JsCore {
                             for receiver in signal_receivers.iter_mut() {
                                 match receiver.try_recv() {
                                     Ok(signal) => {
-                                        // Handle the received signal here
-                                        info!("Received signal: {:?}", signal);
-                                        match js_core.execute_async(format!(
-                                            "await core.getHolochainService().handleCallback({:?})",
-                                            signal
-                                        )) {
-                                            Ok(script_fut) => match script_fut.await {
-                                                Ok(res) => {
-                                                    info!(
-                                                        "Callback executed successfully: {:?}",
-                                                        res
-                                                    );
+                                        match signal {
+                                            Signal::App {
+                                                cell_id,
+                                                zome_name,
+                                                signal,
+                                            } => {
+                                                // Handle the received signal here
+                                                info!("Received signal: {:?}", signal);
+                                                match js_core.execute_async(format!(
+                                                    "await core.getHolochainService().handleCallback({:?})",
+                                                    Signal::App { cell_id, zome_name, signal }
+                                                )) {
+                                                    Ok(script_fut) => match script_fut.await {
+                                                        Ok(res) => {
+                                                            info!(
+                                                                "Callback executed successfully: {:?}",
+                                                                res
+                                                            );
+                                                        }
+                                                        Err(err) => {
+                                                            error!("Error executing callback: {:?}", err);
+                                                        }
+                                                    },
+                                                    Err(err) => {
+                                                        error!("Error executing callback: {:?}", err);
+                                                    }
                                                 }
-                                                Err(err) => {
-                                                    error!("Error executing callback: {:?}", err);
-                                                }
-                                            },
-                                            Err(err) => {
-                                                error!("Error executing callback: {:?}", err);
+                                            }
+                                            Signal::System(system_signal) => {
+                                                info!("Received system signal: {:?}", system_signal)
                                             }
                                         }
                                     }
