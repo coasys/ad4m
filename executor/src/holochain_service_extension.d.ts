@@ -1,0 +1,28 @@
+import { AgentInfoSigned, CallZomeResponse, InstallAppRequest, Signature } from "@holochain/client";
+
+declare global {
+    interface ConductorConfig {
+        passphrase: String,
+        conductorPath: String,
+        dataPath: String,
+        useBootstrap: bool,
+        useProxy: bool,
+        useLocalProxy: bool,
+        useMdns: bool,
+    }
+
+    interface HolochainService {
+        async startHolochainService: (config: ConductorConfig) => void;
+        async logDhtStatus: () => void;
+        async installApp: (install_app_payload: InstallAppRequest) => void;
+        async callZomeFunction: (app_id: String, cell_name: String, zome_name: String, fn_name: String, payload: any) => CallZomeResponse;
+        async agentInfos: () => AgentInfoSigned[];
+        async addAgentInfos: (agent_infos: AgentInfoSigned[]) => void;
+        async removeApp: (app_id: String) => void;
+        async signString: (string: String) => Signature;
+    }
+
+    const HOLOCHAIN_SERVICE: HolochainService;
+}
+
+export {};
