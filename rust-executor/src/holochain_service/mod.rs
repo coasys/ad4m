@@ -1,3 +1,4 @@
+use std::os;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -39,9 +40,17 @@ pub struct LocalConductorConfig {
 
 impl HolochainService {
     pub async fn new(local_config: LocalConductorConfig) -> Result<Self, AnyError> {
-        let mut config = ConductorConfig::default();
-        config.environment_path = PathBuf::from(local_config.conductor_path.clone()).into();
-        config.admin_interfaces = None;
+        let conductor_yaml_path =
+            std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
+        let config = if conductor_yaml_path.exists() {
+            let config = ConductorConfig::load_yaml(&conductor_yaml_path)?;
+            config
+        } else {
+            let mut config = ConductorConfig::default();
+            config.environment_path = PathBuf::from(local_config.conductor_path.clone()).into();
+            config.admin_interfaces = None;
+            config
+        };
 
         //TODO; handle using proxy/bootstrap/mdns
 
