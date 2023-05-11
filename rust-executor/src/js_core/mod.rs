@@ -336,60 +336,63 @@ impl JsCore {
                     };
 
                     let holochain_signal_receiver_fut = async {
-                        //loop {
-                        if let Some(holochain_service) = maybe_get_global_conductor().await {
-                            info!("Found holochain service");
-                            let signal_receivers = holochain_service.signal_receivers.clone();
-                            let mut signal_receivers = signal_receivers.lock().await;
+                        loop {
+                            if let Some(holochain_service) = maybe_get_global_conductor().await {
+                                //info!("Found holochain service");
+                                let signal_receivers = holochain_service.signal_receivers.clone();
+                                let mut signal_receivers = signal_receivers.lock().await;
 
-                            for receiver in signal_receivers.iter_mut() {
-                                match receiver.try_recv() {
-                                    Ok(signal) => {
-                                        match signal {
-                                            Signal::App {
-                                                cell_id,
-                                                zome_name,
-                                                signal,
-                                            } => {
-                                                // Handle the received signal here
-                                                info!("Received signal: {:?}", signal);
-                                                match js_core.execute_async(format!(
-                                                    "await core.getHolochainService().handleCallback({:?})",
-                                                    Signal::App { cell_id, zome_name, signal }
-                                                )) {
-                                                    Ok(script_fut) => match script_fut.await {
-                                                        Ok(res) => {
-                                                            info!(
-                                                                "Callback executed successfully: {:?}",
-                                                                res
-                                                            );
-                                                        }
+                                for receiver in signal_receivers.iter_mut() {
+                                    match receiver.try_recv() {
+                                        Ok(signal) => {
+                                            match signal {
+                                                Signal::App {
+                                                    cell_id,
+                                                    zome_name,
+                                                    signal,
+                                                } => {
+                                                    // Handle the received signal here
+                                                    info!("Received signal: {:?}", signal);
+                                                    match js_core.execute_async(format!(
+                                                        "await core.getHolochainService().handleCallback({:?})",
+                                                        Signal::App { cell_id, zome_name, signal }
+                                                    )) {
+                                                        Ok(script_fut) => match script_fut.await {
+                                                            Ok(res) => {
+                                                                info!(
+                                                                    "Callback executed successfully: {:?}",
+                                                                    res
+                                                                );
+                                                            }
+                                                            Err(err) => {
+                                                                error!("Error executing callback: {:?}", err);
+                                                            }
+                                                        },
                                                         Err(err) => {
                                                             error!("Error executing callback: {:?}", err);
                                                         }
-                                                    },
-                                                    Err(err) => {
-                                                        error!("Error executing callback: {:?}", err);
                                                     }
                                                 }
-                                            }
-                                            Signal::System(system_signal) => {
-                                                info!("Received system signal: {:?}", system_signal)
+                                                Signal::System(system_signal) => {
+                                                    info!("Received system signal: {:?}", system_signal)
+                                                }
                                             }
                                         }
-                                    }
-                                    Err(_err) => {
-                                        // The channel is empty; no signal is available
+                                        Err(_err) => {
+                                            // The channel is empty; no signal is available
+                                        }
                                     }
                                 }
+                            } else {
+                                //println!("HolochainService is not available.");
                             }
-                        } else {
-                            //println!("HolochainService is not available.");
+                            tokio::task::yield_now().await;
                         }
-                        //}
                     };
 
                     tokio::select! {
+                        biased;
+
                         event_loop_result = js_core.event_loop() => {
                             match event_loop_result {
                                 Ok(_) => info!("AD4M event loop finished"),
@@ -412,11 +415,11 @@ impl JsCore {
                         }
                         _request = receive_fut => {
                             info!("AD4M receive_fut completed");
-                            break;
+                            //break;
                         }
                         _module_load = module_load_fut => {
                             info!("AD4M module load completed");
-                            break;
+                            //break;
                         }
                         _holochain_signal_receivers = holochain_signal_receiver_fut => {
                             //info!("AD4M holochain signal receiver completed");
