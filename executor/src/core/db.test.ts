@@ -5,6 +5,7 @@ import { LinkExpression, LinkExpressionInput, PerspectiveDiff } from '@perspect3
 import faker from 'faker'
 
 function constructDummyLinkExpression(): LinkExpressionInput {
+    // @ts-ignore
     return {
         data: {
             source: faker.internet.url(),
@@ -33,6 +34,7 @@ describe('PerspectivismDb', () => {
     it('can store and retrieve links', async () => {
         const link = constructDummyLinkExpression();
         await db!.addLink(pUUID!, link);
+        link.status = 'shared'
 
         const result = await db!.getLink(pUUID!, link);
         expect(result).to.be.deep.equal(link);
@@ -62,8 +64,12 @@ describe('PerspectivismDb', () => {
         const link1 = constructDummyLinkExpression();
         await db!.addLink(pUUID!, link1);
 
+        link1.status = 'shared'
+
         const link2 = constructDummyLinkExpression();
         await db!.addLink(pUUID!, link2);
+
+        link2.status = 'shared'
 
         const allLinks = await db!.getAllLinks(pUUID!)
 
@@ -77,6 +83,8 @@ describe('PerspectivismDb', () => {
         const link1 = constructDummyLinkExpression();
         await db!.addLink(pUUID!, link1);
 
+        link1.status = 'shared'
+
         for(let i=0; i<3; i++) {
             expect(await db!.getAllLinks(pUUID!)).to.be.deep.equal([
                 link1
@@ -87,6 +95,8 @@ describe('PerspectivismDb', () => {
     it('can getLinksBySource', async () => {
         const link1 = constructDummyLinkExpression();
         await db!.addLink(pUUID!, link1);
+
+        link1.status = 'shared';
 
         const link2 = constructDummyLinkExpression();
         await db!.addLink(pUUID!, link2);
@@ -99,6 +109,8 @@ describe('PerspectivismDb', () => {
     it('can getLinksByTarget', async () => {
         const link1 = constructDummyLinkExpression();
         await db!.addLink(pUUID!, link1);
+
+        link1.status = 'shared';
 
         const link2 = constructDummyLinkExpression();
         await db!.addLink(pUUID!, link2);

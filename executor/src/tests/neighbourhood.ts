@@ -61,6 +61,19 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1!.neighbourhood).not.to.be.undefined;;
                 expect(bobP1!.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
                 expect(bobP1!.neighbourhood!.meta.links.length).to.be.equal(0);
+            })
+            
+            it('shared link created by Alice received by Bob', async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
+
+                const aliceP1 = await alice.perspective.add("friends")
+                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test shared links"}));
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+
+                let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+                await testContext.makeAllNodesKnown()
                 expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
 
                 await sleep(5000)
@@ -81,6 +94,36 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobLinks.length).to.be.equal(1)
             })
 
+            it('local link created by Alice NOT received by Bob', async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
+
+                const aliceP1 = await alice.perspective.add("friends")
+                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test local links"}));
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+
+                let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+                await testContext.makeAllNodesKnown()
+
+                await sleep(5000)
+
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'}, 'local')
+
+                await sleep(5000)
+
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let tries = 1
+
+                while(bobLinks.length < 1 && tries < 20) {
+                    await sleep(1000)
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    tries++
+                }
+                
+                expect(bobLinks.length).to.be.equal(0)
+            })
+            
             // it('can get the correct state change signals', async () => {
             //     const aliceP1 = await testContext.alice.perspective.add("state-changes")
             //     expect(aliceP1.state).to.be.equal(PerspectiveState.Private);

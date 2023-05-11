@@ -1,5 +1,6 @@
 import { Field, InputType, ObjectType } from "type-graphql";
 import { ExpressionGeneric, ExpressionGenericInput } from '../expression/Expression';
+import { LinkStatus } from "../perspectives/PerspectiveProxy";
 
 @ObjectType()
 export class Link {
@@ -66,10 +67,18 @@ export class LinkExpression extends ExpressionGeneric(Link) {
         }
         return hash;
     }
+
+    @Field({ nullable: true, defaultValue: 'shared' })
+    status?: LinkStatus;
 };
 
 @InputType()
-export class LinkExpressionInput extends ExpressionGenericInput(LinkInput) {};
+export class LinkExpressionInput extends ExpressionGenericInput(LinkInput) {
+    hash: () => number;
+
+    @Field({ nullable: true, defaultValue: 'shared' })
+    status?: LinkStatus;
+};
 
 export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
     return l1.author == l2.author &&

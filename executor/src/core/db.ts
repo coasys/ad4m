@@ -1,6 +1,6 @@
 import { Database } from 'aloedb-node'
 import path from 'path'
-import type { Expression, LinkExpression, PerspectiveDiff } from "@perspect3vism/ad4m";  
+import type { Expression, LinkExpression, LinkStatus, PerspectiveDiff } from "@perspect3vism/ad4m";  
 
 interface LinkSchema {
     perspective: string,
@@ -9,7 +9,8 @@ interface LinkSchema {
     predicate: string,
     target: string,
     author: string,
-    timestamp: string
+    timestamp: string,
+    status: LinkStatus
 }
 
 interface ExpressionSchema {
@@ -37,7 +38,9 @@ export class PerspectivismDb {
 
     //Link Methods
 
-    async addLink(perspectiveUuid: string, link: LinkExpression) {
+    async addLink(perspectiveUuid: string, link: LinkExpression, status: LinkStatus = 'shared') {
+        delete link.status
+        
         await this.#linkDb.insertOne({
             perspective: perspectiveUuid,
             linkExpression: link,
@@ -45,11 +48,12 @@ export class PerspectivismDb {
             predicate: link.data.predicate,
             target: link.data.target,
             author: link.author,
-            timestamp: link.timestamp
+            timestamp: link.timestamp,
+            status
         } as LinkSchema)
     }
 
-    async addManyLinks(perspectiveUuid: string, links: LinkExpression[]) {
+    async addManyLinks(perspectiveUuid: string, links: LinkExpression[], status: LinkStatus = 'shared') {
         await this.#linkDb.insertMany(links.map((link) => {
             return {
                 perspective: perspectiveUuid,
@@ -58,7 +62,8 @@ export class PerspectivismDb {
                 predicate: link.data.predicate,
                 target: link.data.target,
                 author: link.author,
-                timestamp: link.timestamp
+                timestamp: link.timestamp,
+                status
             } as LinkSchema
         }));
     }
@@ -84,6 +89,8 @@ export class PerspectivismDb {
     }
 
     async removeLink(perspectiveUuid: string, link: LinkExpression) {
+        delete link.status
+
         await this.#linkDb.deleteOne({
             perspective: perspectiveUuid,
             linkExpression: link,
@@ -105,12 +112,27 @@ export class PerspectivismDb {
         if (link.data.target == null) {
             delete link.data.target;
         };
-        return (await this.#linkDb.findOne({ perspective: perspectiveUuid, linkExpression: link }))?.linkExpression;
+
+        if (link.status) {
+            delete link.status;
+        }
+
+        const foundLink = (await this.#linkDb.findOne({ perspective: perspectiveUuid, linkExpression: link }))
+
+        const linkExpression = foundLink?.linkExpression;
+        if (linkExpression?.status) {
+            linkExpression.status = foundLink?.status;
+        }
+
+        return linkExpression;
     }
 
     async getAllLinks(perspectiveUuid: string): Promise<LinkExpression[]> {
         const links = ( await this.#linkDb.findMany({ perspective: perspectiveUuid })).map((val) => {
-            return val.linkExpression;
+            return {
+                ...val.linkExpression,
+                status: val.status
+            };
         })
         .filter((val) => val !== undefined) as LinkExpression[];
         return links
@@ -118,7 +140,10 @@ export class PerspectivismDb {
 
     async getLinksBySource(perspectiveUuid: string, source: string): Promise<LinkExpression[]> {
         const links = ( await this.#linkDb.findMany({ perspective: perspectiveUuid, source })).map((val) => {
-            return val.linkExpression;
+            return {
+                ...val.linkExpression,
+                status: val.status
+            };
         })
         .filter((val) => val !== undefined) as LinkExpression[];
         return links
@@ -126,7 +151,10 @@ export class PerspectivismDb {
 
     async getLinksByTarget(perspectiveUuid: string, target: string): Promise<LinkExpression[]> {
         const links = ( await this.#linkDb.findMany({ perspective: perspectiveUuid, target })).map((val) => {
-            return val.linkExpression;
+            return {
+                ...val.linkExpression,
+                status: val.status
+            };
         })
         .filter((val) => val !== undefined) as LinkExpression[];
         return links

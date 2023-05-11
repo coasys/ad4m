@@ -9,6 +9,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - bootstrap languages to mono repo [PR#328](https://github.com/perspect3vism/ad4m/pull/328)
  - Added a apps changes listener so the launcher app can updated the apps list without having to switch tabs to trigger update [PR#354](https://github.com/perspect3vism/ad4m/pull/354)
  - Support for new UI oriented Subject class predicates (property_named_option, p3_class_icon, etc). [PR#353](https://github.com/perspect3vism/ad4m/pull/353)
+ - Adds a new status property to Link expression to indicate if the link is shared or local. [PR#130](https://github.com/perspect3vism/ad4m/pull/130)
 
 ### Changed
  

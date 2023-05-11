@@ -103,7 +103,7 @@ export default function agentTests(testContext: TestContext) {
                 const currentAgent = await ad4mClient.agent.me();
                 expect(currentAgent.perspective).not.to.be.undefined;
                 expect(currentAgent.perspective!.links.length).to.equal(1);
-                expect(currentAgent.directMessageLanguage).not.to.be.undefined;;
+                expect(currentAgent.directMessageLanguage).not.to.be.undefined;
 
                 await ad4mClient.agent.mutatePublicPerspective({
                     additions: [new Link({
