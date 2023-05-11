@@ -477,12 +477,12 @@ export class PerspectiveProxy {
 
         // Collect all string properties of the object in a list
         if(Object.getPrototypeOf(obj).__properties) {
-            properties = properties.concat(Object.keys(Object.getPrototypeOf(obj).__properties).filter(key => !Array.isArray(obj[key])))
+            Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => !properties.includes(p) ?? properties.push(p))
         }
 
         // Collect all collections of the object in a list
         if (Object.getPrototypeOf(obj).__collections) {
-            collections = collections.concat(Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance'))
+            Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
         }
 
         // Collect all set functions of the object in a list
