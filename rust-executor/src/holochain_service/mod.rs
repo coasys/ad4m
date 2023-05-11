@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use holochain::conductor::api::{CellInfo, ZomeCall};
+use holochain::conductor::api::{CellInfo, ZomeCall, AppInfo};
 use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
+use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    ExternIO, InstallAppPayload, Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned, Signal,
+    ExternIO, InstallAppPayload, Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned, Signal, HoloHash,
 };
 use log::info;
 use once_cell::sync::OnceCell;
@@ -81,28 +82,40 @@ impl HolochainService {
     pub async fn install_app(
         &self,
         install_app_payload: InstallAppPayload,
-    ) -> Result<(), AnyError> {
+    ) -> Result<AppInfo, AnyError> {
         if install_app_payload.installed_app_id.is_none() {
             return Err(anyhow!("App id is required"));
         }
 
         let app_id = install_app_payload.installed_app_id.clone().unwrap();
 
-        self.conductor
-            .clone()
-            .install_app_bundle(install_app_payload)
-            .await
-            .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
+        //Check if app_id already exists
+        let app_info = self.conductor.get_app_info(&app_id).await?;
 
-        let activate = self
-            .conductor
-            .clone()
-            .enable_app(app_id)
-            .await
-            .map_err(|e| anyhow!("Could not activate app: {:?}", e))?;
+        match app_info {
+            None => {
+                self.conductor
+                    .clone()
+                    .install_app_bundle(install_app_payload)
+                    .await
+                    .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
 
-        info!("Installed app with result: {:?}", activate.0);
-        Ok(())
+                let activate = self
+                    .conductor
+                    .clone()
+                    .enable_app(app_id.clone())
+                    .await
+                    .map_err(|e| anyhow!("Could not activate app: {:?}", e))?;
+                info!("Installed app with result: {:?}", activate);
+
+                let app_info = self.conductor.get_app_info(&app_id).await?;
+                Ok(app_info.unwrap())
+            }
+            Some(app_info) => {
+                info!("App already installed with id: {:?}", app_id);
+                Ok(app_info)
+            }
+        }
     }
 
     pub async fn call_zome_function(
@@ -213,6 +226,26 @@ impl HolochainService {
 
         let signature = keystore.sign(agent.clone(), data).await?;
         Ok(signature)
+    }
+
+    pub async fn shutdown(&self) -> Result<(), AnyError> {
+        self.conductor.shutdown().await??;
+        Ok(())
+    }
+
+    pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
+        let keystore = self.conductor.keystore();
+        let pub_keys = keystore.list_public_keys().await?;
+        if pub_keys.len() == 0 {
+            return Err(anyhow!("No public keys found"));
+        }
+        let agent = pub_keys.first().unwrap();
+        info!("Agent key: {:?}", agent);
+        Ok(agent.to_owned())
+    }
+
+    pub async fn get_app_info(&self, app_id: String) -> Result<Option<AppInfo>, AnyError> {
+        Ok(self.conductor.get_app_info(&app_id).await?)
     }
 }
 

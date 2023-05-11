@@ -1,6 +1,10 @@
 use deno_core::{error::AnyError, include_js_files, op, Extension};
-use holochain::prelude::{
-    agent_store::AgentInfoSigned, InstallAppPayload, Signature, ZomeCallResponse,
+use holochain::{
+    conductor::api::AppInfo,
+    prelude::{
+        agent_store::AgentInfoSigned, hash_type::Agent, HoloHash, InstallAppPayload, Signature,
+        ZomeCallResponse,
+    },
 };
 use log::info;
 
@@ -23,10 +27,15 @@ async fn log_dht_status() -> Result<(), AnyError> {
 }
 
 #[op]
-async fn install_app(install_app_payload: InstallAppPayload) -> Result<(), AnyError> {
+async fn install_app(install_app_payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
     let conductor = get_global_conductor().await;
-    conductor.install_app(install_app_payload).await?;
-    Ok(())
+    conductor.install_app(install_app_payload).await
+}
+
+#[op]
+async fn get_app_info(app_id: String) -> Result<Option<AppInfo>, AnyError> {
+    let conductor = get_global_conductor().await;
+    conductor.get_app_info(app_id).await
 }
 
 //TODO
@@ -69,6 +78,18 @@ async fn sign_string(data: String) -> Result<Signature, AnyError> {
     conductor.sign(data).await
 }
 
+#[op]
+async fn shutdown() -> Result<(), AnyError> {
+    let conductor = get_global_conductor().await;
+    conductor.shutdown().await
+}
+
+#[op]
+async fn get_agent_key() -> Result<HoloHash<Agent>, AnyError> {
+    let conductor = get_global_conductor().await;
+    conductor.get_agent_key().await
+}
+
 //TODO: implement dna packing and unpacking (not currently possible with holochain_cli_bundle unpack / pack functions since it does not exposed the functions in lib)
 
 //Implement signal callbacks from dna/holochain to js
@@ -80,11 +101,14 @@ pub fn build() -> Extension {
             start_holochain_conductor::decl(),
             log_dht_status::decl(),
             install_app::decl(),
+            get_app_info::decl(),
             call_zome_function::decl(),
             agent_infos::decl(),
             add_agent_infos::decl(),
             remove_app::decl(),
             sign_string::decl(),
+            shutdown::decl(),
+            get_agent_key::decl(),
         ])
         .force_op_registration()
         .build()
