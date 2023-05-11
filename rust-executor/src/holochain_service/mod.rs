@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::Duration;
+use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use holochain::conductor::api::{CellInfo, ZomeCall, AppInfo};
@@ -42,7 +44,7 @@ pub struct LocalConductorConfig {
 }
 
 impl HolochainService {
-    pub async fn new(local_config: LocalConductorConfig) -> Result<Self, AnyError> {
+    pub async fn new(local_config: LocalConductorConfig) -> Result<(), AnyError> {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
         let config = if conductor_yaml_path.exists() {
@@ -93,8 +95,13 @@ impl HolochainService {
             .config(config)
             .passphrase(Some(local_config.passphrase.as_bytes().into()))
             .build()
-            .await
-            .map_err(|err| anyhow!("Could not build conductor: {:?}", err))?;
+            .await;
+
+        if conductor.is_err() {
+            panic!("Could not start holochain conductor");
+        }
+
+        let conductor = conductor.unwrap();
 
         info!("Started holochain conductor");
         let signal_broadcaster = conductor.signal_broadcaster();
@@ -113,7 +120,7 @@ impl HolochainService {
 
         info!("Started holochain conductor and set reference in rust executor");
 
-        Ok(service)
+        Ok(())
     }
 
     pub async fn install_app(
@@ -163,6 +170,10 @@ impl HolochainService {
         fn_name: String,
         payload: serde_json::Value,
     ) -> Result<ZomeCallResponse, AnyError> {
+        info!(
+            "Calling zome function: {:?} {:?} {:?} {:?} {:?}",
+            app_id, cell_name, zome_name, fn_name, payload
+        );
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
         if app_info.is_none() {
@@ -171,7 +182,7 @@ impl HolochainService {
 
         let app_info = app_info.unwrap();
 
-        let cell_entry = app_info.cell_info.get(&cell_name);
+        let cell_entry = app_info.cell_info.get(&format!("{}-{}", app_id, cell_name));
 
         if cell_entry.is_none() {
             return Err(anyhow!(
@@ -200,18 +211,24 @@ impl HolochainService {
 
         //Get the agents pub key from the conductor
 
-        let mut rng = rand::thread_rng();
-        let random_bytes: [u8; 32] = rng.gen();
+        fn generate_nonce() -> [u8; 32] {
+            let mut rng = OsRng;
+            let mut nonce = [0u8; 32];
+            rng.fill(&mut nonce);
+            nonce
+        }
 
         let zome_call_unsigned = ZomeCallUnsigned {
             cell_id: cell_id,
             zome_name: zome_name.into(),
             fn_name: fn_name.into(),
-            payload: ExternIO::from(serde_json::to_vec(&payload).unwrap()),
+            payload: ExternIO::encode(payload).unwrap(),
             cap_secret: None,
             provenance: agent_pub_key,
-            nonce: random_bytes.into(),
-            expires_at: Timestamp::from_micros(300000000),
+            nonce: generate_nonce().into(),
+            expires_at: Timestamp::now()
+                .checked_add_signed(&Duration::seconds(300))
+                .unwrap(),
         };
 
         let keystore = self.conductor.keystore();

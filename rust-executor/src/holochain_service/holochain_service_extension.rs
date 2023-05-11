@@ -22,7 +22,7 @@ async fn start_holochain_conductor(config: LocalConductorConfig) -> Result<(), A
 async fn log_dht_status() -> Result<(), AnyError> {
     let conductor = get_global_conductor().await;
     let dht_status = conductor.conductor.dump_network_metrics(None).await?;
-    info!("DHT Status: {:?}", dht_status);
+    info!("DHT Status: {:#?}", dht_status);
     Ok(())
 }
 
