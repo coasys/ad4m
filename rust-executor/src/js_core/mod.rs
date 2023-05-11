@@ -343,7 +343,26 @@ impl JsCore {
                                 match receiver.try_recv() {
                                     Ok(signal) => {
                                         // Handle the received signal here
-                                        println!("Received signal: {:?}", signal);
+                                        info!("Received signal: {:?}", signal);
+                                        match js_core.execute_async(format!(
+                                            "await core.getHolochainService().handleCallback({:?})",
+                                            signal
+                                        )) {
+                                            Ok(script_fut) => match script_fut.await {
+                                                Ok(res) => {
+                                                    info!(
+                                                        "Callback executed successfully: {:?}",
+                                                        res
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    error!("Error executing callback: {:?}", err);
+                                                }
+                                            },
+                                            Err(err) => {
+                                                error!("Error executing callback: {:?}", err);
+                                            }
+                                        }
                                     }
                                     Err(_err) => {
                                         // The channel is empty; no signal is available

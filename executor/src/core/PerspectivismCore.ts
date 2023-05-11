@@ -91,6 +91,13 @@ export default class PerspectivismCore {
         })
     }
 
+    get holochainService(): HolochainService {
+        if (!this.#holochain) {
+            throw Error("No holochain service")
+        }
+        return this.#holochain
+    }
+
     get agentService(): AgentService {
         return this.#agentService
     }
