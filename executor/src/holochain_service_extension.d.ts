@@ -9,10 +9,12 @@ declare global {
         useProxy: bool,
         useLocalProxy: bool,
         useMdns: bool,
+        proxyUrl: String,
+        bootstrapUrl: String,
     }
 
     interface HolochainService {
-        async startHolochainService: (config: ConductorConfig) => void;
+        async startHolochainConductor: (config: ConductorConfig) => void;
         async logDhtStatus: () => void;
         async installApp: (install_app_payload: InstallAppRequest) => AppInfo;
         async getAppInfo: (app_id: String) => AppInfo | null;
