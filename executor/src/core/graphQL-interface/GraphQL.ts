@@ -440,13 +440,11 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 await core.agentService.save(args.passphrase)
                 const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
 
-                if (connectHolochain) {
-                  await core.connectHolochain( {hcPortAdmin: hcPortAdmin!, hcPortApp: hcPortApp!} );
-                } else {
-                  await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
-                }
+                await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                console.log("Holochain init complete");
 
                 await core.waitForAgent();
+                console.log("Wait for agent");
                 core.initControllers()
                 await core.initLanguages()
 
@@ -487,14 +485,10 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                         // @ts-ignore
                         const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
     
-                        if (connectHolochain) {
-                            await core.connectHolochain( {hcPortAdmin: hcPortAdmin!, hcPortApp: hcPortApp!} );
-                        } else {
-                            await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
-                            await core.waitForAgent();
-                            core.initControllers()
-                            await core.initLanguages()
-                        }
+                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                        await core.waitForAgent();
+                        core.initControllers()
+                        await core.initLanguages()
     
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                     }

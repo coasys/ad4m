@@ -213,18 +213,6 @@ export default class PerspectivismCore {
         });
     }
 
-    async connectHolochain(params: ConnectHolochainParams) {
-        console.log("Init ad4m service with resource path ", this.#config.resourcePath)
-        console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
-        this.#holochain = new HolochainService({
-            dataPath: this.#config.holochainDataPath,
-            resourcePath: this.#config.resourcePath,
-            adminPort: params.hcPortAdmin,
-            appPort: params.hcPortApp,
-        }, this.#agentService, this.entanglementProofController)
-        await this.#holochain.connect();
-    }
-
     async waitForAgent(): Promise<void> {
         return this.#agentService.ready
     }
@@ -353,7 +341,7 @@ export default class PerspectivismCore {
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
-        return Buffer.from(await this.#holochain!.pubKeyForLanguage(lang))
+        return Buffer.from(await HOLOCHAIN_SERVICE.getAgentKey());
     }
 
     async holochainRequestAgentInfos(): Promise<AgentInfoResponse> {
@@ -379,7 +367,7 @@ export default class PerspectivismCore {
         const templateParams = {
             uid: uuidv4(),
             recipient_did: this.#agentService.agent?.did,
-            recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
+            recipient_hc_agent_pubkey: Buffer.from(await HOLOCHAIN_SERVICE.getAgentKey()).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
         const createdDmLang = await this.languageApplyTemplateAndPublish(this.#config.directMessageLanguage, templateParams)
