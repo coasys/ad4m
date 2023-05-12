@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "description": "Documentation for AD4M",
   "license": "CAL-1.0",
+  "homepage": "./",
   "scripts": {
     "dev": "next dev",
     "start": "next start",
