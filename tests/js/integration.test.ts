@@ -622,6 +622,14 @@ describe("Integration", () => {
                     @subjectCollection({ through: "recipe://comment" })
                     // @ts-ignore
                     comments: string[] = []
+
+                    //@ts-ignore
+                    @subjectProperty({
+                        through: "recipe://local",
+                        writable: true,
+                        local: true
+                    })
+                    local: string = ""
                 }
 
                 before(async () => {
@@ -704,6 +712,31 @@ describe("Integration", () => {
                     await recipe2.get();
 
                     expect(recipe2.ingredients.length).to.equal(1)
+                })
+
+                it("save() & get()", async () => {
+                    let root = Literal.from("Active record implementation test local link").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test";
+                    recipe.local = 'test'
+
+                    await recipe.save();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test")
+                    expect(recipe2.local).to.equal("local")
+
+                    // @ts-ignore
+                    const links = perspective?.get({
+                        source: root,
+                        predicate: "recipe://local"
+                    })
+
+                    console.log('wow', links)
                 })
             })
         })
