@@ -78,6 +78,7 @@ interface PropertyOptions {
     resolveLanguage?: string;
     getter?: string;
     setter?: string;
+    local?: boolean
 }
 export function subjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
@@ -124,6 +125,7 @@ interface WhereOptions {
 interface CollectionOptions {
     through: string,
     where?: WhereOptions,
+    local?: boolean
 }
 
 export function subjectCollection(opts: CollectionOptions) {
@@ -182,7 +184,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
     
-                let { through, initial, required, resolveLanguage, writable, flag, getter, setter } = properties[property]
+                let { through, initial, required, resolveLanguage, writable, flag, getter, setter, local = false } = properties[property]
     
                 if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
@@ -213,6 +215,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
                             source: "this",
                             predicate: through,
                             target: "value",
+                            local
                         }]
                         propertyCode += `property_setter(${uuid}, "${property}", '${stringifyObjectLiteral(action)}').\n`
                     }
@@ -235,7 +238,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
             for(let collection in collections) {
                 let collectionCode = `collection(${uuid}, "${collection}").\n`
     
-                let { through, where } = collections[collection]
+                let { through, where, local = false } = collections[collection]
     
                 if(through) {
                     if(where) {
@@ -271,6 +274,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         source: "this",
                         predicate: through,
                         target: "value",
+                        local
                     }]
                     
                     let collectionSetterAction = [{
@@ -278,6 +282,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         source: "this",
                         predicate: through,
                         target: "value",
+                        local
                     }]
                     collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(action)}').\n`
                     collectionCode += `collection_setter(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`

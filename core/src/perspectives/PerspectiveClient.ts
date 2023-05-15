@@ -187,14 +187,14 @@ export class PerspectiveClient {
         return perspectiveAddLink
     }
 
-    async addLinks(uuid: string, links: Link[]): Promise<LinkExpression[]> {
+    async addLinks(uuid: string, links: Link[], status?: LinkStatus): Promise<LinkExpression[]> {
         const { perspectiveAddLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLinks($uuid: String!, $links: [LinkInput!]!){
-                perspectiveAddLinks(links: $links, uuid: $uuid) {
+            mutation: gql`mutation perspectiveAddLinks($uuid: String!, $links: [LinkInput!]!, $status: String){
+                perspectiveAddLinks(links: $links, uuid: $uuid, $status: String) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
             }`,
-            variables: { uuid, links }
+            variables: { uuid, links, status }
         }))
         return perspectiveAddLinks
     }
@@ -211,10 +211,10 @@ export class PerspectiveClient {
         return perspectiveRemoveLinks
     }
 
-    async linkMutations(uuid: string, mutations: LinkMutations): Promise<LinkExpressionMutations> {
+    async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
         const { perspectiveLinkMutations } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveLinkMutations($uuid: String!, $mutations: LinkMutations!){
-                perspectiveLinkMutations(mutations: $mutations, uuid: $uuid) {
+            mutation: gql`mutation perspectiveLinkMutations($uuid: String!, $mutations: LinkMutations!, $status: String){
+                perspectiveLinkMutations(mutations: $mutations, uuid: $uuid, $status: String) {
                     additions {
                         ${LINK_EXPRESSION_FIELDS}
                     }
@@ -223,7 +223,7 @@ export class PerspectiveClient {
                     }
                 }
             }`,
-            variables: { uuid, mutations }
+            variables: { uuid, mutations, status }
         }))
         return perspectiveLinkMutations
     }
