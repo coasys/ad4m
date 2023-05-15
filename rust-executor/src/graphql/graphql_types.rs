@@ -1,4 +1,4 @@
-use juniper::{GraphQLInputObject, GraphQLObject, GraphQLScalar};
+use juniper::{FieldError, FieldResult, GraphQLInputObject, GraphQLObject, GraphQLScalar};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -402,6 +402,27 @@ pub struct LinkUpdated {
 pub struct PerspectiveStateFilter {
     pub state: String,
     pub perspective: PerspectiveHandle,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum JsResultType<T>
+where
+    T: std::fmt::Debug + Serialize + 'static,
+{
+    Ok(T),
+    Error(String),
+}
+
+impl<T> JsResultType<T>
+where
+    T: std::fmt::Debug + Serialize + 'static,
+{
+    pub fn get_graphql_result(self) -> FieldResult<T> {
+        match self {
+            JsResultType::Ok(result) => Ok(result),
+            JsResultType::Error(error) => Err(FieldError::from(error.clone())),
+        }
+    }
 }
 
 // Define the trait with a generic associated type `Value`

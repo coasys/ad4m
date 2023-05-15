@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(unused_variables)]
 use juniper::{graphql_object, FieldResult};
-use log::{debug, info};
+use log::debug;
 
 use crate::js_core::JsCoreHandle;
 
@@ -21,16 +21,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.addTrustedAgents(
-                {{ agents: {:?} }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "addTrustedAgents", {{ agents: {:?} }}, {{ capabilities: [{}] }})
+            )"#,
             agents, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<String> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_add_entanglement_proofs(
@@ -41,17 +38,14 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentAddEntanglementProofs(
-                {{ proofs: {} }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentAddEntanglementProofs", {{ proofs: {} }}, {{ capabilities: [{}] }})
+            )"#,
             serde_json::to_string(&proofs).unwrap(),
             ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<EntanglementProof> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_delete_entanglement_proofs(
@@ -62,17 +56,14 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentDeleteEntanglementProofs(
-                {{ proofs: {} }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentDeleteEntanglementProofs", {{ proofs: {} }}, {{ capabilities: [{}] }})
+            )"#,
             serde_json::to_string(&proofs).unwrap(),
             ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<EntanglementProof> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_entanglement_proof_pre_flight(
@@ -84,16 +75,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentEntanglementProofPreFlight(
-                {{ deviceKey: "{}", deviceKeyType: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentEntanglementProofPreFlight", {{ deviceKey: "{}", deviceKeyType: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             device_key, device_key_type, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: EntanglementProof = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<EntanglementProof> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_generate(
@@ -104,16 +92,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentGenerate(
-                {{ passphrase: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentGenerate", {{ passphrase: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             passphrase, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: AgentStatus = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_generate_jwt(
@@ -125,16 +110,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentGenerateJwt(
-                {{ rand: "{}", requestId: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentGenerateJwt", {{ rand: "{}", requestId: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             rand, request_id, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: String = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<String> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_lock(
@@ -145,16 +127,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentLock(
-                {{ passphrase: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentLock", {{ passphrase: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             passphrase, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: AgentStatus = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     //NOTE: all the functions from here on out have not been tested by calling the cli <-> rust graphql server
@@ -166,16 +145,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.agentPermitCapability(
-                {{ auth: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentPermitCapability", {{ auth: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             auth, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: String = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<String> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_remove_app(
@@ -186,16 +162,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentRemoveApp(
-                {{ requestId: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentRemoveApp", {{ requestId: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             request_id, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<Apps> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_request_capability(
@@ -207,16 +180,13 @@ impl Mutation {
         let auth_info_json = serde_json::to_string(&auth_info)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentRequestCapability(
-                {{ authInfo: {} }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentRequestCapability", {{ authInfo: {} }}, {{ capabilities: [{}] }})
+            )"#,
             auth_info_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: String = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<String> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_revoke_token(
@@ -227,16 +197,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentRevokeToken(
-                {{ requestId: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentRevokeToken", {{ requestId: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             request_id, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<Apps> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_sign_message(
@@ -247,16 +214,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentSignMessage(
-                {{ message: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentSignMessage", {{ message: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             message, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: AgentSignature = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<AgentSignature> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_unlock(
@@ -267,16 +231,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentUnlock(
-                {{ passphrase: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             passphrase, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: AgentStatus = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_update_direct_message_language(
@@ -287,16 +248,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentUpdateDirectMessageLanguage(
-                {{ directMessageLanguage: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentUpdateDirectMessageLanguage", {{ directMessageLanguage: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             direct_message_language, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Agent = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn agent_update_public_perspective(
@@ -308,16 +266,13 @@ impl Mutation {
         let perspective_json = serde_json::to_string(&perspective)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.agentUpdatePublicPerspective(
-                {{ perspective: {} }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }}, {{ capabilities: [{}] }})
+            )"#,
             perspective_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Agent = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn delete_trusted_agents(
@@ -329,16 +284,13 @@ impl Mutation {
         let agents_json = serde_json::to_string(&agents)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.deleteTrustedAgents(
-                {{ agents: {} }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "deleteTrustedAgents", {{ agents: {} }}, {{ capabilities: [{}] }})
+            )"#,
             agents_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<String> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn expression_create(
@@ -350,16 +302,13 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.expressionCreate(
-                {{ content: {}, languageAddress: "{}" }},
-                {{ capabilities: [{}] }}
-            )
-        )"#,
+                await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }}, {{ capabilities: [{}] }})
+            )"#,
             content, language_address, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: String = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<String> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn expression_interact(
@@ -372,16 +321,17 @@ impl Mutation {
         let interaction_call_json = serde_json::to_string(&interaction_call)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.expressionInteract(
+            await core.callResolver(
+                "Mutation",
+                "expressionInteract",
                 {{ interactionCall: {}, url: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             interaction_call_json, url, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: String = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<String> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn language_apply_template_and_publish(
@@ -393,16 +343,17 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.languageApplyTemplateAndPublish(
+            await core.callResolver(
+                "Mutation",
+                "languageApplyTemplateAndPublish",
                 {{ sourceLanguageHash: "{}", templateData: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             source_language_hash, template_data, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: LanguageRef = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<LanguageRef> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn language_publish(
@@ -415,32 +366,34 @@ impl Mutation {
         let language_meta_json = serde_json::to_string(&language_meta)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.languagePublish(
+            await core.callResolver(
+                "Mutation",
+                "languagePublish",
                 {{ languageMeta: {}, languagePath: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             language_meta_json, language_path, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: LanguageMeta = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<LanguageMeta> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn language_remove(&self, context: &JsCoreHandle, address: String) -> FieldResult<bool> {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.languageRemove(
+            await core.callResolver(
+                "Mutation",
+                "languageRemove",
                 {{ address: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             address, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn language_write_settings(
@@ -452,16 +405,17 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.languageWriteSettings(
+            await core.callResolver(
+                "Mutation",
+                "languageWriteSettings",
                 {{ languageAddress: "{}", settings: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             language_address, settings, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn neighbourhood_join_from_url(
@@ -472,16 +426,17 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.neighbourhoodJoinFromUrl(
+            await core.callResolver(
+                "Mutation",
+                "neighbourhoodJoinFromUrl",
                 {{ url: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             url, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: PerspectiveHandle = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn neighbourhood_publish_from_perspective(
@@ -495,16 +450,17 @@ impl Mutation {
         let meta_json = serde_json::to_string(&meta)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.neighbourhoodPublishFromPerspective(
+            await core.callResolver(
+                "Mutation",
+                "neighbourhoodPublishFromPerspective",
                 {{ linkLanguage: "{}", meta: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             link_language, meta_json, perspectiveUUID, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: String = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<String> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn neighbourhood_send_broadcast(
@@ -517,16 +473,17 @@ impl Mutation {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.neighbourhoodSendBroadcast(
+            await core.callResolver(
+                "Mutation",
+                "neighbourhoodSendBroadcast",
                 {{ payload: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             payload_json, perspectiveUUID, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn neighbourhood_send_broadcast_u(
@@ -539,16 +496,17 @@ impl Mutation {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.neighbourhoodSendBroadcastU(
+            await core.callResolver(
+                "Mutation",
+                "neighbourhoodSendBroadcastU",
                 {{ payload: {}, perspectiveUUID: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             payload_json, perspectiveUUID, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn neighbourhood_send_signal(
@@ -562,16 +520,17 @@ impl Mutation {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.neighbourhoodSendSignal(
+            await core.callResolver(
+                "Mutation",
+                "neighbourhoodSendSignal",
                 {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             payload_json, perspectiveUUID, remote_agent_did, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn neighbourhood_send_signal_u(
@@ -585,16 +544,17 @@ impl Mutation {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.neighbourhoodSendSignalU(
+            await core.callResolver(
+                "Mutation",
+                "neighbourhoodSendSignalU",
                 {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             payload_json, perspectiveUUID, remote_agent_did, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn neighbourhood_set_online_status(
@@ -607,16 +567,17 @@ impl Mutation {
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.neighbourhoodSetOnlineStatus(
+            await core.callResolver(
+                "Mutation",
+                "neighbourhoodSetOnlineStatus",
                 {{ perspectiveUUID: "{}", status: {} }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             perspectiveUUID, status_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn neighbourhood_set_online_status_u(
@@ -629,16 +590,17 @@ impl Mutation {
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.neighbourhoodSetOnlineStatusU(
+            await core.callResolver(
+                "Mutation",
+                "neighbourhoodSetOnlineStatusU",
                 {{ perspectiveUUID: "{}", status: {} }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             perspectiveUUID, status_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_add(
@@ -646,21 +608,20 @@ impl Mutation {
         context: &JsCoreHandle,
         name: String,
     ) -> FieldResult<PerspectiveHandle> {
-        info!("creating perspective {}", name);
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveAdd(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveAdd",
                 {{ name: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             name, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        debug!("created perspective w result: {:?}", result);
-        let s: PerspectiveHandle = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_add_link(
@@ -673,16 +634,17 @@ impl Mutation {
         let link_json = serde_json::to_string(&link)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveAddLink(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveAddLink",
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             link_json, uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: LinkExpression = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_add_link_expression(
@@ -695,16 +657,17 @@ impl Mutation {
         let link_json = serde_json::to_string(&link)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveAddLinkExpression(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveAddLinkExpression",
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             link_json, uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: LinkExpression = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_add_links(
@@ -717,16 +680,17 @@ impl Mutation {
         let links_json = serde_json::to_string(&links)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveAddLinks(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveAddLinks",
                 {{ links: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             links_json, uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<LinkExpression> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_link_mutations(
@@ -739,16 +703,17 @@ impl Mutation {
         let mutations_json = serde_json::to_string(&mutations)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveLinkMutations(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveLinkMutations",
                 {{ mutations: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             mutations_json, uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: LinkExpressionMutations = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<LinkExpressionMutations> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_publish_snapshot(
@@ -759,32 +724,34 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectivePublishSnapshot(
+            await core.callResolver(
+                "Mutation",
+                "perspectivePublishSnapshot",
                 {{ uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: String = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<String> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_remove(&self, context: &JsCoreHandle, uuid: String) -> FieldResult<bool> {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveRemove(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveRemove",
                 {{ uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_remove_link(
@@ -797,16 +764,17 @@ impl Mutation {
         let link_json = serde_json::to_string(&link)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveRemoveLink(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveRemoveLink",
                 {{ link: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             link_json, uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_remove_links(
@@ -819,16 +787,17 @@ impl Mutation {
         let links_json = serde_json::to_string(&links)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveRemoveLinks(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveRemoveLinks",
                 {{ links: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             links_json, uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<LinkExpression> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_update(
@@ -840,16 +809,17 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveUpdate(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveUpdate",
                 {{ name: "{}", uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             name, uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: PerspectiveHandle = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn perspective_update_link(
@@ -864,16 +834,17 @@ impl Mutation {
         let old_link_json = serde_json::to_string(&old_link)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.perspectiveUpdateLink(
+            await core.callResolver(
+                "Mutation",
+                "perspectiveUpdateLink",
                 {{ newLink: {}, oldLink: {}, uuid: "{}" }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             new_link_json, old_link_json, uuid, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: LinkExpression = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_add_friends(
@@ -885,16 +856,17 @@ impl Mutation {
         let dids_json = serde_json::to_string(&dids)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.runtimeAddFriends(
+            await core.callResolver(
+                "Mutation",
+                "runtimeAddFriends",
                 {{ dids: {} }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             dids_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<String> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_add_known_link_language_templates(
@@ -906,16 +878,17 @@ impl Mutation {
         let addresses_json = serde_json::to_string(&addresses)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeAddKnownLinkLanguageTemplates(
+            await core.callResolver(
+                "Mutation",
+                "runtimeAddKnownLinkLanguageTemplates",
                 {{ addresses: {} }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             addresses_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<String> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_friend_send_message(
@@ -928,16 +901,17 @@ impl Mutation {
         let message_json = serde_json::to_string(&message)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.runtimeFriendSendMessage(
+            await core.callResolver(
+                "Mutation",
+                "runtimeFriendSendMessage",
                 {{ did: "{}", message: {} }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             did, message_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_hc_add_agent_infos(
@@ -948,46 +922,50 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.runtimeHcAddAgentInfos(
+            await core.callResolver(
+                "Mutation",
+                "runtimeHcAddAgentInfos",
                 {{ agentInfos: JSON.stringify({}) }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             agent_infos, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_open_link(&self, context: &JsCoreHandle, url: String) -> FieldResult<bool> {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeOpenLink(
-                {{ url: "{}" }}
-            )
-        )"#,
-            url
+            await core.callResolver(
+                "Mutation",
+                "runtimeOpenLink",
+                {{ url: "{}" }},
+                {{ capabilities: [{}] }}
+            ))"#,
+            url, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_quit(&self, context: &JsCoreHandle) -> FieldResult<bool> {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeQuit(
+            await core.callResolver(
+                "Mutation",
+                "runtimeQuit",
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_remove_friends(
@@ -999,16 +977,17 @@ impl Mutation {
         let dids_json = serde_json::to_string(&dids)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeRemoveFriends(
+            await core.callResolver(
+                "Mutation",
+                "runtimeRemoveFriends",
                 {{ dids: {} }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             dids_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<String> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_remove_known_link_language_templates(
@@ -1020,16 +999,17 @@ impl Mutation {
         let addresses_json = serde_json::to_string(&addresses)?;
         let script = format!(
             r#"JSON.stringify(
-            core.resolvers.Mutation.runtimeRemoveKnownLinkLanguageTemplates(
+            await core.callResolver(
+                "Mutation",
+                "runtimeRemoveKnownLinkLanguageTemplates",
                 {{ addresses: {} }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             addresses_json, ALL_CAPABILITY
         );
         let result = js.execute(script).await?;
-        let s: Vec<String> = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_set_status(
@@ -1041,15 +1021,17 @@ impl Mutation {
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"JSON.stringify(
-            await core.resolvers.Mutation.runtimeSetStatus(
+            await core.callResolver(
+                "Mutation",
+                "runtimeSetStatus",
                 {{ status: {} }},
                 {{ capabilities: [{}] }}
-            )
-        )"#,
+            ))"#,
             status_json, ALL_CAPABILITY
         );
+        debug!("runtime_set_status script: {}", script);
         let result = js.execute(script).await?;
-        let s: bool = serde_json::from_str(&result)?;
-        Ok(s)
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 }

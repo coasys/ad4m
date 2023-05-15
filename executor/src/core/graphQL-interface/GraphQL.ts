@@ -21,11 +21,6 @@ import { OuterConfig } from '../../main';
 import path from 'path';
 import Perspective from '../Perspective';
 
-function withFilter(f1:()=>{}, f2:(payload: any, variables: any)=>{} ) {
-    return (a1: any, a2: any) => {
-    }
-}
-
 function checkLinkLanguageInstalled(perspective: Perspective) {
     if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
         throw new Error(`Perspective ${perspective.uuid}/${perspective.name} does not have a LinkLanguage installed. State is: ${perspective.state}`) 
@@ -33,12 +28,12 @@ function checkLinkLanguageInstalled(perspective: Perspective) {
 }
 
 export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
-    const pubsub = PubSub.get()
     function signPerspectiveDeep(input: PerspectiveUnsignedInput): PerspectiveExpression {
         let out = new PerspectiveExpression()
         out.links = input.links.map(l => core.agentService.createSignedExpression(l))
         return core.agentService.createSignedExpression(out)
     }
+
     return {
         Query: {
             //@ts-ignore
@@ -79,7 +74,6 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 let apps = await core.agentService.getApps()
                 return apps;
-
             },
             //@ts-ignore
             expression: async (args, context) => {

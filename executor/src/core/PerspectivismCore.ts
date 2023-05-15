@@ -91,6 +91,29 @@ export default class PerspectivismCore {
         })
     }
 
+    async callResolver (type: string, fnName: string, args: any, context: any) {
+      if(!this.resolvers[type]) throw new Error(`Could not find resolver for type ${type}`)
+      if(!this.resolvers[type][fnName]) throw new Error(`Could not find resolver function ${fnName} for type ${type}`)
+      try {
+        let result;
+        if (args && context) {
+            result = await this.resolvers[type][fnName](args, context);
+        }
+        if (!args) {
+            result = await this.resolvers[type][fnName](context);
+        } 
+        if (!context) {
+            result = await this.resolvers[type][fnName](args);
+        }
+        if (!args && !context) {
+            result = await this.resolvers[type][fnName]();
+        }
+        return {"Ok": result}
+      } catch (error) {
+        return {"Error": JSON.stringify(error)}
+      }
+    }
+
     get holochainService(): HolochainService {
         if (!this.#holochain) {
             throw Error("No holochain service")
