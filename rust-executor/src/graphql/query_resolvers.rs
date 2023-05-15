@@ -437,11 +437,15 @@ impl Query {
         context: &JsCoreHandle,
         filter: Option<String>,
     ) -> FieldResult<Vec<PerspectiveExpression>> {
-        let filter_str = filter.unwrap_or_else(|| String::from("{}"));
+        let filter_str = filter
+            .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
+            .unwrap_or_else(|| String::from("{ filter: null }"));
+        let script = format!(
+            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageInbox", {}, {{ capabilities: [{}] }}))"#,
+            filter_str, ALL_CAPABILITY
+        );
         let mut js = context.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageInbox", {{ filter: "{}" }}, {{ capabilities: [{}] }}))"#, filter_str, ALL_CAPABILITY))
-            .await?;
+        let result = js.execute(script).await?;
         let result: JsResultType<Vec<PerspectiveExpression>> = serde_json::from_str(&result)?;
         result.get_graphql_result()
     }
@@ -451,11 +455,15 @@ impl Query {
         context: &JsCoreHandle,
         filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
-        let filter_str = filter.unwrap_or_else(|| String::from("{}"));
+        let filter_str = filter
+            .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
+            .unwrap_or_else(|| String::from("{ filter: null }"));
+        let script = format!(
+            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageOutbox", {}, {{ capabilities: [{}] }}))"#,
+            filter_str, ALL_CAPABILITY
+        );
         let mut js = context.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageOutbox", {{ filter: "{}" }}, {{ capabilities: [{}] }}))"#, filter_str, ALL_CAPABILITY))
-            .await?;
+        let result = js.execute(script).await?;
         let result: JsResultType<Vec<SentMessage>> = serde_json::from_str(&result)?;
         result.get_graphql_result()
     }
