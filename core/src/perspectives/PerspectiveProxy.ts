@@ -19,7 +19,7 @@ interface Parameter {
 }
 
 /** Perspective UI proxy object
- * 
+ *
  * Convenience object for UIs to interact with a perspective.
  * It is created by some of the methods in the PerspectiveClient class and includes
  * a reference to the PerspectiveClient object that created it.
@@ -68,7 +68,8 @@ export class PerspectiveProxy {
             let source = replaceThis(replaceParameters(command.source))
             let predicate = replaceThis(replaceParameters(command.predicate))
             let target = replaceThis(replaceParameters(command.target))
-            let local = replaceThis(replaceParameters(command.local))
+            let local = command.local ?? false
+
             switch(command.action) {
                 case 'addLink':
                     await this.add(new Link({source, predicate, target}), local ? 'local' : 'shared')
@@ -234,7 +235,7 @@ export class PerspectiveProxy {
     /** Convenience function to get the target of the first link that matches the given query
      * This makes sense when the query is expected to return only one link
      * and the target of that link is what you are looking for.
-     * 
+     *
      * Works best together with @member setSingelTarget()
      */
     async getSingleTarget(query: LinkQuery): Promise<string|void> {
@@ -250,7 +251,7 @@ export class PerspectiveProxy {
      * This function will remove all links with the same source and predicate as the given link,
      * and then add the given link.
      * This ensures there is only one target for the given source and predicate.
-     * 
+     *
      * Works best together with @member getSingleTarget()
      */
     async setSingleTarget(link: Link, status: LinkStatus = 'shared') {
@@ -314,7 +315,7 @@ export class PerspectiveProxy {
         await this.executeAction(action, exprAddr, undefined)
     }
 
-    /** Set the perspective's Social DNA code to the given string. 
+    /** Set the perspective's Social DNA code to the given string.
      * This will replace all previous SDNA code elements with the new one.
      */
     async setSdna(sdnaCode: string) {
@@ -325,7 +326,7 @@ export class PerspectiveProxy {
         }), 'shared')
     }
 
-    /** Returns the perspective's Social DNA code 
+    /** Returns the perspective's Social DNA code
      * This will return all SDNA code elements in an array.
      */
     async getSdna(): Promise<string[]> {
@@ -358,7 +359,7 @@ export class PerspectiveProxy {
     async stringOrTemplateObjectToSubjectClass<T>(subjectClass: T): Promise<string> {
         if(typeof subjectClass === "string")
             return subjectClass
-        else { 
+        else {
             let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
             if(subjectClasses[0]) {
                 return subjectClasses[0]
@@ -372,7 +373,7 @@ export class PerspectiveProxy {
     /** Creates a new subject instance by running its (SDNA defined) constructor,
      * which means adding links around the given expression address so that it
      * conforms to the given subject class.
-     * 
+     *
      * @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, the first subject class
      * that matches the given properties will be used.
@@ -382,7 +383,7 @@ export class PerspectiveProxy {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
         if(!result.length) {
-            throw "No constructor found for given subject class: " + className 
+            throw "No constructor found for given subject class: " + className
         }
 
         let actions = result.map(x => eval(x.Actions))
@@ -390,7 +391,7 @@ export class PerspectiveProxy {
         return this.getSubjectProxy(exprAddr, subjectClass)
     }
 
-    /** Checks if the given expression is a subject instance of the given subject class 
+    /** Checks if the given expression is a subject instance of the given subject class
      * @param expression The expression to be checked
      * @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, the first subject class
@@ -405,7 +406,7 @@ export class PerspectiveProxy {
     /** For an existing subject instance (existing in the perspective's links)
      * this function returns a proxy object that can be used to access the subject's
      * properties and methods.
-     * 
+     *
      * @param base URI of the subject's root expression
      * @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, the first subject class
@@ -415,7 +416,7 @@ export class PerspectiveProxy {
         if(!await this.isSubjectInstance(base, subjectClass)) {
             throw `Expression ${base} is not a subject instance of given class: ${JSON.stringify(subjectClass)}`
         }
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)   
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
         let subject = new Subject(this, base, className)
         await subject.init()
         return subject as unknown as T
@@ -464,10 +465,10 @@ export class PerspectiveProxy {
      * its setters and collections to create a Prolog query that finds
      * all subject classes that would be converted to a proxy object
      * with exactly the same properties and collections.
-     * 
+     *
      * Since there could be multiple subject classes that match the given
      * criteria, this function returns a list of class names.
-     * 
+     *
      * @param obj The template object
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
@@ -511,7 +512,7 @@ export class PerspectiveProxy {
         for(let addFunction of addFunctions) {
             query += `, collection_adder(C, "${collectionAdderToName(addFunction)}", _)`
         }
-        
+
         for(let setCollectionFunction of setCollectionFunctions) {
             query += `, collection_setter(C, "${collectionSetterToName(setCollectionFunction)}", _)`
         }
@@ -536,7 +537,7 @@ export class PerspectiveProxy {
         if((await this.subjectClassesByTemplate(new jsClass)).length > 0) {
             return
         }
-        
+
         await this.addSdna(jsClass.generateSDNA())
     }
 
