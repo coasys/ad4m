@@ -13,7 +13,7 @@ use std::env;
 
 use js_core::JsCore;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() {
     env::set_var("RUST_LOG", "rust_executor=info");
     env_logger::init();
