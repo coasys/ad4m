@@ -46,7 +46,7 @@ async fn call_zome_function(
     cell_name: String,
     zome_name: String,
     fn_name: String,
-    payload: serde_json::Value,
+    payload: Option<serde_json::Value>,
 ) -> Result<ZomeCallResponse, AnyError> {
     let conductor = get_global_conductor().await;
     conductor

@@ -168,7 +168,7 @@ impl HolochainService {
         cell_name: String,
         zome_name: String,
         fn_name: String,
-        payload: serde_json::Value,
+        payload: Option<serde_json::Value>,
     ) -> Result<ZomeCallResponse, AnyError> {
         info!(
             "Calling zome function: {:?} {:?} {:?} {:?} {:?}",
@@ -218,11 +218,16 @@ impl HolochainService {
             nonce
         }
 
+        let payload = match payload {
+            Some(payload) => ExternIO::encode(payload).unwrap(),
+            None => ExternIO::encode(()).unwrap(),
+        };
+
         let zome_call_unsigned = ZomeCallUnsigned {
             cell_id: cell_id,
             zome_name: zome_name.into(),
             fn_name: fn_name.into(),
-            payload: ExternIO::encode(payload).unwrap(),
+            payload: payload,
             cap_secret: None,
             provenance: agent_pub_key,
             nonce: generate_nonce().into(),
