@@ -33,9 +33,10 @@ impl PerspectiveProxy {
         source: String,
         target: String,
         predicate: Option<String>,
+        status: Option<String>
     ) -> Result<AddLinkPerspectiveAddLink> {
         self.client
-            .add_link(self.perspective_uuid.clone(), source, target, predicate)
+            .add_link(self.perspective_uuid.clone(), source, target, predicate, status)
             .await
     }
 
@@ -155,6 +156,7 @@ impl PerspectiveProxy {
                 source,
                 target,
                 Some(predicate),
+                Some("shared".to_string())
             )
             .await?;
         Ok(())
@@ -293,7 +295,7 @@ impl PerspectiveProxy {
             match command.action.as_str() {
                 "addLink" => {
                     //println!("addLink: {:?}", command);
-                    self.add_link(command.source, command.target, command.predicate)
+                    self.add_link(command.source, command.target, command.predicate, command.status)
                         .await?;
                 }
                 "removeLink" => {
@@ -326,6 +328,7 @@ struct Command {
     pub source: String,
     pub predicate: Option<String>,
     pub target: String,
+    pub status: Option<String>
 }
 
 impl Command {
@@ -338,6 +341,10 @@ impl Command {
                 .as_ref()
                 .map(|f| f.replace(pattern, replacement)),
             target: self.target.replace(pattern, replacement),
+            status: self
+                .status
+                .as_ref()
+                .map(|f| f.replace(pattern, replacement)),
         }
     }
 }
@@ -346,9 +353,9 @@ fn parse_action(action: &String) -> Result<Vec<Command>> {
     let action_regex = Regex::new(r"\[(?P<command>\{.*})*\]")?;
 
     // This parses strings like:
-    // {action: "<action>", source: "<source>", predicate: "<predicate>", target: "<target>"}
+    // {action: "<action>", source: "<source>", predicate: "<predicate>", target: "<target>", status: "<status>"}
     let command_regex = Regex::new(
-        r#"\{(action:\s*"(?P<action>[\S--,]+)",?\s*)|(source:\s*"(?P<source>[\S--,]+)",?\s*)|(predicate:\s*"(?P<predicate>[\S--,]+)",?\s*)|(target:\s*"(?P<target>[\S--,]+)",?\s*)\}"#,
+        r#"\{(action:\s*"(?P<action>[\S--,]+)",?\s*)|(source:\s*"(?P<source>[\S--,]+)",?\s*)|(predicate:\s*"(?P<predicate>[\S--,]+)",?\s*)|(target:\s*"(?P<target>[\S--,]+)",?\s*)|(status:\s*"(?P<status>[\S--,]+)",?\s*)\}"#,
     )?;
 
     let mut commands = Vec::new();
@@ -357,6 +364,7 @@ fn parse_action(action: &String) -> Result<Vec<Command>> {
         let mut source = None;
         let mut predicate = None;
         let mut target = None;
+        let mut status = None;
         command_regex
             .captures_iter(capture.name("command").unwrap().as_str())
             .for_each(|capture| {
@@ -364,6 +372,7 @@ fn parse_action(action: &String) -> Result<Vec<Command>> {
                 source = source.or(capture.name("source").map(|e| e.as_str()));
                 predicate = predicate.or(capture.name("predicate").map(|e| e.as_str()));
                 target = target.or(capture.name("target").map(|e| e.as_str()));
+                status = status.or(capture.name("status").map(|e| e.as_str()));
             });
 
         commands.push(Command {
@@ -371,6 +380,7 @@ fn parse_action(action: &String) -> Result<Vec<Command>> {
             source: source.ok_or(anyhow!("Comman without source"))?.into(),
             predicate: predicate.map(|e| e.into()),
             target: target.ok_or(anyhow!("Comman without target"))?.into(),
+            status: status.map(|e| e.into()),
         });
         //println!("{:?}", commands);
     }

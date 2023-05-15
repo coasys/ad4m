@@ -12,6 +12,7 @@ import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
+export type LinkStatus = "shared" | "local"
 interface Parameter {
     name: string
     value: string
@@ -125,8 +126,8 @@ export class PerspectiveProxy {
     }
 
     /** Adds a link to this perspective */
-    async add(link: Link): Promise<LinkExpression> {
-        return await this.#client.addLink(this.#handle.uuid, link)
+    async add(link: Link, status: LinkStatus = 'shared'): Promise<LinkExpression> {
+        return await this.#client.addLink(this.#handle.uuid, link, status)
     }
 
     /** Adds multiple links to this perspective **/
@@ -145,8 +146,8 @@ export class PerspectiveProxy {
     }
 
     /** Adds a linkExpression to this perspective */
-    async addLinkExpression(link: LinkExpressionInput): Promise<LinkExpression> {
-        return await this.#client.addLinkExpression(this.#handle.uuid, link)
+    async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared'): Promise<LinkExpression> {
+        return await this.#client.addLinkExpression(this.#handle.uuid, link, status)
     }
 
     async update(oldLink: LinkExpressionInput, newLink: Link) {
