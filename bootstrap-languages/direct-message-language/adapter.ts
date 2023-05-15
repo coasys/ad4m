@@ -95,13 +95,9 @@ export default class DMAdapter implements DirectMessageAdapter {
   }
 
   async setStatus(status: PerspectiveExpression) {
-    console.log("Setting status:", status);
     this.onlyRecipient()
-    console.log("about to sign");
     const statusExpression = this.#context.agent.createSignedExpression(status)
-    console.log("Signed exp", statusExpression);
-    const res = await this.#holochain.call(DNA_NICK, "direct-message", "set_status", statusExpression)
-    console.log("got res", res);
+    await this.#holochain.call(DNA_NICK, "direct-message", "set_status", statusExpression)
   }
 
   async inbox(filter?: string): Promise<PerspectiveExpression[]> {
