@@ -17,7 +17,7 @@ function interactions(expression: Address): Interaction[] {
   return [];
 }
 
-//@ad4m-template-variable
+//!@ad4m-template-variable
 export const name = "agent-expression-store";
 
 export default async function create(context: LanguageContext): Promise<Language> {

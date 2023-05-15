@@ -11,7 +11,7 @@ function isImmutableExpression(expression: Address): boolean {
     return true
 }
 
-//@ad4m-template-variable
+//!@ad4m-template-variable
 const name = "file-storage";
 
 export default async function create(context: LanguageContext): Promise<Language> {

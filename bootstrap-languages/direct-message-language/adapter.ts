@@ -1,7 +1,7 @@
 import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
 import { DNA, DNA_NICK } from "./build/dna.js";
 
-//@ad4m-template-variable
+//!@ad4m-template-variable
 const recipient_did = "<not templated yet>"
 
 //@ts-ignore
@@ -90,13 +90,18 @@ export default class DMAdapter implements DirectMessageAdapter {
   }
 
   onlyRecipient() {
+    console.log(recipient_did, this.#context.agent.did);
     if(recipient_did !== this.#context.agent.did) throw new Error("Only recipient can call this function!")
   }
 
   async setStatus(status: PerspectiveExpression) {
+    console.log("Setting status:", status);
     this.onlyRecipient()
+    console.log("about to sign");
     const statusExpression = this.#context.agent.createSignedExpression(status)
-    await this.#holochain.call(DNA_NICK, "direct-message", "set_status", statusExpression)
+    console.log("Signed exp", statusExpression);
+    const res = await this.#holochain.call(DNA_NICK, "direct-message", "set_status", statusExpression)
+    console.log("got res", res);
   }
 
   async inbox(filter?: string): Promise<PerspectiveExpression[]> {

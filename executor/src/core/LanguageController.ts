@@ -640,7 +640,7 @@ export default class LanguageController {
 
     applyTemplateData(sourceLanguageLines: string[], templateData: object) {
         //Get lines in sourceLanguageLines which have ad4m-template-variable declared
-        const ad4mTemplatePattern = "//@ad4m-template-variable";
+        const ad4mTemplatePattern = "//!@ad4m-template-variable";
         var indexes = [];
         for(let i = 0; i < sourceLanguageLines.length; i++) {
             if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {

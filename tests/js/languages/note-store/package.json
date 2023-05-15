@@ -5,8 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "deno-bundle": "deno bundle index.ts build/bundle.js",
-    "build": "yarn run deno-bundle"
+    "build": "deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",

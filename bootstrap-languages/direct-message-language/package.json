@@ -3,6 +3,7 @@
   "version": "0.3.2",
   "description": "A templateable AD4M Language for personal, per-agent direct message Languages",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "test": "echo \"No direct message integration tests\"",
     "rollup-dna": "rollup -c rollup.config.hc-dna.js",
@@ -14,7 +15,7 @@
     "build:linux": "yarn compile-dna && yarn build:common",
     "build:macos": "yarn compile-dna && yarn build:common",
     "build:windows": "yarn compile-dna-windows && yarn build:common",
-    "build:common": "yarn rollup-dna && yarn deno-bundle"
+    "build:common": "yarn rollup-dna && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",
