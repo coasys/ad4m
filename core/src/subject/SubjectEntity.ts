@@ -117,10 +117,12 @@ export class SubjectEntity {
     if (collectionSetters.length > 0) {
       const actions = eval(collectionSetters[0].Setter)
 
-      if (Array.isArray(value)) {
-        await this.#perspective.executeAction(actions, this.#baseExpression, value.map(v => ({ name: "value", value: v })))
-      } else {
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
+      if (value) {
+        if (Array.isArray(value)) {
+          await this.#perspective.executeAction(actions, this.#baseExpression, value.map(v => ({ name: "value", value: v })))
+        } else {
+          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
+        }
       }
     }
   }
@@ -131,10 +133,28 @@ export class SubjectEntity {
 
     if (adders.length > 0) {
       const actions = eval(adders[0].Adder)
-      if (Array.isArray(value)) {
-        await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }])))
-      } else {
-        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
+      if (value) {
+        if (Array.isArray(value)) {
+          await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }])))
+        } else {
+          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
+        }
+      }
+    }
+  }
+
+  private async setCollectionRemover(key: string, value: any) {
+    let removers = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_remover(C, "${singularToPlural(key)}", Remover)`)
+    if (!removers) removers = []
+
+    if (removers.length > 0) {
+      const actions = eval(removers[0].Remover)
+      if (value) {
+        if (Array.isArray(value)) {
+          await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }])))
+        } else {
+          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
+        }
       }
     }
   }
@@ -154,8 +174,6 @@ export class SubjectEntity {
 
     for (const [key, value] of entries) {
       if (value) {
-        await this.setProperty(key, value);
-    
         if (value?.action) {
           switch (value.action) {
             case 'setter':
@@ -164,21 +182,31 @@ export class SubjectEntity {
             case "adder":
               await this.setCollectionAdder(key, value.value)
               break;
+            case 'remover':
+              await this.setCollectionRemover(key, value.value)
             default:
               await this.setCollectionSetter(key, value.value)
               break;
           }
-        } else {
+        } else if (Array.isArray(value)) {
           await this.setCollectionSetter(key, value)
+        } else {
+          await this.setProperty(key, value);
         }
       }
     }
+
+    await this.getData();
   }
 
   async get() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
     
     return await this.getData()
+  }
+
+  async delete() {
+    await this.#perspective.removeSubject(this, this.#baseExpression);
   }
 
   // TODO: implement simple quering like limit, skip etc.
@@ -199,12 +227,11 @@ export class SubjectEntity {
     }
 
     return []
-
   }
 }
 
 export type SubjectArray<T> = T[] | {
-  action: 'setter' | 'adder',
+  action: 'setter' | 'adder' | 'remover',
   value: T[]
 }
 
