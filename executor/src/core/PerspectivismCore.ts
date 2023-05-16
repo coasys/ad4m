@@ -110,7 +110,14 @@ export default class PerspectivismCore {
         }
         return {"Ok": result}
       } catch (error) {
-        return {"Error": JSON.stringify(error)}
+        //@ts-ignore
+        if (typeof error.message === "object") {
+            //@ts-ignore
+            return {"Error": JSON.stringify(error.message)};
+        } else {
+            //@ts-ignore
+            return {"Error": error.message}
+        }
       }
     }
 
