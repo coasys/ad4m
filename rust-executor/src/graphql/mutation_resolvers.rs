@@ -346,7 +346,7 @@ impl Mutation {
             await core.callResolver(
                 "Mutation",
                 "languageApplyTemplateAndPublish",
-                {{ sourceLanguageHash: "{}", templateData: "{}" }},
+                {{ sourceLanguageHash: "{}", templateData: JSON.stringify({}) }},
                 {{ capabilities: [{}] }}
             ))"#,
             source_language_hash, template_data, ALL_CAPABILITY

@@ -28,7 +28,7 @@ async fn log_dht_status() -> Result<(), AnyError> {
 
 #[op]
 async fn install_app(install_app_payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
-    let conductor = get_global_conductor().await;
+    let mut conductor = get_global_conductor().await;
     conductor.install_app(install_app_payload).await
 }
 
@@ -74,7 +74,7 @@ async fn remove_app(app_id: String) -> Result<(), AnyError> {
 
 #[op]
 async fn sign_string(data: String) -> Result<Signature, AnyError> {
-    let conductor: std::sync::Arc<HolochainService> = get_global_conductor().await;
+    let conductor = get_global_conductor().await;
     conductor.sign(data).await
 }
 
