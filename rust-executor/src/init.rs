@@ -6,14 +6,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::utils::ad4m_data_directory;
-use crate::globals::{
-    AD4M_VERSION, HC_BIN, HOLOCHAIN_BIN, MAINNET_JSON, OLDEST_VERSION, SWIPL_ZIP,
-};
+use crate::globals::{AD4M_VERSION, HC_BIN, MAINNET_JSON, OLDEST_VERSION, SWIPL_ZIP};
 use crate::utils::write_zip;
 
 /// Sets up the ad4m data directory and config files ready for the executor to consume
 pub fn init(
-    hc_only: bool,
     data_path: Option<String>,
     network_bootstrap_seed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
@@ -69,18 +66,10 @@ pub fn init(
     }
 
     let platform = os_info::get().os_type();
-    let (holochain, hc) = match platform {
-        os_info::Type::Windows => ("holochain.exe", "hc.exe"),
-        _ => ("holochain", "hc"),
+    let hc = match platform {
+        os_info::Type::Windows => "hc.exe",
+        _ => "hc",
     };
-
-    if !hc_only {
-        let holochain_data = HOLOCHAIN_BIN;
-        let holochain_target = binary_path.join(holochain);
-        info!("writing holochain target");
-        fs::write(&holochain_target, holochain_data)?;
-        fs::set_permissions(holochain_target, fs::Permissions::from_mode(0o755))?;
-    }
 
     let hc_data = HC_BIN;
     let hc_target = binary_path.join(hc);

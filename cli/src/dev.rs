@@ -76,7 +76,6 @@ pub async fn run(command: DevFunctions) -> Result<()> {
 
             //start ad4m-host with publishing bootstrap
             rust_executor::init::init(
-                false,
                 Some(data_path.to_str().unwrap().to_string()),
                 Some(temp_publish_bootstrap_path.to_str().unwrap().to_string()),
             )

@@ -112,8 +112,6 @@ enum Domain {
         command: DevFunctions,
     },
     Init {
-        #[arg(long, action)]
-        hc_only: Option<bool>,
         #[arg(short, long, action)]
         data_path: Option<String>,
         #[arg(short, long, action)]
@@ -194,16 +192,11 @@ async fn main() -> Result<()> {
     };
 
     if let Domain::Init {
-        hc_only,
         data_path,
         network_bootstrap_seed,
     } = args.domain
     {
-        match rust_executor::init::init(
-            util::option_to_bool(hc_only),
-            data_path,
-            network_bootstrap_seed,
-        ) {
+        match rust_executor::init::init(data_path, network_bootstrap_seed) {
             Ok(()) => println!("Successfully initialized AD4M executor!"),
             Err(e) => {
                 println!("Failed to initialize AD4M executor: {}", e);
@@ -277,7 +270,6 @@ async fn main() -> Result<()> {
         }
         Domain::Dev { command: _ } => unreachable!(),
         Domain::Init {
-            hc_only: _,
             data_path: _,
             network_bootstrap_seed: _,
         } => unreachable!(),

@@ -22,9 +22,6 @@ lazy_static! {
 /// Raw JSON data for the mainnet seed, included at buildtime from the mainnet_seed.json file
 pub const MAINNET_JSON: &str = include_str!("mainnet_seed.json");
 
-/// Binary data of holochain binary, included at buildtime from the holochain binary
-pub const HOLOCHAIN_BIN: &[u8] = include_bytes!("../temp/holochain");
-
 /// Binary data of hc binary, included at buildtime from the hc binary
 pub const HC_BIN: &[u8] = include_bytes!("../temp/hc");
 
