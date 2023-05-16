@@ -495,6 +495,16 @@ export class PerspectiveProxy {
         // Collect all collections of the object in a list
         let collections = Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance')
 
+        // Collect all string properties of the object in a list
+        if(Object.getPrototypeOf(obj).__properties) {
+            Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => !properties.includes(p) ?? properties.push(p))
+        }
+
+        // Collect all collections of the object in a list
+        if (Object.getPrototypeOf(obj).__collections) {
+            Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
+        }
+
         // Collect all set functions of the object in a list
         let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
         // Add all set functions of the object's prototype to that list
