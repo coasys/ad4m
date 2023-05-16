@@ -310,7 +310,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
             let instanceConditionProlog = instanceConditions.join(", ")
             sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
             sdna += "\n"
-            sdna += `class_remover(${uuid}, '${stringifyObjectLiteral(classRemoverActions)}').\n`
+            sdna += `destructor(${uuid}, '${stringifyObjectLiteral(classRemoverActions)}').\n`
             sdna += "\n"
             sdna += propertiesCode.join("\n")
             sdna += "\n"

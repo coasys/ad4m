@@ -388,7 +388,7 @@ export class PerspectiveProxy {
         return this.getSubjectProxy(exprAddr, subjectClass)
     }
 
-    /** Removes a subject instance by running its (SDNA defined) constructor,
+    /** Removes a subject instance by running its (SDNA defined) destructor,
      * which means removing links around the given expression address
      * 
      * @param subjectClass Either a string with the name of the subject class, or an object
@@ -398,7 +398,7 @@ export class PerspectiveProxy {
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string) {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
-        let result = await this.infer(`subject_class("${className}", C), class_remover(C, Actions)`)
+        let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
         if(!result.length) {
             throw "No constructor found for given subject class: " + className 
         }
