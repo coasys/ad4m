@@ -7,7 +7,7 @@
 //import { WebSocketServer } from 'ws';
 //import { useServer } from 'graphql-ws/lib/use/ws';
 //import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, LanguageRef, PerspectiveExpression, PerspectiveHandle, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveHandle, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -167,6 +167,61 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 const { address } = args
                 const lang = await core.languageController.languageByRef({address, name: ""} as LanguageRef) as any
                 lang.address = address
+
+                const constructorIcon = async (language: Language) => {
+                    if (language.expressionUI) {
+                        const code = language.expressionUI.constructorIcon();
+
+                        if (code) {
+                            return { code }
+                        } else {
+                            return { code: "" }
+                        }
+                    }
+
+                    return null
+                };
+
+                lang.constructorIcon = await constructorIcon(lang);
+
+                const icon = async (language: Language) => {
+                    if (language.expressionUI) {
+                        const code = language.expressionUI.icon();
+
+                        if (code) {
+                            return { code }
+                        } else {
+                            return { code: "" }
+                        }
+                    }
+
+                    return null
+                };
+
+                lang.icon = await icon(lang);
+
+                const settings = async (address: string) => {
+                    return JSON.stringify(core.languageController.getSettings(address))
+                };
+
+                lang.settings = await settings(address);
+
+                const settingsIcon = async (language: Language) => {
+                    if (language.settingsUI) {
+                        const code = language.settingsUI.settingsIcon();
+
+                        if (code) {
+                            return { code }
+                        } else {
+                            return { code: "" }
+                        }
+                    }
+
+                    return null
+                }
+
+                lang.settingsIcon = await settingsIcon(lang);
+
                 return lang
             },
             //@ts-ignore
@@ -578,6 +633,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             //@ts-ignore
             languageApplyTemplateAndPublish: async (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_CREATE_CAPABILITY)
+                console.log("JS args", args);
                 const { sourceLanguageHash, templateData } = args;
                 return await core.languageApplyTemplateAndPublish(sourceLanguageHash, JSON.parse(templateData));
             },
@@ -873,57 +929,6 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
         },
 
-        Subscription: {},
-
-        LanguageHandle: {
-            // @ts-ignore
-            constructorIcon: async (language) => {
-                if (language.expressionUI) {
-                    const code = language.expressionUI.constructorIcon();
-
-                    if (code) {
-                        return { code }
-                    } else {
-                        return { code: "" }
-                    }
-                }
-
-                return null
-            },
-            //@ts-ignore
-            icon: async (language) => {
-                if (language.expressionUI) {
-                    const code = language.expressionUI.icon();
-
-                    if (code) {
-                        return { code }
-                    } else {
-                        return { code: "" }
-                    }
-                }
-
-                return null
-            },
-            //@ts-ignore
-            settings: async (language) => {
-                return JSON.stringify(core.languageController.getSettings(language.address))
-            },
-            //@ts-ignore
-            settingsIcon: async (language) => {
-                if (language.settingsUI) {
-                    const code = language.settingsUI.settingsIcon();
-
-                    if (code) {
-                        return { code }
-                    } else {
-                        return { code: "" }
-                    }
-                }
-
-                return null
-            }
-        },
-
         Agent: {
             //@ts-ignore
             directMessageLanguage: async (agent) => {
@@ -959,20 +964,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                         return null
                 }
             }
-        },
-
-        /*
-        DateTime: new GraphQLScalarType({
-            name: 'Date',
-            description: 'Date custom scalar type',
-            parseValue(value) {
-              return new Date(value); // value from the client
-            },
-            serialize(value) {
-              return value.toISOString(); // value sent to the client
-            }
-        }),
-        */
+        }
     }
 }
 
