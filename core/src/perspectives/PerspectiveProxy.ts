@@ -7,7 +7,7 @@ import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
 import { Subject } from "../subject/Subject";
 import { ExpressionRendered } from "../expression/Expression";
-import { collectionAdderToName, collectionSetterToName } from "../subject/util";
+import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../subject/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
@@ -391,7 +391,26 @@ export class PerspectiveProxy {
         return this.getSubjectProxy(exprAddr, subjectClass)
     }
 
-    /** Checks if the given expression is a subject instance of the given subject class
+    /** Removes a subject instance by running its (SDNA defined) destructor,
+     * which means removing links around the given expression address
+     * 
+     * @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, the first subject class
+     * that matches the given properties will be used.
+     * @param exprAddr The address of the expression to be turned into a subject instance
+     */
+    async removeSubject<T>(subjectClass: T, exprAddr: string) {
+        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
+        if(!result.length) {
+            throw "No constructor found for given subject class: " + className 
+        }
+
+        let actions = result.map(x => eval(x.Actions))
+        await this.executeAction(actions[0], exprAddr, undefined)
+    }
+
+    /** Checks if the given expression is a subject instance of the given subject class 
      * @param expression The expression to be checked
      * @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, the first subject class
@@ -478,6 +497,16 @@ export class PerspectiveProxy {
         // Collect all collections of the object in a list
         let collections = Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance')
 
+        // Collect all string properties of the object in a list
+        if(Object.getPrototypeOf(obj).__properties) {
+            Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => !properties.includes(p) ?? properties.push(p))
+        }
+
+        // Collect all collections of the object in a list
+        if (Object.getPrototypeOf(obj).__collections) {
+            Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
+        }
+
         // Collect all set functions of the object in a list
         let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
         // Add all set functions of the object's prototype to that list
@@ -487,6 +516,11 @@ export class PerspectiveProxy {
         let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("add"))
         // Add all add functions of the object's prototype to that list
         addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("add")))
+
+        // Collect all remove functions of the object in a list
+        let removeFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("remove"))
+        // Add all remove functions of the object's prototype to that list
+        removeFunctions = removeFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("remove")))
 
         // Collect all add functions of the object in a list
         let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("setCollection"))
@@ -513,6 +547,10 @@ export class PerspectiveProxy {
             query += `, collection_adder(C, "${collectionAdderToName(addFunction)}", _)`
         }
 
+        for(let removeFunction of removeFunctions) {
+            query += `, collection_remover(C, "${collectionRemoverToName(removeFunction)}", _)`
+        }
+        
         for(let setCollectionFunction of setCollectionFunctions) {
             query += `, collection_setter(C, "${collectionSetterToName(setCollectionFunction)}", _)`
         }

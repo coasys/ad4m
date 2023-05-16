@@ -91,7 +91,7 @@ export function subjectProperty(opts: PropertyOptions) {
             target[`set${capitalize(value)}`] = () => {}
         }
 
-        Object.defineProperty(target, key, {});
+        Object.defineProperty(target, key, {configurable: true, writable: true});
     };
 }
 
@@ -114,7 +114,7 @@ export function subjectFlag(opts: FlagOptions) {
         // @ts-ignore
         target[key] = opts.value;
 
-        Object.defineProperty(target, key, {configurable: true});
+        Object.defineProperty(target, key, {configurable: true, writable: true});
     };
 }
 
@@ -135,9 +135,10 @@ export function subjectCollection(opts: CollectionOptions) {
         
         const value = key as string
         target[`add${capitalize(value)}`] = () => {}
+        target[`remove${capitalize(value)}`] = () => {}
         target[`setCollection${capitalize(value)}`] = () => {}
 
-        Object.defineProperty(target, key, {configurable: true});
+        Object.defineProperty(target, key, {configurable: true, writable: true});
     };
 }
 
@@ -168,7 +169,10 @@ export function SDNAClass(opts: SDNAClassOptions) {
             let uuid = makeRandomPrologAtom(8)
     
             sdna += `subject_class("${subjectName}", ${uuid}).\n`
-    
+
+
+            let classRemoverActions = []
+
             let constructorActions = []
             if(obj.subjectConstructor && obj.subjectConstructor.length) {
                 constructorActions = constructorActions.concat(obj.subjectConstructor)
@@ -230,6 +234,13 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         predicate: through,
                         target: initial,
                     })
+
+                    classRemoverActions = [{
+                        action: "removeLink",
+                        source: "this",
+                        predicate: through,
+                        target: initial,
+                    }]
                 }
             }
     
@@ -269,12 +280,19 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }
                     
-                    let action = [{
+                    let collectionAdderAction = [{
                         action: "addLink",
                         source: "this",
                         predicate: through,
                         target: "value",
                         local
+                    }]
+
+                    let collectionRemoverAction = [{
+                        action: "removeLink",
+                        source: "this",
+                        predicate: through,
+                        target: "value",
                     }]
                     
                     let collectionSetterAction = [{
@@ -284,7 +302,8 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         target: "value",
                         local
                     }]
-                    collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(action)}').\n`
+                    collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
+                    collectionCode += `collection_remover(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
                     collectionCode += `collection_setter(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
                 }
     
@@ -295,6 +314,8 @@ export function SDNAClass(opts: SDNAClassOptions) {
             sdna += `constructor(${uuid}, '${subjectContructorJSONString}').\n`
             let instanceConditionProlog = instanceConditions.join(", ")
             sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
+            sdna += "\n"
+            sdna += `destructor(${uuid}, '${stringifyObjectLiteral(classRemoverActions)}').\n`
             sdna += "\n"
             sdna += propertiesCode.join("\n")
             sdna += "\n"
