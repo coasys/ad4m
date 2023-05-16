@@ -44,6 +44,7 @@ pub enum PerspectiveFunctions {
         source: String,
         target: String,
         predicate: Option<String>,
+        status: Option<String>,
     },
 
     /// Query links from perspective with given uuid
@@ -146,10 +147,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             source,
             target,
             predicate,
+            status,
         } => {
             ad4m_client
                 .perspectives
-                .add_link(id, source, target, predicate)
+                .add_link(id, source, target, predicate, status)
                 .await?;
         }
         PerspectiveFunctions::QueryLinks(args) => {

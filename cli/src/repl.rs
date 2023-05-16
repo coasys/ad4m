@@ -12,12 +12,13 @@ use crate::formatting::{print_link, print_prolog_results};
 async fn add_link(perspective: &PerspectiveProxy, line: &String) -> bool {
     // add_link(source, predicate, target)
     let add_link =
-        Regex::new(r"add_link\((?P<source>\S+),\s*(?P<predicate>\S+),\s*(?P<target>\S+)\)").expect("Error parsing add_link regex");
+        Regex::new(r"add_link\((?P<source>\S+),\s*(?P<predicate>\S+),\s*(?P<status>\S+),\s*(?P<target>\S+)\)").expect("Error parsing add_link regex");
     let caps = add_link.captures(&line);
     if let Some(caps) = caps {
         let source = caps.name("source").unwrap().as_str().to_string();
         let predicate = caps.name("predicate").unwrap().as_str().to_string();
         let target = caps.name("target").unwrap().as_str().to_string();
+        let status = caps.name("status").unwrap().as_str().to_string();
 
         let predicate = if predicate == "_" {
             None
@@ -25,7 +26,13 @@ async fn add_link(perspective: &PerspectiveProxy, line: &String) -> bool {
             Some(predicate)
         };
 
-        if let Err(e) = perspective.add_link(source, target, predicate).await {
+        let status = if status == "_" {
+            None
+        } else {
+            Some(status)
+        };
+
+        if let Err(e) = perspective.add_link(source, target, predicate, status).await {
             println!("Error adding link: {}", e);
         }
         true

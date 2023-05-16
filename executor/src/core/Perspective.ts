@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkStatus, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
 import { Link, linkEqual, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -460,19 +460,23 @@ export default class Perspective {
         return onlineAgents.filter(o => o)
     }
 
-    async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
+    async addLink(link: LinkInput | LinkExpressionInput, status: LinkStatus = 'shared'): Promise<LinkExpression> {
         const linkExpression = this.ensureLinkExpression(link);
-        const diff = {
-            additions: [linkExpression],
-            removals: []
-        } as PerspectiveDiff
-        const addLink = await this.commit(diff);
 
-        if (!addLink) {
-            await this.#db.addPendingDiff(this.uuid!, diff);
+        if (status === 'shared') {
+            const diff = {
+                additions: [linkExpression],
+                removals: []
+            } as PerspectiveDiff
+            const addLink = await this.commit(diff);
+    
+            if (!addLink) {
+                this.#db.addPendingDiff(this.uuid!, diff);
+            }
         }
 
-        await this.#db.addLink(this.uuid!, linkExpression);
+        await this.#db.addLink(this.uuid!, linkExpression, status);
+
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
@@ -480,10 +484,12 @@ export default class Perspective {
             link: linkExpression
         })
 
+        linkExpression.status = status;
+
         return linkExpression
     }
 
-    async addLinks(links: (LinkInput | LinkExpressionInput)[]): Promise<LinkExpression[]> {
+    async addLinks(links: (LinkInput | LinkExpressionInput)[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
         const linkExpressions = links.map(l => this.ensureLinkExpression(l));
         const diff = {
             additions: linkExpressions,
@@ -495,7 +501,7 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
-        await this.#db.addManyLinks(this.uuid!, linkExpressions);
+        await this.#db.addManyLinks(this.uuid!, linkExpressions, status);
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
@@ -505,7 +511,8 @@ export default class Perspective {
             })
         };
 
-        return linkExpressions
+        // @ts-ignore
+        return linkExpressions.map(l => ({...l, status}))
     }
 
     async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
@@ -590,6 +597,10 @@ export default class Perspective {
             oldLink,
             newLink: newLinkExpression
         });
+
+        if (link.status) {
+            newLinkExpression.status = link.status
+        }
 
         return newLinkExpression
     }

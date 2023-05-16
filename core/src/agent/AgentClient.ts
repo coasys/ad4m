@@ -218,6 +218,7 @@ export class AgentClient {
       delete link.__typename;
       delete link.data.__typename;
       delete link.proof.__typename;
+      delete link.status;
     });
 
     const { agentUpdatePublicPerspective } = unwrapApolloResult(

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "excludeInternal": true,
+  "entryPoints": ["./core/src/index.ts"],
+  "entryPointStrategy": "resolve",
+  "out": "pages/jsdoc/",
+  "excludeExternals": true,
+  "plugin": ["typedoc-plugin-markdown"],
+  "tsconfig": "../core/tsconfig.json",
+  "exclude": ["**/*+(index|.spec|.e2e|.test).ts"]
+}
