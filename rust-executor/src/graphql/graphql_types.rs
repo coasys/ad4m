@@ -322,7 +322,7 @@ pub struct PerspectiveExpression {
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveHandle {
-    pub name: String,
+    pub name: Option<String>,
     pub neighbourhood: Option<Neighbourhood>,
     pub shared_url: Option<String>,
     pub state: String,
@@ -373,7 +373,7 @@ pub struct SentMessage {
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,
-    pub value: LinkExpression,
+    pub value: PerspectiveExpression,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
@@ -437,7 +437,7 @@ pub trait GetFilter {
 
 // Implement the trait for the `NeighbourhoodSignalFilter` struct
 impl GetValue for NeighbourhoodSignalFilter {
-    type Value = LinkExpression;
+    type Value = PerspectiveExpression;
 
     fn get_value(&self) -> Self::Value {
         self.value.clone()

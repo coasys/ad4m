@@ -61,7 +61,7 @@ impl Subscription {
         &self,
         _context: &JsCoreHandle,
         perspectiveUUID: String,
-    ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkExpression>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveExpression>> + Send>> {
         let pubsub = get_global_pubsub().await;
         let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
 
