@@ -1,32 +1,36 @@
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use holochain::conductor::api::{CellInfo, ZomeCall, AppInfo};
+use holochain::conductor::api::{AppInfo, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::kitsune_p2p::dependencies::url2::Url2;
 use holochain::prelude::{
-    ExternIO, InstallAppPayload, Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned, Signal, HoloHash, KitsuneP2pConfig, NetworkType, TransportConfig, ProxyConfig,
+    ExternIO, HoloHash, InstallAppPayload, KitsuneP2pConfig, NetworkType, ProxyConfig, Signal,
+    Signature, Timestamp, TransportConfig, ZomeCallResponse, ZomeCallUnsigned,
 };
+use lazy_static::lazy_static;
+use log::debug;
 use log::info;
-use once_cell::sync::OnceCell;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use holochain::prelude::kitsune_p2p::dependencies::kitsune_p2p_types::dependencies::lair_keystore_api::dependencies::tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
 
 pub(crate) mod holochain_service_extension;
 
+type BoxedStream = Pin<Box<dyn tokio_stream::Stream<Item = Signal> + Send>>;
+
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
-    pub signal_receivers: Arc<Mutex<Vec<Receiver<Signal>>>>,
+    pub signal_receivers: Arc<Mutex<BoxedStream>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,14 +113,13 @@ impl HolochainService {
 
         let service = Self {
             conductor,
-            signal_receivers: Arc::new(Mutex::new(signal_broadcaster.subscribe_separately())),
+            signal_receivers: Arc::new(Mutex::new(Box::pin(signal_broadcaster.subscribe_merged()))),
         };
 
-        let set_res = HOLOCHAIN_CONDUCTOR.set(Arc::new(service.clone()));
+        let mut lock = HOLOCHAIN_CONDUCTOR.lock().await;
+        *lock = Some(service);
+
         info!("Set global conductor");
-        if set_res.is_err() {
-            panic!("Could not set global conductor");
-        }
 
         info!("Started holochain conductor and set reference in rust executor");
 
@@ -124,7 +127,7 @@ impl HolochainService {
     }
 
     pub async fn install_app(
-        &self,
+        &mut self,
         install_app_payload: InstallAppPayload,
     ) -> Result<AppInfo, AnyError> {
         if install_app_payload.installed_app_id.is_none() {
@@ -153,6 +156,11 @@ impl HolochainService {
                 info!("Installed app with result: {:?}", activate);
 
                 let app_info = self.conductor.get_app_info(&app_id).await?;
+
+                let mut receivers = self.signal_receivers.lock().await;
+                let sig_broadcasters = self.conductor.signal_broadcaster();
+                *receivers = Box::pin(sig_broadcasters.subscribe_merged());
+
                 Ok(app_info.unwrap())
             }
             Some(app_info) => {
@@ -168,7 +176,7 @@ impl HolochainService {
         cell_name: String,
         zome_name: String,
         fn_name: String,
-        payload: Option<serde_json::Value>,
+        payload: Option<ExternIO>,
     ) -> Result<ZomeCallResponse, AnyError> {
         info!(
             "Calling zome function: {:?} {:?} {:?} {:?} {:?}",
@@ -219,7 +227,7 @@ impl HolochainService {
         }
 
         let payload = match payload {
-            Some(payload) => ExternIO::encode(payload).unwrap(),
+            Some(payload) => payload,
             None => ExternIO::encode(()).unwrap(),
         };
 
@@ -308,15 +316,20 @@ impl HolochainService {
     }
 }
 
-static HOLOCHAIN_CONDUCTOR: OnceCell<Arc<HolochainService>> = OnceCell::new();
-
-pub async fn get_global_conductor() -> Arc<HolochainService> {
-    HOLOCHAIN_CONDUCTOR
-        .get()
-        .expect("Conductor not initialized")
-        .clone()
+lazy_static! {
+    static ref HOLOCHAIN_CONDUCTOR: Arc<Mutex<Option<HolochainService>>> =
+        Arc::new(Mutex::new(None));
 }
 
-pub async fn maybe_get_global_conductor() -> Option<Arc<HolochainService>> {
-    HOLOCHAIN_CONDUCTOR.get().map(|c| c.clone())
+pub async fn get_global_conductor() -> HolochainService {
+    let lock = HOLOCHAIN_CONDUCTOR.lock().await;
+    lock.clone().expect("Holochain Conductor not started")
+}
+
+pub async fn maybe_get_global_conductor() -> Option<HolochainService> {
+    let lock = HOLOCHAIN_CONDUCTOR.try_lock();
+    match lock {
+        Ok(guard) => guard.clone(),
+        Err(_) => None,
+    }
 }
