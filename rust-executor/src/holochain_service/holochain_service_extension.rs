@@ -2,8 +2,8 @@ use deno_core::{error::AnyError, include_js_files, op, Extension};
 use holochain::{
     conductor::api::AppInfo,
     prelude::{
-        agent_store::AgentInfoSigned, hash_type::Agent, HoloHash, InstallAppPayload, Signature,
-        ZomeCallResponse,
+        agent_store::AgentInfoSigned, hash_type::Agent, ExternIO, HoloHash, InstallAppPayload,
+        Signature, ZomeCallResponse,
     },
 };
 use log::info;
@@ -46,7 +46,7 @@ async fn call_zome_function(
     cell_name: String,
     zome_name: String,
     fn_name: String,
-    payload: Option<serde_json::Value>,
+    payload: Option<ExternIO>,
 ) -> Result<ZomeCallResponse, AnyError> {
     let conductor = get_global_conductor().await;
     conductor

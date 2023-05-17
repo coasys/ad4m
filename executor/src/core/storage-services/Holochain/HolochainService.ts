@@ -1,11 +1,11 @@
-import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest, CallZomeResponse } from '@holochain/client'
+import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest } from '@holochain/client'
 import path from 'path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import { unpackDna, packDna } from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import { AsyncQueue } from './Queue'
-import { decode } from "@msgpack/msgpack"
+import { decode, encode } from "@msgpack/msgpack"
 
 import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
 import EntanglementProofController from '../../EntanglementProof'
@@ -244,7 +244,7 @@ export default class HolochainService {
         return `${languageHash}-${dnaNick}`
     }
 
-    async callZomeFunction(lang: string, dnaNick: string, zomeName: string, fnName: string, payload: object|string): Promise<any> {
+    async callZomeFunction(lang: string, dnaNick: string, zomeName: string, fnName: string, payload: any): Promise<any> {
         await this.#ready
         const installed_app_id = lang
 
@@ -254,7 +254,7 @@ export default class HolochainService {
                 console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
             }
 
-            let result = await HOLOCHAIN_SERVICE.callZomeFunction(installed_app_id, dnaNick, zomeName, fnName, payload);
+            let result = await HOLOCHAIN_SERVICE.callZomeFunction(installed_app_id, dnaNick, zomeName, fnName, encode(payload));
             if (result["Ok"]) {
                 result = decode(result["Ok"])
             } else {
