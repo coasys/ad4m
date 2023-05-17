@@ -343,89 +343,90 @@ impl JsCore {
                                 //info!("Found holochain service");
                                 let signal_receivers = holochain_service.signal_receivers.clone();
                                 let mut signal_receivers = signal_receivers.lock().await;
+                                //debug!("Sig lock");
 
-                                // Loop over the stream
-                                while let Some(signal) = signal_receivers.next().await {
-                                        match signal {
-                                            Signal::App {
-                                                cell_id,
-                                                zome_name,
-                                                signal,
-                                            } => {
-                                                // Handle the received signal here
-                                                info!("Received signal: {:?}", signal);
-                                                match js_core.execute_async(format!(
-                                                    "await core.getHolochainService().handleCallback({:?})",
-                                                    Signal::App { cell_id, zome_name, signal }
-                                                )) {
-                                                    Ok(script_fut) => match script_fut.await {
-                                                        Ok(res) => {
-                                                            info!(
-                                                                "Callback executed successfully: {:?}",
-                                                                res
-                                                            );
-                                                        }
-                                                        Err(err) => {
-                                                            error!("Error executing callback: {:?}", err);
-                                                        }
-                                                    },
-                                                    Err(err) => {
-                                                        error!("Error executing callback: {:?}", err);
-                                                    }
-                                                }
-                                            }
-                                            Signal::System(_) => {
-                                                // Handle the received signal here
-                                                info!("Received system signal");
-                                            }
-                                        }
-                                }
-
-                                // for receiver in signal_receivers.iter_mut() {
-                                //     debug!("Checking for signals");
-                                //     match receiver.try_recv() {
-                                //         Ok(signal) => {
-                                //             match signal {
-                                //                 Signal::App {
-                                //                     cell_id,
-                                //                     zome_name,
-                                //                     signal,
-                                //                 } => {
-                                //                     // Handle the received signal here
-                                //                     info!("Received signal: {:?}", signal);
-                                //                     match js_core.execute_async(format!(
-                                //                         "await core.getHolochainService().handleCallback({:?})",
-                                //                         Signal::App { cell_id, zome_name, signal }
-                                //                     )) {
-                                //                         Ok(script_fut) => match script_fut.await {
-                                //                             Ok(res) => {
-                                //                                 info!(
-                                //                                     "Callback executed successfully: {:?}",
-                                //                                     res
-                                //                                 );
-                                //                             }
-                                //                             Err(err) => {
-                                //                                 error!("Error executing callback: {:?}", err);
-                                //                             }
-                                //                         },
+                                // // Loop over the stream
+                                // if let Some(signal) = signal_receivers.next().await {
+                                //         match signal {
+                                //             Signal::App {
+                                //                 cell_id,
+                                //                 zome_name,
+                                //                 signal,
+                                //             } => {
+                                //                 // Handle the received signal here
+                                //                 info!("Received signal: {:?}", signal);
+                                //                 match js_core.execute_async(format!(
+                                //                     "await core.getHolochainService().handleCallback({:?})",
+                                //                     Signal::App { cell_id, zome_name, signal }
+                                //                 )) {
+                                //                     Ok(script_fut) => match script_fut.await {
+                                //                         Ok(res) => {
+                                //                             info!(
+                                //                                 "Callback executed successfully: {:?}",
+                                //                                 res
+                                //                             );
+                                //                         }
                                 //                         Err(err) => {
                                 //                             error!("Error executing callback: {:?}", err);
                                 //                         }
+                                //                     },
+                                //                     Err(err) => {
+                                //                         error!("Error executing callback: {:?}", err);
                                 //                     }
                                 //                 }
-                                //                 Signal::System(system_signal) => {
-                                //                     info!("Received system signal: {:?}", system_signal)
-                                //                 }
+                                //             }
+                                //             Signal::System(_) => {
+                                //                 // Handle the received signal here
+                                //                 info!("Received system signal");
                                 //             }
                                 //         }
-                                //         Err(_err) => {
-                                //             // The channel is empty; no signal is available
-                                //         }
-                                //     }
                                 // }
+
+                                for receiver in signal_receivers.iter_mut() {
+                                    match receiver.try_recv() {
+                                        Ok(signal) => {
+                                            match signal {
+                                                Signal::App {
+                                                    cell_id,
+                                                    zome_name,
+                                                    signal,
+                                                } => {
+                                                    // Handle the received signal here
+                                                    info!("Received signal: {:?}", signal);
+                                                    match js_core.execute_async(format!(
+                                                        "await core.getHolochainService().handleCallback({:?})",
+                                                        Signal::App { cell_id, zome_name, signal }
+                                                    )) {
+                                                        Ok(script_fut) => match script_fut.await {
+                                                            Ok(res) => {
+                                                                info!(
+                                                                    "Callback executed successfully: {:?}",
+                                                                    res
+                                                                );
+                                                            }
+                                                            Err(err) => {
+                                                                error!("Error executing callback: {:?}", err);
+                                                            }
+                                                        },
+                                                        Err(err) => {
+                                                            error!("Error executing callback: {:?}", err);
+                                                        }
+                                                    }
+                                                }
+                                                Signal::System(system_signal) => {
+                                                    info!("Received system signal: {:?}", system_signal)
+                                                }
+                                            }
+                                        }
+                                        Err(_err) => {
+                                            // The channel is empty; no signal is available
+                                        }
+                                    }
+                                }
                             } else {
                                 //println!("HolochainService is not available.");
                             }
+                            //debug!("Sig unlock");
                             tokio::task::yield_now().await;
                         }
                     };

@@ -8,6 +8,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use holochain::conductor::api::{AppInfo, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
+use holochain::conductor::state::AppInterfaceId;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
@@ -16,12 +17,14 @@ use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, KitsuneP2pConfig, NetworkType, ProxyConfig, Signal,
     Signature, Timestamp, TransportConfig, ZomeCallResponse, ZomeCallUnsigned,
 };
+use holochain::test_utils::itertools::Either;
 use lazy_static::lazy_static;
 use log::debug;
 use log::info;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::broadcast::Receiver;
+use tokio::sync::{Mutex, RwLock};
 
 pub(crate) mod holochain_service_extension;
 
@@ -30,7 +33,8 @@ type BoxedStream = Pin<Box<dyn tokio_stream::Stream<Item = Signal> + Send>>;
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
-    pub signal_receivers: Arc<Mutex<BoxedStream>>,
+    //pub signal_receivers: Arc<Mutex<BoxedStream>>,
+    pub signal_receivers: Arc<Mutex<Vec<Receiver<Signal>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,16 +111,26 @@ impl HolochainService {
 
         let conductor = conductor.unwrap();
 
+        let interface = conductor
+            .clone()
+            .add_app_interface(Either::Right(AppInterfaceId::new(6321)))
+            .await;
+
+        debug!("Added app interface: {:?}", interface);
+
         info!("Started holochain conductor");
         let signal_broadcaster = conductor.signal_broadcaster();
         info!("Got signal broadcaster");
 
+        let subs = signal_broadcaster.subscribe_separately();
+        debug!("Start sub length: {:?}", subs.len());
+
         let service = Self {
             conductor,
-            signal_receivers: Arc::new(Mutex::new(Box::pin(signal_broadcaster.subscribe_merged()))),
+            signal_receivers: Arc::new(Mutex::new(subs)),
         };
 
-        let mut lock = HOLOCHAIN_CONDUCTOR.lock().await;
+        let mut lock = HOLOCHAIN_CONDUCTOR.write().await;
         *lock = Some(service);
 
         info!("Set global conductor");
@@ -157,9 +171,15 @@ impl HolochainService {
 
                 let app_info = self.conductor.get_app_info(&app_id).await?;
 
+                debug!("Getting receivers lock");
                 let mut receivers = self.signal_receivers.lock().await;
+                debug!("Got signal receivers");
                 let sig_broadcasters = self.conductor.signal_broadcaster();
-                *receivers = Box::pin(sig_broadcasters.subscribe_merged());
+                let subs = sig_broadcasters.subscribe_separately();
+                debug!("Got subs length: {:?}", subs.len());
+                if subs.len() != 0 {
+                    *receivers = subs;
+                }
 
                 Ok(app_info.unwrap())
             }
@@ -317,17 +337,17 @@ impl HolochainService {
 }
 
 lazy_static! {
-    static ref HOLOCHAIN_CONDUCTOR: Arc<Mutex<Option<HolochainService>>> =
-        Arc::new(Mutex::new(None));
+    static ref HOLOCHAIN_CONDUCTOR: Arc<RwLock<Option<HolochainService>>> =
+        Arc::new(RwLock::new(None));
 }
 
 pub async fn get_global_conductor() -> HolochainService {
-    let lock = HOLOCHAIN_CONDUCTOR.lock().await;
+    let lock = HOLOCHAIN_CONDUCTOR.read().await;
     lock.clone().expect("Holochain Conductor not started")
 }
 
 pub async fn maybe_get_global_conductor() -> Option<HolochainService> {
-    let lock = HOLOCHAIN_CONDUCTOR.try_lock();
+    let lock = HOLOCHAIN_CONDUCTOR.try_read();
     match lock {
         Ok(guard) => guard.clone(),
         Err(_) => None,
