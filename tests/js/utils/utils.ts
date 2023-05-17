@@ -96,14 +96,16 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
             }
         },
     }));
-    // wsLink.client.on('message' as any, (data: any) => {
-    //     console.log(data);
-    //     if (data.payload) {
-    //         if (data.payload.errors) {
-    //             console.dir(data.payload.errors, { depth: null });
-    //         }
-    //     }
-    // });
+    wsLink.client.on('message' as any, (data: any) => {
+        console.log(data);
+        if (data.payload) {
+            if (data.payload.errors) {
+                console.dir(data.payload.errors, { depth: null });
+            } else {
+                console.dir(data.payload, { depth: null });
+            }
+        }
+    });
 
     const link = new HttpLink({
         uri: `http://127.0.0.1:${port}/graphql`,
