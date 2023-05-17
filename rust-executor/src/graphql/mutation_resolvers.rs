@@ -523,7 +523,7 @@ impl Mutation {
             await core.callResolver(
                 "Mutation",
                 "neighbourhoodSendSignal",
-                {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
+                {{ payload: {}, perspectiveUUID: "{}", remoteAgentDid: "{}" }},
                 {{ capabilities: [{}] }}
             ))"#,
             payload_json, perspectiveUUID, remote_agent_did, ALL_CAPABILITY

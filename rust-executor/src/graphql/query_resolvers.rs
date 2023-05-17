@@ -256,11 +256,11 @@ impl Query {
     async fn neighbourhood_has_telepresence_adapter(
         &self,
         context: &JsCoreHandle,
-        perspective_uuid: String,
+        perspectiveUUID: String,
     ) -> FieldResult<bool> {
         let mut js = context.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodHasTelepresenceAdapter", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspective_uuid, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodHasTelepresenceAdapter", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspectiveUUID, ALL_CAPABILITY))
             .await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -269,11 +269,11 @@ impl Query {
     async fn neighbourhood_online_agents(
         &self,
         context: &JsCoreHandle,
-        perspective_uuid: String,
+        perspectiveUUID: String,
     ) -> FieldResult<Vec<OnlineAgent>> {
         let mut js = context.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOnlineAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspective_uuid, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOnlineAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspectiveUUID, ALL_CAPABILITY))
             .await?;
         let result: JsResultType<Vec<OnlineAgent>> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -282,11 +282,11 @@ impl Query {
     async fn neighbourhood_other_agents(
         &self,
         context: &JsCoreHandle,
-        perspective_uuid: String,
+        perspectiveUUID: String,
     ) -> FieldResult<Vec<String>> {
         let mut js = context.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOtherAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspective_uuid, ALL_CAPABILITY))
+            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOtherAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspectiveUUID, ALL_CAPABILITY))
             .await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
         result.get_graphql_result()
