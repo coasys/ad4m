@@ -257,7 +257,8 @@ export default class LanguageController {
         }
 
         if(language.telepresenceAdapter) {
-            language.telepresenceAdapter.registerSignalCallback((payload: PerspectiveExpression) => {
+            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression) => {
+                await this.tagPerspectiveExpressionSignatureStatus(payload)
                 this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
             })
         }
