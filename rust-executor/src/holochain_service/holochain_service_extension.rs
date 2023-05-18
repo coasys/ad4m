@@ -21,9 +21,8 @@ async fn start_holochain_conductor(config: LocalConductorConfig) -> Result<(), A
 #[op]
 async fn log_dht_status() -> Result<(), AnyError> {
     let interface = get_holochain_service().await;
-    //let dht_status = interface.interface.dump_network_metrics(None).await?;
-    //info!("DHT Status: {:#?}", dht_status);
-    info!("DHT INFO UNIMPLEMENTED");
+    let metrics = interface.get_network_metrics().await?;
+    info!("DHT metrics: {:?}", serde_json::Value::try_from(metrics)?);
     Ok(())
 }
 

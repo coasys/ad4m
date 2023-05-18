@@ -1,5 +1,4 @@
 use deno_core::error::AnyError;
-use futures::channel::mpsc::Receiver;
 use holochain::conductor::api::AppInfo;
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
@@ -7,8 +6,6 @@ use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, ZomeCallResponse,
 };
 use lazy_static::lazy_static;
-use log::debug;
-use log::info;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -40,6 +37,7 @@ pub enum HolochainServiceRequest {
     Shutdown(oneshot::Sender<HolochainServiceResponse>),
     GetAgentKey(oneshot::Sender<HolochainServiceResponse>),
     GetAppInfo(String, oneshot::Sender<HolochainServiceResponse>),
+    GetNetworkMetrics(oneshot::Sender<HolochainServiceResponse>),
 }
 
 #[derive(Debug)]
@@ -54,6 +52,7 @@ pub enum HolochainServiceResponse {
     GetAgentKey(Result<HoloHash<Agent>, AnyError>),
     GetAppInfo(Result<Option<AppInfo>, AnyError>),
     InitComplete(Result<(), AnyError>),
+    GetNetworkMetrics(Result<String, AnyError>),
 }
 
 impl HolochainServiceInterface {
@@ -172,6 +171,17 @@ impl HolochainServiceInterface {
             .await?;
         match response_rx.await.unwrap() {
             HolochainServiceResponse::GetAppInfo(result) => result,
+            _ => unreachable!(),
+        }
+    }
+
+    pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender
+            .send(HolochainServiceRequest::GetNetworkMetrics(response_tx))
+            .await?;
+        match response_rx.await.unwrap() {
+            HolochainServiceResponse::GetNetworkMetrics(result) => result,
             _ => unreachable!(),
         }
     }

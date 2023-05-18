@@ -149,6 +149,11 @@ impl HolochainService {
                         let result = service.get_app_info(app_id).await;
                         let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
                     }
+                    HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
+                        let result = service.get_network_metrics().await;
+                        let _ =
+                            response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
+                    }
                 }
             }
         });
@@ -417,5 +422,9 @@ impl HolochainService {
 
     pub async fn get_app_info(&self, app_id: String) -> Result<Option<AppInfo>, AnyError> {
         Ok(self.conductor.get_app_info(&app_id).await?)
+    }
+
+    pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
+        Ok(self.conductor.dump_network_metrics(None).await?)
     }
 }
