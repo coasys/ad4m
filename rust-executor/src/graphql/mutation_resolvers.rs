@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(unused_variables)]
 use juniper::{graphql_object, FieldResult};
-use log::debug;
 
 use crate::js_core::JsCoreHandle;
 
@@ -1029,7 +1028,6 @@ impl Mutation {
             ))"#,
             status_json, ALL_CAPABILITY
         );
-        debug!("runtime_set_status script: {}", script);
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
         result.get_graphql_result()

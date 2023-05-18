@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(unused_variables)]
 use juniper::{graphql_object, FieldResult};
-use log::debug;
 
 use crate::js_core::JsCoreHandle;
 

@@ -373,7 +373,7 @@ pub struct SentMessage {
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,
-    pub value: PerspectiveExpression,
+    pub signal: PerspectiveExpression,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
@@ -440,7 +440,7 @@ impl GetValue for NeighbourhoodSignalFilter {
     type Value = PerspectiveExpression;
 
     fn get_value(&self) -> Self::Value {
-        self.value.clone()
+        self.signal.clone()
     }
 }
 

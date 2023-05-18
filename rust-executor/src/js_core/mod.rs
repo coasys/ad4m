@@ -1,11 +1,9 @@
-use ::futures::StreamExt;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
-use log::debug;
 use log::{error, info};
 use once_cell::sync::Lazy;
 use std::env::current_dir;
@@ -143,7 +141,6 @@ pub struct ExternWrapper(ExternIO);
 
 impl std::fmt::Display for ExternWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        debug!("Raw extern: {:?}", self.0);
         //Write the bytes to string like: [0, 1, 3]
         let bytes = self.0.as_bytes();
         let mut bytes_str = String::from("[");
