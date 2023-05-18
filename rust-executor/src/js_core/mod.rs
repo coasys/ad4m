@@ -4,7 +4,7 @@ use deno_core::error::AnyError;
 use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
-use holochain::prelude::Signal;
+use holochain::prelude::{ExternIO, Signal};
 use log::debug;
 use log::{error, info};
 use once_cell::sync::Lazy;
@@ -28,7 +28,7 @@ mod utils_extension;
 mod wallet_extension;
 
 use self::futures::{EventLoopFuture, GlobalVariableFuture};
-use crate::holochain_service::maybe_get_global_conductor;
+use crate::holochain_service::maybe_get_holochain_service;
 use crate::Ad4mConfig;
 use options::{main_module_url, main_worker_options};
 
@@ -137,6 +137,26 @@ struct JsCoreResponse {
 
 pub struct JsCore {
     worker: Arc<Mutex<MainWorker>>,
+}
+
+pub struct ExternWrapper(ExternIO);
+
+impl std::fmt::Display for ExternWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        debug!("Raw extern: {:?}", self.0);
+        //Write the bytes to string like: [0, 1, 3]
+        let bytes = self.0.as_bytes();
+        let mut bytes_str = String::from("[");
+        for (i, byte) in bytes.iter().enumerate() {
+            bytes_str.push_str(&format!("{}", byte));
+            if i < bytes.len() - 1 {
+                bytes_str.push_str(", ");
+            }
+        }
+        bytes_str.push_str("]");
+        write!(f, "{}", bytes_str).unwrap();
+        Ok(())
+    }
 }
 
 impl JsCore {
@@ -268,31 +288,34 @@ impl JsCore {
                 loop {
                     //Listener future for loading JS modules into runtime
                     let module_load_fut = async {
-                        while let Some(request) = rx_inside_loader.recv().await {
-                            let tx_loader_cloned = tx_inside_loader.clone();
-                            let script = request.script;
-                            let id = request.id;
+                        loop {
+                            if let Ok(request) = rx_inside_loader.try_recv() {
+                                let tx_loader_cloned = tx_inside_loader.clone();
+                                let script = request.script;
+                                let id = request.id;
 
-                            match js_core.load_module(script).await {
-                                Ok(()) => {
-                                    info!("Module loaded!");
-                                    tx_inside_loader
-                                        .send(JsCoreResponse {
-                                            result: Ok(String::from("")),
-                                            id: id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                }
-                                Err(err) => {
-                                    error!("Error loading module: {:?}", err);
-                                    tx_loader_cloned
-                                        .send(JsCoreResponse {
-                                            result: Err(err.to_string()),
-                                            id,
-                                        })
-                                        .expect("couldn't send on channel");
+                                match js_core.load_module(script).await {
+                                    Ok(()) => {
+                                        info!("Module loaded!");
+                                        tx_inside_loader
+                                            .send(JsCoreResponse {
+                                                result: Ok(String::from("")),
+                                                id: id,
+                                            })
+                                            .expect("couldn't send on channel");
+                                    }
+                                    Err(err) => {
+                                        error!("Error loading module: {:?}", err);
+                                        tx_loader_cloned
+                                            .send(JsCoreResponse {
+                                                result: Err(err.to_string()),
+                                                id,
+                                            })
+                                            .expect("couldn't send on channel");
+                                    }
                                 }
                             }
+                            tokio::task::yield_now().await;
                         }
                     };
 
@@ -300,21 +323,31 @@ impl JsCore {
 
                     //Listener future for receiving script execution calls
                     let receive_fut = async {
-                        while let Some(request) = rx_inside.recv().await {
-                            let tx_cloned = tx_inside.clone();
-                            let script = request.script;
-                            let id = request.id;
-                            global_req_id = Some(id.clone());
-                            match js_core.execute_async(script) {
-                                Ok(execute_async_future) => match execute_async_future.await {
-                                    Ok(result) => {
-                                        tx_inside
-                                            .send(JsCoreResponse {
-                                                result: Ok(result),
-                                                id: id,
-                                            })
-                                            .expect("couldn't send on channel");
-                                    }
+                        loop {
+                            if let Ok(request) = rx_inside.try_recv() {
+                                let tx_cloned = tx_inside.clone();
+                                let script = request.script;
+                                let id = request.id;
+                                global_req_id = Some(id.clone());
+                                match js_core.execute_async(script) {
+                                    Ok(execute_async_future) => match execute_async_future.await {
+                                        Ok(result) => {
+                                            tx_inside
+                                                .send(JsCoreResponse {
+                                                    result: Ok(result),
+                                                    id: id,
+                                                })
+                                                .expect("couldn't send on channel");
+                                        }
+                                        Err(err) => {
+                                            tx_cloned
+                                                .send(JsCoreResponse {
+                                                    result: Err(err.to_string()),
+                                                    id,
+                                                })
+                                                .expect("couldn't send on channel");
+                                        }
+                                    },
                                     Err(err) => {
                                         tx_cloned
                                             .send(JsCoreResponse {
@@ -322,111 +355,55 @@ impl JsCore {
                                                 id,
                                             })
                                             .expect("couldn't send on channel");
+                                        continue;
                                     }
-                                },
-                                Err(err) => {
-                                    tx_cloned
-                                        .send(JsCoreResponse {
-                                            result: Err(err.to_string()),
-                                            id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                    continue;
                                 }
                             }
+                            tokio::task::yield_now().await;
                         }
                     };
 
                     let holochain_signal_receiver_fut = async {
                         loop {
-                            if let Some(holochain_service) = maybe_get_global_conductor().await {
-                                //info!("Found holochain service");
-                                let signal_receivers = holochain_service.signal_receivers.clone();
-                                let mut signal_receivers = signal_receivers.lock().await;
-                                //debug!("Sig lock");
-
-                                // // Loop over the stream
-                                // if let Some(signal) = signal_receivers.next().await {
-                                //         match signal {
-                                //             Signal::App {
-                                //                 cell_id,
-                                //                 zome_name,
-                                //                 signal,
-                                //             } => {
-                                //                 // Handle the received signal here
-                                //                 info!("Received signal: {:?}", signal);
-                                //                 match js_core.execute_async(format!(
-                                //                     "await core.getHolochainService().handleCallback({:?})",
-                                //                     Signal::App { cell_id, zome_name, signal }
-                                //                 )) {
-                                //                     Ok(script_fut) => match script_fut.await {
-                                //                         Ok(res) => {
-                                //                             info!(
-                                //                                 "Callback executed successfully: {:?}",
-                                //                                 res
-                                //                             );
-                                //                         }
-                                //                         Err(err) => {
-                                //                             error!("Error executing callback: {:?}", err);
-                                //                         }
-                                //                     },
-                                //                     Err(err) => {
-                                //                         error!("Error executing callback: {:?}", err);
-                                //                     }
-                                //                 }
-                                //             }
-                                //             Signal::System(_) => {
-                                //                 // Handle the received signal here
-                                //                 info!("Received system signal");
-                                //             }
-                                //         }
-                                // }
-
-                                for receiver in signal_receivers.iter_mut() {
-                                    match receiver.try_recv() {
-                                        Ok(signal) => {
-                                            match signal {
-                                                Signal::App {
-                                                    cell_id,
-                                                    zome_name,
-                                                    signal,
-                                                } => {
-                                                    // Handle the received signal here
-                                                    info!("Received signal: {:?}", signal);
-                                                    match js_core.execute_async(format!(
-                                                        "await core.getHolochainService().handleCallback({:?})",
-                                                        Signal::App { cell_id, zome_name, signal }
-                                                    )) {
-                                                        Ok(script_fut) => match script_fut.await {
-                                                            Ok(res) => {
-                                                                info!(
-                                                                    "Callback executed successfully: {:?}",
-                                                                    res
-                                                                );
-                                                            }
-                                                            Err(err) => {
-                                                                error!("Error executing callback: {:?}", err);
-                                                            }
-                                                        },
+                            if let Some(holochain_service) = maybe_get_holochain_service() {
+                                let stream_receiver = holochain_service.stream_receiver.try_lock();
+                                if let Ok(mut stream_receiver) = stream_receiver {
+                                    if let Ok(signal) = stream_receiver.try_recv() {
+                                        match signal.clone() {
+                                            Signal::App {
+                                                cell_id,
+                                                zome_name,
+                                                signal: payload,
+                                            } => {
+                                                // Handle the received signal here
+                                                let script = format!(
+                                                    "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
+                                                    cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
+                                                );
+                                                match js_core.execute_async(script) {
+                                                    Ok(script_fut) => match script_fut.await {
+                                                        Ok(_res) => {
+                                                            info!(
+                                                                "Holochain Handle Callback Completed Succesfully",
+                                                            );
+                                                        }
                                                         Err(err) => {
                                                             error!("Error executing callback: {:?}", err);
                                                         }
+                                                    },
+                                                    Err(err) => {
+                                                        error!("Error executing callback: {:?}", err);
                                                     }
                                                 }
-                                                Signal::System(system_signal) => {
-                                                    info!("Received system signal: {:?}", system_signal)
-                                                }
                                             }
-                                        }
-                                        Err(_err) => {
-                                            // The channel is empty; no signal is available
+                                            Signal::System(_) => {
+                                                // Handle the received signal here
+                                                info!("Received system signal");
+                                            }
                                         }
                                     }
                                 }
-                            } else {
-                                //println!("HolochainService is not available.");
                             }
-                            //debug!("Sig unlock");
                             tokio::task::yield_now().await;
                         }
                     };
