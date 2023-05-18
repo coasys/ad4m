@@ -11,6 +11,7 @@ declare global {
         useMdns: bool,
         proxyUrl: String,
         bootstrapUrl: String,
+        adminPort: Number
     }
 
     interface HolochainService {

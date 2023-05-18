@@ -265,7 +265,7 @@ export default class LanguageController {
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
-                await PUBSUB.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+                await PUBSUB.publish(PubSub.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
         }
 
@@ -314,7 +314,7 @@ export default class LanguageController {
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
-                await PUBSUB.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+                await PUBSUB.publish(PubSub.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
         }
 

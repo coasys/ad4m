@@ -8,7 +8,7 @@
 
 - [AGENT\_STATUS\_CHANGED](PubSub.md#agent_status_changed)
 - [AGENT\_UPDATED](PubSub.md#agent_updated)
-- [DIRECT\_MESSAGE\_RECEIVED](PubSub.md#direct_message_received)
+- [RUNTIME\_MESSAGED\_RECEIVED\_TOPIC](PubSub.md#direct_message_received)
 - [EXCEPTION\_OCCURRED\_TOPIC](PubSub.md#exception_occurred_topic)
 - [LINK\_ADDED\_TOPIC](PubSub.md#link_added_topic)
 - [LINK\_REMOVED\_TOPIC](PubSub.md#link_removed_topic)
