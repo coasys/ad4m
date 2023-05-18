@@ -103,7 +103,7 @@ export function subjectFlag(opts: FlagOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
-        target["__properties"][key] = { 
+        target["__properties"][key] = {
             ...target["__properties"][key],
             through: opts.through,
             required: true,
@@ -132,7 +132,7 @@ export function subjectCollection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
-        
+
         const value = key as string
         target[`add${capitalize(value)}`] = () => {}
         target[`remove${capitalize(value)}`] = () => {}
@@ -160,14 +160,14 @@ export function SDNAClass(opts: SDNAClassOptions) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
-        
+
         target.generateSDNA = function() {
             let sdna = ""
             let subjectName = opts.name
             let obj = target.prototype;
-    
+
             let uuid = makeRandomPrologAtom(8)
-    
+
             sdna += `subject_class("${subjectName}", ${uuid}).\n`
 
 
@@ -177,38 +177,38 @@ export function SDNAClass(opts: SDNAClassOptions) {
             if(obj.subjectConstructor && obj.subjectConstructor.length) {
                 constructorActions = constructorActions.concat(obj.subjectConstructor)
             }
-    
+
             let instanceConditions = []
             if(obj.isSubjectInstance && obj.isSubjectInstance.length) {
                 instanceConditions = instanceConditions.concat(obj.isSubjectInstance)
             }
-    
+
             let propertiesCode = []
             let properties = obj.__properties || {}
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
-    
+
                 let { through, initial, required, resolveLanguage, writable, flag, getter, setter, local = false } = properties[property]
-    
+
                 if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
                     propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
                 }
-                
+
                 if(getter) {
                     propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- ${getter}.\n`
                 } else if(through) {
                     propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
-    
+
                     if(required) {
                         if(flag) {
                             instanceConditions.push(`triple(Base, "${through}", "${initial}")`)
                         } else {
-                            instanceConditions.push(`triple(Base, "${through}", _)`)    
+                            instanceConditions.push(`triple(Base, "${through}", _)`)
                         }
-                    }    
+                    }
                 }
-                
+
                 if(setter) {
                     propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${setter}.\n`
                 } else if (writable) {
@@ -219,14 +219,14 @@ export function SDNAClass(opts: SDNAClassOptions) {
                             source: "this",
                             predicate: through,
                             target: "value",
-                            local
+                            ...(local && { local: true })
                         }]
                         propertyCode += `property_setter(${uuid}, "${property}", '${stringifyObjectLiteral(action)}').\n`
                     }
                 }
 
                 propertiesCode.push(propertyCode)
-    
+
                 if(initial) {
                     constructorActions.push({
                         action: "addLink",
@@ -243,14 +243,14 @@ export function SDNAClass(opts: SDNAClassOptions) {
                     }]
                 }
             }
-    
+
             let collectionsCode = []
             let collections = obj.__collections || {}
             for(let collection in collections) {
                 let collectionCode = `collection(${uuid}, "${collection}").\n`
-    
+
                 let { through, where, local = false } = collections[collection]
-    
+
                 if(through) {
                     if(where) {
                         if(!where.isInstance && !where.condition) {
@@ -267,8 +267,8 @@ export function SDNAClass(opts: SDNAClassOptions) {
                                 otherClass = where.isInstance
                             }
                             conditions.push(`instance(OtherClass, Target), subject_class("${otherClass}", OtherClass)`)
-                        } 
-                        
+                        }
+
                         if(where.condition) {
                             conditions.push(where.condition)
                         }
@@ -279,13 +279,13 @@ export function SDNAClass(opts: SDNAClassOptions) {
                     } else {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }
-                    
+
                     let collectionAdderAction = [{
                         action: "addLink",
                         source: "this",
                         predicate: through,
                         target: "value",
-                        local
+                        ...(local && { local: true })
                     }]
 
                     let collectionRemoverAction = [{
@@ -294,22 +294,22 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         predicate: through,
                         target: "value",
                     }]
-                    
+
                     let collectionSetterAction = [{
                         action: "collectionSetter",
                         source: "this",
                         predicate: through,
                         target: "value",
-                        local
+                        ...(local && { local: true })
                     }]
                     collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
                     collectionCode += `collection_remover(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
                     collectionCode += `collection_setter(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
                 }
-    
+
                 collectionsCode.push(collectionCode)
             }
-    
+
             let subjectContructorJSONString = stringifyObjectLiteral(constructorActions)
             sdna += `constructor(${uuid}, '${subjectContructorJSONString}').\n`
             let instanceConditionProlog = instanceConditions.join(", ")
