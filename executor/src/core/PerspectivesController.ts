@@ -3,7 +3,7 @@ import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -49,7 +49,6 @@ export default class PerspectivesController {
                     }
 
                     for (const linkRemoved of diff.removals) {
-                        console.log("publishing removal:", linkRemoved)
                         await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
                             perspective: perspectivePlain,
                             link: linkRemoved
@@ -63,7 +62,7 @@ export default class PerspectivesController {
             }
         })
 
-        this.#context.languageController!.addTelepresenceSignalObserver(async (signal: any, lang: LanguageRef) => {
+        this.#context.languageController!.addTelepresenceSignalObserver(async (signal: PerspectiveExpression, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
                 await PUBSUB.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {

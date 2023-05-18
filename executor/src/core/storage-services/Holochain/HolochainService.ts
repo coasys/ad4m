@@ -76,7 +76,12 @@ export default class HolochainService {
     async handleCallback(signal: EncodedAppSignal) {
         //console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
         //@ts-ignore
-        let payload = Buffer.from(decode(signal.signal));
+        let payload = decode(signal.signal);
+        var TypedArray = Object.getPrototypeOf(Uint8Array);
+        if (payload instanceof TypedArray) {
+            //@ts-ignore
+            payload = Buffer.from(payload);
+        };
         let appSignalDecoded = {
             cell_id: signal.cell_id,
             zome_name: signal.zome_name,
