@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::Duration;
@@ -8,7 +7,6 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use holochain::conductor::api::{AppInfo, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
-use holochain::conductor::state::AppInterfaceId;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
@@ -18,23 +16,25 @@ use holochain::prelude::{
     Signature, Timestamp, TransportConfig, ZomeCallResponse, ZomeCallUnsigned,
 };
 use holochain::test_utils::itertools::Either;
-use lazy_static::lazy_static;
-use log::debug;
 use log::info;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast::Receiver;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio_stream::StreamExt;
 
 pub(crate) mod holochain_service_extension;
+pub(crate) mod interface;
 
-type BoxedStream = Pin<Box<dyn tokio_stream::Stream<Item = Signal> + Send>>;
+pub(crate) use interface::{
+    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
+    HolochainServiceRequest, HolochainServiceResponse,
+};
+
+use self::interface::set_holochain_service;
 
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
-    //pub signal_receivers: Arc<Mutex<BoxedStream>>,
-    pub signal_receivers: Arc<Mutex<Vec<Receiver<Signal>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,10 +49,119 @@ pub struct LocalConductorConfig {
     pub use_mdns: bool,
     pub proxy_url: String,
     pub bootstrap_url: String,
+    pub admin_port: u16,
 }
 
 impl HolochainService {
-    pub async fn new(local_config: LocalConductorConfig) -> Result<(), AnyError> {
+    pub async fn init(local_config: LocalConductorConfig) -> Result<(), AnyError> {
+        let (sender, mut receiver) = mpsc::channel::<HolochainServiceRequest>(32);
+        let (stream_sender, stream_receiver) = mpsc::unbounded_channel::<Signal>();
+
+        let inteface = HolochainServiceInterface {
+            sender,
+            stream_receiver: Arc::new(Mutex::new(stream_receiver)),
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create Tokio runtime");
+            let _guard = rt.enter();
+
+            let mut service = HolochainService::new(local_config).await.unwrap();
+
+            set_holochain_service(inteface).await;
+
+            let conductor_clone = service.conductor.clone();
+            // Spawn a new task to forward items from the stream to the receiver
+            tokio::spawn(async move {
+                let sig_broadcasters = conductor_clone.signal_broadcaster();
+
+                let mut streams = tokio_stream::StreamMap::new();
+                for (i, rx) in sig_broadcasters
+                    .subscribe_separately()
+                    .into_iter()
+                    .enumerate()
+                {
+                    streams.insert(i, tokio_stream::wrappers::BroadcastStream::new(rx));
+                }
+                let mut stream =
+                    streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
+
+                response_sender
+                    .send(HolochainServiceResponse::InitComplete(Ok(())))
+                    .unwrap();
+
+                loop {
+                    while let Some(item) = stream.next().await {
+                        let _ = stream_sender.send(item);
+                    }
+                }
+            });
+
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    HolochainServiceRequest::InstallApp(payload, response) => {
+                        let result = service.install_app(payload).await;
+                        let _ = response.send(HolochainServiceResponse::InstallApp(result));
+                    }
+                    HolochainServiceRequest::CallZomeFunction {
+                        app_id,
+                        cell_name,
+                        zome_name,
+                        fn_name,
+                        payload,
+                        response,
+                    } => {
+                        let result = service
+                            .call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
+                            .await;
+                        let _ = response.send(HolochainServiceResponse::CallZomeFunction(result));
+                    }
+                    HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
+                        let result = service.remove_app(app_id).await;
+                        let _ = response_tx.send(HolochainServiceResponse::RemoveApp(result));
+                    }
+                    HolochainServiceRequest::AgentInfos(response_tx) => {
+                        let result = service.agent_infos().await;
+                        let _ = response_tx.send(HolochainServiceResponse::AgentInfos(result));
+                    }
+                    HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
+                        let result = service.add_agent_infos(agent_infos).await;
+                        let _ = response_tx.send(HolochainServiceResponse::AddAgentInfos(result));
+                    }
+                    HolochainServiceRequest::Sign(data, response_tx) => {
+                        let result = service.sign(data).await;
+                        let _ = response_tx.send(HolochainServiceResponse::Sign(result));
+                    }
+                    HolochainServiceRequest::Shutdown(response_tx) => {
+                        let result = service.shutdown().await;
+                        let _ = response_tx.send(HolochainServiceResponse::Shutdown(result));
+                    }
+                    HolochainServiceRequest::GetAgentKey(response_tx) => {
+                        let result = service.get_agent_key().await;
+                        let _ = response_tx.send(HolochainServiceResponse::GetAgentKey(result));
+                    }
+                    HolochainServiceRequest::GetAppInfo(app_id, response_tx) => {
+                        let result = service.get_app_info(app_id).await;
+                        let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
+                    }
+                }
+            }
+        });
+
+        match response_receiver.await? {
+            HolochainServiceResponse::InitComplete(result) => result?,
+            _ => unreachable!(),
+        };
+
+        Ok(())
+    }
+
+    pub async fn new(local_config: LocalConductorConfig) -> Result<HolochainService, AnyError> {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
         let config = if conductor_yaml_path.exists() {
@@ -109,35 +218,20 @@ impl HolochainService {
             panic!("Could not start holochain conductor");
         }
 
+        info!("Started holochain conductor");
+
         let conductor = conductor.unwrap();
 
         let interface = conductor
             .clone()
-            .add_app_interface(Either::Right(AppInterfaceId::new(6321)))
+            .add_app_interface(Either::Left(local_config.admin_port))
             .await;
 
-        debug!("Added app interface: {:?}", interface);
+        info!("Added app interface: {:?}", interface);
 
-        info!("Started holochain conductor");
-        let signal_broadcaster = conductor.signal_broadcaster();
-        info!("Got signal broadcaster");
+        let service = Self { conductor };
 
-        let subs = signal_broadcaster.subscribe_separately();
-        debug!("Start sub length: {:?}", subs.len());
-
-        let service = Self {
-            conductor,
-            signal_receivers: Arc::new(Mutex::new(subs)),
-        };
-
-        let mut lock = HOLOCHAIN_CONDUCTOR.write().await;
-        *lock = Some(service);
-
-        info!("Set global conductor");
-
-        info!("Started holochain conductor and set reference in rust executor");
-
-        Ok(())
+        Ok(service)
     }
 
     pub async fn install_app(
@@ -171,16 +265,6 @@ impl HolochainService {
 
                 let app_info = self.conductor.get_app_info(&app_id).await?;
 
-                debug!("Getting receivers lock");
-                let mut receivers = self.signal_receivers.lock().await;
-                debug!("Got signal receivers");
-                let sig_broadcasters = self.conductor.signal_broadcaster();
-                let subs = sig_broadcasters.subscribe_separately();
-                debug!("Got subs length: {:?}", subs.len());
-                if subs.len() != 0 {
-                    *receivers = subs;
-                }
-
                 Ok(app_info.unwrap())
             }
             Some(app_info) => {
@@ -199,8 +283,8 @@ impl HolochainService {
         payload: Option<ExternIO>,
     ) -> Result<ZomeCallResponse, AnyError> {
         info!(
-            "Calling zome function: {:?} {:?} {:?} {:?} {:?}",
-            app_id, cell_name, zome_name, fn_name, payload
+            "Calling zome function: {:?} {:?} {:?} {:?}",
+            app_id, cell_name, zome_name, fn_name
         );
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
@@ -333,23 +417,5 @@ impl HolochainService {
 
     pub async fn get_app_info(&self, app_id: String) -> Result<Option<AppInfo>, AnyError> {
         Ok(self.conductor.get_app_info(&app_id).await?)
-    }
-}
-
-lazy_static! {
-    static ref HOLOCHAIN_CONDUCTOR: Arc<RwLock<Option<HolochainService>>> =
-        Arc::new(RwLock::new(None));
-}
-
-pub async fn get_global_conductor() -> HolochainService {
-    let lock = HOLOCHAIN_CONDUCTOR.read().await;
-    lock.clone().expect("Holochain Conductor not started")
-}
-
-pub async fn maybe_get_global_conductor() -> Option<HolochainService> {
-    let lock = HOLOCHAIN_CONDUCTOR.try_read();
-    match lock {
-        Ok(guard) => guard.clone(),
-        Err(_) => None,
     }
 }
