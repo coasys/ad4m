@@ -37,7 +37,7 @@ export default async function create(context: LanguageContext): Promise<Language
         await linksAdapter.handleHolochainSignal(signal)
       } else {
         for (const callback of telepresenceAdapter.signalCallbacks) {
-          callback(signal.payload);
+          await callback(signal.payload);
         }
       }
     }

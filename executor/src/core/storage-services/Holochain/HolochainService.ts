@@ -1,4 +1,4 @@
-import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest } from '@holochain/client'
+import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest, EncodedAppSignal } from '@holochain/client'
 import path from 'path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
@@ -73,12 +73,18 @@ export default class HolochainService {
         }, 60000);
     }
 
-    handleCallback(signal: AppSignal) {
-        // console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks", signal);
-        //console.debug("registered callbacks:", this.#signalCallbacks)
+    async handleCallback(signal: EncodedAppSignal) {
+        //console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
+        //@ts-ignore
+        let payload = Buffer.from(decode(signal.signal));
+        let appSignalDecoded = {
+            cell_id: signal.cell_id,
+            zome_name: signal.zome_name,
+            payload: payload
+        } as AppSignal;
         if (this.#signalCallbacks.length != 0) {
-            const signalDna = Buffer.from(signal.cell_id[0]).toString('hex')
-            const signalPubkey = Buffer.from(signal.cell_id[1]).toString('hex')
+            const signalDna = Buffer.from(appSignalDecoded.cell_id[0]).toString('hex')
+            const signalPubkey = Buffer.from(appSignalDecoded.cell_id[1]).toString('hex')
             //console.debug("Looking for:", signalDna, signalPubkey)
             let callbacks = this.#signalCallbacks.filter(e => {
                 const dna = Buffer.from(e[0][0]).toString('hex')
@@ -86,12 +92,13 @@ export default class HolochainService {
                 //console.debug("Checking:", dna, pubkey)
                 return ( dna === signalDna ) && (pubkey === signalPubkey)
             })
-            callbacks.forEach(cb => {
+            for (const cb of callbacks) {
                 if (cb && cb![1] != undefined) {
-                    cb![1](signal);
+                    await cb![1](appSignalDecoded);
                 };
-            })
+            }
         };
+        return appSignalDecoded;
     }
 
     async run(config: HolochainUnlockConfiguration) {
@@ -107,7 +114,8 @@ export default class HolochainService {
             useLocalProxy: config.useLocalProxy!,
             useMdns: config.useMdns!,
             proxyUrl: kitsuneProxy,
-            bootstrapUrl
+            bootstrapUrl,
+            adminPort: config.adminPort!
         } as ConductorConfig);
 
         console.log("Holochain run complete");

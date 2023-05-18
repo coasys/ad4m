@@ -37,7 +37,7 @@ export default class DMAdapter implements DirectMessageAdapter {
             ["direct-message", "inbox"],
           ] 
         }
-      ], (signal) => {
+      ], async (signal) => {
         console.debug("DM Language got HC signal:", signal)
         //@ts-ignore
         let payload = signal.payload
@@ -50,7 +50,9 @@ export default class DMAdapter implements DirectMessageAdapter {
         } catch(e) {
           console.error(e)
         }
-        that.#messageCallbacks.forEach(cb => cb(payload))
+        for (const cb of that.#messageCallbacks) {
+          await cb(payload)
+        }
       });
   }
 
@@ -109,6 +111,7 @@ export default class DMAdapter implements DirectMessageAdapter {
   }
 
   addMessageCallback(callback: MessageCallback) {
+    console.log("adding callback on dm language");
     this.onlyRecipient()
     this.#messageCallbacks.push(callback)
   }
