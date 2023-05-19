@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(unused_variables)]
 use juniper::{graphql_object, FieldResult};
+use log::debug;
 
 use crate::js_core::JsCoreHandle;
 
@@ -113,7 +114,9 @@ impl Mutation {
             )"#,
             rand, request_id, ALL_CAPABILITY
         );
+        debug!("agent_generate_jwt script: {}", script);
         let result = js.execute(script).await?;
+        debug!("agent_generate_jwt result: {}", result);
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
     }
@@ -144,7 +147,7 @@ impl Mutation {
         let mut js = context.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentPermitCapability", {{ auth: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentPermitCapability", {{ auth: JSON.stringify({}) }}, {{ capabilities: [{}] }})
             )"#,
             auth, ALL_CAPABILITY
         );

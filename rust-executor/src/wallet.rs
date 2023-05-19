@@ -418,7 +418,6 @@ mod tests {
             let result = key_pair.verify(message, sig_bytes);
             assert!(result.is_ok());
         }
-        
 
         signature[0] = 0;
         {

@@ -3,7 +3,8 @@ use std::{collections::HashMap, rc::Rc};
 use url::Url;
 
 use super::{
-    pubsub_extension, string_module_loader::StringModuleLoader, utils_extension, wallet_extension,
+    jwt_extension, pubsub_extension, string_module_loader::StringModuleLoader, utils_extension,
+    wallet_extension,
 };
 use crate::holochain_service::holochain_service_extension;
 
@@ -21,10 +22,6 @@ pub fn module_map() -> HashMap<String, String> {
         "https://ad4m.runtime/executor".to_string(),
         include_str!("../../../executor/lib/bundle.js").to_string(),
     );
-    map.insert(
-        "https://ad4m.runtime/test".to_string(),
-        include_str!("testlib.js").to_string(),
-    );
     map
 }
 
@@ -38,9 +35,10 @@ pub fn main_worker_options() -> WorkerOptions {
     let utils_ext = utils_extension::build();
     let sub_ext = pubsub_extension::build();
     let holochain_ext = holochain_service_extension::build();
+    let jwt_ext = jwt_extension::build();
 
     WorkerOptions {
-        extensions: vec![wallet_ext, utils_ext, sub_ext, holochain_ext],
+        extensions: vec![wallet_ext, utils_ext, sub_ext, holochain_ext, jwt_ext],
         module_loader: Rc::new(loader),
         ..Default::default()
     }
