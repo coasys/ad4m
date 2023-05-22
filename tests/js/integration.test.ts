@@ -652,25 +652,6 @@ describe("Integration", () => {
                     expect(recipe2.name).to.equal("recipe://test")
                 })
 
-                it("delete()", async () => {
-                    let root = Literal.from("Active record implementation test delete").toUrl()
-                    const recipe = new Recipe(perspective!, root)
-
-                    recipe.name = "recipe://test";
-
-                    await recipe.save();
-
-                    const recipe2 = await Recipe.all(perspective!);
-
-                    expect(recipe2.length).to.equal(2)
-
-                    await recipe.delete();
-
-                    const recipe3 = await Recipe.all(perspective!);
-
-                    expect(recipe3.length).to.equal(1)
-                })
-
                 it("update()", async () => {
                     let root = Literal.from("Active record implementation test").toUrl()
                     const recipe = new Recipe(perspective!, root)
@@ -709,14 +690,52 @@ describe("Integration", () => {
                     expect(recipe2.comments.length).to.equal(2)
                 })
 
-                it("can constrain collection entries through 'where' clause with prolog condition", async () => {
-                    let root = Literal.from("Active record implementation collection test 1").toUrl()
+                it("save() & get() local", async () => {
+                    let root = Literal.from("Active record implementation test local link").toUrl()
+                    const recipe = new Recipe(perspective!, root)
 
+                    recipe.name = "recipe://locallink";
+                    recipe.local = 'test'
+
+                    await recipe.save();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://locallink")
+                    expect(recipe2.local).to.equal("test")
+
+                    // @ts-ignore
+                    const links = await perspective?.get({
+                        source: root,
+                        predicate: "recipe://local"
+                    })
+
+                    expect(links!.length).to.equal(1)
+                    expect(links![0].status).to.equal('local')
+                })
+
+                it("delete()", async () => {
+                    const recipe2 = await Recipe.all(perspective!);
+
+                    expect(recipe2.length).to.equal(3)
+
+                    await recipe2[0].delete();
+
+                    const recipe3 = await Recipe.all(perspective!);
+
+                    expect(recipe3.length).to.equal(2)
+                })
+
+                it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                    let root = Literal.from("Active record implementation collection test with where").toUrl()
                     const recipe = new Recipe(perspective!, root)
 
                     let recipeEntries = Literal.from("test recipes").toUrl()
 
                     recipe.entries = [recipeEntries]
+                    // @ts-ignore
                     recipe.comments = ['test', 'test1']
                     recipe.name = "recipe://collection_test";
 
@@ -731,32 +750,6 @@ describe("Integration", () => {
                     await recipe2.get();
 
                     expect(recipe2.ingredients.length).to.equal(1)
-                })
-
-                it("save() & get() local", async () => {
-                    let root = Literal.from("Active record implementation test local link").toUrl()
-                    const recipe = new Recipe(perspective!, root)
-
-                    recipe.name = "recipe://test";
-                    recipe.local = 'test'
-
-                    await recipe.save();
-
-                    const recipe2 = new Recipe(perspective!, root);
-
-                    await recipe2.get();
-
-                    expect(recipe2.name).to.equal("recipe://test")
-                    expect(recipe2.local).to.equal("test")
-
-                    // @ts-ignore
-                    const links = await perspective?.get({
-                        source: root,
-                        predicate: "recipe://local"
-                    })
-
-                    expect(links!.length).to.equal(1)
-                    expect(links![0].status).to.equal('local')
                 })
             })
         })
