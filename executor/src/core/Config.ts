@@ -18,7 +18,7 @@ export class MainConfig {
     holochainConductorPath: string;
     resourcePath: string = '';
     languageLanguageOnly: boolean = false;
-    reqCredential: string = '';
+    adminCredential: string = '';
     knownLinkLanguages: string[] = [];
     trustedAgents: string[] =  [];
     systemLanguages: string[] = [];
@@ -68,7 +68,7 @@ export interface CoreConfig {
     perspectiveLanguageSettings?: object
     neighbourhoodLanguageSettings?: object
     languageLanguageSettings?: object
-    reqCredential?: string
+    adminCredential?: string
     swiplPath?: string,
     swiplHomePath?: string,
 }
@@ -77,8 +77,8 @@ export interface CoreConfig {
 export function init(c: CoreConfig): MainConfig {
     const mainConfig = new MainConfig(c.appResourcePath, c.appDataPath);
 
-    if(c.reqCredential) {
-        mainConfig.reqCredential = c.reqCredential
+    if(c.adminCredential) {
+        mainConfig.adminCredential = c.adminCredential
     }
 
     //Create paths if they do not exist

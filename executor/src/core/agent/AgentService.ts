@@ -52,7 +52,7 @@ export default class AgentService {
   #readyPromise: Promise<void>;
   #readyPromiseResolve?: (value: void | PromiseLike<void>) => void;
 
-  constructor(rootConfigPath: string, reqCredential?: string) {
+  constructor(rootConfigPath: string, adminCredential?: string) {
     this.#file = path.join(rootConfigPath, "agent.json");
     this.#fileProfile = path.join(rootConfigPath, "agentProfile.json");
     this.#appsFile = path.join(rootConfigPath, "apps.json");
@@ -67,11 +67,11 @@ export default class AgentService {
     });
     this.#requests = new Map();
     this.#tokenValidPeriod = DefaultTokenValidPeriod;
-    if (reqCredential) {
-      this.#adminCredential = reqCredential;
+    if (adminCredential) {
+      this.#adminCredential = adminCredential;
     } else {
       console.warn(
-        "reqCredential is not set or empty, empty token will possess admin capabililities."
+        "adminCredential is not set or empty, empty token will possess admin capabililities."
       );
       this.#adminCredential = "";
     }
@@ -413,9 +413,9 @@ export default class AgentService {
 
 export function init(
   rootConfigPath: string,
-  reqCredential?: string
+  adminCredential?: string
 ): AgentService {
-  const agent = new AgentService(rootConfigPath, reqCredential);
+  const agent = new AgentService(rootConfigPath, adminCredential);
   agent.load();
   return agent;
 }
