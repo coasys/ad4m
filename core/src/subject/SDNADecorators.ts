@@ -188,7 +188,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
 
-                let { through, initial, required, resolveLanguage, writable, flag, getter, setter, local = false } = properties[property]
+                let { through, initial, required, resolveLanguage, writable, flag, getter, setter, local } = properties[property]
 
                 if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
@@ -249,7 +249,7 @@ export function SDNAClass(opts: SDNAClassOptions) {
             for(let collection in collections) {
                 let collectionCode = `collection(${uuid}, "${collection}").\n`
 
-                let { through, where, local = false } = collections[collection]
+                let { through, where, local} = collections[collection]
 
                 if(through) {
                     if(where) {
