@@ -59,8 +59,6 @@ Error.captureStackTrace = function (err, constructorOpt) {
 
 import { init, path, os } from 'https://ad4m.runtime/executor'
 
-console.log("Hello from main")
-
 const appDataPath = path.join(os.homedir(), 'ad4m', 'tests', 'ad4m1');
 const binaryPath = path.join(appDataPath, 'binary');
 const swiplHomePath = (process.platform == "win32" ? path.join(appDataPath, 'swipl/') : path.join(appDataPath, 'swipl/lib/swipl/'))
@@ -82,12 +80,6 @@ const bootstrapFixtures = {
 const connectHolochain = false;
 const reqCredential = undefined;
 
-//if (!fs.existsSync(appDataPath)) {
-//  fs.mkdirSync(appDataPath);
-//}
-//const bLanguage = bootstrapLanguage ? await import(path.isAbsolute(bootstrapLanguage) ? bootstrapLanguage: path.join(__dirname, bootstrapLanguage)) : [];
-//const bPerspective = bootstrapPerspective ? await import(path.isAbsolute(bootstrapPerspective) ? bootstrapPerspective: path.join(__dirname, bootstrapPerspective)) : [];
-
 async function initCore(config) {
     const core = await init(config)
     globalThis.core = core
@@ -95,9 +87,6 @@ async function initCore(config) {
 }
 
 globalThis.initCore = initCore
-//await initCore()
-
-console.log("main done")
 
 const n = 5
 globalThis.n = n
