@@ -161,7 +161,7 @@ export class SubjectEntity {
 
   async save() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
-    
+
     await this.#perspective.createSubject(this, this.#baseExpression);
 
     await this.update()
@@ -188,7 +188,7 @@ export class SubjectEntity {
               await this.setCollectionSetter(key, value.value)
               break;
           }
-        } else if (Array.isArray(value)) {
+        } else if (Array.isArray(value) && value.length > 0) {
           await this.setCollectionSetter(key, value)
         } else {
           await this.setProperty(key, value);
@@ -201,7 +201,7 @@ export class SubjectEntity {
 
   async get() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
-    
+
     return await this.getData()
   }
 
