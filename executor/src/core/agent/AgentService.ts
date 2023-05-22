@@ -362,31 +362,7 @@ export default class AgentService {
       throw new Error("Can't find permitted request");
     }
 
-    // const key = this.getSigningKey();
-    // console.log("Signing key", key);
-    // // @ts-ignore
-    // let keyEncoder = new KeyEncoder.default("secp256k1");
-    // console.log("Key encoder", keyEncoder, key.privateKey);
-    // const pemPrivateKey = await keyEncoder.encodePrivate(
-    //   key.privateKey,
-    //   "raw",
-    //   "pem"
-    // );
-    // console.log("Pem private key", pemPrivateKey);
-    // const keyObj = crypto.createPrivateKey(key.privateKey);
-    // console.log("Key object", keyObj);
-
-    // const jwt = await new jose.SignJWT({ ...auth })
-    //   .setProtectedHeader({ alg: "ES256K" })
-    //   .setIssuedAt()
-    //   .setIssuer(this.did || "")
-    //   .setAudience(`${auth.appName}:${this.did || ""}`)
-    //   .setExpirationTime(`${this.#tokenValidPeriod}s`)
-    //   .sign(keyObj);
-
     const jwt = await JWT.generateJwt(this.did || "", `${auth.appName}:${this.did || ""}`, `${this.#tokenValidPeriod}s`);
-
-    console.log("JWT", jwt);
 
     this.#requests.delete(authKey);
 
@@ -396,8 +372,6 @@ export default class AgentService {
       console.log("Apps", apps);
       fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
     }
-
-    console.log("returning");
 
     return jwt;
   }
