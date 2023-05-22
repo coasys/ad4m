@@ -1,6 +1,14 @@
 use juniper::{FieldError, FieldResult, GraphQLInputObject, GraphQLObject, GraphQLScalar};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+use crate::js_core::JsCoreHandle;
+
+#[derive(Clone)]
+pub struct RequestContext {
+    pub capability: String,
+    pub js_handle: JsCoreHandle,
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {

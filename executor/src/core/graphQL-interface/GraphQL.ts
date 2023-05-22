@@ -36,6 +36,9 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
     return {
         Query: {
+            getCapabilities: async (token: string) => {
+                return await core.agentService.getCapabilities(token);
+            },
             //@ts-ignore
             agent: (context) => {
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)

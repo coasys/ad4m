@@ -2,29 +2,27 @@ pub mod graphql_types;
 mod mutation_resolvers;
 mod query_resolvers;
 mod subscription_resolvers;
+mod utils;
 
+use graphql_types::RequestContext;
 use mutation_resolvers::*;
 use query_resolvers::*;
 use subscription_resolvers::*;
 
 use crate::js_core::JsCoreHandle;
 
-use std::io::Write;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::{convert::Infallible, io::Write};
 
 use deno_core::error::AnyError;
 use futures::FutureExt as _;
-use juniper::RootNode;
+use juniper::{InputValue, RootNode};
 use juniper_graphql_transport_ws::ConnectionConfig;
 use juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
 
-#[derive(Clone)]
-struct Context;
-
-impl juniper::Context for Context {}
-
-impl juniper::Context for JsCoreHandle {}
+impl juniper::Context for RequestContext {}
 
 type Schema = RootNode<'static, Query, Mutation, Subscription>;
 
@@ -47,7 +45,12 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(),
 
     let qm_schema = schema();
     let js_core_handle_cloned1 = js_core_handle.clone();
-    let qm_state = warp::any().map(move || js_core_handle_cloned1.clone());
+    let qm_state = warp::any()
+        .and(warp::header::<String>("authorization"))
+        .map(move |header| RequestContext {
+            capability: header,
+            js_handle: js_core_handle_cloned1.clone(),
+        });
     let qm_graphql_filter = juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
 
     let root_node = Arc::new(schema());
@@ -61,7 +64,17 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(),
                 serve_graphql_transport_ws(
                     websocket,
                     root_node,
-                    ConnectionConfig::new(js_core_handle),
+                    |val: HashMap<String, InputValue>| async move {
+                        let auth_header = val
+                            .get("authorization")
+                            .map(|v| v.as_string_value().unwrap_or("").to_string());
+                        let context = RequestContext {
+                            capability: auth_header.unwrap_or(String::from("")),
+                            js_handle: js_core_handle.clone(),
+                        };
+                        Ok(ConnectionConfig::new(context))
+                            as Result<ConnectionConfig<_>, Infallible>
+                    },
                 )
                 .map(|r| {
                     if let Err(e) = r {
