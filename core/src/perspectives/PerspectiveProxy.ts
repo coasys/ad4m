@@ -68,7 +68,7 @@ export class PerspectiveProxy {
             let source = replaceThis(replaceParameters(command.source))
             let predicate = replaceThis(replaceParameters(command.predicate))
             let target = replaceThis(replaceParameters(command.target))
-            let local = command.local ?? false
+            let local = command?.local ?? false
 
             switch(command.action) {
                 case 'addLink':
@@ -393,7 +393,7 @@ export class PerspectiveProxy {
 
     /** Removes a subject instance by running its (SDNA defined) destructor,
      * which means removing links around the given expression address
-     * 
+     *
      * @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, the first subject class
      * that matches the given properties will be used.
@@ -403,14 +403,14 @@ export class PerspectiveProxy {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
         if(!result.length) {
-            throw "No constructor found for given subject class: " + className 
+            throw "No constructor found for given subject class: " + className
         }
 
         let actions = result.map(x => eval(x.Actions))
         await this.executeAction(actions[0], exprAddr, undefined)
     }
 
-    /** Checks if the given expression is a subject instance of the given subject class 
+    /** Checks if the given expression is a subject instance of the given subject class
      * @param expression The expression to be checked
      * @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, the first subject class
@@ -492,19 +492,23 @@ export class PerspectiveProxy {
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
         // Collect all string properties of the object in a list
-        let properties = Object.keys(obj).filter(key => !Array.isArray(obj[key]))
+        let properties = []
 
         // Collect all collections of the object in a list
-        let collections = Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance')
+        let collections = []
 
         // Collect all string properties of the object in a list
         if(Object.getPrototypeOf(obj).__properties) {
-            Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => !properties.includes(p) ?? properties.push(p))
+            Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => properties.push(p))
+        } else {
+            properties.push(...Object.keys(obj).filter(key => !Array.isArray(obj[key])))
         }
 
         // Collect all collections of the object in a list
         if (Object.getPrototypeOf(obj).__collections) {
             Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
+        } else {
+            collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
         }
 
         // Collect all set functions of the object in a list
@@ -550,7 +554,7 @@ export class PerspectiveProxy {
         for(let removeFunction of removeFunctions) {
             query += `, collection_remover(C, "${collectionRemoverToName(removeFunction)}", _)`
         }
-        
+
         for(let setCollectionFunction of setCollectionFunctions) {
             query += `, collection_setter(C, "${collectionSetterToName(setCollectionFunction)}", _)`
         }
