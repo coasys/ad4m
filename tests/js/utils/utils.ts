@@ -36,7 +36,7 @@ export async function startExecutor(dataPath: string,
     hcAppPort: number,
     ipfsSwarmPort: number,
     languageLanguageOnly: boolean = false,
-    reqCredential?: string
+    adminCredential?: string
 ): Promise<ChildProcess> {
     console.log(bootstrapSeedPath);
     console.log(dataPath);
@@ -52,21 +52,19 @@ export async function startExecutor(dataPath: string,
         console.log("No holochain process running")
     }
     
-    if (!reqCredential) {
+    if (!adminCredential) {
         executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
     } else {
-        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${reqCredential} --run-dapp-server false`, {})
+        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
             if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                console.log("going to resolve");
                 resolve()
             }
         });
         executorProcess!.stderr!.on('data', (data) => {
             if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
-                console.log("going to resolve");
                 resolve()
             }
         }); 
@@ -97,7 +95,6 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
         },
     }));
     wsLink.client.on('message' as any, (data: any) => {
-        console.log(data);
         if (data.payload) {
             if (data.payload.errors) {
                 console.dir(data.payload.errors, { depth: null });
@@ -107,12 +104,6 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
         }
     });
 
-    const link = new HttpLink({
-        uri: `http://127.0.0.1:${port}/graphql`,
-        //@ts-ignore
-        fetch
-    });
-  
     let client = new ApolloClient({
         link: wsLink,
         cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
@@ -127,15 +118,6 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
                 fetchPolicy: "no-cache"
             }
         },
-    });
-    onError(({ graphQLErrors, networkError }) => {
-        if (graphQLErrors)
-            graphQLErrors.forEach(({ message, locations, path }) =>
-            console.log(
-                `[GraphQL error]: Message: ${message}, Location: ${locations}, Path: ${path}`
-            )
-            );
-        if (networkError) console.log(`[Network error]: ${networkError}`);
     });
     
     return client;
