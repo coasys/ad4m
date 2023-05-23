@@ -65,11 +65,17 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(),
                     websocket,
                     root_node,
                     |val: HashMap<String, InputValue>| async move {
-                        let auth_header = val
-                            .get("authorization")
-                            .map(|v| v.as_string_value().unwrap_or("").to_string());
+                        let mut auth_header = String::from("");
+
+                        if let Some(headers) = val.get("headers") {
+                            let headers = headers.to_object_value().unwrap();
+                            if let Some(auth) = headers.get("authorization") {
+                                auth_header = auth.as_string_value().unwrap().to_string();
+                            }
+                        };
+
                         let context = RequestContext {
-                            capability: auth_header.unwrap_or(String::from("")),
+                            capability: auth_header,
                             js_handle: js_core_handle.clone(),
                         };
                         Ok(ConnectionConfig::new(context))

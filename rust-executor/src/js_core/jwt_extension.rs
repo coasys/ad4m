@@ -7,18 +7,50 @@ use serde::{Deserialize, Serialize};
 use crate::wallet::Wallet;
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthInfoExtended {
+    request_id: String,
+    auth: AuthInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthInfo {
+    app_name: String,
+    app_desc: String,
+    app_domain: Option<String>,
+    app_url: Option<String>,
+    app_icon_path: Option<String>,
+    capabilities: Option<Vec<Capability>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Capability {
+    with: Resource,
+    can: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Resource {
+    domain: String,
+    pointers: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     iss: String,
     aud: String,
-    exp: String,
+    exp: u64,
     iat: u64,
+    capabilities: AuthInfo,
 }
 
 #[op]
 async fn generate_jwt(
     issuer: String,
     audience: String,
-    expiration_time: String,
+    expiration_time: u64,
+    capabilities: AuthInfo,
 ) -> Result<String, AnyError> {
     // Get the private key
     let wallet = Wallet::instance();
@@ -39,8 +71,9 @@ async fn generate_jwt(
     let payload = Claims {
         iss: issuer,
         aud: audience,
-        exp: expiration_time,
+        exp: unix_timestamp + expiration_time,
         iat: unix_timestamp,
+        capabilities: capabilities,
     };
 
     let token = encode(

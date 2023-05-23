@@ -1,5 +1,4 @@
 #![allow(non_snake_case)]
-#![allow(unused_variables)]
 use juniper::{graphql_object, FieldResult};
 
 use super::graphql_types::*;
@@ -16,8 +15,8 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agent", null, {{ capabilities: [{}] }}))"#,
-                context.capability
+                r#"JSON.stringify(await core.callResolver("Query", "agent", null, {{ capabilities: {} }}))"#,
+                capabilities
             ))
             .await?;
         let result: JsResultType<Agent> = serde_json::from_str(&result)?;
@@ -39,10 +38,10 @@ impl Query {
                     r#"JSON.stringify(
                     await core.callResolver("Query", "agentByDID", 
                         {{ did: "{}" }}, 
-                        {{ capabilities: [{}] }}
+                        {{ capabilities: {} }}
                     )
                 )"#,
-                    did, context.capability
+                    did, capabilities
                 )
                 .into(),
             )
@@ -57,8 +56,8 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentGetApps", null, {{ capabilities: [{}] }}))"#,
-                context.capability
+                r#"JSON.stringify(await core.callResolver("Query", "agentGetApps", {{ capabilities: {} }}))"#,
+                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
@@ -69,7 +68,7 @@ impl Query {
         &self,
         context: &RequestContext,
     ) -> FieldResult<Vec<EntanglementProof>> {
-        let capabilities =
+        let _capabilities =
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let result = js
@@ -82,7 +81,7 @@ impl Query {
     }
 
     async fn agent_is_locked(&self, context: &RequestContext) -> FieldResult<bool> {
-        let capabilities =
+        let _capabilities =
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let result = js
@@ -100,8 +99,8 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentStatus", null, {{ capabilities: [{}] }}))"#,
-                context.capability
+                r#"JSON.stringify(await core.callResolver("Query", "agentStatus", {{ capabilities: {} }}))"#,
+                capabilities
             ))
             .await?;
         let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
@@ -118,9 +117,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}, {{ capabilities: {} }}))"#,
                 url,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<Option<ExpressionRendered>> = serde_json::from_str(&result)?;
@@ -137,9 +136,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionInteractions", {{ url: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "expressionInteractions", {{ url: "{}" }}, {{ capabilities: {} }}))"#,
                 url,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<InteractionMeta>> = serde_json::from_str(&result)?;
@@ -161,9 +160,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionMany", {{ urls: [{}] }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "expressionMany", {{ urls: [{}] }}, {{ capabilities: {} }}))"#,
                 urls_string,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<Option<ExpressionRendered>>> = serde_json::from_str(&result)?;
@@ -180,9 +179,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionRaw", {{ url: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "expressionRaw", {{ url: "{}" }}, {{ capabilities: {} }}))"#,
                 url,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<Option<String>> = serde_json::from_str(&result)?;
@@ -195,8 +194,8 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "getTrustedAgents", {{ capabilities: [{}] }}))"#,
-                context.capability
+                r#"JSON.stringify(await core.callResolver("Query", "getTrustedAgents", {{ capabilities: {} }}))"#,
+                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
@@ -213,9 +212,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "language", {{ address: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "language", {{ address: "{}" }}, {{ capabilities: {} }}))"#,
                 address,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<LanguageHandle> = serde_json::from_str(&result)?;
@@ -232,9 +231,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languageMeta", {{ address: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "languageMeta", {{ address: "{}" }}, {{ capabilities: {} }}))"#,
                 address,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<LanguageMeta> = serde_json::from_str(&result)?;
@@ -251,9 +250,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languageSource", {{ address: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "languageSource", {{ address: "{}" }}, {{ capabilities: {} }}))"#,
                 address,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -271,9 +270,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languages", {{ filter: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "languages", {{ filter: "{}" }}, {{ capabilities: {} }}))"#,
                 filter_string,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<LanguageHandle>> = serde_json::from_str(&result)?;
@@ -289,7 +288,7 @@ impl Query {
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodHasTelepresenceAdapter", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspectiveUUID, context.capability))
+            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodHasTelepresenceAdapter", {{ perspectiveUUID: "{}" }}, {{ capabilities: {} }}))"#, perspectiveUUID, capabilities))
             .await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -304,7 +303,7 @@ impl Query {
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOnlineAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspectiveUUID, context.capability))
+            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOnlineAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: {} }}))"#, perspectiveUUID, capabilities))
             .await?;
         let result: JsResultType<Vec<OnlineAgent>> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -319,7 +318,7 @@ impl Query {
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOtherAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: [{}] }}))"#, perspectiveUUID, context.capability))
+            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOtherAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: {} }}))"#, perspectiveUUID, capabilities))
             .await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -335,9 +334,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspective", {{ uuid: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "perspective", {{ uuid: "{}" }}, {{ capabilities: {} }}))"#,
                 uuid,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<Option<PerspectiveHandle>> = serde_json::from_str(&result)?;
@@ -355,8 +354,8 @@ impl Query {
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryLinks", {{ query: {}, uuid: "{}" }}, {{ capabilities: [{}] }}))"#,
-            query_string, uuid, context.capability
+            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryLinks", {{ query: {}, uuid: "{}" }}, {{ capabilities: {} }}))"#,
+            query_string, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
@@ -373,8 +372,8 @@ impl Query {
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let script = format!(
-            r#"await core.callResolver("Query", "perspectiveQueryProlog", {{ query: '{}', uuid: "{}" }}, {{ capabilities: [{}] }})"#,
-            query, uuid, context.capability
+            r#"await core.callResolver("Query", "perspectiveQueryProlog", {{ query: '{}', uuid: "{}" }}, {{ capabilities: {} }})"#,
+            query, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -391,9 +390,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspectiveSnapshot", {{ uuid: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "perspectiveSnapshot", {{ uuid: "{}" }}, {{ capabilities: {} }}))"#,
                 uuid,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<Perspective> = serde_json::from_str(&result)?;
@@ -406,8 +405,8 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspectives", null, {{ capabilities: [{}] }}))"#,
-                context.capability
+                r#"JSON.stringify(await core.callResolver("Query", "perspectives", {{ capabilities: {} }}))"#,
+                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<PerspectiveHandle>> = serde_json::from_str(&result)?;
@@ -424,9 +423,9 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriendStatus", {{ did: "{}" }}, {{ capabilities: [{}] }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriendStatus", {{ did: "{}" }}, {{ capabilities: {} }}))"#,
                 did,
-                context.capability
+                capabilities
             ))
             .await?;
         let result: JsResultType<PerspectiveExpression> = serde_json::from_str(&result)?;
@@ -439,8 +438,8 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriends", null, {{ capabilities: [{}] }}))"#,
-                context.capability
+                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriends", {{ capabilities: {} }}))"#,
+                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
@@ -452,19 +451,19 @@ impl Query {
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos", null, {{ capabilities: [{}] }}))"#, context.capability))
+            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos", {{ capabilities: {} }}))"#, capabilities))
             .await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
     }
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
-        let capabilities =
+        let _capabilities =
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeInfo", null, {{ capabilities: [{}] }}))"#,
-                context.capability
+            .execute(format!(
+                r#"JSON.stringify(await core.callResolver("Query", "runtimeInfo", null))"#,
             ))
             .await?;
         let result: JsResultType<RuntimeInfo> = serde_json::from_str(&result)?;
@@ -479,7 +478,7 @@ impl Query {
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeKnownLinkLanguageTemplates", {{ capabilities: [{}] }}))"#, context.capability))
+            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeKnownLinkLanguageTemplates", {{ capabilities: {} }}))"#, capabilities))
             .await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -496,8 +495,8 @@ impl Query {
             .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
             .unwrap_or_else(|| String::from("{ filter: null }"));
         let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageInbox", {}, {{ capabilities: [{}] }}))"#,
-            filter_str, context.capability
+            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageInbox", {}, {{ capabilities: {} }}))"#,
+            filter_str, capabilities
         );
         let mut js = context.js_handle.clone();
         let result = js.execute(script).await?;
@@ -516,8 +515,8 @@ impl Query {
             .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
             .unwrap_or_else(|| String::from("{ filter: null }"));
         let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageOutbox", {}, {{ capabilities: [{}] }}))"#,
-            filter_str, context.capability
+            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageOutbox", {}, {{ capabilities: {} }}))"#,
+            filter_str, capabilities
         );
         let mut js = context.js_handle.clone();
         let result = js.execute(script).await?;
@@ -541,10 +540,10 @@ impl Query {
                 r#"JSON.stringify(
                 await core.callResolver("Query", "runtimeVerifyStringSignedByDid",
                     {{ data: "{}", did: "{}", didSigningKeyId: "{}", signedData: "{}" }},
-                    {{ capabilities: [{}] }}
+                    {{ capabilities: {} }}
                 )
             )"#,
-                data, did, did_signing_key_id, signed_data, context.capability
+                data, did, did_signing_key_id, signed_data, capabilities
             ))
             .await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;

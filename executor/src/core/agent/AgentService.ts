@@ -303,18 +303,10 @@ export default class AgentService {
       return [AGENT_AUTH_CAPABILITY];
     }
 
-    // const key = this.getSigningKey();
-    // // @ts-ignore
-    // let keyEncoder = new KeyEncoder.default("secp256k1");
-    // const pemPublicKey = keyEncoder.encodePublic(key.publicKey, "raw", "pem");
-    // const pubKeyObj = crypto.createPublicKey(pemPublicKey);
-
-    // const { payload } = await jose.jwtVerify(token, pubKeyObj);
     const payload = await JWT.verifyJwt(token);
-    console.log("Got cap payload: ", payload);
 
     //@ts-ignore
-    return payload.capabilities;
+    return payload.capabilities.capabilities;
   }
 
   isAdminCredential(token: string) {
@@ -355,21 +347,19 @@ export default class AgentService {
 
   async generateJwt(requestId: string, rand: string) {
     const authKey = genRequestKey(requestId, rand);
-    console.log("AgentService.generateJwt(): rand number with requestId: ", authKey);
     const auth = this.#requests.get(authKey);
 
     if (!auth) {
       throw new Error("Can't find permitted request");
     }
 
-    const jwt = await JWT.generateJwt(this.did || "", `${auth.appName}:${this.did || ""}`, `${this.#tokenValidPeriod}s`);
+    const jwt = await JWT.generateJwt(this.did || "", `${auth.appName}:${this.did || ""}`, this.#tokenValidPeriod, auth);
 
     this.#requests.delete(authKey);
 
     if (requestId === this.#requestingAuthInfo?.requestId) {
       const apps = [...this.#apps, { ...this.#requestingAuthInfo, token: jwt }];
       this.#apps = apps;
-      console.log("Apps", apps);
       fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
     }
 

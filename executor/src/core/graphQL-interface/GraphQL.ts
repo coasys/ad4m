@@ -37,7 +37,16 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
     return {
         Query: {
             getCapabilities: async (token: string) => {
-                return await core.agentService.getCapabilities(token);
+                if (token === undefined) {
+                    token = ""
+                };
+                const capabilities = await core.agentService.getCapabilities(token);
+                if(!capabilities) throw new Error("User capability is empty.")
+
+                const isAd4minCredential =  core.agentService.isAdminCredential(token)
+                checkTokenAuthorized(core.agentService.getApps(), token, isAd4minCredential)
+
+                return { capabilities, token };
             },
             //@ts-ignore
             agent: (context) => {

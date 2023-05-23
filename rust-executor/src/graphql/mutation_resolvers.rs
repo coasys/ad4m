@@ -1,5 +1,4 @@
 #![allow(non_snake_case)]
-#![allow(unused_variables)]
 use juniper::{graphql_object, FieldResult};
 use log::debug;
 
@@ -21,9 +20,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "addTrustedAgents", {{ agents: {:?} }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "addTrustedAgents", {{ agents: {:?} }}, {{ capabilities: {} }})
             )"#,
-            agents, context.capability
+            agents, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
@@ -40,10 +39,10 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentAddEntanglementProofs", {{ proofs: {} }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentAddEntanglementProofs", {{ proofs: {} }}, {{ capabilities: {} }})
             )"#,
             serde_json::to_string(&proofs).unwrap(),
-            context.capability
+            capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
@@ -60,10 +59,10 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentDeleteEntanglementProofs", {{ proofs: {} }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentDeleteEntanglementProofs", {{ proofs: {} }}, {{ capabilities: {} }})
             )"#,
             serde_json::to_string(&proofs).unwrap(),
-            context.capability
+            capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
@@ -81,9 +80,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentEntanglementProofPreFlight", {{ deviceKey: "{}", deviceKeyType: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentEntanglementProofPreFlight", {{ deviceKey: "{}", deviceKeyType: "{}" }}, {{ capabilities: {} }})
             )"#,
-            device_key, device_key_type, context.capability
+            device_key, device_key_type, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<EntanglementProof> = serde_json::from_str(&result)?;
@@ -95,14 +94,15 @@ impl Mutation {
         context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
+        debug!("Agent generate raw cap: {}", context.capability.clone());
         let capabilities =
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentGenerate", {{ passphrase: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentGenerate", {{ passphrase: "{}" }}, {{ capabilities: {} }})
             )"#,
-            passphrase, context.capability
+            passphrase, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
@@ -120,9 +120,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentGenerateJwt", {{ rand: "{}", requestId: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentGenerateJwt", {{ rand: "{}", requestId: "{}" }}, {{ capabilities: {} }})
             )"#,
-            rand, request_id, context.capability
+            rand, request_id, capabilities
         );
         debug!("agent_generate_jwt script: {}", script);
         let result = js.execute(script).await?;
@@ -141,9 +141,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentLock", {{ passphrase: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentLock", {{ passphrase: "{}" }}, {{ capabilities: {} }})
             )"#,
-            passphrase, context.capability
+            passphrase, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
@@ -161,9 +161,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentPermitCapability", {{ auth: JSON.stringify({}) }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentPermitCapability", {{ auth: JSON.stringify({}) }}, {{ capabilities: {} }})
             )"#,
-            auth, context.capability
+            auth, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -180,9 +180,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentRemoveApp", {{ requestId: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentRemoveApp", {{ requestId: "{}" }}, {{ capabilities: {} }})
             )"#,
-            request_id, context.capability
+            request_id, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
@@ -200,9 +200,9 @@ impl Mutation {
         let auth_info_json = serde_json::to_string(&auth_info)?;
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentRequestCapability", {{ authInfo: {} }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentRequestCapability", {{ authInfo: {} }}, {{ capabilities: {} }})
             )"#,
-            auth_info_json, context.capability
+            auth_info_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -219,9 +219,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentRevokeToken", {{ requestId: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentRevokeToken", {{ requestId: "{}" }}, {{ capabilities: {} }})
             )"#,
-            request_id, context.capability
+            request_id, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
@@ -238,9 +238,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentSignMessage", {{ message: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentSignMessage", {{ message: "{}" }}, {{ capabilities: {} }})
             )"#,
-            message, context.capability
+            message, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<AgentSignature> = serde_json::from_str(&result)?;
@@ -257,9 +257,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}" }}, {{ capabilities: {} }})
             )"#,
-            passphrase, context.capability
+            passphrase, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
@@ -276,9 +276,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUpdateDirectMessageLanguage", {{ directMessageLanguage: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentUpdateDirectMessageLanguage", {{ directMessageLanguage: "{}" }}, {{ capabilities: {} }})
             )"#,
-            direct_message_language, context.capability
+            direct_message_language, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Agent> = serde_json::from_str(&result)?;
@@ -296,9 +296,9 @@ impl Mutation {
         let perspective_json = serde_json::to_string(&perspective)?;
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }}, {{ capabilities: {} }})
             )"#,
-            perspective_json, context.capability
+            perspective_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Agent> = serde_json::from_str(&result)?;
@@ -316,9 +316,9 @@ impl Mutation {
         let agents_json = serde_json::to_string(&agents)?;
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "deleteTrustedAgents", {{ agents: {} }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "deleteTrustedAgents", {{ agents: {} }}, {{ capabilities: {} }})
             )"#,
-            agents_json, context.capability
+            agents_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
@@ -336,9 +336,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }}, {{ capabilities: [{}] }})
+                await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }}, {{ capabilities: {} }})
             )"#,
-            content, language_address, context.capability
+            content, language_address, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -361,9 +361,9 @@ impl Mutation {
                 "Mutation",
                 "expressionInteract",
                 {{ interactionCall: {}, url: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            interaction_call_json, url, context.capability
+            interaction_call_json, url, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -385,9 +385,9 @@ impl Mutation {
                 "Mutation",
                 "languageApplyTemplateAndPublish",
                 {{ sourceLanguageHash: "{}", templateData: JSON.stringify({}) }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            source_language_hash, template_data, context.capability
+            source_language_hash, template_data, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<LanguageRef> = serde_json::from_str(&result)?;
@@ -410,9 +410,9 @@ impl Mutation {
                 "Mutation",
                 "languagePublish",
                 {{ languageMeta: {}, languagePath: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            language_meta_json, language_path, context.capability
+            language_meta_json, language_path, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<LanguageMeta> = serde_json::from_str(&result)?;
@@ -433,9 +433,9 @@ impl Mutation {
                 "Mutation",
                 "languageRemove",
                 {{ address: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            address, context.capability
+            address, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -457,9 +457,9 @@ impl Mutation {
                 "Mutation",
                 "languageWriteSettings",
                 {{ languageAddress: "{}", settings: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            language_address, settings, context.capability
+            language_address, settings, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -480,9 +480,9 @@ impl Mutation {
                 "Mutation",
                 "neighbourhoodJoinFromUrl",
                 {{ url: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            url, context.capability
+            url, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
@@ -506,9 +506,9 @@ impl Mutation {
                 "Mutation",
                 "neighbourhoodPublishFromPerspective",
                 {{ linkLanguage: "{}", meta: {}, perspectiveUUID: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            link_language, meta_json, perspectiveUUID, context.capability
+            link_language, meta_json, perspectiveUUID, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -531,9 +531,9 @@ impl Mutation {
                 "Mutation",
                 "neighbourhoodSendBroadcast",
                 {{ payload: {}, perspectiveUUID: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            payload_json, perspectiveUUID, context.capability
+            payload_json, perspectiveUUID, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -556,9 +556,9 @@ impl Mutation {
                 "Mutation",
                 "neighbourhoodSendBroadcastU",
                 {{ payload: {}, perspectiveUUID: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            payload_json, perspectiveUUID, context.capability
+            payload_json, perspectiveUUID, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -582,9 +582,9 @@ impl Mutation {
                 "Mutation",
                 "neighbourhoodSendSignal",
                 {{ payload: {}, perspectiveUUID: "{}", remoteAgentDid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            payload_json, perspectiveUUID, remote_agent_did, context.capability
+            payload_json, perspectiveUUID, remote_agent_did, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -608,9 +608,9 @@ impl Mutation {
                 "Mutation",
                 "neighbourhoodSendSignalU",
                 {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            payload_json, perspectiveUUID, remote_agent_did, context.capability
+            payload_json, perspectiveUUID, remote_agent_did, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -633,9 +633,9 @@ impl Mutation {
                 "Mutation",
                 "neighbourhoodSetOnlineStatus",
                 {{ perspectiveUUID: "{}", status: {} }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            perspectiveUUID, status_json, context.capability
+            perspectiveUUID, status_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -658,9 +658,9 @@ impl Mutation {
                 "Mutation",
                 "neighbourhoodSetOnlineStatusU",
                 {{ perspectiveUUID: "{}", status: {} }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            perspectiveUUID, status_json, context.capability
+            perspectiveUUID, status_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -681,9 +681,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveAdd",
                 {{ name: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            name, context.capability
+            name, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
@@ -706,9 +706,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveAddLink",
                 {{ link: {}, uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            link_json, uuid, context.capability
+            link_json, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
@@ -731,9 +731,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveAddLinkExpression",
                 {{ link: {}, uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            link_json, uuid, context.capability
+            link_json, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
@@ -756,9 +756,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveAddLinks",
                 {{ links: {}, uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            links_json, uuid, context.capability
+            links_json, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
@@ -781,9 +781,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveLinkMutations",
                 {{ mutations: {}, uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            mutations_json, uuid, context.capability
+            mutations_json, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<LinkExpressionMutations> = serde_json::from_str(&result)?;
@@ -804,9 +804,9 @@ impl Mutation {
                 "Mutation",
                 "perspectivePublishSnapshot",
                 {{ uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            uuid, context.capability
+            uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -827,9 +827,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveRemove",
                 {{ uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            uuid, context.capability
+            uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -852,9 +852,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveRemoveLink",
                 {{ link: {}, uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            link_json, uuid, context.capability
+            link_json, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -877,9 +877,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveRemoveLinks",
                 {{ links: {}, uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            links_json, uuid, context.capability
+            links_json, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
@@ -901,9 +901,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveUpdate",
                 {{ name: "{}", uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            name, uuid, context.capability
+            name, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
@@ -928,9 +928,9 @@ impl Mutation {
                 "Mutation",
                 "perspectiveUpdateLink",
                 {{ newLink: {}, oldLink: {}, uuid: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            new_link_json, old_link_json, uuid, context.capability
+            new_link_json, old_link_json, uuid, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
@@ -952,9 +952,9 @@ impl Mutation {
                 "Mutation",
                 "runtimeAddFriends",
                 {{ dids: {} }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            dids_json, context.capability
+            dids_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
@@ -976,9 +976,9 @@ impl Mutation {
                 "Mutation",
                 "runtimeAddKnownLinkLanguageTemplates",
                 {{ addresses: {} }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            addresses_json, context.capability
+            addresses_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
@@ -1001,9 +1001,9 @@ impl Mutation {
                 "Mutation",
                 "runtimeFriendSendMessage",
                 {{ did: "{}", message: {} }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            did, message_json, context.capability
+            did, message_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -1024,9 +1024,9 @@ impl Mutation {
                 "Mutation",
                 "runtimeHcAddAgentInfos",
                 {{ agentInfos: JSON.stringify({}) }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            agent_infos, context.capability
+            agent_infos, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -1043,9 +1043,9 @@ impl Mutation {
                 "Mutation",
                 "runtimeOpenLink",
                 {{ url: "{}" }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            url, context.capability
+            url, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -1061,9 +1061,9 @@ impl Mutation {
             await core.callResolver(
                 "Mutation",
                 "runtimeQuit",
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            context.capability
+            capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
@@ -1085,9 +1085,9 @@ impl Mutation {
                 "Mutation",
                 "runtimeRemoveFriends",
                 {{ dids: {} }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            dids_json, context.capability
+            dids_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
@@ -1109,9 +1109,9 @@ impl Mutation {
                 "Mutation",
                 "runtimeRemoveKnownLinkLanguageTemplates",
                 {{ addresses: {} }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            addresses_json, context.capability
+            addresses_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
@@ -1133,9 +1133,9 @@ impl Mutation {
                 "Mutation",
                 "runtimeSetStatus",
                 {{ status: {} }},
-                {{ capabilities: [{}] }}
+                {{ capabilities: {} }}
             ))"#,
-            status_json, context.capability
+            status_json, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
