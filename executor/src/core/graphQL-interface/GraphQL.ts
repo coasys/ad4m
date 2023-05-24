@@ -20,6 +20,8 @@ import { checkCapability, checkTokenAuthorized } from '../agent/Auth'
 import { OuterConfig } from '../../main';
 import path from 'path';
 import Perspective from '../Perspective';
+import { Capability } from '../agent/Auth'
+import { Capabilities } from '../agent/Auth'
 
 function checkLinkLanguageInstalled(perspective: Perspective) {
     if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
@@ -47,6 +49,9 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 checkTokenAuthorized(core.agentService.getApps(), token, isAd4minCredential)
 
                 return { capabilities, token };
+            },
+            checkCapability: async (suppliedCapabilities: Capabilities, expectedCapabilities: Capability) => {
+                await checkCapability(suppliedCapabilities, expectedCapabilities);
             },
             //@ts-ignore
             agent: (context) => {

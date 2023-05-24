@@ -13,7 +13,11 @@ use crate::pubsub::{
 };
 
 use super::graphql_types::*;
-use super::utils::get_capabilies;
+use super::utils::{
+    check_capabilities, get_capabilies, AGENT_SUBSCRIBE_CAPABILITY,
+    PERSPECTIVE_SUBSCRIBE_CAPABILITY, RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY,
+    RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY,
+};
 use super::RequestContext;
 
 pub struct Subscription;
@@ -48,6 +52,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(AGENT_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        }
+
         let pubsub = get_global_pubsub().await;
         let topic = &AGENT_UPDATED_TOPIC;
 
@@ -65,6 +81,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        }
+
         let pubsub = get_global_pubsub().await;
         let topic = &EXCEPTION_OCCURRED_TOPIC;
 
@@ -83,6 +111,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        };
+
         let pubsub = get_global_pubsub().await;
         let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
 
@@ -105,6 +145,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(PERSPECTIVE_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        };
+
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_ADDED_TOPIC;
 
@@ -123,6 +175,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(PERSPECTIVE_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        };
+
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_LINK_ADDED_TOPIC;
 
@@ -141,6 +205,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(PERSPECTIVE_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        };
+
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_LINK_REMOVED_TOPIC;
 
@@ -177,6 +253,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(PERSPECTIVE_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        };
+
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_REMOVED_TOPIC;
 
@@ -195,6 +283,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(PERSPECTIVE_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        };
+
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC;
 
@@ -212,6 +312,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(PERSPECTIVE_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        };
+
         let pubsub = get_global_pubsub().await;
         let topic = &PERSPECTIVE_UPDATED_TOPIC;
 
@@ -229,6 +341,18 @@ impl Subscription {
                 async move { Err(capabilities.err().unwrap()) },
             ));
         }
+
+        let cap_check = check_capabilities(
+            context.js_handle.clone(),
+            capabilities.unwrap(),
+            serde_json::to_value(PERSPECTIVE_SUBSCRIBE_CAPABILITY.clone()).unwrap(),
+        )
+        .await;
+
+        if cap_check.is_err() {
+            return Box::pin(stream::once(async move { Err(cap_check.err().unwrap()) }));
+        };
+
         let pubsub = get_global_pubsub().await;
         let topic = &RUNTIME_MESSAGED_RECEIVED_TOPIC;
 
