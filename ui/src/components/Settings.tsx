@@ -1,5 +1,6 @@
 import { Agent, Literal } from "@perspect3vism/ad4m";
 import { useContext, useEffect, useState } from "react";
+import { version } from "../../package.json";
 import {
   PREDICATE_FIRSTNAME,
   PREDICATE_LASTNAME,
@@ -72,6 +73,8 @@ const Profile = (props: Props) => {
   const [showPassword, setShowPassword] = useState(false);
 
   const [loadingProxy, setLoadingProxy] = useState(false);
+
+  const [showUpdateRequired, setShowUpdateRequired] = useState(false);
 
   function openLogs() {
     appWindow.emit("copyLogs");
@@ -195,6 +198,28 @@ const Profile = (props: Props) => {
     }
   };
 
+  const checkLatestVersion = async () => {
+    try {
+      const response = await fetch(
+        `https://registry.npmjs.org/@perspect3vism/ad4m/latest`
+      );
+      const data = await response.json();
+      const latestVersion = data.version;
+      if (version && latestVersion && latestVersion !== version) {
+        console.info(
+          `New version exists. Current: ${version}, Latest: ${latestVersion}`
+        );
+        setShowUpdateRequired(true);
+      }
+    } catch (error) {
+      console.error("Failed to fetch latest version", error);
+    }
+  };
+
+  useEffect(() => {
+    checkLatestVersion();
+  }, []);
+
   return (
     <div>
       <j-box px="500" my="500">
@@ -257,6 +282,22 @@ const Profile = (props: Props) => {
         <j-button onClick={openLogs} full variant="secondary">
           <j-icon size="sm" slot="start" name="clipboard"></j-icon>
           Show logs
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button
+          full
+          variant="secondary"
+          onClick={() => open("https://ad4m.dev/download/")}
+          disabled={!showUpdateRequired}
+        >
+          <j-icon
+            size="sm"
+            slot="start"
+            name={showUpdateRequired ? "file-arrow-down" : "check-circle"}
+          ></j-icon>
+          {showUpdateRequired ? "Download update" : "Latest version installed"}
         </j-button>
       </j-box>
 

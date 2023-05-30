@@ -1,7 +1,9 @@
 import { useCallback, useContext, useEffect, useState } from "react";
+import { version } from "../../package.json";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
 import { invoke } from "@tauri-apps/api";
+import { open } from "@tauri-apps/api/shell";
 import { buildAd4mClient } from "../util";
 import { fetchProfile } from "./Settings";
 
@@ -18,6 +20,7 @@ function Profile() {
   const [password, setPassword] = useState("");
   const [showProfileInfo, setShowProfileInfo] = useState(false);
   const [lockAgentModalOpen, setLockAgentModalOpen] = useState(false);
+  const [showUpdateRequired, setShowUpdateRequired] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [profile, setProfile] = useState({
     firstName: "",
@@ -55,12 +58,40 @@ function Profile() {
     setPassword(value);
   };
 
+  const checkLatestVersion = async () => {
+    try {
+      const response = await fetch(
+        `https://registry.npmjs.org/@perspect3vism/ad4m/latest`
+      );
+      const data = await response.json();
+      const latestVersion = data.version;
+      if (version && latestVersion && latestVersion !== version) {
+        console.info(
+          `New version exists. Current: ${version}, Latest: ${latestVersion}`
+        );
+        setShowUpdateRequired(true);
+      }
+    } catch (error) {
+      console.error("Failed to fetch latest version", error);
+    }
+  };
+
+  useEffect(() => {
+    checkLatestVersion();
+  }, []);
+
   return (
     <div>
       <j-popover placement="bottom">
         <j-button slot="trigger" variant="ghost" size="sm">
           <j-flex a="center">
-            {profile.username}
+            {showUpdateRequired && (
+              <>
+                <div className="notification"></div>
+                <j-box p="100"></j-box>
+              </>
+            )}
+            {profile.username || "Agent"}
             <j-box p="200"></j-box>
             <j-icon size="xs" name="chevron-down"></j-icon>
           </j-flex>
@@ -78,6 +109,14 @@ function Profile() {
             Poweroff Agent
             <j-icon size="xs" slot="start" name="x-circle"></j-icon>
           </j-menu-item>
+          <>
+            {showUpdateRequired && (
+              <j-menu-item onClick={() => open("https://ad4m.dev/download/")}>
+                Update AD4M
+                <div className="notification" slot="start"></div>
+              </j-menu-item>
+            )}
+          </>
         </j-menu>
       </j-popover>
       {lockAgentModalOpen && (
