@@ -2,10 +2,10 @@ setup_file() {
     echo "Creating test agent 1" >&3
     echo "Initalizing data directory..." >&3
     rm -rf ./tests/ad4m1
-    ./host/dist/ad4m-macos-x64 init --dataPath ./tests/ad4m1
+    ./target/release/ad4m init --data-path ./tests/ad4m1
     echo "done." >&3
     echo "Starting agent 1..." >&3
-    ./host/dist/ad4m-macos-x64 serve --dataPath ./tests/ad4m1 &
+    ./target/release/ad4m serve --app-data-path ./tests/ad4m1 &
     sleep 5
     echo "done." >&3
 
@@ -17,10 +17,10 @@ setup_file() {
     #echo "Creating test agent 2" >&3
     #echo "Initalizing data directory..." >&3
     #rm -rf ./tests/ad4m2
-    #./host/dist/ad4m-macos-x64 init --dataPath ./tests/ad4m2
+    #./target/release/ad4m init --data-path ./tests/ad4m2
     #echo "done." >&3
     #echo "Starting agent 2..." >&3
-    #./host/dist/ad4m-macos-x64 serve --dataPath ./tests/ad4m2 --port 4001 --ipfsPort 15000 --hcAdminPort 2337 --hcAppPort 2338 &
+    #./target/release/ad4m serve --app-data-path ./tests/ad4m2 --gql-port 4001 --ipfs-swarm-port 15000 --hc-admin-port 2337 --hc-app-port 2338 &
     #sleep 5
     #echo "done." >&3
     
