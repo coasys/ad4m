@@ -27,7 +27,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
         with:
           tag_name: ${{ steps.create_tag.outputs.version }}
-          release_name: AD4M Launcher & Host ${{ steps.create_tag.outputs.version }} Prerelease
+          release_name: AD4M Launcher & CLI ${{ steps.create_tag.outputs.version }} Prerelease
           body: See the assets to download this version and install.
           draft: true
           prerelease: true
@@ -79,17 +79,8 @@ jobs:
     - name: Yarn Install
       run: yarn install
 
-    - name: Build AD4M-Host & build Launcher binary (macos-latest)
-      if: matrix.platform == 'macos-latest'
-      run: yarn run build-macos
-
-    - name: Build AD4M-Host & build Launcher binary (windows-latest)
-      if: matrix.platform == 'windows-latest'
-      run: yarn run build-windows
-
-    - name: Build AD4M-Host & build Launcher binary (linux-latest)
-      if: matrix.platform == 'ubuntu-latest'
-      run: yarn run build-linux
+    - name: Build AD4M-CLI & build Launcher binary (macos-latest)
+      run: yarn run package-ad4m
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
@@ -103,15 +94,15 @@ jobs:
         asset_name: ad4m_${{ steps.extract_version.outputs.version }}_amd64.deb
         asset_content_type: application/octet-stream
 
-    - name: Upload Release AD4M Host Linux Binary
-      id: upload-release-linux-ad4m-host-binary
+    - name: Upload Release AD4M CLI Linux Binary
+      id: upload-release-linux-ad4m-cli-binary
       if: matrix.platform == 'ubuntu-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/host/dist/ad4m-linux-x64
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m
         asset_name: ad4m-linux-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
@@ -127,15 +118,15 @@ jobs:
         asset_name: AD4M_${{ steps.extract_version.outputs.version }}_x64.dmg
         asset_content_type: application/octet-stream
 
-    - name: Upload Release AD4M Host Macos Binary
-      id: upload-release-macos-ad4m-host-binary
+    - name: Upload Release AD4M CLI Macos Binary
+      id: upload-release-macos-ad4m-cli-binary
       if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /Users/runner/work/ad4m/ad4m/host/dist/ad4m-macos-x64
+        asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m
         asset_name: ad4m-macos-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
@@ -151,15 +142,15 @@ jobs:
         asset_name: AD4M_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
         asset_content_type: application/octet-stream
 
-    - name: Upload Release AD4M Host Windows Binary
-      id: upload-release-windows-ad4m-host-binary
+    - name: Upload Release AD4M CLI Windows Binary
+      id: upload-release-windows-ad4m-cli-binary
       if: matrix.platform == 'windows-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: D:\a\ad4m\ad4m\host\dist\ad4m-windows-x64.exe
+        asset_path: D:\a\ad4m\ad4m\target\release\ad4m.exe
         asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
         asset_content_type: application/octet-stream
 

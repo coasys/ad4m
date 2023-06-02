@@ -9,7 +9,7 @@ on:
 
 jobs:
   test:
-    name: JS Ad4mClient <> AD4M host
+    name: JS Ad4mClient <> AD4M Executor
     runs-on: macos-latest
     strategy:
       matrix:
@@ -49,11 +49,8 @@ jobs:
     - name: Yarn Install
       run: yarn install
 
-    - name: Yarn Build
+    - name: Yarn Build (builds entire workspace)
       run: yarn build
-
-    - name: Build AD4M-Host
-      run: yarn run package-macos
 
     - name: Run tests/js
       run: |

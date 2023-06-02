@@ -9,7 +9,7 @@ on:
 
 jobs:
   test:
-    name: AD4M cli <> AD4M host
+    name: AD4M cli
     runs-on: macos-latest
     strategy:
       matrix:
@@ -49,14 +49,8 @@ jobs:
     - name: Yarn Install
       run: yarn install
 
-    - name: Yarn Build
+    - name: Yarn Build (builds entire workspace)
       run: yarn build
-
-    - name: Build AD4M-Host
-      run: yarn run package-macos
-
-    - name: Build AD4M cli
-      run: cd cli && cargo build --release
 
     - name: Run binaries test script
       run: ./tests/bats/bin/bats tests/binaries.bats || cat ~/Library/Logs/DiagnosticReports/*
