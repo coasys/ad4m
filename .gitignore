@@ -20,10 +20,6 @@ docs-src/api.md
 docs-src/typedoc
 docs-src/_book
 
-host/dist
-host/build
-
-
 ui/build
 ui/src-tauri/bins
 ui/.pnp
