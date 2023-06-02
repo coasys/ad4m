@@ -1,11 +1,11 @@
 mod config;
 mod globals;
 pub mod graphql;
+mod holochain_service;
 mod js_core;
 mod utils;
 mod wallet;
 
-mod holochain_service;
 pub mod init;
 mod pubsub;
 

@@ -1,5 +1,6 @@
 mod globals;
 mod graphql;
+mod holochain_service;
 mod js_core;
 mod utils;
 mod wallet;
