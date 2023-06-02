@@ -76,7 +76,6 @@ pub async fn run(command: DevFunctions) -> Result<()> {
 
             //start ad4m-host with publishing bootstrap
             rust_executor::init::init(
-                false,
                 Some(data_path.to_str().unwrap().to_string()),
                 Some(temp_publish_bootstrap_path.to_str().unwrap().to_string()),
             )
@@ -103,6 +102,10 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     gql_port: None,
                     hc_admin_port: None,
                     hc_app_port: None,
+                    hc_use_bootstrap: None,
+                    hc_use_local_proxy: None,
+                    hc_use_mdns: None,
+                    hc_use_proxy: None,
                     ipfs_swarm_port: None,
                     connect_holochain: None,
                     admin_credential: None,

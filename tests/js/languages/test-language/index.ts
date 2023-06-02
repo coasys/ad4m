@@ -1,4 +1,4 @@
-import type { Address, Interaction, Expression, Language, LanguageContext, PublicSharing } from "@perspect3vism/ad4m";
+import type { Address, Interaction, Expression, Language, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
 
 export default function create(context: LanguageContext): Language {
     const expressions = new Array<Expression>()

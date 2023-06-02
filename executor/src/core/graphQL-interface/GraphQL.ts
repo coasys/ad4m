@@ -7,7 +7,7 @@
 //import { WebSocketServer } from 'ws';
 //import { useServer } from 'graphql-ws/lib/use/ws';
 //import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, LanguageRef, PerspectiveExpression, PerspectiveHandle, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveHandle, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
 import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
@@ -20,11 +20,8 @@ import { checkCapability, checkTokenAuthorized } from '../agent/Auth'
 import { OuterConfig } from '../../main';
 import path from 'path';
 import Perspective from '../Perspective';
-
-function withFilter(f1:()=>{}, f2:(payload: any, variables: any)=>{} ) {
-    return (a1: any, a2: any) => {
-    }
-}
+import { Capability } from '../agent/Auth'
+import { Capabilities } from '../agent/Auth'
 
 function checkLinkLanguageInstalled(perspective: Perspective) {
     if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
@@ -33,21 +30,36 @@ function checkLinkLanguageInstalled(perspective: Perspective) {
 }
 
 export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
-    const pubsub = PubSub.get()
     function signPerspectiveDeep(input: PerspectiveUnsignedInput): PerspectiveExpression {
         let out = new PerspectiveExpression()
         out.links = input.links.map(l => core.agentService.createSignedExpression(l))
         return core.agentService.createSignedExpression(out)
     }
+
     return {
         Query: {
+            getCapabilities: async (token: string) => {
+                if (token === undefined) {
+                    token = ""
+                };
+                const capabilities = await core.agentService.getCapabilities(token);
+                if(!capabilities) throw new Error("User capability is empty.")
+
+                const isAd4minCredential =  core.agentService.isAdminCredential(token)
+                checkTokenAuthorized(core.agentService.getApps(), token, isAd4minCredential)
+
+                return { capabilities, token };
+            },
+            checkCapability: async (suppliedCapabilities: Capabilities, expectedCapabilities: Capability) => {
+                await checkCapability(suppliedCapabilities, expectedCapabilities);
+            },
             //@ts-ignore
-            agent: (parent, args, context, info) => {
+            agent: (context) => {
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 return core.agentService.agent
             },
             //@ts-ignore
-            agentByDID: async (parent, args, context, info) => {
+            agentByDID: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 const { did } = args;
                 if (did != core.agentService.did) {
@@ -66,23 +78,22 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 }
             },
             //@ts-ignore
-            agentStatus: (parent, args, context, info) => {
+            agentStatus: (context) => {
                 checkCapability(context.capabilities, Auth.AGENT_READ_CAPABILITY)
                 return core.agentService.dump()
             },
             //@ts-ignore
-            agentIsLocked: (parent, args, context, info) => {
+            agentIsLocked: () => {
                 return !core.agentService.isUnlocked
             },
             //@ts-ignore
-            agentGetApps: async (parent, args, context, info) => {
+            agentGetApps: async (context) => {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 let apps = await core.agentService.getApps()
                 return apps;
-
             },
             //@ts-ignore
-            expression: async (parent, args, context, info) => {
+            expression: async (args, context) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const url = args.url.toString();
                 const ref = parseExprUrl(url)
@@ -91,11 +102,31 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     expression.ref = ref
                     expression.url = url
                     expression.data = JSON.stringify(expression.data)
+
+                    //Add the expression icon
+                    expression.icon = { code: await core.languageController.getIcon(ref.language) }
+
+                    //Add the language information
+                    let lang
+
+                    if(expression.ref.language.address === "literal") {
+                        return { address: "literal", name: "literal" }
+                    }
+
+                    try {
+                        lang = await core.languageController.languageForExpression(expression.ref) as any    
+                    } catch(e) {
+                        console.error("While trying to get language for expression", expression, ":", e)
+                        lang = {}
+                    }
+                    
+                    lang.address = expression.ref.language.address
+                    expression.language = lang
                 }
                 return expression
             },
             //@ts-ignore
-            expressionMany: async (parent, args, context, info) => {
+            expressionMany: async (args, context) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const { urls } = args;
                 const expressionPromises = [];
@@ -104,39 +135,114 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 };
                 const results = await Promise.all(expressionPromises);
 
-                return results.map((expression: Expression|null, index) => {
+                return await Promise.all(results.map(async (expression: Expression|null, index) => {
                     if(expression) {
                         expression.ref = parseExprUrl(urls[index]);
                         expression.url = urls[index];
                         expression.data = JSON.stringify(expression.data);
+
+                        //Add the expression icon
+                        expression.icon = { code: await core.languageController.getIcon(expression.ref.language) }
+
+                        //Add the language information
+                        let lang
+
+                        if(expression.ref.language.address === "literal") {
+                            return { address: "literal", name: "literal" }
+                        }
+
+                        try {
+                            lang = await core.languageController.languageForExpression(expression.ref) as any    
+                        } catch(e) {
+                            console.error("While trying to get language for expression", expression, ":", e)
+                            lang = {}
+                        }
+                        
+                        lang.address = expression.ref.language.address
+                        expression.language = lang
                     }
                     return expression
-                })
+                }))
             },
             //@ts-ignore
-            expressionRaw: async (parent, args, context, info) => {
+            expressionRaw: async (args, context) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const ref = parseExprUrl(args.url.toString())
                 const expression = await core.languageController.getExpression(ref) as any
                 return JSON.stringify(expression)
             },
             //@ts-ignore
-            expressionInteractions: async (parent, args, context, info) => {
+            expressionInteractions: async (args, context) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_READ_CAPABILITY)
                 const { url } = args
                 const result = await core.languageController.expressionInteractions(url)
                 return result
             },
             //@ts-ignore
-            language: async (parent, args, context, info) => {
+            language: async (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const lang = await core.languageController.languageByRef({address, name: ""} as LanguageRef) as any
                 lang.address = address
+
+                const constructorIcon = async (language: Language) => {
+                    if (language.expressionUI) {
+                        const code = language.expressionUI.constructorIcon();
+
+                        if (code) {
+                            return { code }
+                        } else {
+                            return { code: "" }
+                        }
+                    }
+
+                    return null
+                };
+
+                lang.constructorIcon = await constructorIcon(lang);
+
+                const icon = async (language: Language) => {
+                    if (language.expressionUI) {
+                        const code = language.expressionUI.icon();
+
+                        if (code) {
+                            return { code }
+                        } else {
+                            return { code: "" }
+                        }
+                    }
+
+                    return null
+                };
+
+                lang.icon = await icon(lang);
+
+                const settings = async (address: string) => {
+                    return JSON.stringify(core.languageController.getSettings(address))
+                };
+
+                lang.settings = await settings(address);
+
+                const settingsIcon = async (language: Language) => {
+                    if (language.settingsUI) {
+                        const code = language.settingsUI.settingsIcon();
+
+                        if (code) {
+                            return { code }
+                        } else {
+                            return { code: "" }
+                        }
+                    }
+
+                    return null
+                }
+
+                lang.settingsIcon = await settingsIcon(lang);
+
                 return lang
             },
             //@ts-ignore
-            languageMeta: async (parent, args, context, info) => {
+            languageMeta: async (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const languageExpression = await core.languageController.getLanguageExpression(address)
@@ -158,7 +264,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            languageSource: async (parent, args, context, info) => {
+            languageSource: async (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 const { address } = args
                 const languageSource = await core.languageController.getLanguageSource(address)
@@ -169,7 +275,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            languages: (parent, args, context, info) => {
+            languages: (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_READ_CAPABILITY)
                 let filter
                 if(args.filter && args.filter !== '') filter = args.filter
@@ -177,7 +283,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodOtherAgents: async (parent, args, context, info) => {
+            neighbourhoodOtherAgents: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -187,7 +293,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodHasTelepresenceAdapter: async (parent, args, context, info) => {
+            neighbourhoodHasTelepresenceAdapter: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
                 const { perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -198,7 +304,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodOnlineAgents: async (parent, args, context, info) => {
+            neighbourhoodOnlineAgents: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
                 const { perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -210,13 +316,18 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             
             //@ts-ignore
-            perspective: (parent, args, context, info) => {
+            perspective: (args, context) => {
                 const id = args.uuid
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
-                return core.perspectivesController.perspectiveID(id)
+                let perspective = core.perspectivesController.perspectiveID(id);
+                if (perspective == undefined) {
+                    return null;
+                } else {
+                    return perspective
+                }
             },
             //@ts-ignore
-            perspectiveQueryLinks: async (parent, args, context, info) => {
+            perspectiveQueryLinks: async (args, context) => {
                 const { uuid, query } = args
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
@@ -224,59 +335,59 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return await perspective.getLinks(query)
             },
             //@ts-ignore
-            perspectiveQueryProlog: async (parent, args, context, info) => {
+            perspectiveQueryProlog: async (args, context) => {
                 const { uuid, query } = args
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return JSON.stringify(await perspective.prologQuery(query))
             },
             //@ts-ignore
-            perspectiveSnapshot: async (parent, args, context, info) => {
+            perspectiveSnapshot: async (args, context) => {
                 const id = args.uuid
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability([id]))
                 return await core.perspectivesController.perspectiveSnapshot(id)
             },
             //@ts-ignore
-            perspectives: (parent, args, context, info) => {
+            perspectives: (context) => {
                 checkCapability(context.capabilities, Auth.perspectiveQueryCapability(["*"]))
                 return core.perspectivesController.allPerspectiveHandles()
             },
             //@ts-ignore
-            agentGetEntanglementProofs: (parent, args, context, info) => {
+            agentGetEntanglementProofs: () => {
                 return core.entanglementProofController.getEntanglementProofs();
             },
             //@ts-ignore
-            getTrustedAgents: (parent, args, context, info) => {
+            getTrustedAgents: (context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
                 return core.runtimeService.getTrustedAgents();
             },
 
             //@ts-ignore
-            runtimeKnownLinkLanguageTemplates: (parent, args, context, info) => {
+            runtimeKnownLinkLanguageTemplates: (context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
 
             //@ts-ignore
-            runtimeFriends: (parent, args, context, info) => {
+            runtimeFriends: (context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_READ_CAPABILITY)
                 return core.runtimeService.friends();
             },
 
             //@ts-ignore
-            runtimeHcAgentInfos: async (parent, args, context, info) => {
+            runtimeHcAgentInfos: async (context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
-                return JSON.stringify(await core.holochainRequestAgentInfos())
+                return JSON.stringify(await core.holochainRequestAgentInfos());
             },
 
             //@ts-ignore
-            runtimeVerifyStringSignedByDid: async (parent, args, context, info) => {
+            runtimeVerifyStringSignedByDid: async (args, context) => {
                 const { did, didSigningKeyId, data, signedData } = args;
                 return await core.signatureService.verifyStringSignedByDid(did, didSigningKeyId, data, signedData)
             },
 
             //@ts-ignore
-            runtimeFriendStatus: async (parent, args, context, info) => {
+            runtimeFriendStatus: async (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
                 const { did } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
@@ -288,20 +399,20 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            runtimeMessageInbox: async (parent, args, context, info) => {
+            runtimeMessageInbox: async (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 const dmLang = await core.myDirectMessageLanguage()
                 return await dmLang.directMessageAdapter!.inbox(filter)
             },
             //@ts-ignore
-            runtimeMessageOutbox: (parent, args, context, info) => {
+            runtimeMessageOutbox: (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_READ_CAPABILITY)
                 const { filter } = args
                 return core.runtimeService.getMessagesOutbox(filter)
             },
             //@ts-ignore
-            runtimeInfo: (parent, args) => {
+            runtimeInfo: () => {
                 const isInitialized = core.agentService.isInitialized();
                 const isUnlocked = core.agentService.isUnlocked();
                 return {
@@ -313,24 +424,24 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
         },
         Mutation: {
             //@ts-ignore
-            agentAddEntanglementProofs: (parent, args, context, info) => {
+            agentAddEntanglementProofs: (args, context) => {
                 const { proofs } = args;
                 core.entanglementProofController.addEntanglementProofs(proofs);
                 return core.entanglementProofController.getEntanglementProofs();
             },
             //@ts-ignore
-            agentDeleteEntanglementProofs: (parent, args, context, info) => {
+            agentDeleteEntanglementProofs: (args, context) => {
                 const { proofs } = args;
                 core.entanglementProofController.deleteEntanglementProofs(proofs);
                 return core.entanglementProofController.getEntanglementProofs();  
             },
             //@ts-ignore
-            agentEntanglementProofPreFlight: (parent, args, context, info) => {
+            agentEntanglementProofPreFlight: (args, context) => {
                 const { deviceKey, deviceKeyType } = args;
                 return core.entanglementProofController.signDeviceKey(deviceKey, deviceKeyType);
             },
             //@ts-ignore
-            agentRemoveApp: async (parent, args, context, info) => {
+            agentRemoveApp: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId } = args;
                 await core.agentService.removeApp(requestId)
@@ -338,42 +449,42 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
             },
             //@ts-ignore
-            agentRevokeToken: async (parent, args, context, info) => {
+            agentRevokeToken: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId } = args;
                 await core.agentService.revokeAppToken(requestId)
                 return await core.agentService.getApps();
             },
             //@ts-ignore
-            addTrustedAgents: (parent, args, context, info) => {
+            addTrustedAgents: (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
                 const { agents } = args;
                 core.runtimeService.addTrustedAgents(agents);
                 return core.runtimeService.getTrustedAgents();
             },
             //@ts-ignore
-            deleteTrustedAgents: (parent, args, context, info) => {
+            deleteTrustedAgents: (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
                 const { agents } = args;
                 core.runtimeService.deleteTrustedAgents(agents);
                 return core.runtimeService.getTrustedAgents();
             },
             //@ts-ignore
-            runtimeAddKnownLinkLanguageTemplates: (parent, args, context, info) => {
+            runtimeAddKnownLinkLanguageTemplates: (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY)
                 const { addresses } = args;
                 core.runtimeService.addKnowLinkLanguageTemplates(addresses);
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
             //@ts-ignore
-            runtimeRemoveKnownLinkLanguageTemplates: (parent, args, context, info) => {
+            runtimeRemoveKnownLinkLanguageTemplates: (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY)
                 const { addresses } = args;
                 core.runtimeService.removeKnownLinkLanguageTemplates(addresses);
                 return core.runtimeService.knowLinkLanguageTemplates();
             },
             //@ts-ignore
-            runtimeAddFriends: async (parent, args, context, info) => {
+            runtimeAddFriends: async (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_CREATE_CAPABILITY)
                 const { dids } = args;
                 core.runtimeService.addFriends(dids);
@@ -382,26 +493,24 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return core.runtimeService.friends();
             },
             //@ts-ignore
-            runtimeRemoveFriends: (parent, args, context, info) => {
+            runtimeRemoveFriends: (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_FRIENDS_DELETE_CAPABILITY)
                 const { dids } = args;
                 core.runtimeService.removeFriends(dids);
                 return core.runtimeService.friends();
             },
             //@ts-ignore
-            agentGenerate: async (parent, args, context, info) => {
+            agentGenerate: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
                 const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
 
-                if (connectHolochain) {
-                  await core.connectHolochain( {hcPortAdmin: hcPortAdmin!, hcPortApp: hcPortApp!} );
-                } else {
-                  await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
-                }
+                await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                console.log("Holochain init complete");
 
                 await core.waitForAgent();
+                console.log("Wait for agent");
                 core.initControllers()
                 await core.initLanguages()
 
@@ -418,13 +527,13 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return agent;
             },
             //@ts-ignore
-            agentLock: async (parent, args, context, info) => {
+            agentLock: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_LOCK_CAPABILITY)
                 await core.agentService.lock(args.passphrase)
                 return core.agentService.dump()
             },
             //@ts-ignore
-            agentUnlock: async (parent, args, context, info) => {
+            agentUnlock: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_UNLOCK_CAPABILITY)
                 try {
                     await core.agentService.unlock(args.passphrase)
@@ -442,14 +551,10 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                         // @ts-ignore
                         const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
     
-                        if (connectHolochain) {
-                            await core.connectHolochain( {hcPortAdmin: hcPortAdmin!, hcPortApp: hcPortApp!} );
-                        } else {
-                            await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
-                            await core.waitForAgent();
-                            core.initControllers()
-                            await core.initLanguages()
-                        }
+                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                        await core.waitForAgent();
+                        core.initControllers()
+                        await core.initLanguages()
     
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                     }
@@ -470,7 +575,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return dump
             },
             //@ts-ignore
-            agentUpdateDirectMessageLanguage: async (parent, args, context, info) => {
+            agentUpdateDirectMessageLanguage: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_UPDATE_CAPABILITY)
                 const { directMessageLanguage } = args;
                 let currentAgent = core.agentService.agent;
@@ -482,7 +587,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return currentAgent;
             },
             //@ts-ignore
-            agentUpdatePublicPerspective: async (parent, args, context, info) => {
+            agentUpdatePublicPerspective: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_UPDATE_CAPABILITY)
                 const {perspective} = args;
                 let currentAgent = core.agentService.agent;
@@ -494,42 +599,49 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return currentAgent;
             },
             //@ts-ignore
-            agentRequestCapability: async (parent, args, context, info) => {
+            agentRequestCapability: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { authInfo } = args;
                 let token = await core.agentService.requestCapability(authInfo);
                 return token;
             },
             //@ts-ignore
-            agentPermitCapability: (parent, args, context, info) => {
+            agentPermitCapability: (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_PERMIT_CAPABILITY)
                 const { auth } = args;
                 return core.agentService.permitCapability(auth, context.capabilities);
             },
             //@ts-ignore
-            agentGenerateJwt: async (parent, args, context, info) => {
+            agentGenerateJwt: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId, rand } = args;
                 let jwt = await core.agentService.generateJwt(requestId, rand)
+                console.log("Generated JWT: ", jwt);
                 return jwt;
             },
             //@ts-ignore
-            agentSignMessage: async (parent, args, context, info) => {
+            agentSignMessage: async (args, context) => {
                 checkCapability(context.capabilities, Auth.AGENT_SIGN_CAPABILITY)
                 const { message } = args;
                 let sig = await core.agentService.signMessage(message)
                 return sig
             },
             //@ts-ignore
-            expressionCreate: async (parent, args, context, info) => {
+            expressionCreate: async (args, context) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_CREATE_CAPABILITY)
                 const { languageAddress, content } = args
+
+                //@ts-ignore
+                function prepareExpressionData(value) {
+                    return typeof value === 'object' && value !== null ? JSON.parse(JSON.stringify(value)) : value;
+                }
+
                 const langref = { address: languageAddress } as LanguageRef
-                const expref = await core.languageController.expressionCreate(langref, JSON.parse(content))
+                const expref = await core.languageController.expressionCreate(langref, prepareExpressionData(content))
                 return exprRef2String(expref)
             },
             //@ts-ignore
-            expressionInteract: async (parent, args, context, info) => {
+            expressionInteract: async (args, context) => {
                 checkCapability(context.capabilities, Auth.EXPRESSION_UPDATE_CAPABILITY)
                 let { url, interactionCall } = args
                 interactionCall = new InteractionCall(interactionCall.name, JSON.parse(interactionCall.parametersStringified))
@@ -537,13 +649,14 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return result
             },
             //@ts-ignore
-            languageApplyTemplateAndPublish: async (parent, args, context, info) => {
+            languageApplyTemplateAndPublish: async (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_CREATE_CAPABILITY)
+                console.log("JS args", args);
                 const { sourceLanguageHash, templateData } = args;
                 return await core.languageApplyTemplateAndPublish(sourceLanguageHash, JSON.parse(templateData));
             },
             //@ts-ignore
-            languagePublish: async (parent, args, context, info) => {
+            languagePublish: async (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_CREATE_CAPABILITY)
                 const { languagePath, languageMeta } = args;
                 const expression = await core.languagePublish(languagePath, languageMeta);
@@ -561,7 +674,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return meta
             },
             //@ts-ignore
-            languageRemove: async (parent, args, context, info) => {
+            languageRemove: async (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_DELETE_CAPABILITY)
                 const { address } = args
                 try {
@@ -573,14 +686,14 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return true
             },
             //@ts-ignore
-            languageWriteSettings: async (parent, args, context, info) => {
+            languageWriteSettings: async (args, context) => {
                 checkCapability(context.capabilities, Auth.LANGUAGE_UPDATE_CAPABILITY)
                 const { languageAddress, settings } = args
                 await core.languageController.putSettings(languageAddress, JSON.parse(settings))
                 return true
             },
             //@ts-ignore
-            neighbourhoodJoinFromUrl: async (parent, args, context, info) => {
+            neighbourhoodJoinFromUrl: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_READ_CAPABILITY)
                 const { url } = args;
                 try{
@@ -592,7 +705,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
             },
             //@ts-ignore
-            neighbourhoodPublishFromPerspective: async (parent, args, context, info) => {
+            neighbourhoodPublishFromPerspective: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_CREATE_CAPABILITY)
                 const { linkLanguage, meta, perspectiveUUID } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -608,7 +721,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodSetOnlineStatus: async (parent, args, context, info) => {
+            neighbourhoodSetOnlineStatus: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID, status } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -622,7 +735,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodSetOnlineStatusU: async (parent, args, context, info) => {
+            neighbourhoodSetOnlineStatusU: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID, status } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -636,7 +749,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodSendSignal: async (parent, args, context, info) => {
+            neighbourhoodSendSignal: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID, remoteAgentDid, payload } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -650,7 +763,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodSendSignalU: async (parent, args, context, info) => {
+            neighbourhoodSendSignalU: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID, remoteAgentDid, payload } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -664,7 +777,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodSendBroadcast: async (parent, args, context, info) => {
+            neighbourhoodSendBroadcast: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID, payload } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -678,7 +791,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            neighbourhoodSendBroadcastU: async (parent, args, context, info) => {
+            neighbourhoodSendBroadcastU: async (args, context) => {
                 checkCapability(context.capabilities, Auth.NEIGHBOURHOOD_UPDATE_CAPABILITY)
                 const { perspectiveUUID, payload } = args
                 const perspective = core.perspectivesController.perspective(perspectiveUUID)
@@ -692,41 +805,41 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            perspectiveAdd: (parent, args, context, info) => {
+            perspectiveAdd: async (args, context) => {
                 checkCapability(context.capabilities, Auth.PERSPECTIVE_CREATE_CAPABILITY)
                 const { name } = args;
-                return core.perspectivesController.add(name)
+                return await core.perspectivesController.add(name)
             },
             //@ts-ignore
-            perspectiveAddLink: async (parent, args, context, info) => {
+            perspectiveAddLink: async (args, context) => {
                 const { uuid, link } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addLink(link)
             },
             //@ts-ignore
-            perspectiveAddLinks: async (parent, args, context, info) => {
+            perspectiveAddLinks: async (args, context) => {
                 const { uuid, links } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addLinks(links)
             },
             //@ts-ignore
-            perspectiveAddLinkExpression: async (parent, args, context, info) => {
+            perspectiveAddLinkExpression: async (args, context) => {
                 const { uuid, link } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addLink(link)
             },
             //@ts-ignore
-            perspectiveRemove: (parent, args, context, info) => {
+            perspectiveRemove: async (args, context) => {
                 const { uuid } = args
                 checkCapability(context.capabilities, Auth.perspectiveDeleteCapability([uuid]))
-                core.perspectivesController.remove(uuid)
+                await core.perspectivesController.remove(uuid)
                 return true
             },
             //@ts-ignore
-            perspectiveRemoveLink: async (parent, args, context, info) => {
+            perspectiveRemoveLink: async (args, context) => {
                 // console.log("GQL| removeLink:", args)
                 const { uuid, link } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
@@ -735,58 +848,58 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return true
             },
             //@ts-ignore
-            perspectiveRemoveLinks: async (parent, args, context, info) => {
+            perspectiveRemoveLinks: async (args, context) => {
                 const { uuid, links } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.removeLinks(links)
             },
             //@ts-ignore
-            perspectiveLinkMutations: async (parent, args, context, info) => {
+            perspectiveLinkMutations: async (args, context) => {
                 const { uuid, mutations } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.linkMutations(mutations)
             },
             //@ts-ignore
-            perspectiveUpdate: (parent, args, context, info) => {
+            perspectiveUpdate: async (args, context) => {
                 const { uuid, name } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
-                return core.perspectivesController.update(uuid, name);
+                return await core.perspectivesController.update(uuid, name);
             },
             //@ts-ignore
-            perspectiveUpdateLink: async (parent, args, context, info) => {
+            perspectiveUpdateLink: async (args, context) => {
                 const { uuid, oldLink, newLink } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.updateLink(oldLink, newLink)
             },
             //@ts-ignore
-            runtimeOpenLink: (parent, args) => {
+            runtimeOpenLink: (args) => {
                 const { url } = args
                 console.log("openLinkExtern:", url)
                 //shell.openExternal(url)
                 return true
             },
             //@ts-ignore
-            runtimeQuit: (parent, args, context, info) => {
+            runtimeQuit: (context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_QUIT_CAPABILITY)
                 process.exit(0)
                 return true
             },
             //@ts-ignore
-            runtimeHcAddAgentInfos: async (parent, args, context, info) => {
+            runtimeHcAddAgentInfos: async (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
                 const { agentInfos } = args
                 //@ts-ignore
                 const parsed = JSON.parse(agentInfos).map(info => {
                     return {
                         //@ts-ignore
-                        agent: Buffer.from(info.agent.data),
+                        agent: Buffer.from(Object.values(info.agent)),
                         //@ts-ignore
-                        signature: Buffer.from(info.signature.data),
+                        signature: Buffer.from(Object.values(info.signature)),
                         //@ts-ignore
-                        agent_info: Buffer.from(info.agent_info.data)
+                        agent_info: Buffer.from(Object.values(info.agent_info))
                     }
                 })
 
@@ -795,7 +908,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            runtimeSetStatus: async (parent, args, context, info) => {
+            runtimeSetStatus: async (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_MY_STATUS_UPDATE_CAPABILITY)
                 const { status } = args
                 const dmLang = await core.myDirectMessageLanguage()
@@ -804,7 +917,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            runtimeFriendSendMessage: async (parent, args, context, info) => {
+            runtimeFriendSendMessage: async (args, context) => {
                 checkCapability(context.capabilities, Auth.RUNTIME_MESSAGES_CREATE_CAPABILITY)
                 const { did, message } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
@@ -832,84 +945,6 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 return wasSent
             }
 
-        },
-
-        Subscription: {},
-
-        ExpressionRendered: {
-            //@ts-ignore
-            language: async (expression) => {
-                //console.log("GQL LANGUAGE", expression)
-                let lang
-
-                if(expression.ref.language.address === "literal") {
-                    return { address: "literal", name: "literal" }
-                }
-
-                try {
-                    lang = await core.languageController.languageForExpression(expression.ref) as any    
-                } catch(e) {
-                    console.error("While trying to get language for expression", expression, ":", e)
-                    lang = {}
-                }
-                
-                lang.address = expression.ref.language.address
-                return lang
-            },
-
-            //@ts-ignore
-            icon: async (expression) => {
-                return { code: await core.languageController.getIcon(expression.ref.language) }
-            }
-        },
-
-        LanguageHandle: {
-            // @ts-ignore
-            constructorIcon: async (language) => {
-                if (language.expressionUI) {
-                    const code = language.expressionUI.constructorIcon();
-
-                    if (code) {
-                        return { code }
-                    } else {
-                        return { code: "" }
-                    }
-                }
-
-                return null
-            },
-            //@ts-ignore
-            icon: async (language) => {
-                if (language.expressionUI) {
-                    const code = language.expressionUI.icon();
-
-                    if (code) {
-                        return { code }
-                    } else {
-                        return { code: "" }
-                    }
-                }
-
-                return null
-            },
-            //@ts-ignore
-            settings: async (language) => {
-                return JSON.stringify(core.languageController.getSettings(language.address))
-            },
-            //@ts-ignore
-            settingsIcon: async (language) => {
-                if (language.settingsUI) {
-                    const code = language.settingsUI.settingsIcon();
-
-                    if (code) {
-                        return { code }
-                    } else {
-                        return { code: "" }
-                    }
-                }
-
-                return null
-            }
         },
 
         Agent: {
@@ -947,20 +982,7 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                         return null
                 }
             }
-        },
-
-        /*
-        DateTime: new GraphQLScalarType({
-            name: 'Date',
-            description: 'Date custom scalar type',
-            parseValue(value) {
-              return new Date(value); // value from the client
-            },
-            serialize(value) {
-              return value.toISOString(); // value sent to the client
-            }
-        }),
-        */
+        }
     }
 }
 

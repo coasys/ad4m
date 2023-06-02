@@ -1,9 +1,9 @@
-use actix::prelude::*;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use holochain::prelude::{ExternIO, Signal};
 use log::{error, info};
 use once_cell::sync::Lazy;
 use std::env::current_dir;
@@ -19,6 +19,7 @@ use tokio::sync::{
 use tokio::task::LocalSet;
 
 mod futures;
+mod jwt_extension;
 mod options;
 mod pubsub_extension;
 mod string_module_loader;
@@ -26,18 +27,12 @@ mod utils_extension;
 mod wallet_extension;
 
 use self::futures::{EventLoopFuture, GlobalVariableFuture};
+use crate::holochain_service::maybe_get_holochain_service;
 use crate::Ad4mConfig;
 use options::{main_module_url, main_worker_options};
 
 static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
     Lazy::new(|| Arc::new(TokioMutex::new(None)));
-
-/// Define message
-#[derive(Message)]
-#[rtype(result = "Result<String, AnyError>")]
-pub struct Execute {
-    pub script: String,
-}
 
 pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,
@@ -143,6 +138,25 @@ pub struct JsCore {
     worker: Arc<Mutex<MainWorker>>,
 }
 
+pub struct ExternWrapper(ExternIO);
+
+impl std::fmt::Display for ExternWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        //Write the bytes to string like: [0, 1, 3]
+        let bytes = self.0.as_bytes();
+        let mut bytes_str = String::from("[");
+        for (i, byte) in bytes.iter().enumerate() {
+            bytes_str.push_str(&format!("{}", byte));
+            if i < bytes.len() - 1 {
+                bytes_str.push_str(", ");
+            }
+        }
+        bytes_str.push_str("]");
+        write!(f, "{}", bytes_str).unwrap();
+        Ok(())
+    }
+}
+
 impl JsCore {
     pub fn new() -> Self {
         JsCore {
@@ -180,8 +194,7 @@ impl JsCore {
         event_loop
     }
 
-    fn init_core(&self, mut config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
-        config.prepare();
+    fn init_core(&self, config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
         let mut worker = self
             .worker
             .lock()
@@ -225,7 +238,7 @@ impl JsCore {
         let tx_inside_clone = tx_inside.clone();
         let tx_inside_loader_clone = tx_inside_loader.clone();
         std::thread::spawn(move || {
-            let rt = Builder::new_current_thread()
+            let rt = Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to create Tokio runtime");
@@ -273,50 +286,66 @@ impl JsCore {
                 loop {
                     //Listener future for loading JS modules into runtime
                     let module_load_fut = async {
-                        while let Some(request) = rx_inside_loader.recv().await {
-                            let tx_loader_cloned = tx_inside_loader.clone();
-                            let script = request.script;
-                            let id = request.id;
+                        loop {
+                            if let Ok(request) = rx_inside_loader.try_recv() {
+                                let tx_loader_cloned = tx_inside_loader.clone();
+                                let script = request.script;
+                                let id = request.id;
 
-                            match js_core.load_module(script).await {
-                                Ok(()) => {
-                                    info!("Module loaded!");
-                                    tx_inside_loader
-                                        .send(JsCoreResponse {
-                                            result: Ok(String::from("")),
-                                            id: id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                }
-                                Err(err) => {
-                                    error!("Error loading module: {:?}", err);
-                                    tx_loader_cloned
-                                        .send(JsCoreResponse {
-                                            result: Err(err.to_string()),
-                                            id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                }
-                            }
-                        }
-                    };
-
-                    //Listener future for receiving script execution calls
-                    let receive_fut = async {
-                        while let Some(request) = rx_inside.recv().await {
-                            let tx_cloned = tx_inside.clone();
-                            let script = request.script;
-                            let id = request.id;
-                            match js_core.execute_async(script) {
-                                Ok(execute_async_future) => match execute_async_future.await {
-                                    Ok(result) => {
-                                        tx_inside
+                                match js_core.load_module(script).await {
+                                    Ok(()) => {
+                                        info!("Module loaded!");
+                                        tx_inside_loader
                                             .send(JsCoreResponse {
-                                                result: Ok(result),
+                                                result: Ok(String::from("")),
                                                 id: id,
                                             })
                                             .expect("couldn't send on channel");
                                     }
+                                    Err(err) => {
+                                        error!("Error loading module: {:?}", err);
+                                        tx_loader_cloned
+                                            .send(JsCoreResponse {
+                                                result: Err(err.to_string()),
+                                                id,
+                                            })
+                                            .expect("couldn't send on channel");
+                                    }
+                                }
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    };
+
+                    let mut global_req_id = None;
+
+                    //Listener future for receiving script execution calls
+                    let receive_fut = async {
+                        loop {
+                            if let Ok(request) = rx_inside.try_recv() {
+                                let tx_cloned = tx_inside.clone();
+                                let script = request.script;
+                                let id = request.id;
+                                global_req_id = Some(id.clone());
+                                match js_core.execute_async(script) {
+                                    Ok(execute_async_future) => match execute_async_future.await {
+                                        Ok(result) => {
+                                            tx_inside
+                                                .send(JsCoreResponse {
+                                                    result: Ok(result),
+                                                    id: id,
+                                                })
+                                                .expect("couldn't send on channel");
+                                        }
+                                        Err(err) => {
+                                            tx_cloned
+                                                .send(JsCoreResponse {
+                                                    result: Err(err.to_string()),
+                                                    id,
+                                                })
+                                                .expect("couldn't send on channel");
+                                        }
+                                    },
                                     Err(err) => {
                                         tx_cloned
                                             .send(JsCoreResponse {
@@ -324,43 +353,92 @@ impl JsCore {
                                                 id,
                                             })
                                             .expect("couldn't send on channel");
+                                        continue;
                                     }
-                                },
-                                Err(err) => {
-                                    tx_cloned
-                                        .send(JsCoreResponse {
-                                            result: Err(err.to_string()),
-                                            id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                    continue;
                                 }
                             }
+                            tokio::task::yield_now().await;
                         }
                     };
 
-                    //NOTE: WARNING!!!!!: Its is possible that if we get a request such as generate agent and then another to load a module,
-                    //since the load module would complete first it will cause the request future to be "lost" and thus the graphql will not get a response
-                    //we should track this and if required change the behaviour here so that we ensure we continue to run a receive_fut even in the case where
-                    //a module_load_fut completes
-                    //Using join! here might work if we ensure that the receive fut & module load fut's contain loops and run forever
+                    let holochain_signal_receiver_fut = async {
+                        loop {
+                            if let Some(holochain_service) = maybe_get_holochain_service() {
+                                let stream_receiver = holochain_service.stream_receiver.try_lock();
+                                if let Ok(mut stream_receiver) = stream_receiver {
+                                    if let Ok(signal) = stream_receiver.try_recv() {
+                                        match signal.clone() {
+                                            Signal::App {
+                                                cell_id,
+                                                zome_name,
+                                                signal: payload,
+                                            } => {
+                                                // Handle the received signal here
+                                                let script = format!(
+                                                    "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
+                                                    cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
+                                                );
+                                                match js_core.execute_async(script) {
+                                                    Ok(script_fut) => match script_fut.await {
+                                                        Ok(_res) => {
+                                                            info!(
+                                                                "Holochain Handle Callback Completed Succesfully",
+                                                            );
+                                                        }
+                                                        Err(err) => {
+                                                            error!("Error executing callback: {:?}", err);
+                                                        }
+                                                    },
+                                                    Err(err) => {
+                                                        error!("Error executing callback: {:?}", err);
+                                                    }
+                                                }
+                                            }
+                                            Signal::System(_) => {
+                                                // Handle the received signal here
+                                                info!("Received system signal");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    };
+
                     tokio::select! {
+                        biased;
+
                         event_loop_result = js_core.event_loop() => {
                             match event_loop_result {
                                 Ok(_) => info!("AD4M event loop finished"),
                                 Err(err) => {
+                                    let tx_cloned = tx_inside.clone();
                                     error!("AD4M event loop closed with error: {}", err);
+                                    if global_req_id.is_some() {
+                                        //TODO: this error should also cause the graphql server to error since right now we are just killing
+                                        //the event loop completely and this should be reflected in the main thread
+                                        tx_cloned
+                                            .send(JsCoreResponse {
+                                                result: Err(err.to_string()),
+                                                id: global_req_id.unwrap(),
+                                            })
+                                            .expect("couldn't send on channel");
+                                    }
                                     break;
                                 }
                             }
                         }
                         _request = receive_fut => {
                             info!("AD4M receive_fut completed");
-                            break;
+                            //break;
                         }
                         _module_load = module_load_fut => {
                             info!("AD4M module load completed");
-                            break;
+                            //break;
+                        }
+                        _holochain_signal_receivers = holochain_signal_receiver_fut => {
+                            //info!("AD4M holochain signal receiver completed");
                         }
                     }
                 }

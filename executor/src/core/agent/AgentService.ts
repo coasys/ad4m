@@ -52,7 +52,7 @@ export default class AgentService {
   #readyPromise: Promise<void>;
   #readyPromiseResolve?: (value: void | PromiseLike<void>) => void;
 
-  constructor(rootConfigPath: string, reqCredential?: string) {
+  constructor(rootConfigPath: string, adminCredential?: string) {
     this.#file = path.join(rootConfigPath, "agent.json");
     this.#fileProfile = path.join(rootConfigPath, "agentProfile.json");
     this.#appsFile = path.join(rootConfigPath, "apps.json");
@@ -67,11 +67,11 @@ export default class AgentService {
     });
     this.#requests = new Map();
     this.#tokenValidPeriod = DefaultTokenValidPeriod;
-    if (reqCredential) {
-      this.#adminCredential = reqCredential;
+    if (adminCredential) {
+      this.#adminCredential = adminCredential;
     } else {
       console.warn(
-        "reqCredential is not set or empty, empty token will possess admin capabililities."
+        "adminCredential is not set or empty, empty token will possess admin capabililities."
       );
       this.#adminCredential = "";
     }
@@ -303,15 +303,10 @@ export default class AgentService {
       return [AGENT_AUTH_CAPABILITY];
     }
 
-    const key = this.getSigningKey();
-    // @ts-ignore
-    let keyEncoder = new KeyEncoder.default("secp256k1");
-    const pemPublicKey = keyEncoder.encodePublic(key.publicKey, "raw", "pem");
-    const pubKeyObj = crypto.createPublicKey(pemPublicKey);
+    const payload = await JWT.verifyJwt(token);
 
-    const { payload } = await jose.jwtVerify(token, pubKeyObj);
-
-    return payload.capabilities;
+    //@ts-ignore
+    return payload.capabilities.capabilities;
   }
 
   isAdminCredential(token: string) {
@@ -352,30 +347,13 @@ export default class AgentService {
 
   async generateJwt(requestId: string, rand: string) {
     const authKey = genRequestKey(requestId, rand);
-    console.log("AgentService.generateJwt(): rand number with requestId: ", authKey);
     const auth = this.#requests.get(authKey);
 
     if (!auth) {
       throw new Error("Can't find permitted request");
     }
 
-    const key = this.getSigningKey();
-    // @ts-ignore
-    let keyEncoder = new KeyEncoder.default("secp256k1");
-    const pemPrivateKey = keyEncoder.encodePrivate(
-      key.privateKey,
-      "raw",
-      "pem"
-    );
-    const keyObj = crypto.createPrivateKey(pemPrivateKey);
-
-    const jwt = await new jose.SignJWT({ ...auth })
-      .setProtectedHeader({ alg: "ES256K" })
-      .setIssuedAt()
-      .setIssuer(this.did || "")
-      .setAudience(`${auth.appName}:${this.did || ""}`)
-      .setExpirationTime(`${this.#tokenValidPeriod}s`)
-      .sign(keyObj);
+    const jwt = await JWT.generateJwt(this.did || "", `${auth.appName}:${this.did || ""}`, this.#tokenValidPeriod, auth);
 
     this.#requests.delete(authKey);
 
@@ -425,9 +403,9 @@ export default class AgentService {
 
 export function init(
   rootConfigPath: string,
-  reqCredential?: string
+  adminCredential?: string
 ): AgentService {
-  const agent = new AgentService(rootConfigPath, reqCredential);
+  const agent = new AgentService(rootConfigPath, adminCredential);
   agent.load();
   return agent;
 }

@@ -257,7 +257,8 @@ export default class LanguageController {
         }
 
         if(language.telepresenceAdapter) {
-            language.telepresenceAdapter.registerSignalCallback((payload: PerspectiveExpression) => {
+            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression) => {
+                await this.tagPerspectiveExpressionSignatureStatus(payload)
                 this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
             })
         }
@@ -265,7 +266,7 @@ export default class LanguageController {
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
-                await PUBSUB.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+                await PUBSUB.publish(PubSub.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
         }
 
@@ -314,7 +315,7 @@ export default class LanguageController {
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
-                await PUBSUB.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+                await PUBSUB.publish(PubSub.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
         }
 
@@ -640,7 +641,7 @@ export default class LanguageController {
 
     applyTemplateData(sourceLanguageLines: string[], templateData: object) {
         //Get lines in sourceLanguageLines which have ad4m-template-variable declared
-        const ad4mTemplatePattern = "//@ad4m-template-variable";
+        const ad4mTemplatePattern = "//!@ad4m-template-variable";
         var indexes = [];
         for(let i = 0; i < sourceLanguageLines.length; i++) {
             if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {

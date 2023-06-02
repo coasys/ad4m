@@ -4,8 +4,7 @@ mkdir tst-tmp
 cd tst-tmp
 mkdir agents
 mkdir languages
-mkdir languages/test-language
-cp -r ../test-language/build languages/test-language/build
+mkdir note
 
 ln -s ../../../executor/temp/binary/hc ./hc
 ln -s ../../../executor/temp/binary/holochain ./holochain

@@ -112,8 +112,6 @@ enum Domain {
         command: DevFunctions,
     },
     Init {
-        #[arg(long, action)]
-        hc_only: Option<bool>,
         #[arg(short, long, action)]
         data_path: Option<String>,
         #[arg(short, long, action)]
@@ -136,6 +134,14 @@ enum Domain {
         hc_admin_port: Option<u16>,
         #[arg(long, action)]
         hc_app_port: Option<u16>,
+        #[arg(long, action)]
+        hc_use_bootstrap: Option<bool>,
+        #[arg(long, action)]
+        hc_use_local_proxy: Option<bool>,
+        #[arg(long, action)]
+        hc_use_mdns: Option<bool>,
+        #[arg(long, action)]
+        hc_use_proxy: Option<bool>,
         #[arg(short, long, action)]
         ipfs_swarm_port: Option<u16>,
         #[arg(short, long, action)]
@@ -186,16 +192,11 @@ async fn main() -> Result<()> {
     };
 
     if let Domain::Init {
-        hc_only,
         data_path,
         network_bootstrap_seed,
     } = args.domain
     {
-        match rust_executor::init::init(
-            util::option_to_bool(hc_only),
-            data_path,
-            network_bootstrap_seed,
-        ) {
+        match rust_executor::init::init(data_path, network_bootstrap_seed) {
             Ok(()) => println!("Successfully initialized AD4M executor!"),
             Err(e) => {
                 println!("Failed to initialize AD4M executor: {}", e);
@@ -214,6 +215,10 @@ async fn main() -> Result<()> {
         gql_port,
         hc_admin_port,
         hc_app_port,
+        hc_use_bootstrap,
+        hc_use_local_proxy,
+        hc_use_mdns,
+        hc_use_proxy,
         ipfs_swarm_port,
         connect_holochain,
         admin_credential,
@@ -230,6 +235,10 @@ async fn main() -> Result<()> {
             gql_port,
             hc_admin_port,
             hc_app_port,
+            hc_use_bootstrap,
+            hc_use_local_proxy,
+            hc_use_mdns,
+            hc_use_proxy,
             ipfs_swarm_port,
             connect_holochain,
             admin_credential,
@@ -261,7 +270,6 @@ async fn main() -> Result<()> {
         }
         Domain::Dev { command: _ } => unreachable!(),
         Domain::Init {
-            hc_only: _,
             data_path: _,
             network_bootstrap_seed: _,
         } => unreachable!(),
@@ -274,6 +282,10 @@ async fn main() -> Result<()> {
             gql_port: _,
             hc_admin_port: _,
             hc_app_port: _,
+            hc_use_bootstrap: _,
+            hc_use_local_proxy: _,
+            hc_use_mdns: _,
+            hc_use_proxy: _,
             ipfs_swarm_port: _,
             connect_holochain: _,
             admin_credential: _,

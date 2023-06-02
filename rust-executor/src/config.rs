@@ -11,8 +11,14 @@ pub struct Ad4mConfig {
     pub language_language_only: Option<bool>,
     pub run_dapp_server: Option<bool>,
     pub gql_port: Option<u16>,
+    #[serde(rename = "hcPortAdmin")]
     pub hc_admin_port: Option<u16>,
+    #[serde(rename = "hcPortApp")]
     pub hc_app_port: Option<u16>,
+    pub hc_use_local_proxy: Option<bool>,
+    pub hc_use_mdns: Option<bool>,
+    pub hc_use_proxy: Option<bool>,
+    pub hc_use_bootstrap: Option<bool>,
     pub ipfs_swarm_port: Option<u16>,
     pub connect_holochain: Option<bool>,
     pub admin_credential: Option<String>,
@@ -68,9 +74,9 @@ impl Ad4mConfig {
             if cfg!(windows) {
                 data_path.push("swipl");
             }
-            //If os is other push swipl/lib/swipl/
+            //If os is other push swipl/bin/swipl/
             else {
-                data_path.push("swipl/lib/swipl");
+                data_path.push("swipl/bin/swipl");
             }
             self.swipl_path = Some(
                 data_path
@@ -81,7 +87,7 @@ impl Ad4mConfig {
         }
         if self.swipl_home_path.is_none() {
             let mut data_path = PathBuf::from(self.app_data_path.clone().unwrap());
-            data_path.push("swipl/bin/swipl");
+            data_path.push("swipl/lib/swipl");
             self.swipl_home_path = Some(
                 data_path
                     .into_os_string()
@@ -107,6 +113,10 @@ impl Default for Ad4mConfig {
             gql_port: None,
             hc_admin_port: None,
             hc_app_port: None,
+            hc_use_local_proxy: None,
+            hc_use_mdns: None,
+            hc_use_proxy: None,
+            hc_use_bootstrap: None,
             ipfs_swarm_port: None,
             connect_holochain: None,
             admin_credential: None,

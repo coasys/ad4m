@@ -1,27 +1,28 @@
-use actix_web::{
-    middleware,
-    web::{self, Data},
-    App, Error, HttpResponse, HttpServer,
-};
-use deno_core::error::AnyError;
-use juniper::RootNode;
-use juniper_actix::{graphiql_handler, graphql_handler, playground_handler};
-use std::io::Write;
-
-mod graphql_types;
+pub mod graphql_types;
 mod mutation_resolvers;
 mod query_resolvers;
 mod subscription_resolvers;
+mod utils;
 
+use graphql_types::RequestContext;
 use mutation_resolvers::*;
 use query_resolvers::*;
 use subscription_resolvers::*;
 
 use crate::js_core::JsCoreHandle;
 
-pub struct MyContext;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::{convert::Infallible, io::Write};
 
-impl juniper::Context for MyContext {}
+use deno_core::error::AnyError;
+use futures::FutureExt as _;
+use juniper::{InputValue, RootNode};
+use juniper_graphql_transport_ws::ConnectionConfig;
+use juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
+use warp::{http::Response, Filter};
+
+impl juniper::Context for RequestContext {}
 
 type Schema = RootNode<'static, Query, Mutation, Subscription>;
 
@@ -29,54 +30,79 @@ fn schema() -> Schema {
     Schema::new(Query, Mutation, Subscription)
 }
 
-async fn graphiql_route() -> Result<HttpResponse, Error> {
-    graphiql_handler("/graphql", None).await
-}
+pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(), AnyError> {
+    let log = warp::log("warp::server");
 
-async fn playground_route() -> Result<HttpResponse, Error> {
-    playground_handler("/", None).await
-}
-
-async fn graphql_route(
-    req: actix_web::HttpRequest,
-    payload: actix_web::web::Payload,
-    schema: web::Data<Schema>,
-    deno_connect: web::Data<JsCoreHandle>,
-) -> Result<HttpResponse, Error> {
-    graphql_handler(&schema, &deno_connect, req, payload).await
-}
-
-/// Starts the GraphQL server
-pub async fn start_server(js_core_handle: JsCoreHandle) -> Result<(), AnyError> {
-    schema().as_schema_language();
     let mut file = std::fs::File::create("schema.gql").unwrap();
     file.write_all(schema().as_schema_language().as_bytes())
         .unwrap();
 
-    //Start the server
-    let server = HttpServer::new(move || {
-        App::new()
-            .app_data(Data::new(schema()))
-            .app_data(Data::new(js_core_handle.clone()))
-            .wrap(middleware::Compress::default())
-            .wrap(middleware::Logger::default())
-            .service(
-                web::resource("/")
-                    .route(web::post().to(graphql_route))
-                    .route(web::get().to(graphql_route)),
-            )
-            .service(
-                web::resource("/graphql")
-                    .route(web::post().to(graphql_route))
-                    .route(web::get().to(graphql_route)),
-            )
-            .service(web::resource("/playground").route(web::get().to(playground_route)))
-            .service(web::resource("/graphiql").route(web::get().to(graphiql_route)))
+    let homepage = warp::path::end().map(|| {
+        Response::builder()
+            .header("content-type", "text/html")
+            .body("<html><h1>AD4M Executor</h1><div>visit <a href=\"/playground\">graphql playground</a> to explore the executor</html>")
     });
-    server
-        .bind("127.0.0.1:4000")
-        .expect("Could not bind to port 4000")
-        .run()
-        .await
-        .map_err(|e| e.into())
+
+    let qm_schema = schema();
+    let js_core_handle_cloned1 = js_core_handle.clone();
+    let qm_state = warp::any()
+        .and(warp::header::<String>("authorization"))
+        .map(move |header| RequestContext {
+            capability: header,
+            js_handle: js_core_handle_cloned1.clone(),
+        });
+    let qm_graphql_filter = juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
+
+    let root_node = Arc::new(schema());
+
+    let routes = (warp::path("graphql")
+        .and(warp::ws())
+        .map(move |ws: warp::ws::Ws| {
+            let root_node = root_node.clone();
+            let js_core_handle = js_core_handle.clone();
+            ws.on_upgrade(move |websocket| async move {
+                serve_graphql_transport_ws(
+                    websocket,
+                    root_node,
+                    |val: HashMap<String, InputValue>| async move {
+                        let mut auth_header = String::from("");
+
+                        if let Some(headers) = val.get("headers") {
+                            let headers = headers.to_object_value().unwrap();
+                            if let Some(auth) = headers.get("authorization") {
+                                auth_header = auth.as_string_value().unwrap().to_string();
+                            }
+                        };
+
+                        let context = RequestContext {
+                            capability: auth_header,
+                            js_handle: js_core_handle.clone(),
+                        };
+                        Ok(ConnectionConfig::new(context))
+                            as Result<ConnectionConfig<_>, Infallible>
+                    },
+                )
+                .map(|r| {
+                    if let Err(e) = r {
+                        log::error!("Websocket error: {e}");
+                    }
+                })
+                .await
+            })
+        }))
+    .map(|reply| {
+        // TODO#584: remove this workaround
+        warp::reply::with_header(reply, "Sec-WebSocket-Protocol", "graphql-transport-ws")
+    })
+    .or(warp::post()
+        .and(warp::path("graphql"))
+        .and(qm_graphql_filter))
+    .or(warp::get()
+        .and(warp::path("playground"))
+        .and(playground_filter("/graphql", Some("/subscriptions"))))
+    .or(homepage)
+    .with(log);
+
+    warp::serve(routes).run(([127, 0, 0, 1], port)).await;
+    Ok(())
 }

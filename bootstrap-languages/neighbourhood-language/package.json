@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"No neighbourhood language integration tests\"",
-    "build": "deno bundle index.ts build/bundle.js"
+    "build": "deno run --allow-all esbuild.ts"
   },
   "author": "joshuadparkin@gmail.com",
   "license": "ISC"

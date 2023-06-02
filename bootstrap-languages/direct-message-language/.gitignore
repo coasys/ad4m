@@ -10,6 +10,7 @@ build/*
 !*.config.js 
 !rollup.config.hc-dna.js
 !dna.js
+!esbuild.js
 
 node_modules
 target

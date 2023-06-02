@@ -2,6 +2,7 @@ import { ChildProcess, exec, ExecException, execSync } from "node:child_process"
 import { rmSync } from "node:fs";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions/index.js";
 import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
+import { onError } from "@apollo/client/link/error";
 import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
@@ -28,20 +29,21 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
     })
   }
 
-export async function startExecutor(relativeDataPath: string, 
+export async function startExecutor(dataPath: string, 
     bootstrapSeedPath: string, 
     gqlPort: number,
     hcAdminPort: number,
     hcAppPort: number,
     ipfsSwarmPort: number,
     languageLanguageOnly: boolean = false,
-    reqCredential?: string
+    adminCredential?: string
 ): Promise<ChildProcess> {
     console.log(bootstrapSeedPath);
+    console.log(dataPath);
     let executorProcess = null as ChildProcess | null;
-    rmSync(relativeDataPath, { recursive: true, force: true })
+    rmSync(dataPath, { recursive: true, force: true })
     console.log("Initialzing executor data directory")
-    execSync(`../../host/dist/ad4m-macos-x64 init --dataPath ${relativeDataPath} --networkBootstrapSeed ${bootstrapSeedPath} --overrideConfig true`, {})
+    execSync(`../../target/debug/ad4m init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {})
     
     console.log("Starting executor")
     try {
@@ -50,17 +52,22 @@ export async function startExecutor(relativeDataPath: string,
         console.log("No holochain process running")
     }
     
-    if (!reqCredential) {
-        executorProcess = exec(`../../host/dist/ad4m-macos-x64 serve --dataPath ${relativeDataPath} --port ${gqlPort} --hcAdminPort ${hcAdminPort} --hcAppPort ${hcAppPort} --ipfsPort ${ipfsSwarmPort} --hcUseBootrap false --hcUseProxy false --hcUseLocalProxy false --hcUseMdns true --languageLanguageOnly ${languageLanguageOnly}`, {})
+    if (!adminCredential) {
+        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
     } else {
-        executorProcess = exec(`../../host/dist/ad4m-macos-x64 serve --dataPath ${relativeDataPath} --port ${gqlPort} --hcAdminPort ${hcAdminPort} --hcAppPort ${hcAppPort} --ipfsPort ${ipfsSwarmPort} --hcUseBootrap false --hcUseProxy false --hcUseLocalProxy false --hcUseMdns true --languageLanguageOnly ${languageLanguageOnly} --reqCredential ${reqCredential}`, {})
+        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
-            if (data.includes("GraphQL server started")) {
+            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
                 resolve()
             }
         });
+        executorProcess!.stderr!.on('data', (data) => {
+            if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
+                resolve()
+            }
+        }); 
     })
 
     executorProcess!.stdout!.on('data', (data) => {
@@ -77,7 +84,7 @@ export async function startExecutor(relativeDataPath: string,
 
 export function apolloClient(port: number, token?: string): ApolloClient<any> {
     const wsLink = new GraphQLWsLink(createClient({
-        url: `ws://localhost:${port}/graphql`,
+        url: `ws://127.0.0.1:${port}/graphql`,
         webSocketImpl: Websocket,
         connectionParams: () => {
             return {
@@ -87,14 +94,17 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
             }
         },
     }));
-
-    const link = new HttpLink({
-        uri: "http://localhost:4000/graphql",
-        //@ts-ignore
-        fetch
+    wsLink.client.on('message' as any, (data: any) => {
+        if (data.payload) {
+            if (data.payload.errors) {
+                console.dir(data.payload.errors, { depth: null });
+            } else {
+                console.dir(data.payload, { depth: null });
+            }
+        }
     });
-  
-    return new ApolloClient({
+
+    let client = new ApolloClient({
         link: wsLink,
         cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
         defaultOptions: {
@@ -109,6 +119,8 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
             }
         },
     });
+    
+    return client;
 }
 
 export function sleep(ms: number) {

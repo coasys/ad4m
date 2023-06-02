@@ -1,5 +1,9 @@
 #!/bin/bash
 
-cd test-language
+cd languages/test-language
+yarn install
+yarn run build
+
+cd ../note-store
 yarn install
 yarn run build

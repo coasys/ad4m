@@ -75,7 +75,7 @@ export default class PerspectivismCore {
     constructor(config: Config.CoreConfig) {
         this.#config = Config.init(config);
 
-        this.#agentService = new AgentService(this.#config.rootConfigPath, this.#config.reqCredential)
+        this.#agentService = new AgentService(this.#config.rootConfigPath, this.#config.adminCredential)
         this.#runtimeService = new RuntimeService(this.#config)
         this.#agentService.ready.then(() => {
             this.#runtimeService.did = this.#agentService!.did!
@@ -89,6 +89,43 @@ export default class PerspectivismCore {
         this.#languagesReady = new Promise(resolve => {
             that.#resolveLanguagesReady = resolve
         })
+    }
+
+    async callResolver (type: string, fnName: string, args: any, context: any) {
+      if(!this.resolvers[type]) throw new Error(`Could not find resolver for type ${type}`)
+      if(!this.resolvers[type][fnName]) throw new Error(`Could not find resolver function ${fnName} for type ${type}`)
+      try {
+        let result;
+        if (args && context) {
+            result = await this.resolvers[type][fnName](args, context);
+        }
+        if (!args) {
+            result = await this.resolvers[type][fnName](context);
+        } 
+        if (!context) {
+            result = await this.resolvers[type][fnName](args);
+        }
+        if (!args && !context) {
+            result = await this.resolvers[type][fnName]();
+        }
+        return {"Ok": result}
+      } catch (error) {
+        //@ts-ignore
+        if (typeof error.message === "object") {
+            //@ts-ignore
+            return {"Error": JSON.stringify(error.message)};
+        } else {
+            //@ts-ignore
+            return {"Error": error.message}
+        }
+      }
+    }
+
+    get holochainService(): HolochainService {
+        if (!this.#holochain) {
+            throw Error("No holochain service")
+        }
+        return this.#holochain
     }
 
     get agentService(): AgentService {
@@ -206,18 +243,6 @@ export default class PerspectivismCore {
         });
     }
 
-    async connectHolochain(params: ConnectHolochainParams) {
-        console.log("Init ad4m service with resource path ", this.#config.resourcePath)
-        console.log(`Holochain ports: admin=${params.hcPortAdmin} app=${params.hcPortApp}`)
-        this.#holochain = new HolochainService({
-            dataPath: this.#config.holochainDataPath,
-            resourcePath: this.#config.resourcePath,
-            adminPort: params.hcPortAdmin,
-            appPort: params.hcPortApp,
-        }, this.#agentService, this.entanglementProofController)
-        await this.#holochain.connect();
-    }
-
     async waitForAgent(): Promise<void> {
         return this.#agentService.ready
     }
@@ -279,7 +304,7 @@ export default class PerspectivismCore {
         perspectiveID.sharedUrl = neighbourhoodUrl
         perspectiveID.neighbourhood = neighbourhood;
         perspectiveID.state = PerspectiveState.Synced;
-        this.#perspectivesController!.replace(perspectiveID, neighbourhood, false, PerspectiveState.Synced)
+        await this.#perspectivesController!.replace(perspectiveID, neighbourhood, false, PerspectiveState.Synced)
         return neighbourhoodUrl
     }
 
@@ -346,7 +371,7 @@ export default class PerspectivismCore {
     }
 
     async pubKeyForLanguage(lang: string): Promise<Buffer> {
-        return Buffer.from(await this.#holochain!.pubKeyForLanguage(lang))
+        return Buffer.from(await HOLOCHAIN_SERVICE.getAgentKey());
     }
 
     async holochainRequestAgentInfos(): Promise<AgentInfoResponse> {
@@ -372,7 +397,7 @@ export default class PerspectivismCore {
         const templateParams = {
             uid: uuidv4(),
             recipient_did: this.#agentService.agent?.did,
-            recipient_hc_agent_pubkey: Buffer.from((await this.#holochain?.pubKeyForAllLanguages())!).toString('hex')
+            recipient_hc_agent_pubkey: Buffer.from(await HOLOCHAIN_SERVICE.getAgentKey()).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
         const createdDmLang = await this.languageApplyTemplateAndPublish(this.#config.directMessageLanguage, templateParams)

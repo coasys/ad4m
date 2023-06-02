@@ -1,7 +1,7 @@
 import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
 import { DNA, DNA_NICK } from "./build/dna.js";
 
-//@ad4m-template-variable
+//!@ad4m-template-variable
 const recipient_did = "<not templated yet>"
 
 //@ts-ignore
@@ -37,7 +37,7 @@ export default class DMAdapter implements DirectMessageAdapter {
             ["direct-message", "inbox"],
           ] 
         }
-      ], (signal) => {
+      ], async (signal) => {
         console.debug("DM Language got HC signal:", signal)
         //@ts-ignore
         let payload = signal.payload
@@ -50,7 +50,9 @@ export default class DMAdapter implements DirectMessageAdapter {
         } catch(e) {
           console.error(e)
         }
-        that.#messageCallbacks.forEach(cb => cb(payload))
+        for (const cb of that.#messageCallbacks) {
+          await cb(payload)
+        }
       });
   }
 
@@ -90,6 +92,7 @@ export default class DMAdapter implements DirectMessageAdapter {
   }
 
   onlyRecipient() {
+    console.log(recipient_did, this.#context.agent.did);
     if(recipient_did !== this.#context.agent.did) throw new Error("Only recipient can call this function!")
   }
 
@@ -108,6 +111,7 @@ export default class DMAdapter implements DirectMessageAdapter {
   }
 
   addMessageCallback(callback: MessageCallback) {
+    console.log("adding callback on dm language");
     this.onlyRecipient()
     this.#messageCallbacks.push(callback)
   }

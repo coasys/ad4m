@@ -38,7 +38,7 @@ describe("Authentication integration tests", () => {
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
                 gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
 
-            ad4mClient = new Ad4mClient(apolloClient(gqlPort))
+            ad4mClient = new Ad4mClient(apolloClient(gqlPort), false)
             await ad4mClient.agent.generate("passphrase")
         })
 
@@ -98,10 +98,10 @@ describe("Authentication integration tests", () => {
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
                 gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort, false, "123");
        
-            adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"))
+            adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"), false)
             await adminAd4mClient.agent.generate("passphrase")
             
-            unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort))
+            unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
         })
 
         after(async () => {
@@ -208,19 +208,19 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
         })
 
         it("user with invalid jwt can not query agent status", async () => {
             // @ts-ignore
-            let ad4mClient = new Ad4mClient(apolloClient(gqlPort, "invalid-jwt"))
+            let ad4mClient = new Ad4mClient(apolloClient(gqlPort, "invalid-jwt"), false)
 
             const call = async () => {
                 return await ad4mClient!.agent.status()
             }
 
-            await expect(call()).to.be.rejectedWith("Invalid Compact JWS");
+            await expect(call()).to.be.rejectedWith("InvalidToken");
         })
 
         it("authenticated user can not query agent status if capability is not matched", async () => {
@@ -243,7 +243,7 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
 
             const call = async () => {
                 return await authenticatedAppAd4mClient!.agent.status()

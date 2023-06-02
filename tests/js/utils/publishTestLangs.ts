@@ -17,7 +17,6 @@ const appDataPath = path.join(TEST_DIR, "agents", "p");
 const publishLanguagesPath = path.join(TEST_DIR, "languages");
 const publishingBootstrapSeedPath = path.join(`${__dirname}/../publishBootstrapSeed.json`);
 const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-const noteIpfsHashPath = path.join(`${__dirname}/../scripts/note-ipfs-hash`);
 const perspectiveDiffSyncHashPath = path.join(`${__dirname}/../scripts/perspective-diff-sync-hash`);
 const gqlPort = 4000;
 const hcAdminPort = 15000;
@@ -29,7 +28,6 @@ const languagesToPublish = {
     "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
     "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["uid", "recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
     "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
-    "note-ipfs": {name: "note-ipfs", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
     "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
 }
@@ -39,7 +37,6 @@ const languageHashes = {
     "agentLanguage": "",
     "perspectiveLanguage": "",
     "neighbourhoodLanguage": "",
-    "noteIpfs": "",
     "perspectiveDiffSync": ""
 }
 
@@ -64,7 +61,6 @@ function injectSystemLanguages() {
 }
 
 function injectLangAliasHashes() {
-    fs.writeFileSync(noteIpfsHashPath, languageHashes["noteIpfs"]);
     fs.writeFileSync(perspectiveDiffSyncHashPath, languageHashes["perspectiveDiffSync"]);
 }
 
@@ -92,9 +88,6 @@ async function publish() {
         }
         if (language === "perspective-language") {
             languageHashes["perspectiveLanguage"] = publishedLang.address;
-        }
-        if (language === "note-ipfs") {
-            languageHashes["noteIpfs"] = publishedLang.address;
         }
         if (language === "perspective-diff-sync") {
             languageHashes["perspectiveDiffSync"] = publishedLang.address;

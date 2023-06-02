@@ -6,6 +6,17 @@ import { expect } from "chai";
 export default function expressionTests(testContext: TestContext) {
     return () => {
         describe('Expressions', () => {
+            let noteLangAddress = "";
+
+            before(async () => {
+                const ad4mClient = testContext.ad4mClient!
+                
+                //Publish mocking interactions language so it can be used
+                const publish = await ad4mClient.languages.publish("./languages/note-store/build/bundle.js", {name: "note-store", description: "A test language for saving simple strings"} as LanguageMetaInput)
+
+                noteLangAddress = publish.address;
+            })
+    
             it('can get() my agent expression', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 const me = await ad4mClient.agent.me()
@@ -47,10 +58,8 @@ export default function expressionTests(testContext: TestContext) {
 
             it('can create valid signatures', async () => {
                 const ad4mClient = testContext.ad4mClient!
-                //@ts-ignore
-                const noteIpfs = fs.readFileSync("./scripts/note-ipfs-hash").toString();
 
-                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs)
+                const exprAddr = await ad4mClient.expression.create("test note", noteLangAddress)
                 expect(exprAddr).not.to.be.undefined;
 
                 const expr = await ad4mClient.expression.get(exprAddr)
@@ -60,9 +69,8 @@ export default function expressionTests(testContext: TestContext) {
 
             it('can get expression from cache', async () => {
                 const ad4mClient = testContext.ad4mClient!
-                const noteIpfs = fs.readFileSync("./scripts/note-ipfs-hash").toString();
 
-                const exprAddr = await ad4mClient.expression.create("test note", noteIpfs)
+                const exprAddr = await ad4mClient.expression.create("test note", noteLangAddress)
                 expect(exprAddr).not.to.be.undefined;
 
                 const expr = await ad4mClient.expression.get(exprAddr)
@@ -75,7 +83,7 @@ export default function expressionTests(testContext: TestContext) {
                 expect(exprCacheHit.proof.valid).to.be.true;
                 expect(exprCacheHit.data).to.be.equal("\"test note\"");
 
-                const objExpr = await ad4mClient.expression.create(JSON.stringify({"key": "value"}), noteIpfs)
+                const objExpr = await ad4mClient.expression.create({"key": "value"}, noteLangAddress)
                 expect(objExpr).not.to.be.undefined;
 
                 const exprObj = await ad4mClient.expression.get(objExpr)
@@ -92,7 +100,7 @@ export default function expressionTests(testContext: TestContext) {
             it('can use expression interactions', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 //Publish mocking interactions language so it can be used
-                const publish = await ad4mClient.languages.publish("./tst-tmp/languages/test-language/build/bundle.js", {name: "test-language", description: "A test language for interactions"} as LanguageMetaInput)
+                const publish = await ad4mClient.languages.publish("./languages/test-language/build/bundle.js", {name: "test-language", description: "A test language for interactions"} as LanguageMetaInput)
 
                 //@ts-ignore
                 const testLangAddress = publish.address;

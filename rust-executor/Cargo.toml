@@ -22,13 +22,6 @@ futures = "0.3.28"
 tokio-stream = { version = "0.1.12", features = ["sync"] }
 lazy_static = "1.4.0"
 
-juniper = "0.15.0"
-juniper_subscriptions = "0.16.0"
-juniper_actix = "0.4.0"
-actix-web = "4.2.1"
-actix-rt = "2.2.0"
-actix = "0.13.0"
-
 chrono = { version = "0.4.24", features = ["serde"] }
 env_logger = "0.10.0"
 serde_json = "1.0.95"
@@ -51,3 +44,13 @@ multibase = "0.9.1"
 multihash = { version = "0.18.0", features = ["sha2"] }
 cid = "0.10.1"
 once_cell = "1.17.1"
+
+juniper = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol", features = ["chrono"] }
+juniper_subscriptions = {git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol" }
+juniper_graphql_transport_ws = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol" }
+juniper_warp = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol", features = ["subscriptions"] }
+warp = "0.3.4"
+
+jsonwebtoken = "8.3.0"
+
+holochain = "0.1.3"

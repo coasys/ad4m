@@ -10,12 +10,11 @@
     "rollup-expression-ui": "rollup -c rollup.config.expression-ui.js",
     "compile-dna": "cd hc-dna && ./build.sh && cd ..",
     "compile-dna-windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd ..",
-    "deno-bundle": "deno bundle index.ts build/bundle.js",
     "build": "run-script-os",
     "build:linux": "yarn compile-dna && yarn build:common",
     "build:macos": "yarn compile-dna && yarn build:common",
     "build:windows": "yarn compile-dna-windows && yarn build:common",
-    "build:common": "yarn rollup-dna && yarn rollup-icons && yarn rollup-expression-ui && yarn deno-bundle"
+    "build:common": "yarn rollup-dna && yarn rollup-icons && yarn rollup-expression-ui && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",

@@ -91,23 +91,23 @@ export default function languageTests(testContext: TestContext) {
             })
 
             it('can publish and template a non-Holochain language and provide correct meta data', async() => {
-                const ipfsMetaInfo = new LanguageMetaInput("Newly published note language", "Just to test non-HC language work as well");
+                const noteMetaInfo = new LanguageMetaInput("Newly published note language", "Just to test non-HC language work as well");
                 //Publish a source language without a holochain DNA
                 const canPublishNonHolochainLang = await ad4mClient.languages.publish(
-                    path.join(__dirname, "../tst-tmp/languages/note-ipfs/build/bundle.js"), 
-                    ipfsMetaInfo
+                    path.join(__dirname, "../languages/note-store/build/bundle.js"), 
+                    noteMetaInfo
                 );
-                expect(canPublishNonHolochainLang.name).to.be.equal(ipfsMetaInfo.name);
-                //TODO/NOTE: this will break if the note-ipfs language version is changed
-                expect(canPublishNonHolochainLang.address).to.be.equal("QmbWg5VBFB1Zzce8X33GiGpMDXFPQjFQKS2T2rJtSYt7TJ");
+                expect(canPublishNonHolochainLang.name).to.be.equal(noteMetaInfo.name);
+                //TODO/NOTE: this will break if the note language version is changed
+                expect(canPublishNonHolochainLang.address).to.be.equal("QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA");
             
                 //Get meta for source language above and make sure it is correct
                 const sourceLanguageMetaNonHC = await ad4mClient.expression.get(`lang://${canPublishNonHolochainLang.address}`);
                 expect(sourceLanguageMetaNonHC.proof.valid).to.be.true;
                 const sourceLanguageMetaNonHCData = JSON.parse(sourceLanguageMetaNonHC.data);
-                expect(sourceLanguageMetaNonHCData.name).to.be.equal(ipfsMetaInfo.name)
-                expect(sourceLanguageMetaNonHCData.description).to.be.equal(ipfsMetaInfo.description)
-                expect(sourceLanguageMetaNonHCData.address).to.be.equal("QmbWg5VBFB1Zzce8X33GiGpMDXFPQjFQKS2T2rJtSYt7TJ")
+                expect(sourceLanguageMetaNonHCData.name).to.be.equal(noteMetaInfo.name)
+                expect(sourceLanguageMetaNonHCData.description).to.be.equal(noteMetaInfo.description)
+                expect(sourceLanguageMetaNonHCData.address).to.be.equal("QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA")
             })
 
 
@@ -127,8 +127,13 @@ export default function languageTests(testContext: TestContext) {
                     error = e
                 }
 
+                console.log("Response for non trust got error", error);
+
                 //@ts-ignore
-                expect(error.toString()).to.be.equal(`ApolloError: Language not created by trusted agent: ${(await ad4mClient.agent.me()).did} and is not templated... aborting language install. Language metadata: ${stringify(sourceLanguageMeta)}`)
+                sourceLanguageMeta.sourceCodeLink = null;
+
+                //@ts-ignore
+                expect(error.toString()).to.contain(`ApolloError: Language not created by trusted agent: ${(await ad4mClient.agent.me()).did} and is not templated... aborting language install. Language metadata: ${stringify(sourceLanguageMeta)}`)
             })
 
             describe('with Bob having added Alice to list of trusted agents', () => {

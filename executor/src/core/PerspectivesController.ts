@@ -3,7 +3,7 @@ import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSub from './graphQL-interface/PubSub'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
 
 export default class PerspectivesController {
@@ -49,7 +49,6 @@ export default class PerspectivesController {
                     }
 
                     for (const linkRemoved of diff.removals) {
-                        console.log("publishing removal:", linkRemoved)
                         await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
                             perspective: perspectivePlain,
                             link: linkRemoved
@@ -63,10 +62,10 @@ export default class PerspectivesController {
             }
         })
 
-        this.#context.languageController!.addTelepresenceSignalObserver((signal: any, lang: LanguageRef) => {
+        this.#context.languageController!.addTelepresenceSignalObserver(async (signal: PerspectiveExpression, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                PUBSUB.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
+                await PUBSUB.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
                     signal: signal,
                     perspective: perspective.plain()
                 })
@@ -97,7 +96,7 @@ export default class PerspectivesController {
         fs.writeFileSync(FILEPATH, JSON.stringify(obj))
     }
 
-    perspectiveID(uuid: string): PerspectiveHandle|void {
+    perspectiveID(uuid: string): PerspectiveHandle|undefined {
         const pID = this.#perspectiveHandles.get(uuid)
         // console.log("pID:", pID)
         return pID
@@ -131,7 +130,7 @@ export default class PerspectivesController {
         return new Ad4mPerspective(await perspective.getLinks({} as LinkQuery));
     }
 
-    add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState): PerspectiveHandle {
+    async add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState): Promise<PerspectiveHandle> {
         let perspective = {
             uuid: uuidv4(),
             name,
@@ -142,19 +141,19 @@ export default class PerspectivesController {
         this.#perspectiveHandles.set(perspective.uuid, perspective)
         this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood, createdFromJoin, state))
         this.save()
-        PUBSUB.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
+        await PUBSUB.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, perspective)
         return perspective
     }
 
-    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
-        PUBSUB.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: perspectiveHandle })
+    async replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
+        await PUBSUB.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: perspectiveHandle })
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
         this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
         this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin, state));
         this.save()
     }
 
-    remove(uuid: string) {
+    async remove(uuid: string) {
         try {
             let perspective = this.#perspectiveInstances.get(uuid);
             perspective?.clearPolling();
@@ -164,14 +163,14 @@ export default class PerspectivesController {
             this.#perspectiveHandles.delete(uuid)
             this.#perspectiveInstances.delete(uuid)
             this.save()
-            PUBSUB.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, { uuid })
+            await PUBSUB.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, uuid)
         } catch (e) {
             console.error("Error removing perspective:", e);
             throw new Error(`Error removing perspective: ${e}`);
         }
     }
 
-    update(uuid: string, name: string) {
+    async update(uuid: string, name: string) {
         let perspective = this.perspective(uuid);
         perspective.name = name;
 
@@ -185,13 +184,13 @@ export default class PerspectivesController {
             instance.updateFromId(perspective as PerspectiveHandle)
         }
 
-        PUBSUB.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: {
+        await PUBSUB.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, {
             uuid: perspective.uuid,
             name: perspective.name,
             state: perspective.state,
             sharedUrl: perspective.sharedUrl,
             neighbourhood: perspective.neighbourhood
-        } as PerspectiveHandle });
+        });
 
         return perspective
     }

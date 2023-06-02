@@ -51,7 +51,7 @@ export interface OuterConfig {
   //Should ad4m-executor connect to an existing holochain instance, or spawn its own
   connectHolochain?: boolean,
   //The credential used by admin client to make request
-  reqCredential?: string,
+  adminCredential?: string,
   //Path to swipl executable
   swiplPath?: string,
   //Path to swipl home directory
@@ -89,7 +89,7 @@ export interface SeedFileSchema {
 export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     let { 
       resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
-      mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, reqCredential, swiplPath, swiplHomePath,runDappServer,
+      mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, adminCredential, swiplPath, swiplHomePath,runDappServer,
       dAppPort
     } = config
     if(!gqlPort) gqlPort = 4000
@@ -189,7 +189,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       languageAliases,
       bootstrapFixtures,
       languageLanguageOnly,
-      reqCredential,
+      adminCredential,
       swiplPath,
       swiplHomePath
     } as CoreConfig);

@@ -109,15 +109,6 @@ export class PerspectivismDb {
     }
 
     async getLink(perspectiveUuid: string, link: LinkExpression): Promise<LinkExpression | undefined> {
-        if (link.data.source == null) {
-            delete link.data.source;
-        };
-        if (link.data.predicate == null) {
-            delete link.data.predicate;
-        };
-        if (link.data.target == null) {
-            delete link.data.target;
-        };
         return (await this.#linkDb.findOne({ perspective: perspectiveUuid, linkExpression: link }))?.linkExpression;
     }
 

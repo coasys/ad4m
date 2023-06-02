@@ -42,8 +42,8 @@ async fn load_module(path: String) -> Result<String, AnyError> {
 }
 
 pub fn build() -> Extension {
-    Extension::builder("wallet")
-        .js(include_js_files!(wallet "utils_extension.js",))
+    Extension::builder("utils")
+        .js(include_js_files!(utils "utils_extension.js",))
         .ops(vec![
             get_signing_dna::decl(),
             hash::decl(),
