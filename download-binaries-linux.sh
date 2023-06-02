@@ -11,20 +11,3 @@ if [ ! -f "./executor/temp/binary/hc" ]; then
         cp ./executor/temp/binary/hc /usr/local/bin/hc
     fi
 fi
-
-if [ ! -f "./executor/temp/binary/holochain" ]; then
-    wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.1.0/holochain-linux-0.1.0
-    mv holochain-linux-0.1.0 ./executor/temp/binary/holochain
-    chmod +x ./executor/temp/binary/holochain
-
-    if [ ! -f "/usr/local/bin/holochain" ]; then
-        echo "Copying holochain to /usr/local/bin"
-        cp ./executor/temp/binary/holochain /usr/local/bin/holochain
-    fi
-fi
-
-if [ ! -f "./executor/temp/swipl/bin/swipl" ]; then
-    wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.1.0/swipl-linux-x86.zip
-    unzip swipl-linux-x86.zip -d ./executor/temp
-    rm -rf swipl-linux-x64.zip
-fi
