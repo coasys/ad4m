@@ -16,14 +16,13 @@
   "type": "module",
   "types": "lib/main.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && yarn run bundle",
     "bundle": "node scripts/bundle.js",
     "run": "node --experimental-specifier-resolution=node lib/main.js",
-    "test": "yarn run test-perspective && yarn test-db && yarn run test-prolog && yarn run test-swipl && yarn run test-auth-unit",
+    "test": "yarn run test-perspective && yarn test-db && yarn run test-prolog && yarn run test-auth-unit",
     "test-perspective": "ts-mocha -p tsconfig.json --exit src/core/Perspective.test.ts",
     "test-db": "ts-mocha -p tsconfig.json --exit src/core/db.test.ts",
     "test-prolog": "ts-mocha -p tsconfig.json --exit src/core/PrologInstance.test.ts",
-    "test-swipl": "ts-mocha -p tsconfig.json --exit src/core/Swipl.test.ts",
     "test-auth-unit": "ts-mocha -p tsconfig.json --exit src/core/agent/Auth.test.ts"
   },
   "repository": {

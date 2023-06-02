@@ -6,7 +6,7 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-libs": {
-      "dependsOn": ["@perspect3vism/ad4m#build", "@perspect3vism/ad4m-connect#build", "@perspect3vism/ad4m-executor#build", "@perspect3vism/ad4m-test#build"],
+      "dependsOn": ["@perspect3vism/ad4m#build", "@perspect3vism/ad4m-connect#build", "@perspect3vism/ad4m-executor#build", "@perspect3vism/ad4m-test#build", "@perspect3vism/ad4m-cli#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-languages": {
@@ -15,6 +15,11 @@
         "@perspect3vism/language-language#build", "@perspect3vism/neighbourhood-language#build",
         "@perspect3vism/file-storage#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+
+    "ad4m-launcher#package-ad4m": {
+      "dependsOn": [],
+      "outputs": ["dist/**"]
     },
 
     "lint": {
@@ -32,55 +37,16 @@
       "outputs": []
     },
     "test:macos": {
-      "dependsOn": ["ad4m-host#package-macos", "test"],
+      "dependsOn": ["test"],
       "outputs": []
     },
     "test:linux": {
-      "dependsOn": ["ad4m-host#package-linux", "test"],
+      "dependsOn": ["test"],
       "outputs": []
     },
     "test:windows": {
-      "dependsOn": ["ad4m-host#package-windows", "test"],
+      "dependsOn": ["test"],
       "outputs": []
-    },
-
-    "ad4m-host#package-linux": {
-      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
-      "outputs": ["dist/**", "lib/**", "build/**"]
-    },
-    "ad4m-host#package-macos": {
-      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
-      "outputs": ["dist/**", "lib/**", "build/**"]
-    },
-    "ad4m-host#package-windows": {
-      "dependsOn": ["^lint", "@perspect3vism/ad4m#build", "@perspect3vism/ad4m-executor#build", "ad4m-host#build"],
-      "outputs": ["dist/**", "lib/**", "build/**"]
-    },
-
-    "ad4m-launcher#build-linux": {
-      "dependsOn": ["ad4m-host#package-linux"],
-      "outputs": ["dist/**"]
-    },
-    "ad4m-launcher#build-macos": {
-      "dependsOn": ["ad4m-host#package-macos"],
-      "outputs": ["dist/**"]
-    },
-    "ad4m-launcher#build-windows": {
-      "dependsOn": ["ad4m-host#package-windows"],
-      "outputs": ["dist/**"]
-    },
-
-    "ad4m-launcher#build-all-linux": {
-      "dependsOn": ["ad4m-host#package-linux"],
-      "outputs": ["dist/**"]
-    },
-    "ad4m-launcher#build-all-macos": {
-      "dependsOn": ["ad4m-host#package-macos"],
-      "outputs": ["dist/**"]
-    },
-    "ad4m-launcher#build-all-windows": {
-      "dependsOn": ["ad4m-host#package-windows"],
-      "outputs": ["dist/**"]
     }
   }
 }
