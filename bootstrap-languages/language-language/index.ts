@@ -4,8 +4,6 @@ import Adapter from "./adapter";
 
 export const name = "languages";
 
-export const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev";
-
 function interactions(expression: Address): Interaction[] {
   return [];
 }

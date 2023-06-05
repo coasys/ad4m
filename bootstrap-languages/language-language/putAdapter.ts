@@ -1,60 +1,70 @@
-import type { Address, AgentService, PublicSharing, LanguageContext, LanguageLanguageInput} from "@perspect3vism/ad4m";
-import type { IPFS } from "ipfs-core-types"
-import axios from "axios";
-import https from "https";
-import { PROXY_URL } from ".";
+import type { Address, AgentService, PublicSharing, LanguageContext, HolochainLanguageDelegate, LanguageLanguageInput, LanguageMeta, LanguageMetaInternal, LanguageExpression } from "@perspect3vism/ad4m";
+import pako from "pako";
+import { LanguageStorage } from "./languageStorage";
+import { DNA_NICK } from "./dna";
+import { Blob } from "buffer";
+import type { LanguageMetadata } from "./types";
 
-export class CloudflarePutAdapter implements PublicSharing {
-  #agent: AgentService;
-  #IPFS: IPFS;
+export type EntryHash = Uint8Array;
 
-  constructor(context: LanguageContext) {
-    this.#agent = context.agent;
-    this.#IPFS = context.IPFS;
-  }
+export interface LanguageData {
+    name: string;
+    file_type: string;
+    data_base64: string;
+}
 
-  async createPublic(language: LanguageLanguageInput): Promise<Address> {
-    const ipfsAddress = await this.#IPFS.add(
-      { content: language.bundle.toString()},
-      { onlyHash: true},
-    );
-    // @ts-ignore
-    const hash = ipfsAddress.cid.toString();
 
-    if(hash != language.meta.address)
-      throw new Error(`Language Persistence: Can't store language. Address stated in meta differs from actual file\nWanted: ${language.meta.address}\nGot: ${hash}`)
+export class LanguageStoragePutAdapter implements PublicSharing {
+    #agent: AgentService
+    #DNA: HolochainLanguageDelegate;
 
-    const agent = this.#agent;
-    const expression = agent.createSignedExpression(language.meta);
-
-    //Build the key value object for the meta object
-    const key = `meta-${hash}`;
-    const metaPostData = {
-      key: key,
-      // Content of the new object.
-      value: JSON.stringify(expression),
-    };
-    //Save the meta information to the KV store
-    const httpsAgent = new https.Agent({
-      rejectUnauthorized: false
-    });
-    const metaPostResult = await axios.post(PROXY_URL, metaPostData, { httpsAgent });
-    if (metaPostResult.status != 200) {
-      console.error("Upload language meta data gets error: ", metaPostResult);
+    constructor(context: LanguageContext) {
+        this.#agent = context.agent
+        this.#DNA = context.Holochain as HolochainLanguageDelegate;
     }
 
-    //Build the key value object for the language bundle
-    const languageBundleBucketParams = {
-      key: hash,
-      // Content of the new object.
-      value: language.bundle.toString(),
-    };
-    //Save the language bundle to the KV store
-    const bundlePostResult = await axios.post(PROXY_URL, languageBundleBucketParams, { httpsAgent });
-    if (bundlePostResult.status != 200) {
-      console.error("Upload language bundle data gets error: ", metaPostResult);
-    }
+    async createPublic(language: LanguageLanguageInput): Promise<Address> {
+        console.log("createPublic fileData", language)
+        try {
+            // Just in case...
+            if(typeof language === "string"){
+                //@ts-ignore
+                fileData = JSON.parse(fileData)
+            }
+        }catch(e){}
 
-    return hash as Address;
-  }
+        const storage = new LanguageStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language-language", fn_name, payload));
+
+        const data_uncompressed = Uint8Array.from(Buffer.from(language.bundle.toString(), "base64"));
+        const data_compressed = pako.deflate(data_uncompressed)
+        const blob = new Blob([data_compressed])
+
+        const hashes = await storage.upload(blob);
+
+        const fileMetadata = {
+            name: language.meta.name,
+            address: hashes.toString(),
+            description: language.meta.description,
+            checksum: "1234",
+            chunks_hashes: hashes,
+            data_base64: language.bundle.toString(),
+            size: data_uncompressed.length,
+        } as LanguageMetadata
+
+        //Create the signed expression object
+        const expression: LanguageExpression = this.#agent.createSignedExpression(fileMetadata)
+        //Remove the data_base64 from the expression, since this is already stored above
+        delete expression.data.data_base64;
+        delete expression.data.size;
+        delete expression.data.checksum;
+        delete expression.data.chunks_hashes;
+
+        //Store the FileMetadataExpression
+        const address = await storage.storeLanguageExpression(expression)
+        if (!Buffer.isBuffer(address)) {
+            throw new Error("Could not create FileExpression data")
+        };
+        //@ts-ignore
+        return address.toString("hex")
+    }
 }
