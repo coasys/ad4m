@@ -4,7 +4,7 @@
   "description": "This is a Language for storing AD4M neighbourhood objects",
   "main": "index.js",
   "scripts": {
-    "integration-test": "node ../../test-runner/build/cli.js --test ./integration.test.cjs --bundle ./build/bundle.js --meta '{\"name\":\"file-storage\",\"description\":\"An AD4M Language for file storage leveraging a holochain DNA\",\"sourceCodeLink\":\"https://github.com/perspect3vism/file-storage-language\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
+    "integration-test": "node ../../test-runner/build/cli.js --test ./integration.test.cjs --bundle ./build/bundle.js --meta '{\"name\":\"neighbourhood-storage\",\"description\":\"An AD4M Language for neighboirhood storage leveraging a holochain DNA\",\"sourceCodeLink\":\"https://github.com/perspect3vism/file-storage-language\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "build": "run-script-os",
     "build:linux": "yarn run build-dna && tsc && rollup -c",
     "build:macos": "yarn run build-dna && tsc && rollup -c",

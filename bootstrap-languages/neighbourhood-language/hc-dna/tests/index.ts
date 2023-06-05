@@ -78,6 +78,5 @@ test("Share full FileExpression between Alice and Bob", async (t) => {
         t.deepEqual(neighbourdhoodExpressionDown, neighbourhoodExpression)
 
         await scenario.shutDown();
-
       })
   })
