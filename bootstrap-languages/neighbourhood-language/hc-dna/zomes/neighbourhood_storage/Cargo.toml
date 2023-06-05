@@ -1,0 +1,21 @@
+[package]
+name = "neighbourhood_storage"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "neighbourhood_storage"
+
+[dependencies]
+derive_more = "0"
+serde = "1"
+lazy_static = "*"
+chrono = { version = "0.4.22", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+thiserror = "1.0.20"
+integrity = { path = "../integrity" }
+sha2 = "0.10.5"
+hdk = "0.1.0"
+holo_hash = "0.1.0"

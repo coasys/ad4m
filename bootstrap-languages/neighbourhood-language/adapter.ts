@@ -1,75 +1,60 @@
-import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext, AgentService } from "@perspect3vism/ad4m";
+import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext, AgentService, HolochainLanguageDelegate, NeighbourhoodExpression } from "@perspect3vism/ad4m";
 import type { IPFS } from "ipfs-core-types"
 import axios from "axios";
 import https from "https";
-import { PROXY_URL } from ".";
+import { DNA_NICK } from "./dna";
+import { NeighbourhoodStorage } from "./neighbourhoodStorage";
 
 class NeighbourhoodPutAdapter implements PublicSharing {
-  #agent: AgentService;
-  #IPFS: IPFS
+  #agent: AgentService
+  #DNA: HolochainLanguageDelegate;
 
   constructor(context: LanguageContext) {
-    this.#agent = context.agent;
-    this.#IPFS = context.IPFS;
+      this.#agent = context.agent
+      this.#DNA = context.Holochain as HolochainLanguageDelegate;
   }
 
   async createPublic(neighbourhood: object): Promise<Address> {
-    const ipfsAddress = await this.#IPFS.add(
-      { content: JSON.stringify(neighbourhood)},
-      { onlyHash: true},
-    );
-    // @ts-ignore
-    const hash = ipfsAddress.cid.toString();
+    const storage = new NeighbourhoodStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "file_storage", fn_name, payload));
 
-    const agent = this.#agent;
-    const expression = agent.createSignedExpression(neighbourhood);
+    const expression: any = this.#agent.createSignedExpression(neighbourhood)
 
-    //Build the key value object for the neighbourhood object
-    const key = hash;
-    const neighbourhoodPostData = {
-      key: key,
-      // Content of the new object.
-      value: JSON.stringify(expression),
+    //Store the FileMetadataExpression
+    const address = await storage.storeNeighbourhoodExpression(expression)
+    if (!Buffer.isBuffer(address)) {
+        throw new Error("Could not create FileExpression data")
     };
-    //Save the neighbourhood information to the KV store
-    const httpsAgent = new https.Agent({
-      rejectUnauthorized: false
-    });
-    const neighbourhoodPostResult = await axios.post(PROXY_URL, neighbourhoodPostData, { httpsAgent });
-    if (neighbourhoodPostResult.status != 200) {
-      console.error("Upload neighbourhood data gets error: ", neighbourhoodPostResult);
-    }
 
-    return hash as Address;
+    //@ts-ignore
+    return address.toString("hex")
   }
 }
 
 export default class Adapter implements ExpressionAdapter {
   putAdapter: PublicSharing;
+  #DNA: HolochainLanguageDelegate;
 
   constructor(context: LanguageContext) {
     this.putAdapter = new NeighbourhoodPutAdapter(context);
+    this.#DNA = context.Holochain as HolochainLanguageDelegate;
   }
 
   async get(address: Address): Promise<Expression> {
     const cid = address.toString();
 
-    let presignedUrl;
-    try {
-      const getPresignedUrl = await axios.get(PROXY_URL+`?key=${cid}`);
-      presignedUrl = getPresignedUrl.data.url;
-    } catch (e) {
-      console.error("Get neighbourhood failed at getting presigned url", e);
-    }
+    const storage = new NeighbourhoodStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language-language", fn_name, payload));
 
-    let neighbourhoodObject;
-    try {
-      const getneighbourhoodObject = await axios.get(presignedUrl);
-      neighbourhoodObject = getneighbourhoodObject.data;
-    } catch (e) {
-      console.error("Get meta information failed at getting meta information", e);
-    }
+    let addressBuffer = Buffer.from(address, 'hex');
+    const expression = (await storage.getNeighbourhoodExpression(addressBuffer)) as NeighbourhoodExpression
 
-    return neighbourhoodObject;
+    if (!expression) {
+      return null;
+    };
+    if (expression.data.chunks_hashes === 0 || expression.data.chunks_hashes === undefined) {
+        expression.data.data_base64 = "";
+        return expression;
+    };
+
+    return expression
   }
 }

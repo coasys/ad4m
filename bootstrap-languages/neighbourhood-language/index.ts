@@ -17,8 +17,6 @@ export class UI implements ExpressionUI {
 
 export const name = "neighbourhood-store";
 
-export const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev/";
-
 export default async function create(context: LanguageContext): Promise<Language> {
   //const Holochain = context.Holochain as HolochainLanguageDelegate;
   //await Holochain.registerDNAs([{ file: DNA, nick: DNA_NICK }]);
