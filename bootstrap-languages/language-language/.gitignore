@@ -10,3 +10,5 @@ build/*
 !dna.js
 
 node_modules
+.ad4m-test
+ad4m-test-0

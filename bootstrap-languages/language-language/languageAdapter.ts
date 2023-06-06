@@ -19,7 +19,7 @@ export default class LangAdapter implements LanguageAdapter {
       return null;
     }
 
-    const storage = new LanguageStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language-language", fn_name, payload));
+    const storage = new LanguageStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language_storage", fn_name, payload));
 
     let addressBuffer = Buffer.from(address, 'hex');
     const expression = (await storage.getLanguageExpression(addressBuffer)) as LanguageExpression

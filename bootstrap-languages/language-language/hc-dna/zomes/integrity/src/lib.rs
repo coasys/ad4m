@@ -8,7 +8,6 @@ pub struct LanguageChunk(SerializedBytes);
 pub struct LanguageMetadata {
     pub name: String,
     pub description: String,
-    pub address: String,
     pub size: usize,
     pub checksum: String,
     pub chunks_hashes: Vec<EntryHash>,

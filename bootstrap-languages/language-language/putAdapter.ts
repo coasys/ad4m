@@ -33,7 +33,7 @@ export class LanguageStoragePutAdapter implements PublicSharing {
             }
         }catch(e){}
 
-        const storage = new LanguageStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language-language", fn_name, payload));
+        const storage = new LanguageStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language_storage", fn_name, payload));
 
         const data_uncompressed = Uint8Array.from(Buffer.from(language.bundle.toString(), "base64"));
         const data_compressed = pako.deflate(data_uncompressed)
@@ -43,11 +43,9 @@ export class LanguageStoragePutAdapter implements PublicSharing {
 
         const fileMetadata = {
             name: language.meta.name,
-            address: hashes.toString(),
             description: language.meta.description,
             checksum: "1234",
             chunks_hashes: hashes,
-            data_base64: language.bundle.toString(),
             size: data_uncompressed.length,
         } as LanguageMetadata
 
@@ -55,9 +53,6 @@ export class LanguageStoragePutAdapter implements PublicSharing {
         const expression: LanguageExpression = this.#agent.createSignedExpression(fileMetadata)
         //Remove the data_base64 from the expression, since this is already stored above
         delete expression.data.data_base64;
-        delete expression.data.size;
-        delete expression.data.checksum;
-        delete expression.data.chunks_hashes;
 
         //Store the FileMetadataExpression
         const address = await storage.storeLanguageExpression(expression)
