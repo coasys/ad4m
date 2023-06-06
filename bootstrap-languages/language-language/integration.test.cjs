@@ -9,7 +9,7 @@ describe("Expression", () => {
       bundle: data_base64,
       meta: {
         name: "language-language",
-        address: "sklfjasfja",
+        address: "QmdJ7bZY6UEZsxHpbk1fteHVWJ9dCgR1Avqw9Cj1KRG1Um",
         description: "description"
       }
     });
