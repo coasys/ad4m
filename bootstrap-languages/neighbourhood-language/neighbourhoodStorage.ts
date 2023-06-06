@@ -19,4 +19,4 @@ export class NeighbourhoodStorage {
   }
 }
 
-export default NeighbourhoodExpression
+export default NeighbourhoodStorage
