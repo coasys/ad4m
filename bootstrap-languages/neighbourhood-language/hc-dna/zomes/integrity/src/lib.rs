@@ -45,6 +45,16 @@ pub struct NeighbourhoodExpression {
     pub data: NeighbourhoodMetadata,
 }
 
+#[hdk_entry_helper]
+pub struct NeighbourhoodParam {
+    pub neighbourhood: NeighbourhoodExpression,
+    pub address: String,
+}
+
+#[hdk_entry_helper]
+pub struct NeighbourhoodAddress(pub String);
+
+
 #[hdk_entry_defs]
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
@@ -53,4 +63,12 @@ pub enum EntryTypes {
 
     #[entry_def(visibility = "public")]
     NeighbourhoodChunk(NeighbourhoodChunk),
+
+    #[entry_def(visibility = "public")]
+    NeighbourhoodAddress(NeighbourhoodAddress),
+}
+
+#[hdk_link_types]
+pub enum LinkTypes {
+    NeighbourhoodLink,
 }

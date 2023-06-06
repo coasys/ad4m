@@ -14,10 +14,15 @@ export default class Adapter implements ExpressionAdapter {
   }
 
   async get(address: Address): Promise<Expression | null> {
+    //Check the first two characters of address are equal to Qm
+    if (address.substring(0, 2) != "Qm") {
+      console.error("LanguageLanguage.get(): The address is not a valid hash");
+      return null;
+    }
+
     const storage = new LanguageStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language_storage", fn_name, payload));
 
-    let addressBuffer = Buffer.from(address, 'hex');
-    const expression = (await storage.getLanguageExpression(addressBuffer)) as LanguageExpression
+    const expression = (await storage.getLanguageExpression(address)) as LanguageExpression
 
     if (!expression) {
       return null;

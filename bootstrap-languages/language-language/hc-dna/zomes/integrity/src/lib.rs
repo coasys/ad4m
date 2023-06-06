@@ -5,9 +5,13 @@ use hdi::prelude::*;
 pub struct LanguageChunk(SerializedBytes);
 
 #[hdk_entry_helper]
+pub struct LanguageAddress(pub String);
+
+#[hdk_entry_helper]
 pub struct LanguageMetadata {
     pub name: String,
     pub description: String,
+    pub address: String,
     pub size: usize,
     pub checksum: String,
     pub chunks_hashes: Vec<EntryHash>,
@@ -35,4 +39,12 @@ pub enum EntryTypes {
 
     #[entry_def(visibility = "public")]
     LanguageChunk(LanguageChunk),
+
+    #[entry_def(visibility = "public")]
+    LanguageAddress(LanguageAddress),
+}
+
+#[hdk_link_types]
+pub enum LinkTypes {
+    LanguageLink,
 }

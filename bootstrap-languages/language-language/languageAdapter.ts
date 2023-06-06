@@ -21,15 +21,14 @@ export default class LangAdapter implements LanguageAdapter {
 
     const storage = new LanguageStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language_storage", fn_name, payload));
 
-    let addressBuffer = Buffer.from(address, 'hex');
-    const expression = (await storage.getLanguageExpression(addressBuffer)) as LanguageExpression
+    const expression = (await storage.getLanguageExpression(address)) as LanguageExpression
 
     if (!expression) {
       console.error("LanguageLanguage.get(): Failed to fetch language");
       return null;
     };
+    
     if (expression.data.chunks_hashes === 0 || expression.data.chunks_hashes === undefined) {
-        expression.data.data_base64 = "";
         console.error("LanguageLanguage.get(): Failed to fetch language");
         return null;
     };

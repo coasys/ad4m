@@ -5,6 +5,7 @@ export type EntryHash = Uint8Array;
 export class LanguageMetadata {
   name: string;
   description: string;
+  address: string;
   size: number;
   checksum: string;
   chunks_hashes: Array<EntryHash>;

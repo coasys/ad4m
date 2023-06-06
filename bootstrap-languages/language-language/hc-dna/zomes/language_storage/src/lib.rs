@@ -1,6 +1,8 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use hdk::prelude::*;
-use integrity::{EntryTypes, LanguageChunk, LanguageExpression};
+use integrity::{EntryTypes, LanguageChunk, LanguageExpression, LinkTypes, LanguageAddress};
+mod utils;
+use utils::{err, get_latest_link};
 
 #[hdk_extern]
 fn init(_: ()) -> ExternResult<InitCallbackResult> {
@@ -22,11 +24,23 @@ pub fn get_now() -> DateTime<Utc> {
 }
 
 #[hdk_extern]
-pub fn store_language_expression(expression: LanguageExpression) -> ExternResult<EntryHash> {
-    let hash = hash_entry(&expression)?;
-    create_entry(&EntryTypes::LanguageExpression(expression))?;
+pub fn store_language_expression(expression: LanguageExpression) -> ExternResult<()> {
+    let address = EntryTypes::LanguageAddress(LanguageAddress(expression.data.address.clone()));
+    let address_hash = hash_entry(&address)?;
 
-    Ok(hash)
+    let language_expression = EntryTypes::LanguageExpression(expression);
+    let language_expression_hash = hash_entry(&language_expression)?;
+    create_entry(&language_expression)?;
+
+    //Link profile entry to did
+    create_link(
+        address_hash,
+        language_expression_hash,
+        LinkTypes::LanguageLink,
+        LinkTag::from("".as_bytes().to_owned()),
+    )?;
+
+    Ok(())
 }
 
 #[hdk_extern]
@@ -42,19 +56,36 @@ pub fn store_chunk(file_chunk: LanguageChunk) -> ExternResult<EntryHash> {
 
 #[hdk_extern]
 pub fn get_language_expression(
-    file_expression_hash: EntryHash,
+    file_expression_hash: LanguageAddress,
 ) -> ExternResult<Option<LanguageExpression>> {
-    match get(file_expression_hash.clone(), GetOptions::default())? {
-        Some(record) => {
-            let file_expression: LanguageExpression = record
-                .entry()
-                .to_app_option()
-                .map_err(|e| wasm_error!(e))?
-                .ok_or(wasm_error!(WasmErrorInner::Guest(
-                    "Malformed file chunk".into()
-                )))?;
+    let expression_links = get_latest_link(
+        hash_entry(file_expression_hash)?,
+        Some(LinkTag::from("".as_bytes().to_owned())),
+    )
+    .map_err(|error| err(format!("{}", error).as_ref()))?;
 
-            Ok(Some(file_expression))
+    match expression_links {
+        Some(link) => {
+            match get(
+                link.target
+                    .into_entry_hash()
+                    .expect("could not get action hash"),
+                GetOptions::default(),
+            )
+            .map_err(|error| err(format!("{}", error).as_ref()))?
+            {
+                Some(elem) => {
+                    let exp_data: LanguageExpression = elem
+                        .entry()
+                        .to_app_option()
+                        .map_err(|sb_err| err(&format!("{}", sb_err)))?
+                        .ok_or(err(
+                            "Could not deserialize link expression data into Profile type",
+                        ))?;
+                    Ok(Some(exp_data))
+                }
+                None => Ok(None),
+            }
         }
         None => Ok(None),
     }

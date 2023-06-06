@@ -14,7 +14,7 @@ export class NeighbourhoodStorage {
     return await this.#zomeCall("store_neighbourhood_expression", neighbourhoodExpression);
   }
 
-  async getNeighbourhoodExpression(fileHash: EntryHash): Promise<NeighbourhoodExpression> {
+  async getNeighbourhoodExpression(fileHash: string): Promise<NeighbourhoodExpression> {
     return await this.#zomeCall("get_neighbourhood_expression", fileHash) as NeighbourhoodExpression;
   }
 }

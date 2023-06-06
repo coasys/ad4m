@@ -4,6 +4,7 @@ import { LanguageStorage } from "./languageStorage";
 import { DNA_NICK } from "./dna";
 import { Blob } from "buffer";
 import type { LanguageMetadata } from "./types";
+import type { IPFS } from "ipfs-core-types"
 
 export type EntryHash = Uint8Array;
 
@@ -17,13 +18,27 @@ export interface LanguageData {
 export class LanguageStoragePutAdapter implements PublicSharing {
     #agent: AgentService
     #DNA: HolochainLanguageDelegate;
+    #IPFS: IPFS;
 
     constructor(context: LanguageContext) {
-        this.#agent = context.agent
+        this.#agent = context.agent;
         this.#DNA = context.Holochain as HolochainLanguageDelegate;
+        // @ts-ignore
+        this.#IPFS = context.IPFS;
     }
 
     async createPublic(language: LanguageLanguageInput): Promise<Address> {
+        const ipfsAddress = await this.#IPFS.add(
+            { content: language.bundle.toString()},
+            { onlyHash: true},
+        );
+        // @ts-ignore
+        const hash = ipfsAddress.cid.toString();
+
+        if(hash != language.meta.address) {
+            throw new Error(`Language Persistence: Can't store language. Address stated in meta differs from actual file\nWanted: ${language.meta.address}\nGot: ${hash}`)
+        }
+
         console.log("createPublic fileData", language)
         try {
             // Just in case...
@@ -44,6 +59,7 @@ export class LanguageStoragePutAdapter implements PublicSharing {
         const fileMetadata = {
             name: language.meta.name,
             description: language.meta.description,
+            address: language.meta.address,
             checksum: "1234",
             chunks_hashes: hashes,
             size: data_uncompressed.length,
@@ -55,11 +71,9 @@ export class LanguageStoragePutAdapter implements PublicSharing {
         delete expression.data.data_base64;
 
         //Store the FileMetadataExpression
-        const address = await storage.storeLanguageExpression(expression)
-        if (!Buffer.isBuffer(address)) {
-            throw new Error("Could not create FileExpression data")
-        };
+        await storage.storeLanguageExpression(expression)
+
         //@ts-ignore
-        return address.toString("hex")
+        return hash
     }
 }

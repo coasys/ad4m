@@ -50,7 +50,7 @@ export class LanguageStorage {
     return await this.#zomeCall("store_language_expression", fileExpression);
   }
 
-  async getLanguageExpression(fileHash: EntryHash): Promise<LanguageExpression> {
+  async getLanguageExpression(fileHash: string): Promise<LanguageExpression> {
     return await this.#zomeCall("get_language_expression", fileHash) as LanguageExpression;
   }
 
