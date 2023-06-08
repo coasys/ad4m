@@ -80,14 +80,10 @@ query FriendStatus($did: String!) {
       links {
         author
         timestamp
-        data { 
-            links {
-                author
-                timestamp
-                data { source, predicate, target }
-                proof { valid, invalid, signature, key }
-                status
-            }  
+        data {
+          source
+          predicate
+          target
         }
         proof {
           valid
@@ -95,6 +91,7 @@ query FriendStatus($did: String!) {
           signature
           key
         }
+        status
       }
     }
     proof {
@@ -118,14 +115,10 @@ query MessageInbox($filter: String) {
       links {
         author
         timestamp
-        data { 
-            links {
-                author
-                timestamp
-                data { source, predicate, target }
-                proof { valid, invalid, signature, key }
-                status
-            }  
+        data {
+          source
+          predicate
+          target
         }
         proof {
           valid
@@ -133,6 +126,7 @@ query MessageInbox($filter: String) {
           signature
           key
         }
+        status
       }
     }
     proof {
@@ -145,21 +139,27 @@ query MessageInbox($filter: String) {
 }
 
 query MessageOutbox($filter: String) {
-    runtimeMessageOutbox(filter: $filter) { 
-        recipient,
-        message {
-            author
-            timestamp
-            data { 
-                links {
-                    author
-                    timestamp
-                    data { source, predicate, target }
-                    proof { valid, invalid, signature, key }
-                    status
-                }  
-            }
-            proof { valid, invalid, signature, key }
+  runtimeMessageOutbox(filter: $filter) {
+    recipient
+    message {
+      author
+      timestamp
+      data {
+        links {
+          author
+          timestamp
+          data {
+            source
+            predicate
+            target
+          }
+          proof {
+            valid
+            invalid
+            signature
+            key
+          }
+          status
         }
       }
       proof {
