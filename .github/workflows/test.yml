@@ -84,6 +84,11 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'yarn'
 
+      - name: Install Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.32.4
+
       - name: Install dependencies
         run: yarn install
 

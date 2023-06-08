@@ -46,6 +46,11 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
 
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - name: Yarn Install
       run: yarn install
 
