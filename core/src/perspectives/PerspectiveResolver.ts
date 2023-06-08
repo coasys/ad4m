@@ -3,6 +3,7 @@ import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkExpre
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
+import { LinkStatus } from "./PerspectiveProxy";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE } from '../PubSub'
 
@@ -88,12 +89,13 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => LinkExpression)
-    perspectiveAddLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @PubSub() pubSub: any): LinkExpression {
+    perspectiveAddLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @Arg('status', { nullable: true, defaultValue: 'shared'}) status: LinkStatus, @PubSub() pubSub: any): LinkExpression {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
         l.proof = testLink.proof
         l.data = link
+        l.status = status
 
         pubSub.publish(LINK_ADDED_TOPIC, { link: l })
         pubSub.publish(PERSPECTIVE_SYNC_STATE_CHANGE, PerspectiveState.LinkLanguageInstalledButNotSynced)
@@ -146,8 +148,9 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => LinkExpression)
-    perspectiveAddLinkExpression(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @PubSub() pubSub: any): LinkExpression {
+    perspectiveAddLinkExpression(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @Arg('status', { nullable: true}) status: LinkStatus, @PubSub() pubSub: any): LinkExpression {
         pubSub.publish(LINK_ADDED_TOPIC, { link })
+        link.status = status;
         return link as LinkExpression
     }
  

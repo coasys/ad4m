@@ -13,6 +13,7 @@ export const SIGNAL = "signal"
 export const EXCEPTION_OCCURRED_TOPIC = "exception-occurred-topic"
 export const NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC = "neighbourhood-signal-received-topic"
 export const PERSPECTIVE_SYNC_STATE_CHANGE = "perspective-sync-state-change"
+export const APPS_CHANGED = "apps-changed"
 
 const pubsub = new PubSub()
 

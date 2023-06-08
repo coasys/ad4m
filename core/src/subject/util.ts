@@ -42,6 +42,18 @@ export function collectionAdderToName(adderName: string): string {
     return plural.charAt(0).toLowerCase() + plural.slice(1)
 }
 
+// e.g. "comments" -> "removeComment"
+export function collectionToRemoverName(collection: string): string {
+    return `remove${capitalize(pluralToSingular(collection))}`
+}
+
+// e.g. "removeEntry" -> "entries"
+export function collectionRemoverToName(removerName: string): string {
+    let singular = removerName.substring(6)
+    let plural = singularToPlural(singular)
+    return plural.charAt(0).toLowerCase() + plural.slice(1)
+}
+
 export function collectionSetterToName(adderName: string): string {
     let singular = adderName.substring(13)
     let plural = singularToPlural(singular)

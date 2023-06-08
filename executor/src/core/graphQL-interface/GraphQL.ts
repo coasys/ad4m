@@ -594,7 +594,17 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 if (!currentAgent) {
                     throw Error("No current agent init'd")
                 }
-                currentAgent.perspective = perspective;
+
+                currentAgent.perspective = {
+                    ...perspective,
+                    links: perspective.links.map((l: any) => {
+                        const link = {...l};
+                        delete link.status
+                  
+                        return link
+                    })
+                };
+
                 await core.agentService.updateAgent(currentAgent);
                 return currentAgent;
             },
@@ -812,10 +822,10 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveAddLink: async (args, context) => {
-                const { uuid, link } = args
+                const { uuid, link, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLink(link)
+                return await perspective.addLink(link, status)
             },
             //@ts-ignore
             perspectiveAddLinks: async (args, context) => {
@@ -826,10 +836,10 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveAddLinkExpression: async (args, context) => {
-                const { uuid, link } = args
+                const { uuid, link, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLink(link)
+                return await perspective.addLink(link, status)
             },
             //@ts-ignore
             perspectiveRemove: async (args, context) => {

@@ -5,6 +5,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     instanceQuery, Subject, subjectProperty,
     subjectCollection, subjectFlag,
     SDNAClass,
+    SubjectEntity,
 } from "@perspect3vism/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
@@ -117,7 +118,7 @@ describe("Integration", () => {
 
             it("should work with a property that is not set initially and that auto-resolves", async () => {
                 //@ts-ignore
-                expect(await subject.title).to.be.false
+                expect(await subject.title).to.be.undefined
         
                 let title = "test title"
                 //@ts-ignore
@@ -423,7 +424,7 @@ describe("Integration", () => {
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
                 let todo = todos[0]
-                expect(await todo.title).to.equal(false)
+                expect(await todo.title).to.be.undefined
 
                 // @ts-ignore
                 await todo.setTitle("new title")
@@ -480,7 +481,7 @@ describe("Integration", () => {
 
                 // @ts-ignore
                 const liked1 = await todo.isLiked
-                expect(liked1).to.be.false
+                expect(liked1).to.be.undefined
 
                 await perspective?.add(new Link({source: root, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
 
@@ -536,6 +537,145 @@ describe("Integration", () => {
                     expect(messageEntries.length).to.equal(1)
                 })
 
+            })
+
+            describe("Active record implementation", () => {
+                @SDNAClass({
+                    name: "Recipe"
+                })
+                class Recipe extends SubjectEntity {
+                    //@ts-ignore
+                    @subjectFlag({
+                        through: "ad4m://type",
+                        value: "ad4m://recipe"
+                    })
+                    type: string = ""
+
+                    //@ts-ignore
+                    @subjectProperty({
+                        through: "recipe://name", 
+                        writable: true,
+                    })
+                    name: string = ""
+
+                    //@ts-ignore
+                    @subjectCollection({ through: "recipe://entries" })
+                    entries: string[] = []
+
+                    // @ts-ignore
+                    @subjectCollection({
+                        through: "recipe://entries",
+                        where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
+                    })
+                    // @ts-ignore
+                    ingredients: [];
+
+                    //@ts-ignore
+                    @subjectCollection({ through: "recipe://comment" })
+                    // @ts-ignore
+                    comments: string[] = []
+                }
+
+                before(async () => {
+                    // @ts-ignore
+                    perspective!.addSdna(Recipe.generateSDNA())
+                })
+
+                it("save() & get()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test";
+
+                    await recipe.save();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test")
+                })
+
+                it("delete()", async () => {
+                    let root = Literal.from("Active record implementation test delete").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test";
+
+                    await recipe.save();
+
+                    const recipe2 = await Recipe.all(perspective!);
+
+                    expect(recipe2.length).to.equal(2)
+
+                    await recipe.delete();
+
+                    const recipe3 = await Recipe.all(perspective!);
+
+                    expect(recipe3.length).to.equal(1)
+                })
+
+                it("update()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test1";
+
+                    await recipe.update();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test1")
+                })
+
+                it("find()", async () => {
+                    const recipes = await Recipe.all(perspective!);
+
+                    expect(recipes.length).to.equal(1)
+                })
+
+                it("can constrain collection entries clause", async () => {
+                    let root = Literal.from("Active record implementation collection test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://collection_test";
+
+                    recipe.comments = ['test', 'test1']
+
+                    await recipe.save()
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.comments.length).to.equal(2)
+                })
+
+                it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                    let root = Literal.from("Active record implementation collection test 1").toUrl()
+
+                    const recipe = new Recipe(perspective!, root)
+                    
+                    let recipeEntries = Literal.from("test recipes").toUrl()
+                    
+                    recipe.entries = [recipeEntries]
+                    recipe.comments = ['test', 'test1']
+                    recipe.name = "recipe://collection_test";
+
+                    await recipe.save()
+                    
+                    await perspective?.add(new Link({source: recipeEntries, predicate: "recipe://has_ingredient", target: "recipe://test"}))
+                    
+                    await recipe.get()
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.ingredients.length).to.equal(1)
+                })
             })
         })
     })

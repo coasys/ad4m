@@ -1,5 +1,5 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { collectionSetterToName, collectionToAdderName, collectionToSetterName, propertyNameToSetterName } from "./util";
+import { collectionSetterToName, collectionToAdderName, collectionToRemoverName, collectionToSetterName, propertyNameToSetterName } from "./util";
 
 export class Subject {
     #baseExpression: string;
@@ -45,12 +45,8 @@ export class Subject {
                         } else {
                             return expressionURI
                         }
-                    } else if(results!=undefined) {
-                        if(results) {
-                            return results
-                        } else {
-                            return false
-                        }
+                    } else if(results) {
+                        return results
                     } else {
                         return undefined
                     }
@@ -116,6 +112,23 @@ export class Subject {
                 const collection = adder.Collection
                 const actions = eval(adder.Adder)
                 this[collectionToAdderName(collection)] = async (value: any) => {
+                    if (Array.isArray(value)) {
+                        await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value: v}])))
+                    } else {
+                        await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
+                    }
+                }
+            }
+        }
+
+        let removers = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_remover(C, Collection, Remover)`)
+        if(!removers) removers = []
+
+        for(let remover of removers) {
+            if(remover) {
+                const collection = remover.Collection
+                const actions = eval(remover.Remover)
+                this[collectionToRemoverName(collection)] = async (value: any) => {
                     if (Array.isArray(value)) {
                         await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value: v}])))
                     } else {

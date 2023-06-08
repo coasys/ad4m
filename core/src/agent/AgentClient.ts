@@ -78,6 +78,7 @@ export interface InitializeArgs {
 
 export type AgentUpdatedCallback = (agent: Agent) => null;
 export type AgentStatusChangedCallback = (agent: Agent) => null;
+export type AgentAppsUpdatedCallback = () => null;
 /**
  * Provides access to all functions regarding the local agent,
  * such as generating, locking, unlocking, importing the DID keystore,
@@ -85,6 +86,7 @@ export type AgentStatusChangedCallback = (agent: Agent) => null;
  */
 export class AgentClient {
   #apolloClient: ApolloClient<any>;
+  #appsChangedCallback: AgentAppsUpdatedCallback[];
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
 
@@ -92,10 +94,12 @@ export class AgentClient {
     this.#apolloClient = client;
     this.#updatedCallbacks = [];
     this.#agentStatusChangedCallbacks = [];
+    this.#appsChangedCallback = [];
 
     if (subscribe) {
       this.subscribeAgentUpdated();
       this.subscribeAgentStatusChanged();
+      this.subscribeAppsChanged();
     }
   }
 
@@ -214,6 +218,7 @@ export class AgentClient {
       delete link.__typename;
       delete link.data.__typename;
       delete link.proof.__typename;
+      delete link.status;
     });
 
     const { agentUpdatePublicPerspective } = unwrapApolloResult(
@@ -348,6 +353,10 @@ export class AgentClient {
     this.#updatedCallbacks.push(listener);
   }
 
+  addAppChangedListener(listener) {
+    this.#appsChangedCallback.push(listener);
+  }
+
   subscribeAgentUpdated() {
     this.#apolloClient
       .subscribe({
@@ -361,6 +370,26 @@ export class AgentClient {
           const agent = result.data.agentUpdated;
           this.#updatedCallbacks.forEach((cb) => {
             cb(agent);
+          });
+        },
+        error: (e) => console.error(e),
+      });
+  }
+
+  subscribeAppsChanged() {
+    this.#apolloClient
+      .subscribe({
+        query: gql` subscription {
+                agentAppsChanged { 
+                  ${Apps_FIELDS}
+                }
+            }   
+        `,
+      })
+      .subscribe({
+        next: (result) => {
+          this.#appsChangedCallback.forEach((cb) => {
+            cb();
           });
         },
         error: (e) => console.error(e),

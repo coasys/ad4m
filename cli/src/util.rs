@@ -93,6 +93,7 @@ pub async fn string_2_perspective_snapshot(
             "ad4m://self".to_string(),
             format!("literal://string:{}", urlencoding::encode(&string)),
             None,
+            None,
         )
         .await?;
     println!("Added status link to temporary perspective");

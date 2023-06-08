@@ -1,9 +1,14 @@
 import { Ad4mClient, ExceptionType } from "@perspect3vism/ad4m";
 import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
 import { createContext, useCallback, useEffect, useState } from "react";
-import { buildAd4mClient } from "../util";
-import { appWindow } from '@tauri-apps/api/window'
-import { invoke } from '@tauri-apps/api/tauri'
+import {
+  buildAd4mClient,
+  getForVersion,
+  setForVersion,
+  removeForVersion,
+} from "../util";
+import { appWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/tauri";
 
 type State = {
   url: string;
@@ -17,225 +22,243 @@ type State = {
   connected: boolean;
   connectedLaoding: boolean;
   expertMode: boolean;
-}
+};
 
 type ContextProps = {
   state: State;
   methods: {
-    configureEndpoint: (str: string) => void,
-    resetEndpoint: () => void
-    handleTrustAgent: (str: string) => void,
-    handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void,
-    toggleExpertMode: () => void
+    configureEndpoint: (str: string) => void;
+    resetEndpoint: () => void;
+    handleTrustAgent: (str: string) => void;
+    handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void;
+    toggleExpertMode: () => void;
   };
-}
+};
 
 const initialState: ContextProps = {
   state: {
-    url: '',
+    url: "",
     isInitialized: false,
-    did: '',
+    did: "",
     isUnlocked: false,
     client: null,
     loading: false,
-    candidate: '',
-    auth: '',
+    candidate: "",
+    auth: "",
     connected: false,
     connectedLaoding: true,
-    expertMode: localStorage.getItem('expertMode') === 'true'
+    expertMode: getForVersion("expertMode") === "true",
   },
   methods: {
     configureEndpoint: () => null,
     resetEndpoint: () => null,
     handleTrustAgent: () => null,
     handleLogin: () => null,
-    toggleExpertMode: () => null
-  }
-}
+    toggleExpertMode: () => null,
+  },
+};
 
 export const Ad4minContext = createContext(initialState);
-
 
 export function Ad4minProvider({ children }: any) {
   const [state, setState] = useState(initialState.state);
 
   useEffect(() => {
-    localStorage.setItem('expertMode', state.expertMode.toString());
-  }, [state])
+    setForVersion("expertMode", state.expertMode.toString());
+  }, [state]);
 
   const toggleExpertMode = () => {
     setState((prevState) => ({
       ...prevState,
-      expertMode: !prevState.expertMode
-    }))
-  }
+      expertMode: !prevState.expertMode,
+    }));
+  };
 
+  const checkConnection = useCallback(
+    async (url: string, client: Ad4mClient): Promise<string> => {
+      return new Promise(async (resolve, reject) => {
+        try {
+          if (client) {
+            const id = setTimeout(() => {
+              resolve("");
+            }, 1000);
 
-  const checkConnection = useCallback(async (url: string, client: Ad4mClient): Promise<string> => {
-    return new Promise(async (resolve, reject) => {
-      try {
-        if (client) {
-          const id = setTimeout(() => {
-            resolve('')
-          }, 1000);
+            await client.agent.status(); // TODO runtime info is broken
+            clearTimeout(id);
 
-          await client.agent.status(); // TODO runtime info is broken
-          clearTimeout(id);
+            console.log("get hc agent infos success.");
 
-          console.log("get hc agent infos success.");
+            resolve(url);
+          }
+        } catch (err) {
+          if (url) {
+            console.error(
+              "Could not connect to the executor on a given url: ",
+              url
+            );
+          }
 
-          resolve(url)
+          resolve("");
         }
-      } catch (err) {
-        if (url) {
-          console.error("Could not connect to the executor on a given url: ", url);
-        }
+      });
+    },
+    []
+  );
 
-        resolve('')
-      }
-    })
-  }, [])
-
-  const handleLogin = useCallback((client: Ad4mClient, login: Boolean, did: string) => {
-    setState((prev) => ({
-      ...prev,
-      isUnlocked: login,
-      did: did,
-      loading: false
-    }))
-
-    if (login) {
-      client.runtime.addExceptionCallback((exception: ExceptionInfo) => {
-        if (exception.type === ExceptionType.AgentIsUntrusted) {
-          setState((prev) => ({
-            ...prev,
-            candidate: exception.addon!
-          }));
-        }
-        if (exception.type === ExceptionType.CapabilityRequested) {
-          setState((prev) => ({
-            ...prev,
-            auth: exception.addon!
-          }))
-        }
-        Notification.requestPermission()
-          .then(response => {
-            if (response === 'granted') {
-              new Notification(exception.title, { body: exception.message })
-            }
-          });
-        console.log(exception);
-
-        appWindow.setFocus();
-
-        return null
-      })
-    }
-  }, []);
-
-  const checkIfAgentIsInitialized = useCallback(async (client: Ad4mClient) => {
-    console.log("Check if agent is initialized.", client)
-
-    let status = await client?.agent.status();
-    console.log("agent status in init: ", status);
-
-    handleLogin(client, status.isUnlocked, status.did ? status.did! : "");
-
-    return status;
-  }, [handleLogin]);
-
-  const connect = useCallback(async (url: string) => {
-    const client = await buildAd4mClient(url);
-    try {
-      await checkConnection(url, client);
-
-      const { isInitialized, isUnlocked } = await checkIfAgentIsInitialized(client);
-
-      setState(prev => ({
+  const handleLogin = useCallback(
+    (client: Ad4mClient, login: Boolean, did: string) => {
+      setState((prev) => ({
         ...prev,
-        client,
-        url,
-        isInitialized,
-        isUnlocked,
-        connected: true,
-        connectedLaoding: false
+        isUnlocked: login,
+        did: did,
+        loading: false,
       }));
 
-      localStorage.setItem('url', url as string);
-    } catch (e) {
-      console.log('err', e)
-    }
-  }, [checkConnection, checkIfAgentIsInitialized])
+      if (login) {
+        client.runtime.addExceptionCallback((exception: ExceptionInfo) => {
+          if (exception.type === ExceptionType.AgentIsUntrusted) {
+            setState((prev) => ({
+              ...prev,
+              candidate: exception.addon!,
+            }));
+          }
+          if (exception.type === ExceptionType.CapabilityRequested) {
+            setState((prev) => ({
+              ...prev,
+              auth: exception.addon!,
+            }));
+          }
+          Notification.requestPermission().then((response) => {
+            if (response === "granted") {
+              new Notification(exception.title, { body: exception.message });
+            }
+          });
+          console.log(exception);
+
+          appWindow.setFocus();
+
+          return null;
+        });
+      }
+    },
+    []
+  );
+
+  const checkIfAgentIsInitialized = useCallback(
+    async (client: Ad4mClient) => {
+      console.log("Check if agent is initialized.", client);
+
+      let status = await client?.agent.status();
+      console.log("agent status in init: ", status);
+
+      handleLogin(client, status.isUnlocked, status.did ? status.did! : "");
+
+      return status;
+    },
+    [handleLogin]
+  );
+
+  const connect = useCallback(
+    async (url: string) => {
+      const client = await buildAd4mClient(url);
+      try {
+        await checkConnection(url, client);
+
+        const { isInitialized, isUnlocked } = await checkIfAgentIsInitialized(
+          client
+        );
+
+        setState((prev) => ({
+          ...prev,
+          client,
+          url,
+          isInitialized,
+          isUnlocked,
+          connected: true,
+          connectedLaoding: false,
+        }));
+
+        setForVersion("url", url as string);
+      } catch (e) {
+        console.log("err", e);
+      }
+    },
+    [checkConnection, checkIfAgentIsInitialized]
+  );
 
   useEffect(() => {
-    let localStorageURL = localStorage.getItem('url');
+    let localStorageURL = getForVersion("url");
 
-    if (localStorageURL && localStorageURL !== 'null' && !localStorageURL.includes('localhost')) {
+    if (
+      localStorageURL &&
+      localStorageURL !== "null" &&
+      !localStorageURL.includes("localhost")
+    ) {
       if (localStorageURL) {
         connect(localStorageURL);
       }
     } else {
-      invoke('get_port').then((message) => {
+      invoke("get_port").then((message) => {
         if (message) {
           const url = `ws://localhost:${message}/graphql`;
           connect(url);
         }
-      })
+      });
     }
   }, [checkConnection, checkIfAgentIsInitialized, connect]);
 
   useEffect(() => {
-    appWindow.listen('ready', async () => {
-      const message = await invoke('get_port');
+    appWindow.listen("ready", async () => {
+      const message = await invoke("get_port");
       if (message) {
         const url = `ws://localhost:${message}/graphql`;
         connect(url);
       }
-    })
-  }, [connect])
+    });
+  }, [connect]);
 
   const handleTrustAgent = (candidate: string) => {
     setState((prev) => ({
       ...prev,
-      candidate
+      candidate,
     }));
-  }
+  };
 
   const configureEndpoint = async (url: string) => {
     if (url) {
       setState((prev) => ({
         ...prev,
-        url
+        url,
       }));
 
-      await connect(url)
+      await connect(url);
     }
-  }
+  };
 
   const resetEndpoint = () => {
     setState((prev) => ({
       ...prev,
-      url: '',
-      connected: false
-    }))
+      url: "",
+      connected: false,
+    }));
 
-    localStorage.removeItem('url');
-  }
+    removeForVersion("url");
+  };
 
   useEffect(() => {
     const build = async () => {
-      const client = await buildAd4mClient(state.url)
+      const client = await buildAd4mClient(state.url);
 
       setState((prev) => ({
         ...prev,
-        client
+        client,
       }));
-    }
+    };
     if (state.url) {
-      console.log('gggg 0', state.url);
+      console.log("gggg 0", state.url);
       build();
     }
-  }, [state.url])
+  }, [state.url]);
 
   return (
     <Ad4minContext.Provider
@@ -246,12 +269,11 @@ export function Ad4minProvider({ children }: any) {
           handleTrustAgent,
           resetEndpoint,
           handleLogin,
-          toggleExpertMode
-        }
+          toggleExpertMode,
+        },
       }}
     >
       {children}
     </Ad4minContext.Provider>
-  )
+  );
 }
-

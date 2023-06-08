@@ -59,6 +59,31 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(snapshot.links.length).to.equal(0);
             })
 
+            it('can CRUD local perspective links with local link method', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+
+                const create = await ad4mClient.perspective.add("test-crud");
+                expect(create.name).to.equal("test-crud");
+
+                const linkAdd = await create.add(new Link({
+                    source: "test://test-source",
+                    predicate: "test://test-predicate",
+                    target: "test://test-target"
+                }), 'local');
+
+                const links = await create.get({} as LinkQuery);
+                expect(links.length).to.equal(1);
+                expect(links[0].status).to.equal('local')
+
+                await create.remove(linkAdd);
+
+                const linksPostDelete = await create.get({} as LinkQuery);
+                expect(linksPostDelete.length).to.equal(0);
+
+                const snapshot = await create.snapshot();
+                expect(snapshot.links.length).to.equal(0);
+            })
+            
             it('can make mutations using perspective addLinks(), removeLinks() & linkMutations()', async () => {
                 const ad4mClient = testContext.ad4mClient!;
 
