@@ -51,7 +51,6 @@
         "typescript": "^4.6.2",
         "unzipper": "^0.10.11",
         "ws": "8.13.0",
-        "ad4m-host": "*",
         "run-script-os": "^1.1.6"
     }
 }
