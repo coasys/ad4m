@@ -43,6 +43,9 @@ jobs:
 
     - name: Install dependencies
       run: yarn install
+
+    - name: Build the workspace
+      run: yarn run build
       
     - name: Run the tests
       run: yarn test
@@ -83,6 +86,9 @@ jobs:
 
       - name: Install dependencies
         run: yarn install
+
+      - name: Build the workspace
+        run: yarn run build
 
       - name: Run the tests
         run: |
