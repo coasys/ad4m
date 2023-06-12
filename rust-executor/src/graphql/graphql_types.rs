@@ -443,6 +443,20 @@ pub trait GetFilter {
     fn get_filter(&self) -> Option<String>;
 }
 
+impl GetValue for Option<Apps> {
+    type Value = Option<Apps>;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+impl GetFilter for Option<Apps> {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
 // Implement the trait for the `NeighbourhoodSignalFilter` struct
 impl GetValue for NeighbourhoodSignalFilter {
     type Value = PerspectiveExpression;

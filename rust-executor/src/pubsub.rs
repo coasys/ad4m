@@ -94,6 +94,7 @@ lazy_static::lazy_static! {
     static ref GLOBAL_PUB_SUB: Arc<PubSub> = Arc::new(PubSub::new());
 
     pub static ref AGENT_STATUS_CHANGED_TOPIC: String = "agent-status-changed-topic".to_owned();
+    pub static ref APPS_CHANGED: String = "apps-changed".to_owned();
     pub static ref AGENT_UPDATED_TOPIC: String = "agent-updated-topic".to_owned();
     pub static ref EXCEPTION_OCCURRED_TOPIC: String = "exception-occurred-topic".to_owned();
     pub static ref NEIGHBOURHOOD_SIGNAL_TOPIC: String = "neighbourhood-signal-received-topic".to_owned();

@@ -362,7 +362,7 @@ export default class AgentService {
       this.#apps = apps;
       fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
 
-      this.#pubsub.publish(PubSubInstance.APPS_CHANGED, null);      
+      await PUBSUB.publish(PubSubInstance.APPS_CHANGED, null);      
     }
 
     return jwt;
@@ -372,19 +372,19 @@ export default class AgentService {
     return this.#apps;
   }
 
-  removeApp(requestId: string) {
+  async removeApp(requestId: string) {
     try {
       this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId);
 
       fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
 
-      this.#pubsub.publish(PubSubInstance.APPS_CHANGED, null);
+      await PUBSUB.publish(PubSubInstance.APPS_CHANGED, null);
     } catch (e) {
       console.error("Error while removing app", e);
     }
   }
 
-  revokeAppToken(requestId: string) {
+  async revokeAppToken(requestId: string) {
     try {
       this.#apps = this.#apps.map((app: any) =>
         app.requestId === requestId ? { ...app, revoked: true } : app
@@ -392,7 +392,7 @@ export default class AgentService {
 
       fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
 
-      this.#pubsub.publish(PubSubInstance.APPS_CHANGED, null);
+      await PUBSUB.publish(PubSubInstance.APPS_CHANGED, null);
     } catch (e) {
       console.error("Error while revoking token", e);
     }

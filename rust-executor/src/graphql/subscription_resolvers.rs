@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use crate::pubsub::{
     get_global_pubsub, subscribe_and_process, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC,
-    EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
+    APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
     PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
     PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC,
@@ -39,6 +39,23 @@ impl Subscription {
         let topic = &AGENT_STATUS_CHANGED_TOPIC;
 
         subscribe_and_process::<AgentStatus>(pubsub, topic.to_string(), None).await
+    }
+
+    async fn agent_apps_changed(
+        &self,
+        context: &RequestContext,
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<Option<Apps>>> + Send>> {
+        let capabilities =
+            get_capabilies(context.js_handle.clone(), context.capability.clone()).await;
+        if capabilities.is_err() {
+            return Box::pin(stream::once(
+                async move { Err(capabilities.err().unwrap()) },
+            ));
+        }
+        let pubsub = get_global_pubsub().await;
+        let topic = &APPS_CHANGED;
+
+        subscribe_and_process::<Option<Apps>>(pubsub, topic.to_string(), None).await
     }
 
     async fn agent_updated(
