@@ -1,4 +1,6 @@
-use juniper::{FieldError, FieldResult, GraphQLInputObject, GraphQLObject, GraphQLScalar};
+use juniper::{
+    FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::js_core::JsCoreHandle;
@@ -240,6 +242,24 @@ pub struct Link {
     pub target: String,
 }
 
+#[derive(GraphQLEnum, Debug, Deserialize, Serialize, Clone)]
+pub enum LinkStatus {
+    #[serde(rename = "shared")]
+    Shared,
+    #[serde(rename = "local")]
+    Local,
+}
+
+//Impl display for LinkStatus
+impl std::fmt::Display for LinkStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match *self {
+            LinkStatus::Shared => write!(f, "shared"),
+            LinkStatus::Local => write!(f, "local"),
+        }
+    }
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpression {
@@ -247,6 +267,7 @@ pub struct LinkExpression {
     pub data: Link,
     pub proof: ExpressionProof,
     pub timestamp: String,
+    pub status: Option<LinkStatus>,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -256,6 +277,7 @@ pub struct LinkExpressionInput {
     pub data: LinkInput,
     pub proof: ExpressionProofInput,
     pub timestamp: String,
+    pub status: Option<LinkStatus>,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

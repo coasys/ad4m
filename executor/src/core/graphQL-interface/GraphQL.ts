@@ -822,7 +822,10 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveAddLink: async (args, context) => {
-                const { uuid, link, status } = args
+                let { uuid, link, status } = args
+                if (status == null) {
+                    status = 'shared'
+                };
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addLink(link, status)
@@ -836,7 +839,10 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveAddLinkExpression: async (args, context) => {
-                const { uuid, link, status } = args
+                let { uuid, link, status } = args
+                if (status == null) {
+                    status = 'shared'
+                };
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addLink(link, status)
