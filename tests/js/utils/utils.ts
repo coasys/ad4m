@@ -98,8 +98,6 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
         if (data.payload) {
             if (data.payload.errors) {
                 console.dir(data.payload.errors, { depth: null });
-            } else {
-                console.dir(data.payload, { depth: null });
             }
         }
     });
