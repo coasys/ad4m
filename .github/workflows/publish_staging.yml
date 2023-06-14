@@ -41,7 +41,7 @@ jobs:
 
     needs: 
       - create-release
-      - npm-publish
+      # - npm-publish
 
     runs-on: ${{ matrix.platform }}
 
