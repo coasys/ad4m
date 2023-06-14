@@ -39,6 +39,6 @@ export default class LangAdapter implements LanguageAdapter {
     const data_uncompressed = pako.inflate(data_stream);
     const buffer = Buffer.from(data_uncompressed)
 
-    return buffer.toString("utf-8")
+    return buffer.toString("base64")
   }
 }
