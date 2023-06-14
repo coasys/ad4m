@@ -182,7 +182,7 @@ jobs:
         with:
           node-version: 16.x
       - name: Install deps
-        run: yarn install
+        run: yarn install --no-cache
       - name: Build modules
         run: yarn run build-libs
       - name: Publish core
