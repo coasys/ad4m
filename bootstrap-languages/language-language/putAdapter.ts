@@ -50,7 +50,7 @@ export class LanguageStoragePutAdapter implements PublicSharing {
 
         const storage = new LanguageStorage((fn_name, payload) => this.#DNA.call(DNA_NICK, "language_storage", fn_name, payload));
 
-        const data_uncompressed = Uint8Array.from(Buffer.from(language.bundle.toString(), "base64"));
+        const data_uncompressed = Uint8Array.from(Buffer.from(language.bundle.toString()));
         const data_compressed = pako.deflate(data_uncompressed)
         const blob = new Blob([data_compressed])
 
