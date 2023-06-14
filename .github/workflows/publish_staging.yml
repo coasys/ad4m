@@ -173,66 +173,65 @@ jobs:
     #     releaseBody: "See the assets to download this version and install."
     #     projectPath: "./ui"
   
-  npm-publish:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      # Setup .npmrc file to publish to npm
-      - name: Use Node.js 16.x
-        uses: actions/setup-node@v1
-        with:
-          node-version: 16.x
-      - name: Install deps
-        run: yarn install
-      - name: Build modules
-        run: yarn run build-libs
-      - name: Publish core
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: core/package.json
-      - name: Publish connect
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: connect/package.json
-      - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: executor/package.json
-      - name: Publish Test runner
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: test-runner/package.json
-      
-  
-  crates-publish:
-    runs-on: ubuntu-20.04
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - uses: actions/setup-node@v3
-        with:
-          node-version: '16.x'
-          cache: 'yarn'
-      - name: Cache cargo
-        id: cache-cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo
-          restore-keys: ${{ runner.os }}-cargo
-      - run: rustup target add wasm32-unknown-unknown
-      - run: cd core && yarn install && yarn build && cd ..
-      - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
-      - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo workspaces publish --from-git
+  # npm-publish:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v3
+  #     # Setup .npmrc file to publish to npm
+  #     - name: Use Node.js 16.x
+  #       uses: actions/setup-node@v1
+  #       with:
+  #         node-version: 16.x
+  #     - name: Install deps
+  #       run: yarn install
+  #     - name: Build modules
+  #       run: yarn run build-libs
+  #     - name: Publish core
+  #       uses: JS-DevTools/npm-publish@v1
+  #       with:
+  #         token: ${{ secrets.NPM_TOKEN }}
+  #         package: core/package.json
+  #     - name: Publish connect
+  #       uses: JS-DevTools/npm-publish@v1
+  #       with:
+  #         token: ${{ secrets.NPM_TOKEN }}
+  #         package: connect/package.json
+  #     - name: Publish executor
+  #       uses: JS-DevTools/npm-publish@v1
+  #       with:
+  #         token: ${{ secrets.NPM_TOKEN }}
+  #         package: executor/package.json
+  #     - name: Publish Test runner
+  #       uses: JS-DevTools/npm-publish@v1
+  #       with:
+  #         token: ${{ secrets.NPM_TOKEN }}
+  #         package: test-runner/package.json
+        
+  # crates-publish:
+  #   runs-on: ubuntu-20.04
+  #   steps:
+  #     - uses: actions/checkout@v2
+  #     - uses: actions-rs/toolchain@v1
+  #       with:
+  #         toolchain: stable
+  #         override: true
+  #     - uses: actions/setup-node@v3
+  #       with:
+  #         node-version: '16.x'
+  #         cache: 'yarn'
+  #     - name: Cache cargo
+  #       id: cache-cargo
+  #       uses: actions/cache@v3
+  #       with:
+  #         path: |
+  #           ~/.cargo/bin/
+  #           ~/.cargo/registry/index/
+  #           ~/.cargo/registry/cache/
+  #           ~/.cargo/git/db/
+  #         key: ${{ runner.os }}-cargo
+  #         restore-keys: ${{ runner.os }}-cargo
+  #     - run: rustup target add wasm32-unknown-unknown
+  #     - run: cd core && yarn install && yarn build && cd ..
+  #     - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
+  #     - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  #     - run: cargo workspaces publish --from-git
