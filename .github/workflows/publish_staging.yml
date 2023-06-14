@@ -76,7 +76,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - name: Yarn Install
-      run: yarn install
+      run: yarn install --no-cache
 
     - name: Build AD4M-Host & build Launcher binary (macos-latest)
       if: matrix.platform == 'macos-latest'
