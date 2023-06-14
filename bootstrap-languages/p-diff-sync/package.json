@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/perspective-diff-sync",
-  "version": "0.3.4",
+  "version": "0.3.5-prerelease",
   "description": "An AD4M language for syncing mutations to a share perspective",
   "main": "index.js",
   "scripts": {
