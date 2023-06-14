@@ -44,7 +44,6 @@ jobs:
       # - npm-publish
 
     runs-on: ${{ matrix.platform }}
-
     steps:
     - name: Fetch source code
       uses: actions/checkout@v2
