@@ -115,7 +115,7 @@ if (isPreRelease) {
     uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), RUST_VERSION)
     console.log("UI Cargo version: " + uiTauriCargo.oldVersion + " -> " + RUST_VERSION)
 } else {
-    uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), RAW_RUST_VERSION)
+    uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), RAW_VERSION)
     console.log("UI Cargo version: " + uiTauriCargo.oldVersion + " -> " + VERSION)
 }
 fs.writeFileSync('ui/src-tauri/Cargo.toml', uiTauriCargo.newContent)
