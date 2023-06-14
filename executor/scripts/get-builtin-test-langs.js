@@ -9,10 +9,10 @@ const languages = {
     bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.2.1/bundle.js",
   },
   languages: {
-      bundle: "../bootstrap-languages/language-language/build/bundle.js",
+      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.5/bundle.js",
   },
   "neighbourhood-store": {
-    bundle: "../bootstrap-languages/neighbourhood-language/build/bundle.js",
+    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.2/bundle.js",
   },
   "perspective-diff-sync": {
     bundle: "../bootstrap-languages/p-diff-sync/build/bundle.js",
