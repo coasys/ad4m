@@ -39,7 +39,7 @@ export class LanguageStoragePutAdapter implements PublicSharing {
             throw new Error(`Language Persistence: Can't store language. Address stated in meta differs from actual file\nWanted: ${language.meta.address}\nGot: ${hash}`)
         }
 
-        console.log("createPublic fileData", language)
+        //console.log("createPublic fileData", language)
         try {
             // Just in case...
             if(typeof language === "string"){
