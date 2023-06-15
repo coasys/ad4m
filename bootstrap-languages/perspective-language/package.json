@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/perspective-language",
-  "version": "0.3.5-prerelease",
+  "version": "0.4.0",
   "description": "An AD4M Language for perspective snapshot expressions stored on IPFS",
   "main": "index.js",
   "scripts": {
