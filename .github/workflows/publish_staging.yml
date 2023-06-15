@@ -162,7 +162,7 @@ jobs:
         asset_content_type: application/octet-stream
 
     - name: "Upload built AD4MIN"
-      uses: tauri-apps/tauri-action@v0.3
+      uses: tauri-apps/tauri-action@v0.4.2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
