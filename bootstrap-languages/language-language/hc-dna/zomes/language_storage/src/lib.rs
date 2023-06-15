@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use hdk::prelude::*;
 use integrity::{EntryTypes, LanguageChunk, LanguageExpression, LinkTypes, LanguageAddress};
 mod utils;
-use utils::{err, get_latest_link};
+use utils::{err, get_oldest_link};
 
 #[hdk_extern]
 fn init(_: ()) -> ExternResult<InitCallbackResult> {
@@ -28,19 +28,31 @@ pub fn store_language_expression(expression: LanguageExpression) -> ExternResult
     let address = EntryTypes::LanguageAddress(LanguageAddress(expression.data.address.clone()));
     let address_hash = hash_entry(&address)?;
 
-    let language_expression = EntryTypes::LanguageExpression(expression);
-    let language_expression_hash = hash_entry(&language_expression)?;
-    create_entry(&language_expression)?;
+    let found_expression = get_language_expression(LanguageAddress(expression.data.address.clone()));
 
-    //Link profile entry to did
-    create_link(
-        address_hash,
-        language_expression_hash,
-        LinkTypes::LanguageLink,
-        LinkTag::from("".as_bytes().to_owned()),
-    )?;
+    match found_expression {
+        Ok(Some(expression)) => {
+            Err(err(format!("An language with same address was found {:?}", expression).as_ref()))
+        }
+        Ok(None) => {
+            let language_expression = EntryTypes::LanguageExpression(expression);
+            let language_expression_hash = hash_entry(&language_expression)?;
+            create_entry(&language_expression)?;
+        
+            //Link profile entry to did
+            create_link(
+                address_hash,
+                language_expression_hash,
+                LinkTypes::LanguageLink,
+                LinkTag::from("".as_bytes().to_owned()),
+            )?;
 
-    Ok(())
+            Ok(())
+        }
+        Err(error) => {
+            Err(err(format!("Error: {}", error).as_ref()))
+        }
+    }
 }
 
 #[hdk_extern]
@@ -58,7 +70,7 @@ pub fn store_chunk(file_chunk: LanguageChunk) -> ExternResult<EntryHash> {
 pub fn get_language_expression(
     file_expression_hash: LanguageAddress,
 ) -> ExternResult<Option<LanguageExpression>> {
-    let expression_links = get_latest_link(
+    let expression_links = get_oldest_link(
         hash_entry(file_expression_hash)?,
         Some(LinkTag::from("".as_bytes().to_owned())),
     )

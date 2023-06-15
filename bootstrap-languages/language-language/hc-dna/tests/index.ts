@@ -140,7 +140,6 @@ test("Share full FileExpression between Alice and Bob", async (t) => {
             name: "test.txt",
             size: buf.length,
             file_type: "text/plain",
-            checksum: "1234",
             chunks_hashes: hashes
         }
 
