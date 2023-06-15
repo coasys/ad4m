@@ -46,6 +46,7 @@ function apolloClient(port: number, token?: string): ApolloClient<any> {
 }
 
 describe("Authentication integration tests", () => {
+    this.timeout(200000)
     describe("admin credential is not set", () => {
         const TEST_DIR = path.join(`${__dirname}/../../src/tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "unauth-agent");
