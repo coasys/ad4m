@@ -72,7 +72,7 @@ fn main() {
     if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
         let _ = remove_dir_all(data_path());
     }
-    
+
     if let Err(err) = setup_logs() {
         println!("Error setting up the logs: {:?}", err);
     }
@@ -80,7 +80,7 @@ fn main() {
     let free_port = find_port(12000, 13000);
 
     log::info!("Free port: {:?}", free_port);
-    
+
     save_executor_port(free_port);
 
     find_and_kill_processes("ad4m-host");
@@ -131,6 +131,9 @@ fn main() {
             open_tray
         ])
         .setup(move |app| {
+            // Hides the dock icon
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let splashscreen = app.get_window("splashscreen").unwrap();
 
             let splashscreen_clone = splashscreen.clone();
@@ -152,7 +155,7 @@ fn main() {
             .expect("Failed to spawn ad4m serve");
 
             let handle = app.handle();
-    
+
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     match event.clone() {
@@ -209,7 +212,7 @@ fn main() {
                         let _ = window.hide();
                     } else {
                         window.show().unwrap();
-                        window.set_focus().unwrap();                
+                        window.set_focus().unwrap();
                     }
                 },
                 SystemTrayEvent::MenuItemClick { id, .. } => {
@@ -238,15 +241,15 @@ fn get_main_window(handle: &AppHandle) -> Window {
         window
     } else {
         create_main_window(handle);
-        let main = handle.get_window("AD4M");                
+        let main = handle.get_window("AD4M");
         main.expect("Couldn't get main window right after creating it")
     }
 }
 
 fn log_error(window: &Window, message: &str) {
     dialog::message(
-        Some(window), 
-        "Error", 
+        Some(window),
+        "Error",
         message
     );
 }
