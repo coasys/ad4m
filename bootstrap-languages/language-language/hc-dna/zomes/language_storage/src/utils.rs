@@ -5,22 +5,22 @@ pub(crate) fn err(reason: &str) -> WasmError {
     wasm_error!(WasmErrorInner::Host(String::from(reason)))
 }
 
-pub(crate) fn get_latest_link(base: EntryHash, tag: Option<LinkTag>) -> ExternResult<Option<Link>> {
+pub(crate) fn get_oldest_link(base: EntryHash, tag: Option<LinkTag>) -> ExternResult<Option<Link>> {
     let language_info = get_links(base, LinkTypes::LanguageLink, tag)?;
 
-    // Find the latest
-    let latest_info =
+    // Find the oldest
+    let oldest_info =
         language_info
             .into_iter()
-            .fold(None, |latest: Option<Link>, link| match latest {
-                Some(latest) => {
-                    if link.timestamp > latest.timestamp {
+            .fold(None, |oldest: Option<Link>, link| match oldest {
+                Some(oldest) => {
+                    if link.timestamp < oldest.timestamp {
                         Some(link)
                     } else {
-                        Some(latest)
+                        Some(oldest)
                     }
                 }
                 None => Some(link),
             });
-    return Ok(latest_info);
+    return Ok(oldest_info);
 }
