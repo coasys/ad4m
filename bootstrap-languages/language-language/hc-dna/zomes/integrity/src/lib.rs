@@ -13,7 +13,6 @@ pub struct LanguageMetadata {
     pub description: String,
     pub address: String,
     pub size: usize,
-    pub checksum: String,
     pub chunks_hashes: Vec<EntryHash>,
 }
 

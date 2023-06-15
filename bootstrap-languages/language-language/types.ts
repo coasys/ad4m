@@ -7,7 +7,6 @@ export class LanguageMetadata {
   description: string;
   address: string;
   size: number;
-  checksum: string;
   chunks_hashes: Array<EntryHash>;
 }
 
