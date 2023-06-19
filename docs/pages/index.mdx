@@ -1,62 +1,84 @@
 import { Callout } from "nextra-theme-docs";
+import { Tab, Tabs } from "nextra-theme-docs";
 
 # Introduction
 
-The internet has evolved from creating and sharing simple documents and websites to highly social digital experiences.
+The internet has evolved from creating and sharing simple documents to highly social digital experiences.
 Yet, there is still no social infrastructure baked into the fabric of the web.
 
-ADAM tries to provide a minimal assumption of what is needed to create any type of social app,
-and make these apps interoperable with each other.
+The lack of a social protocol has resulted in companies taking the role of building out these social networks
+in silos, harvesting and profiting on the content created within these social spaces.
+
+ADAM tries to provide this infrastructure, by putting agents and their social context
+at the core of our digital communication.
+
+<Tabs items={["Current state of the web", "New paradigm"]}>
+  <Tab>
+    <img src="/images/web-a.png" />
+    <small style={{ lineHeight: "1.5" }}>
+      A person has several user accounts on several social media networks,
+      creating silos between data, and ownership at the app level.
+    </small>
+  </Tab>
+  <Tab>
+    <img src="/images/web-b.png" />
+    <small style={{ lineHeight: "1" }}>
+      An agent participate in several social groups, and apps ask for permission
+      to access these groups – giving ownership to agents and their social
+      groups.
+    </small>
+  </Tab>
+</Tabs>
+
+## What is ADAM?
+
+ADAM is both a **spanning layer** that connects different technologies, as well as an
+**application development framework**, empowering developers to build a wide range of
+applications with greater flexibility and interoperability.
 
 It tries to capture the essence of what _really_ goes on in human communication networks,
 instead of having the technology dictate how we communicate.
 
-ADAM takes the assumption that any social network consists of:
+Using ADAM, apps can be built without being coupled to a specific storage
+technology. Both app developers and users are able to switch storage
+layers while keeping the other components of their app.
 
-- **Agents**
-- **Languages**
-- **Perspectives**
+ADAM provides the foundation for seamless
+integration between diverse apps and networks, paving the way for a
+more unified and coherent digital landscape.
 
-As a digital _social_ layer on top of the web,
-ADAM starts with the most important thing in a social network – The **Agents** in the network.
+By implementing the ADAM layer, we can move towards a more interconnected,
+human-centric digital ecosystem that supports meaningful communication and
+collaboration – ultimately unlocking the full potential of our digital experiences,
+**without locking users into one specific platform, network, technology, or app.**
 
-In the same way computers have their own unique IP address on the internet,
-each agent in ADAM has their own DID (decentralized identifier).
+## How does it work?
 
-An agent can
+ADAM defines a minimal set of assumptions of what is needed to create any type of social application.
 
-**Languages** include **Expressions** in their definition, and **Perspectives** include **Links** (Link Expressions, to be precise).
+| Definition                             | Description                                                        |
+| -------------------------------------- | ------------------------------------------------------------------ |
+| [Agents](/concepts#agents)             | The agents in the network.                                         |
+| [Languages](/concepts#languages)       | The different ways people express ideas.                           |
+| [Perspectives](/concepts#perspectives) | The collection of these expressions organized in a meaningful way. |
 
-Through combination of these basic principles, two important derived concepts
-are constructed:
+Through a combination of these basic principles, two important concepts are constructed:
 
-- **Neighbourhoods** (i.e. shared Perspectives)
-- **Social Organisms** (i.e. fractal, super agents, defined through shared perspectives and shared interaction patterns/social DNA).
+| Definition                              | Description                                     |
+| --------------------------------------- | ----------------------------------------------- |
+| [Neighbourhoods](/concepts#agents)      | Shared Perspectives.                            |
+| [Social Organisms](/concepts#languages) | A Neighbourhood acting like a collective Agent. |
 
 All these are discussed in detail in the [Concepts section](/concepts).
 
-## Spanning Layer
+## How does this differ from Nostr / Bluesky / etc?
 
-Similar to how the IP layer decouples application protocols from physical links
-and allows many-to-many combinations between them by capturing the quintessence
-of computer networks through the assignment of a unique address to each and
-every node,
-AD4M integrates DID to assume a unique and independent/sovereign address per human/agent
-and decouple application specific semantics from data storage and integrity layers.
+There are many similarities between ADAM and Norsr, Bluesky, Mastadon etc.
+The key difference is that these usually use a federated system. In Nostr every client has to keep the secret key stored.
+This creates a lot of attack vectors. ADAM implements a capability system to ensure you can revoke an apps access to your data at any point,
+and also fine tune what kind of data the client will have access to.
 
-![spanning layer](/images/ad4m-spanning-layer.png)
-
-AD4M is an interoperability layer that sits between an app's UI and the
-(centralized or decentralized) back-end components or p2p networks.
-Using AD4M, an app can be built without being coupled to a specific storage
-technology.
-Both app developers and users are able to switch Languages and with them storage
-layers while keeping the other components of their running app.
-
-The sections [Getting started](/getting-started) and [Writing and using Social DNA](/social-dna)
-cover the uper parts of the stack,
-[Creating AD4M Languages](/languages) shows how to wrap existing storage layers
-and create new ones as Languages.
+More information is coming.
 
 ## Why?
 

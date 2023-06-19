@@ -9,14 +9,14 @@ import { Steps } from "nextra-theme-docs";
 Download the latest version of the AD4M launcher from
 its [GitHub release page](https://github.com/perspect3vism/ad4min/releases) and run/install it.
 
-After successful agent initialization you should see an AD4M system-tray icon which will
-bring up an AD4M pop-up window on click:
+After creating an agent, you should see an AD4M system-tray icon which will
+bring up an AD4M pop-up window when you click it:
 
 ![ad4min-screenshots](/images/launcher.jpg)
 
 ### Setup app to connect to AD4M
 
-First, install npm dependencies to your app/UI project:
+Install npm dependencies in your project:
 
 ```
 npm install -s @perspect3vism/ad4m @perspect3vism/ad4m-connect
@@ -24,40 +24,45 @@ npm install -s @perspect3vism/ad4m @perspect3vism/ad4m-connect
 
 ### Connect UI client using `ad4m-connect`
 
-The AD4M-executor serves a GraphQL interface for UIs to connect to
-and remote control the executor to use Languages, query and modify Perspectives etc.
-That interface implements a capability-based security mechanism which allows for
-making the local interface available publicly via a proxy ("setup proxy" button)
-so that mobile UIs can call in to your ad4m-executor run at home,
-but also to manage access to certain Perspectives/Neighbourhoods only to certain UIs.
+ADAM will expose a GraphQL endpoint on localhost that any website or native app can try to connect to.
 
-Anyway, to not confront you with the complexity of writing code for requesting a
-capability token and injecting it into a GraphQL client
-right at the start of your AD4M journey,
-there is [ad4m-connect](https://github.com/perspect3vism/ad4m-connect)
-to do all of this for you and just deliver an initialized and usable
+Apps need to be granted capabilities to be able to access your agents data.
+This is done by requesting a capability token and using the token to connect to the GraphQL API.
+
+To avoid the complexity of setting up this authentication flow [ad4m-connect](https://github.com/perspect3vism/ad4m-connect)
+will do all of this for you and just deliver an initialized and usable
 [Ad4mClient](/jsdoc/classes/Ad4mClient) object.
 
 #### Web/Browser UI
 
 ```js
-import "@perspect3vism/ad4m-connect";
+import Ad4mConnect from "@perspect3vism/ad4m-connect";
+
+const ui = Ad4mConnect({
+  appName: "Example",
+  appDesc: "This is a sample app.",
+  appDomain: "ad4m.dev",
+  appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+  capabilities: [
+    {
+      with: { domain: "_", pointers: ["_"] },
+      can: ["*"],
+    },
+  ],
+});
+
+ui.connect().then((client) => {
+  // Save the client
+});
+
+ui.addEventListener("authstatechange", (e) => {
+  if (auth.authState === "connected") {
+    // You are connected to ADAM
+  }
+});
 ```
 
-and then add the `ad4m-connect` web component to your markup:
-
-```html
-<ad4m-connect
-  appName="Perspect3ve"
-  appDesc=""
-  appDomain="org.perspect3vism.perspect3ve"
-  capabilities='[{"with":{"domain":"*","pointers":["*"]},"can": ["*"]}]'
-  appiconpath="./images/Perspect3ve-Logo.png"
-></ad4m-connect>
-```
-
-This web component will create a modal dialog over your UI,
-but only if there is no capability token in the browsers localStorage yet.
+This will initialize a web component and create a modal dialog over your UI.
 After the first successful hand-shake, `ad4m-connect` will put the token there
 and on next start-up of your app will check if the token still works and
 not prompt the user again.

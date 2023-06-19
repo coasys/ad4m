@@ -2,18 +2,42 @@
 
 ### Agents
 
-AD4M agents are represented by a decentralized identifier (DID). Users can either use their existing identity or create a new one through AD4M. Conceptually, AD4M Agents are modelled as something that can speak and that can listen. Agents communicate by creating signed Expressions using AD4M Languages and listen by having an implicit direct message interface. Additionally they have a publicly shared Perspective that other agents can see, containing statements about themselves or anything else.
+As a _social_ digital protocol, ADAM starts with the most important thing in a social network
+– The **Agents** in the network.
+
+In the same way computers have their own unique IP address on the internet,
+each agent in ADAM has their own [Decentralized Identifier](https://en.wikipedia.org/wiki/Decentralized_identifier). Users can either use their
+existing identity or create a new one through AD4M.
+
+When you create a DID, you generate a pair of cryptographic keys: a public key and a private key.
+The private key is like a secret code that only you know and should keep safe.
+It's used to prove that you are the rightful owner of the DID. On the other hand,
+the public key is shared with others and allows them to verify your identity.
+
+Any time an Agent wants to say somthing in the network the message will be signed with the secret key,
+so other Agents can verify you were the actualy sender of that message.
 
 [Agent class definition](/jsdoc/classes/Agent)
 
 ### Languages
 
-Agents communicate using Languages. They are essentially Javascript modules that encapsulate how to retrieve and create content. The modules abstract the complexities of different protocols like IPFS, Holochain, Torrents and provide a simple, uniform API for developers to interact with them. Agents can create Expressions with the Languages, which are identified by a URI like this: `<language>://<expression>`. The Expressions are signed to ensure authenticity. AD4M looks up the Language hash and asks the Language about the Expression.
+Agents communicate using Languages. They are essentially Javascript modules that encapsulate
+how to retrieve and create content. The modules abstract the complexities of different
+protocols like IPFS, Holochain, Torrents and provide a simple, uniform API for developers to interact with them. Agents can create Expressions with the Languages, which are identified by a URI like this: `<language>://<expression>`. The Expressions are signed to ensure authenticity. AD4M looks up the Language hash and asks the Language about the Expression.
 
 [Language inerface](/jsdoc/interfaces/Language)
 
 ### Perspectives
 
-In AD4M, “Perspectives” are private graph databases that represent context and association between Expression’s. Perspectives only consist of a collection of “links,” which connect three things: a subject, a predicate, and a target. All three things are URLs pointing to Expression data in different Languages. Links inside Perspectives have a signature and show which agent the link came from. Expressions show the same data to everyone who looks at them, but Perspectives show how one user connects different Expressions in their own way.
+In AD4M, “Perspectives” are private graph databases that represent context and association
+between Expression’s. Perspectives only consist of a collection of “links,” which connect
+three things: a subject, a predicate, and a target. All three things are URLs pointing to
+Expression data in different Languages. Links inside Perspectives have a signature and show
+which agent the link came from. Expressions show the same data to everyone who looks at them,
+but Perspectives show how one user connects different Expressions in their own way.
 
 [Perspecive class definition](/jsdoc/classes/Agent)
+
+### Expressions
+
+### Links
