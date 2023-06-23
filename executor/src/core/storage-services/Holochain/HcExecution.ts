@@ -42,6 +42,13 @@ export function writeDefaultConductor(conductorConfig: ConductorConfiguration) {
     } else {
         proxyType = "remote_proxy_client"
     }
+
+    let  transport_pool = `
+    sub_transport:
+        type: quic
+      proxy_config:
+        type: remote_proxy_client
+        proxy_url: ${kitsuneProxy}`
     let conductorStringConfig = `
 ---
 environment_path: ${escapeShellArg(conductorConfig.environmentPath)}
@@ -53,14 +60,10 @@ admin_interfaces:
       port: ${conductorConfig.adminPort}
 network:
   network_type: ${conductorConfig.useMdns? 'quic_mdns' : 'quic_bootstrap'}
-  ${conductorConfig.useBootstrap ? 'bootstrap_service: '+ conductorConfig.bootstrapService : ''}
+  ${conductorConfig.useBootstrap && !conductorConfig.useMdns ? 'bootstrap_service: '+ conductorConfig.bootstrapService : ''}
   transport_pool:
-    - type: ${conductorConfig.useProxy ? 'proxy' : 'quic'}
-      sub_transport:
-        type: quic
-      proxy_config:
-        type: remote_proxy_client
-        proxy_url: ${kitsuneProxy}
+    - type: ${conductorConfig.useProxy && !conductorConfig.useMdns ? 'proxy' : 'quic'}
+    ${!conductorConfig.useMdns ? transport_pool : ''}
   tuning_params:
     gossip_strategy: sharded-gossip
     gossip_loop_iteration_delay_ms: '1000'
