@@ -171,7 +171,7 @@ export default class PerspectivismCore {
             useBootstrap: params.hcUseBootstrap,
             useProxy: params.hcUseProxy,
             useLocalProxy: params.hcUseLocalProxy,
-            useMdns: params.hcUseMdns,
+            useMdns: true,
         }
 
         this.#holochain = new HolochainService(holochainConfig)
