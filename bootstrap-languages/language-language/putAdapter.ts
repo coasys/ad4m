@@ -60,6 +60,10 @@ export class LanguageStoragePutAdapter implements PublicSharing {
             name: language.meta.name,
             description: language.meta.description,
             address: language.meta.address,
+            templateSourceLanguageAddress: language.meta.templateSourceLanguageAddress,
+            templateAppliedParams: language.meta.templateAppliedParams,
+            possibleTemplateParams: language.meta.possibleTemplateParams,
+            sourceCodeLink: language.meta.sourceCodeLink,
             chunks_hashes: hashes,
             size: data_uncompressed.length,
         } as LanguageMetadata
