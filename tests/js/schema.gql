@@ -1,0 +1,379 @@
+type LinkExpressionMutations {
+  additions: [LinkExpression!]!
+  removals: [LinkExpression!]!
+}
+
+type InteractionMeta {
+  label: String!
+  name: String!
+  parameters: [InteractionParameter!]!
+}
+
+type Neighbourhood {
+  linkLanguage: String!
+  meta: Perspective!
+}
+
+input InteractionCall {
+  name: String!
+  parametersStringified: String!
+}
+
+input CapabilityInput {
+  can: [String!]!
+  with: ResourceInput!
+}
+
+type RuntimeInfo {
+  ad4mExecutorVersion: String!
+  isInitialized: Boolean!
+  isUnlocked: Boolean!
+}
+
+input LinkInput {
+  predicate: String
+  source: String!
+  target: String!
+}
+
+type ExpressionRendered {
+  author: String!
+  data: String!
+  icon: Icon!
+  language: LanguageRef!
+  proof: ExpressionProof!
+  timestamp: String!
+}
+
+type LanguageMeta {
+  address: String!
+  author: String!
+  description: String
+  name: String!
+  possibleTemplateParams: [String!]
+  sourceCodeLink: String
+  templateAppliedParams: String
+  templateSourceLanguageAddress: String
+  templated: Boolean
+}
+
+enum LinkStatus {
+  SHARED
+  LOCAL
+}
+
+input EntanglementProofInput {
+  deviceKey: String!
+  deviceKeySignedByDid: String!
+  deviceKeyType: String!
+  did: String!
+  didSignedByDeviceKey: String!
+  didSigningKeyId: String!
+}
+
+type Resource {
+  domain: String!
+  pointers: [String!]!
+}
+
+type Perspective {
+  links: [LinkExpression!]!
+}
+
+input LinkQuery {
+  fromDate: DateTime
+  limit: Float
+  predicate: String
+  source: String
+  target: String
+  untilDate: DateTime
+}
+
+type AgentSignature {
+  publicKey: String!
+  signature: String!
+}
+
+input ExpressionProofInput {
+  invalid: Boolean
+  key: String
+  signature: String
+  valid: Boolean
+}
+
+input LinkMutations {
+  additions: [LinkInput!]!
+  removals: [LinkExpressionInput!]!
+}
+
+type AgentStatus {
+  did: String
+  didDocument: String
+  error: String
+  isInitialized: Boolean!
+  isUnlocked: Boolean!
+}
+
+type LanguageHandle {
+  address: String!
+  constructorIcon: Icon
+  icon: Icon
+  name: String!
+  settings: String
+  settingsIcon: Icon
+}
+
+input LinkExpressionInput {
+  author: String!
+  data: LinkInput!
+  proof: ExpressionProofInput!
+  timestamp: String!
+  status: LinkStatus
+}
+
+type ExceptionInfo {
+  addon: String
+  message: String!
+  title: String!
+  type: Float!
+}
+
+scalar DateTime
+
+type OnlineAgent {
+  did: String!
+  status: PerspectiveExpression!
+}
+
+type LanguageRef {
+  address: String!
+  name: String!
+}
+
+input AuthInfoInput {
+  appDesc: String!
+  appDomain: String!
+  appIconPath: String
+  appName: String!
+  appUrl: String
+  capabilities: [CapabilityInput!]
+}
+
+type LinkUpdated {
+  newLink: LinkExpression!
+  oldLink: LinkExpression!
+}
+
+type ExpressionProof {
+  invalid: Boolean
+  key: String
+  signature: String
+  valid: Boolean
+}
+
+type Mutation {
+  addTrustedAgents(agents: [String!]!): [String!]!
+  agentAddEntanglementProofs(proofs: [EntanglementProofInput!]!): [EntanglementProof!]!
+  agentDeleteEntanglementProofs(proofs: [EntanglementProofInput!]!): [EntanglementProof!]!
+  agentEntanglementProofPreFlight(deviceKey: String!, deviceKeyType: String!): EntanglementProof!
+  agentGenerate(passphrase: String!): AgentStatus!
+  agentGenerateJwt(rand: String!, requestId: String!): String!
+  agentLock(passphrase: String!): AgentStatus!
+  agentPermitCapability(auth: String!): String!
+  agentRemoveApp(requestId: String!): [Apps!]!
+  agentRequestCapability(authInfo: AuthInfoInput!): String!
+  agentRevokeToken(requestId: String!): [Apps!]!
+  agentSignMessage(message: String!): AgentSignature!
+  agentUnlock(passphrase: String!): AgentStatus!
+  agentUpdateDirectMessageLanguage(directMessageLanguage: String!): Agent!
+  agentUpdatePublicPerspective(perspective: PerspectiveInput!): Agent!
+  deleteTrustedAgents(agents: [String!]!): [String!]!
+  expressionCreate(content: String!, languageAddress: String!): String!
+  expressionInteract(interactionCall: InteractionCall!, url: String!): String!
+  languageApplyTemplateAndPublish(sourceLanguageHash: String!, templateData: String!): LanguageRef!
+  languagePublish(languageMeta: LanguageMetaInput!, languagePath: String!): LanguageMeta!
+  languageRemove(address: String!): Boolean!
+  languageWriteSettings(languageAddress: String!, settings: String!): Boolean!
+  neighbourhoodJoinFromUrl(url: String!): PerspectiveHandle!
+  neighbourhoodPublishFromPerspective(linkLanguage: String!, meta: PerspectiveInput!, perspectiveUUID: String!): String!
+  neighbourhoodSendBroadcast(payload: PerspectiveInput!, perspectiveUUID: String!): Boolean!
+  neighbourhoodSendBroadcastU(payload: PerspectiveUnsignedInput!, perspectiveUUID: String!): Boolean!
+  neighbourhoodSendSignal(payload: PerspectiveInput!, perspectiveUUID: String!, remoteAgentDid: String!): Boolean!
+  neighbourhoodSendSignalU(payload: PerspectiveUnsignedInput!, perspectiveUUID: String!, remoteAgentDid: String!): Boolean!
+  neighbourhoodSetOnlineStatus(perspectiveUUID: String!, status: PerspectiveInput!): Boolean!
+  neighbourhoodSetOnlineStatusU(perspectiveUUID: String!, status: PerspectiveUnsignedInput!): Boolean!
+  perspectiveAdd(name: String!): PerspectiveHandle!
+  perspectiveAddLink(link: LinkInput!, uuid: String!, status: String): LinkExpression!
+  perspectiveAddLinkExpression(link: LinkExpressionInput!, uuid: String!, status: String): LinkExpression!
+  perspectiveAddLinks(links: [LinkInput!]!, uuid: String!): [LinkExpression!]!
+  perspectiveLinkMutations(mutations: LinkMutations!, uuid: String!): LinkExpressionMutations!
+  perspectivePublishSnapshot(uuid: String!): String!
+  perspectiveRemove(uuid: String!): Boolean!
+  perspectiveRemoveLink(link: LinkExpressionInput!, uuid: String!): Boolean!
+  perspectiveRemoveLinks(links: [LinkExpressionInput!]!, uuid: String!): [LinkExpression!]!
+  perspectiveUpdate(name: String!, uuid: String!): PerspectiveHandle!
+  perspectiveUpdateLink(newLink: LinkInput!, oldLink: LinkExpressionInput!, uuid: String!): LinkExpression!
+  runtimeAddFriends(dids: [String!]!): [String!]!
+  runtimeAddKnownLinkLanguageTemplates(addresses: [String!]!): [String!]!
+  runtimeFriendSendMessage(did: String!, message: PerspectiveInput!): Boolean!
+  runtimeHcAddAgentInfos(agentInfos: String!): Boolean!
+  runtimeOpenLink(url: String!): Boolean!
+  runtimeQuit: Boolean!
+  runtimeRemoveFriends(dids: [String!]!): [String!]!
+  runtimeRemoveKnownLinkLanguageTemplates(addresses: [String!]!): [String!]!
+  runtimeSetStatus(status: PerspectiveInput!): Boolean!
+}
+
+type PerspectiveExpression {
+  author: String!
+  data: Perspective!
+  proof: ExpressionProof!
+  timestamp: String!
+}
+
+type SentMessage {
+  message: PerspectiveExpression!
+  recipient: String!
+}
+
+type Query {
+  agent: Agent!
+  agentByDID(did: String!): Agent
+  agentGetApps: [Apps!]!
+  agentGetEntanglementProofs: [EntanglementProof!]!
+  agentIsLocked: Boolean!
+  agentStatus: AgentStatus!
+  expression(url: String!): ExpressionRendered
+  expressionInteractions(url: String!): [InteractionMeta!]!
+  expressionMany(urls: [String!]!): [ExpressionRendered]!
+  expressionRaw(url: String!): String
+  getTrustedAgents: [String!]!
+  language(address: String!): LanguageHandle!
+  languageMeta(address: String!): LanguageMeta!
+  languageSource(address: String!): String!
+  languages(filter: String): [LanguageHandle!]!
+  neighbourhoodHasTelepresenceAdapter(perspectiveUUID: String!): Boolean!
+  neighbourhoodOnlineAgents(perspectiveUUID: String!): [OnlineAgent!]!
+  neighbourhoodOtherAgents(perspectiveUUID: String!): [String!]!
+  perspective(uuid: String!): PerspectiveHandle
+  perspectiveQueryLinks(query: LinkQuery!, uuid: String!): [LinkExpression!]!
+  perspectiveQueryProlog(query: String!, uuid: String!): String!
+  perspectiveSnapshot(uuid: String!): Perspective!
+  perspectives: [PerspectiveHandle!]!
+  runtimeFriendStatus(did: String!): PerspectiveExpression!
+  runtimeFriends: [String!]!
+  runtimeHcAgentInfos: String!
+  runtimeInfo: RuntimeInfo!
+  runtimeKnownLinkLanguageTemplates: [String!]!
+  runtimeMessageInbox(filter: String): [PerspectiveExpression!]!
+  runtimeMessageOutbox(filter: String): [SentMessage!]!
+  runtimeVerifyStringSignedByDid(data: String!, did: String!, didSigningKeyId: String!, signedData: String!): Boolean!
+}
+
+type Apps {
+  auth: AuthInfo!
+  requestId: String!
+  revoked: Boolean
+  token: String!
+}
+
+type Agent {
+  did: String!
+  directMessageLanguage: String
+  perspective: Perspective
+}
+
+type Icon {
+  code: String
+}
+
+type LinkExpression {
+  author: String!
+  data: Link!
+  proof: ExpressionProof!
+  timestamp: String!
+  status: LinkStatus
+}
+
+type Link {
+  predicate: String
+  source: String!
+  target: String!
+}
+
+type Capability {
+  can: [String!]!
+  with: Resource!
+}
+
+type AuthInfo {
+  appDesc: String!
+  appIconPath: String
+  appName: String!
+  appUrl: String!
+  capabilities: [Capability!]!
+}
+
+input PerspectiveUnsignedInput {
+  links: [LinkInput!]!
+}
+
+type Subscription {
+  agentStatusChanged: AgentStatus!
+  agentAppsChanged: Apps
+  agentUpdated: Agent!
+  exceptionOccurred: ExceptionInfo!
+  neighbourhoodSignal(perspectiveUUID: String!): PerspectiveExpression!
+  perspectiveAdded: PerspectiveHandle!
+  perspectiveLinkAdded(uuid: String!): LinkExpression!
+  perspectiveLinkRemoved(uuid: String!): LinkExpression!
+  perspectiveLinkUpdated(uuid: String!): LinkUpdated!
+  perspectiveRemoved: String!
+  perspectiveSyncStateChange(uuid: String!): String!
+  perspectiveUpdated: PerspectiveHandle!
+  runtimeMessageReceived: PerspectiveExpression!
+}
+
+type PerspectiveHandle {
+  name: String
+  neighbourhood: Neighbourhood
+  sharedUrl: String
+  state: String!
+  uuid: String!
+}
+
+type InteractionParameter {
+  name: String!
+  type: String!
+}
+
+input ResourceInput {
+  domain: String!
+  pointers: [String!]!
+}
+
+input PerspectiveInput {
+  links: [LinkExpressionInput!]!
+}
+
+type EntanglementProof {
+  deviceKey: String!
+  deviceKeySignedByDid: String!
+  deviceKeyType: String!
+  did: String!
+  didSignedByDeviceKey: String
+  didSigningKeyId: String!
+}
+
+input LanguageMetaInput {
+  description: String!
+  name: String!
+  possibleTemplateParams: [String!]
+  sourceCodeLink: String
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}
