@@ -40,7 +40,7 @@ export async function installSystemLanguages(relativePath = '') {
     let binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
 
     if (!fs.existsSync(binaryPath)) {
-      await getAd4mHostBinary(relativePath);
+      await getAd4mHostBinary(relativePath, localAd4mPath);
       binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
     }
 

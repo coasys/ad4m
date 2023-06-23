@@ -59,8 +59,14 @@ function fileExist(binaryPath: string): Promise<string[]> {
   })
 }
 
-export async function getAd4mHostBinary(relativePath: string) {
+export async function getAd4mHostBinary(relativePath: string, localAd4mPath: any) {
   return new Promise(async (resolve, reject) => {
+    const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary');
+    if (localAd4mPath) {
+      await fs.ensureDir(binaryPath);
+      fs.copyFileSync(localAd4mPath, path.join(ad4mDataDirectory(relativePath), 'binary', 'ad4m'));
+      resolve(null);
+    }
     const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/latest");
     const data: any = await response.json();
     const version = data['name'].replace('v', '');
@@ -69,8 +75,6 @@ export async function getAd4mHostBinary(relativePath: string) {
     const isWin = process.platform === "win32";
     const isMac = process.platform === 'darwin';
     const isLinux = process.platform === 'linux';
-  
-    const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary');
 
     const files = await fileExist(binaryPath)
     

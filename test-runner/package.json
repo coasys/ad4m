@@ -7,12 +7,12 @@
   "scripts": {
     "build": "tsc",
     "build:util": "browserify build/client.js --standalone Bundle -p esmify > public/client.js",
-    "test": "yarn run test-expression",
-    "test-expression": "node build/cli.js --test ./example/expression.test.js --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"note-ipfs\",\"description\":\"IPFS based language for storing data\",\"sourceCodeLink\":\"https://github.com/perspect3vism/note-ipfs\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
-    "test-link": "node build/cli.js --test ./example/link.test.js --bundle \"example/languages/social-context.js\" --meta '{\"name\":\"social-context\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
+    "test": "yarn run test-expression && yarn run test-link",
+    "test-expression": "node build/cli.js --test ./example/expression.test.js --bundle \"../bootstrap-languages/file-storage/build/bundle.js\" --meta '{\"name\":\"holochain-file-storage\",\"description\":\"Holochain based language for storing objects\",\"sourceCodeLink\":\"https://github.com/perspect3vism/file-storage\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
+    "test-link": "node build/cli.js --test ./example/link.test.js --bundle \"../bootstrap-languages/p-diff-sync/build/bundle.js\" --meta '{\"name\":\"perspective-diff-sync\",\"description\":\"Holochain based language for sharing Perspectives\",\"sourceCodeLink\":\"https://github.com/perspect3vism/perspective-diff-sync\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "test-ui": "node build/cli.js --ui --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"note-ipfs\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "ad4m-test": "./build/cli.js",
-    "postinstall": "node ./scripts/get-builtin-test-langs.js"
+    "get-languages": "node ./scripts/get-builtin-test-langs.js"
   },
   "preferGlobal": true,
   "dependencies": {
@@ -36,7 +36,6 @@
     "graphql": "15.7.2",
     "graphql-ws": "5.12.0",
     "node-fetch": "2",
-    "node-wget-js": "^1.0.1",
     "subscriptions-transport-ws": "^0.11.0",
     "tree-kill": "^1.2.2",
     "ts-node": "^10.5.0",

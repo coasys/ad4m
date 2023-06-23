@@ -6,25 +6,25 @@ import os from "os";
 
 const languages = {
   "agent-expression-store": {
-    bundle: "https://github.com/perspect3vism/agent-language/releases/download/0.2.1/bundle.js",
+    bundle: "../bootstrap-languages/agent-language/build/bundle.js",
   },
   languages: {
-      bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.5/bundle.js",
+      bundle: "../bootstrap-languages/local-language-persistence/build/bundle.js",
   },
   "neighbourhood-store": {
-    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.2/bundle.js",
+    bundle: "../bootstrap-languages/local-neighbourhood-persistence/build/bundle.js",
   },
   "perspective-diff-sync": {
     bundle: "../bootstrap-languages/p-diff-sync/build/bundle.js",
   },
   "note-ipfs": {
-    bundle: "https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js",
+    bundle: "../bootstrap-languages/note-ipfs/build/bundle.js",
   },
   "direct-message-language": {
-    bundle: "https://github.com/perspect3vism/direct-message-language/releases/download/0.1.0/bundle.js"
+    bundle: "../bootstrap-languages/direct-message-language/build/bundle.js",
   },
   "perspective-language": {
-    bundle: "https://github.com/perspect3vism/perspective-language/releases/download/0.0.1/bundle.js"
+    bundle: "../bootstrap-languages/perspective-language/build/bundle.js",
   }
 };
 

@@ -1,4 +1,4 @@
-import { Ad4mClient, Link, LinkExpression, LinkQuery } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkExpression, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import getPort from "get-port";
 import { startServer } from "../cli.js";
 import { buildAd4mClient } from "../client.js";
@@ -16,20 +16,30 @@ class AgentLinkClass {
       this.perspective = perspective
   }
 
+  async waitAgent() {
+    return await this.client.neighbourhood.otherAgents(this.perspective)
+  }
+
   async addLink(link: Link) {
     const response = await this.client.perspective.addLink(this.perspective, link);
+
+    await sleep(10000)
   
     return response;
   }
 
   async removeLink(link: LinkExpression) {
     const response = await this.client.perspective.removeLink(this.perspective, link);
+
+    await sleep(10000)
   
     return response;
   }
 
   async updateLink(oldLink: LinkExpression, newLink: Link) {
     const response = await this.client.perspective.updateLink(this.perspective, oldLink, newLink);
+
+    await sleep(10000)
   
     return response;
   }
@@ -38,6 +48,21 @@ class AgentLinkClass {
     const response = await this.client.perspective.queryLinks(this.perspective, query);
   
     return response;
+  }
+
+  async waitForSync() {
+    await new Promise(async (resolve, reject) => {
+      const syncCallback = (state: PerspectiveState) => {
+        if (state === PerspectiveState.Synced) {
+          resolve(null)
+        };
+        return null;
+      };
+
+      const proxy = await this.client.perspective.byUUID(this.perspective);
+      if (proxy?.state === PerspectiveState.Synced) resolve(null);
+      proxy?.addSyncStateChangeListener(syncCallback);
+    });
   }
 }
 
@@ -101,9 +126,17 @@ export async function spawnLinkAgent() {
 
   const relativePath = `ad4m-test-${global.agents.length}`;
 
-  const { languageAddress, clear, perspective, neighbourhood } = await startServer(relativePath, bundle!, meta!, 'linkLanguage', port, defaultLangPath);
-  
+  let isJoining = global.agents.length > 0;
+  let { languageAddress, clear, perspective, neighbourhood } = await startServer(relativePath, bundle!, meta!, 'linkLanguage', port, defaultLangPath);
+
   const client = await buildAd4mClient(port);
+
+  if (isJoining) {
+    const previousAgent = global.agents[global.agents.length - 1];
+    const neighbourhood = previousAgent.neighbourhood!;
+
+    console.log(`Agent number ${global.agents.length}, is joining neighbourhood: `, neighbourhood);
+  }
   
   const agent = new AgentLinkClass(client, languageAddress, perspective, neighbourhood);
 
@@ -118,4 +151,8 @@ export async function spawnLinkAgent() {
   })
 
   return agent;
+}
+
+export function sleep(ms: number): Promise<any> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
