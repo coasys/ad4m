@@ -12,7 +12,6 @@ pub struct LanguageMetadata {
     pub name: String,
     pub description: String,
     pub address: String,
-    pub author: String,
     pub templated: Option<bool>,
     #[serde(rename = "templateSourceLanguageAddress")]
     pub template_source_language_address: Option<String>,
