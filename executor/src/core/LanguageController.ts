@@ -375,14 +375,14 @@ export default class LanguageController {
                 // We need to get the meta from the language language
                 // Retry 10 times with increasing delay to account for Holochain sync
                 let retries = 0;
-                while (!languageMeta && retries < 10) {
+                while (!languageMeta || retries < 10) {
                     try {
                         languageMeta = await this.getLanguageExpression(address)
                     } catch (e) {
                         console.error(`Error getting language meta from language language: ${e}\nRetrying...`)
                     }
                     retries++;
-                    await new Promise(r => setTimeout(r, 5000 * retries));
+                        await new Promise(r => setTimeout(r, 5000 * retries));
                 }
             }
             if (languageMeta == null) {
