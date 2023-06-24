@@ -12,16 +12,6 @@ pub struct LanguageMetadata {
     pub name: String,
     pub description: String,
     pub address: String,
-    pub author: String,
-    pub templated: Option<bool>,
-    #[serde(rename = "templateSourceLanguageAddress")]
-    pub template_source_language_address: Option<String>,
-    #[serde(rename = "templateAppliedParams")]
-    pub template_applied_params: Option<String>,
-    #[serde(rename = "possibleTemplateParams")]
-    pub possbile_template_params: Option<Vec<String>>,
-    #[serde(rename = "sourceCodeLink")]
-    pub source_code_link: Option<String>,
     pub size: usize,
     pub chunks_hashes: Vec<EntryHash>,
 }
