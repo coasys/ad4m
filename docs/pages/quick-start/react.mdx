@@ -1,0 +1,59 @@
+# React
+
+More info is coming.
+
+```jsx
+import Ad4mConnect from "@perspect3vism/ad4m-connect";
+import { useEffect, useState } from "react";
+
+const options = {
+  appName: "ad4m-connect-example",
+  appDesc: "hello",
+  appDomain: "dev.ad4m.connect.example",
+
+  appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+  capabilities: [
+    {
+      with: { domain: "*", pointers: ["*"] },
+      can: ["*"],
+    },
+  ],
+};
+
+export default function App() {
+  const [client, setClient] = useState();
+
+  const ui = Ad4mConnect(options);
+
+  function onLogin() {
+    ui.connect().then(setClient);
+  }
+
+  if (client) return <LoggedIn client={client} />;
+
+  return (
+    <div className="App">
+      <button onClick={onLogin}>Login</button>
+    </div>
+  );
+}
+
+function LoggedIn({ client }) {
+  const [perspectives, setPerspectives] = useState([]);
+
+  useEffect(() => {
+    client.perspective.all().then(setPerspectives);
+  }, [client]);
+
+  return (
+    <div>
+      My perspectives:
+      <ul>
+        {perspectives.map((p) => (
+          <li>{p.name}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```

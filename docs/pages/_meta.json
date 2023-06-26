@@ -1,23 +1,29 @@
 {
-  "-- Getting Started": {
+  "--start": {
     "type": "separator",
     "title": "Getting Started"
   },
   "index": "Introduction",
   "installation": "Installation",
-  "concepts": "Concepts",
-  "-- Building your Application": {
+  "quick-start": "Quick Start",
+  "--essentials": {
     "type": "separator",
-    "title": "Building your Application"
+    "title": "Essentials"
   },
-  "setup": "Getting Started",
   "auth": "Authentication",
+  "agents": "Agents",
   "expressions": "Expressions",
+  "languages": "Languages",
   "perspectives": "Perspectives",
   "neighbourhoods": "Neighbourhoods",
-  "languages": "Languages",
   "social-dna": "Social DNA",
-  "-- API Reference": {
+  "--build": {
+    "type": "separator",
+    "title": "Tutorials"
+  },
+  "make-lang": "Create your own language",
+  "todo-app": "Create a Todo App",
+  "--api": {
     "type": "separator",
     "title": "API Reference"
   },

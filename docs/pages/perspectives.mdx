@@ -3,7 +3,17 @@ import { Callout } from "nextra-theme-docs";
 # Perspectives
 
 Perspectives are one of the foundational concepts in ADAM. It is essentially local graph databases
-that form semantic meaning between [Expressions](/concepts#expressions).
+that form semantic meaning between [Expressions](/essentials/expressions).
+
+Perspectives only consist of a collection of “links,” which connect
+three things: a subject, a predicate, and a target. All three things are URLs pointing to
+Expression data in different Languages.
+
+Links inside Perspectives have a signature and show
+which agent the link came from. Expressions show the same data to everyone who looks at them,
+but Perspectives show how one user connects different Expressions in their own way.
+
+[Perspective class definition](/jsdoc/classes/Agent)
 
 ## Create a Perspective and add content
 
@@ -27,19 +37,17 @@ const allLinks = await myPerspective.get(new LinkQuery({})); // => []
 In this case it should return an empty array since we just created that perspective.
 
 So let's add something!
-With the following code we're creating an adhoc semantic statement
-representing what we think about AD4M...
 
-```js
-const me = await ad4m.agent.me();
-const source = me.did;
-const predicate = await ad4m.expression.create("thinks", "literal");
-const target = await ad4m.expression.create(
-  "AD4M will be the last social network",
-  "literal"
-);
+```ts
+const perspective = ad4m.perspective.add("My first perspective");
 
-const linkExpresion = await myPerspective.add({ source, predicate, target });
+const link = {
+  subject: await ad4m.agent.me(),
+  predicate: "sioc://likes",
+  target: await ad4m.expression.create("ad4m", "literal"),
+};
+
+perspective.add(link);
 ```
 
 Links consist of 3 URLs pointing to Expressions of Languages.

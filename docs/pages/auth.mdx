@@ -21,18 +21,9 @@ const ui = Ad4mConnect({
 ui.connect().then((client) => {
   // Save the client after authentication is done
 });
-
-ui.addEventListener("authstatechange", (e) => {
-  // Check e.detail to see current authentication state
-});
 ```
 
-This will initialize a web component and create a modal dialog over your UI.
-After the first successful hand-shake, `ad4m-connect` will put the token in local storage
-and on next start-up of your app will check if the token still works and
-not prompt the user again.
-
-This is what your user will see when the app is not connected yet:
+This will create a popup that takes the agent through the authentication process:
 
 ![ad4m-connect-1](/images/connect.jpg)
 
@@ -42,7 +33,7 @@ and AD4M functionality is potentially risky.
 `ad4m-connect` not only makes it easy for app developers to connect to the users AD4M-executor,
 it also provides a recognizable interface/wizard for the user.
 
-Like in this example, an app/UI should provide its name and an icon for the user
+Like in this example, an app should provide its name and an icon for the user
 to quickly understand what is going on.
 
 The `capabilities` property must hold a string that defines what capability
