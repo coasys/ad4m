@@ -9,11 +9,6 @@ use crate::globals::SIGNING_DNA;
 use super::JS_CORE_HANDLE;
 
 #[op]
-fn get_signing_dna() -> Result<Vec<u8>, AnyError> {
-    Ok(SIGNING_DNA.to_vec())
-}
-
-#[op]
 fn hash(data: String) -> Result<String, AnyError> {
     // Compute the SHA-256 multihash
     let multihash = Code::Sha2_256.digest(data.as_bytes());
@@ -44,11 +39,7 @@ async fn load_module(path: String) -> Result<String, AnyError> {
 pub fn build() -> Extension {
     Extension::builder("utils")
         .js(include_js_files!(utils "utils_extension.js",))
-        .ops(vec![
-            get_signing_dna::decl(),
-            hash::decl(),
-            load_module::decl(),
-        ])
+        .ops(vec![hash::decl(), load_module::decl()])
         .force_op_registration()
         .build()
 }
