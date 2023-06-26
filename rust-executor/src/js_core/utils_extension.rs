@@ -4,8 +4,6 @@ use log::info;
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
 
-use crate::globals::SIGNING_DNA;
-
 use super::JS_CORE_HANDLE;
 
 #[op]
