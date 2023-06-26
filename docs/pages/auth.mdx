@@ -1,0 +1,65 @@
+# Authentication
+
+Apps need to be granted capabilities to be able to access your agents data.
+
+To avoid the complexity of setting up this authentication flow [ad4m-connect](https://github.com/perspect3vism/ad4m-connect)
+will do all of this for you and just deliver an initialized and usable
+[Ad4mClient](/jsdoc/classes/Ad4mClient) object.
+
+```js
+import Ad4mConnect from "@perspect3vism/ad4m-connect";
+
+const ui = Ad4mConnect({
+  appName: "My First ADAM App",
+  appDesc: "This is my first app here.",
+  appDomain: "ad4m.dev",
+  appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+});
+
+// .connect() will show the authentication pop up
+ui.connect().then((client) => {
+  // Save the client after authentication is done
+});
+
+ui.addEventListener("authstatechange", (e) => {
+  // Check e.detail to see current authentication state
+});
+```
+
+This will initialize a web component and create a modal dialog over your UI.
+After the first successful hand-shake, `ad4m-connect` will put the token in local storage
+and on next start-up of your app will check if the token still works and
+not prompt the user again.
+
+This is what your user will see when the app is not connected yet:
+
+![ad4m-connect-1](/images/connect.jpg)
+
+Since all the users's data is stored locally in AD4M Perspectives,
+using a new app/UI and granting it access to all or parts of these perspectives
+and AD4M functionality is potentially risky.
+`ad4m-connect` not only makes it easy for app developers to connect to the users AD4M-executor,
+it also provides a recognizable interface/wizard for the user.
+
+Like in this example, an app/UI should provide its name and an icon for the user
+to quickly understand what is going on.
+
+The `capabilities` property must hold a string that defines what capability
+(access to which perspectives and interface functions) should be requested.
+This example requests all which might a good first step when starting to familiarize
+yourself with AD4M, but should be restricted to what you really need for a production release.
+
+If the user clicks authorize, `ad4m-connect` will connect to the AD4M-executor and request a capability token.
+This will make the AD4M launcher bring up its pop-up window:
+
+![ad4m-connect-pop-up](/images/authorize.jpg)
+
+Here the user has to confirm the request to their AD4M instance.
+Next, AD4M will then show a six-digit random secret code that needs to be entered into the app UI.
+That way we have safely established that the network agent initiating the capability request (as seen from
+the AD4M-executor) really is the UI the users wants to use.
+
+Now you are ready to use the AD4MClient to communicate with the agent.
+
+More info is found in the [docs](https://github.com/perspect3vism/ad4m/tree/main/connect)

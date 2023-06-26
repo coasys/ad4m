@@ -1,0 +1,78 @@
+import { Callout } from "nextra-theme-docs";
+
+# Perspectives
+
+Perspectives are one of the foundational concepts in ADAM. It is essentially local graph databases
+that form semantic meaning between [Expressions](/concepts#expressions).
+
+## Create a Perspective and add content
+
+Adding a new perspective is as easy as
+
+```js
+const myPerspective = await ad4m.perspective.add("My new perspective");
+```
+
+The returned object is of type [PerspectiveProxy](api.md#class-perspectiveproxy),
+which hides all the remote calls to the AD4M executor and can be treated like a
+local database object.
+
+Perspectives are basically local graph databases.
+We can query all links on that proxy object with `get`:
+
+```js
+const allLinks = await myPerspective.get(new LinkQuery({})); // => []
+```
+
+In this case it should return an empty array since we just created that perspective.
+
+So let's add something!
+With the following code we're creating an adhoc semantic statement
+representing what we think about AD4M...
+
+```js
+const me = await ad4m.agent.me();
+const source = me.did;
+const predicate = await ad4m.expression.create("thinks", "literal");
+const target = await ad4m.expression.create(
+  "AD4M will be the last social network",
+  "literal"
+);
+
+const linkExpresion = await myPerspective.add({ source, predicate, target });
+```
+
+Links consist of 3 URLs pointing to Expressions of Languages.
+For this example, we made life easy by using the agent's DID and AD4M's `Literal` Language.
+
+### LinkExpression
+
+We have put in a [Link](api.md#class-link) object into `myPerspective.add()`
+(`{source, predicate, target}`),
+but what this function returns is a [LinkExpression](api.md#class-linkexpression).
+
+Even though this Perspective is not shared (yet) but just our private, local
+graph database, we might want to share it [later](#2-publish-perspective-as-neighbourhood)
+as Neighbourhood.
+Then, all links added by some agent to their local Perspective will be shared
+with the other agents using a LinkLanguage - a Language which defines Expressions
+representing Links. That is LinkExpressions.
+
+Using the [generic Expression template](api.html#expressiongeneric),
+LinkExpressions wrap Links with author, timestamp and signature:
+
+```js
+{
+    author: "did:key:zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
+    timestamp: "Sun Oct 23 2022 15:31:52 GMT+0200 (Central European Summer Time)",
+    data: {
+        source: "did:key:zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
+        predicate: "literal://string:thinks",
+        target: "literal://string:AD4M%20will%20be%20the%20last%20social%20network",
+    },
+    proof: {
+        key: "#zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
+        signature: "xxxx",
+    }
+}
+```

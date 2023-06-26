@@ -1,21 +1,37 @@
 {
-    "index": "Introduction",
-    "getting-started": "Getting Started",
-    "concepts": "Concepts",
-    "languages": "AD4M Languages",
-    "social-dna": "Social DNA",
-    "tutorial": "Tutorial",
-    "jsdoc": "API Reference",
-    "download": {
-        "title": "AD4M Website",
-        "type": "page",
-        "href": "https://ad4m.dev",
-        "newWindow": true
-    },
-    "community": {
-        "title": "Community",
-        "type": "page",
-        "href": "https://ad4m.dev/community/",
-        "newWindow": true
-    }
+  "-- Getting Started": {
+    "type": "separator",
+    "title": "Getting Started"
+  },
+  "index": "Introduction",
+  "installation": "Installation",
+  "concepts": "Concepts",
+  "-- Building your Application": {
+    "type": "separator",
+    "title": "Building your Application"
+  },
+  "setup": "Getting Started",
+  "auth": "Authentication",
+  "expressions": "Expressions",
+  "perspectives": "Perspectives",
+  "neighbourhoods": "Neighbourhoods",
+  "languages": "Languages",
+  "social-dna": "Social DNA",
+  "-- API Reference": {
+    "type": "separator",
+    "title": "API Reference"
+  },
+  "jsdoc": "API Reference",
+  "download": {
+    "title": "AD4M Website",
+    "type": "page",
+    "href": "https://ad4m.dev",
+    "newWindow": true
+  },
+  "community": {
+    "title": "Community",
+    "type": "page",
+    "href": "https://ad4m.dev/community/",
+    "newWindow": true
+  }
 }

@@ -14,19 +14,14 @@ at the core of our digital communication.
 
 <Tabs items={["Current state of the web", "New paradigm"]}>
   <Tab>
+    A person has several user accounts on several social media networks,
+    creating silos between data, and ownership at the app level.
     <img src="/images/web-a.png" />
-    <small style={{ lineHeight: "1.5" }}>
-      A person has several user accounts on several social media networks,
-      creating silos between data, and ownership at the app level.
-    </small>
   </Tab>
   <Tab>
+    An agent participate in several social groups, and apps ask for permission
+    to access these groups – giving ownership to agents and their social groups.
     <img src="/images/web-b.png" />
-    <small style={{ lineHeight: "1" }}>
-      An agent participate in several social groups, and apps ask for permission
-      to access these groups – giving ownership to agents and their social
-      groups.
-    </small>
   </Tab>
 </Tabs>
 
@@ -54,12 +49,12 @@ collaboration – ultimately unlocking the full potential of our digital experie
 
 ## Why should I build on ADAM?
 
-ADAM solves a lot of common challenges when developing applications.
+ADAM solves a lot of common challenges when developing applications. Here are some of them:
 
-- **Cold Start**: In ADAM you interface with an existing social infrastructure, meaning you don't need to work on attracting users and activity to your app for people to be able to find it useful.
-- **Authentication**: In ADAM authentication is already solved for you.
-- **Database management**: Using ADAM you don't need to maintain any database or infrastructure. Don't worry about scaling.
-- **Interoparbility**: In ADAM you are not locked into using one kind of storage technology, and you can switch out your tech stack incrementally.
+- **Cold Start**: When a new social platform has limited content and a small user base, it is challenging to attract users and engagement. Using ADAM you can avoid this by interfacing with already existing agents and their social groups.
+- **Authentication**: Authentication is already taken care of, reducing the overload of having to implement authentication flows and user management.
+- **Database management**: ADAM is completely decentralized, hence there is no database to manage, and no infrastructure you need to scale.
+- **Interoperability**: You are not locked into using one kind of storage technology, and you can switch out your tech stack incrementally.
 
 ## How does it work?
 
@@ -68,7 +63,7 @@ ADAM defines a minimal set of assumptions of what is needed to create any type o
 | Definition                             | Description                                                        |
 | -------------------------------------- | ------------------------------------------------------------------ |
 | [Agents](/concepts#agents)             | The agents in the network.                                         |
-| [Languages](/concepts#languages)       | The different ways people express ideas.                           |
+| [Languages](/concepts#languages)       | The different ways agents can express ideas.                       |
 | [Perspectives](/concepts#perspectives) | The collection of these expressions organized in a meaningful way. |
 
 Through a combination of these basic principles, two important concepts are constructed:
@@ -78,16 +73,45 @@ Through a combination of these basic principles, two important concepts are cons
 | [Neighbourhoods](/concepts#agents)      | Shared Perspectives.                            |
 | [Social Organisms](/concepts#languages) | A Neighbourhood acting like a collective Agent. |
 
+Here is a visualization of how these concepts interact with each other:
+
+![Spanning Layer](/images/spanning-layer.png)
+
 All these are discussed in detail in the [Concepts section](/concepts).
 
-## How does this differ from Nostr / Bluesky / etc?
+## How does this differ from Nostr / Bluesky / Mastadon / etc?
 
-There are many similarities between ADAM and Norsr, Bluesky, Mastadon etc.
-The key difference is that these usually use a federated system. In Nostr every client has to keep the secret key stored.
-This creates a lot of attack vectors. ADAM implements a capability system to ensure you can revoke an apps access to your data at any point,
-and also fine tune what kind of data the client will have access to.
+There are many similarities between ADAM and Nostr, Bluesky, and other social protocols.
+Here are some key features of ADAM that sets it apart from them:
 
-More information is coming.
+### Agent-Centric
+
+Nostr, Mastadon and Bluesky all are federated systems. In these
+federated systems, the focus is primarily on the server or instance hosting the user's data.
+In contrast, ADAM places the emphasis on the user or the "Agent" themselves.
+
+In an Agent-Centric system like ADAM, each individual user is considered an autonomous
+agent with control over their data and interactions. The system revolves around
+empowering users to have greater ownership and agency over their online presence.
+
+### Capability tokens
+
+ADAM implements a capability token system. Every app needs to be granted access
+to an Agents data, by obtaining a temporary token. At any
+time the agent can revoke these tokens in their ADAM instance.
+
+On the other hand, each Nostr app needs to keep the secret key locally. This makes the attack vectors
+greater. If an attacker steals the secret key, all the users data could be leaked.
+
+### Interoperability
+
+Languages in ADAM is a powerful concept that makes any Expression an Agent creates resolvable by
+another Agent through the URL of that Expression. Having a generic way of resolving data independent of the underlying
+protocol makes ADAM interoparable with any kind of centralized, or decentralized system.
+
+### Validation rules
+
+More info coming.
 
 ## Why?
 
