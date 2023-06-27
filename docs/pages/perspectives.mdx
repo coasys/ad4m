@@ -2,85 +2,73 @@ import { Callout } from "nextra-theme-docs";
 
 # Perspectives
 
-Perspectives are one of the foundational concepts in ADAM. It is essentially local graph databases
-that form semantic meaning between [Expressions](/essentials/expressions).
+A Perspective is essentially a local graph databases that
+contains the associations between [Expressions](/essentials/expressions).
+
+While Expressions contain "objective data", Perspectives can associate meaning between Expressions
+by linking them together.
+
+## Creating a Perspective
+
+Creating a Perspective can be done easily like this:
+
+```ts
+const myNotes = ad4m.perspective.add("My private notes");
+```
+
+The returning object will be an instance of [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy/)
+which essentially will work as your database instance.
+
+## Adding a Link
 
 Perspectives only consist of a collection of “links,” which connect
-three things: a subject, a predicate, and a target. All three things are URLs pointing to
-Expression data in different Languages.
+three Expression URLs:
 
-Links inside Perspectives have a signature and show
-which agent the link came from. Expressions show the same data to everyone who looks at them,
-but Perspectives show how one user connects different Expressions in their own way.
+- **Subject**: The Expression that you want to store or retrieve information about.
+- **Predicate**: Describes the relationship between the subject and the target.
+- **Target**: The Expression that is connected to the subject.
+
+```ts
+const link = {
+  subject: "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+  predicate: "sioc://likes",
+  target: "literal://ad4m",
+};
+
+myNotes.add(link);
+```
 
 [Perspective class definition](/jsdoc/classes/Agent)
 
-## Create a Perspective and add content
+## Query Links
 
-Adding a new perspective is as easy as
-
-```js
-const myPerspective = await ad4m.perspective.add("My new perspective");
-```
-
-The returned object is of type [PerspectiveProxy](api.md#class-perspectiveproxy),
-which hides all the remote calls to the AD4M executor and can be treated like a
-local database object.
-
-Perspectives are basically local graph databases.
-We can query all links on that proxy object with `get`:
+We can query all links on a [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy/) using the `get` function:
 
 ```js
-const allLinks = await myPerspective.get(new LinkQuery({})); // => []
+const allLinks = await myNotes.get(
+  new LinkQuery({ predicate: "sioc://likes" })
+);
 ```
 
-In this case it should return an empty array since we just created that perspective.
+What you get back will be an array of [LinkExpressions](/jsdoc/classes/LinkExpression/):
 
-So let's add something!
-
-```ts
-const perspective = ad4m.perspective.add("My first perspective");
-
-const link = {
-  subject: await ad4m.agent.me(),
-  predicate: "sioc://likes",
-  target: await ad4m.expression.create("ad4m", "literal"),
-};
-
-perspective.add(link);
+```json
+[
+  {
+    "author": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+    "timestamp": "2023-06-21T14:47:48.935Z",
+    "data": {
+      "subject": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+      "predicate": "sioc://likes",
+      "target": "literal://ad4m"
+    },
+    "proof": {
+      "key": "#zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
+      "signature": "xxxx"
+    }
+  }
+]
 ```
-
-Links consist of 3 URLs pointing to Expressions of Languages.
-For this example, we made life easy by using the agent's DID and AD4M's `Literal` Language.
-
-### LinkExpression
-
-We have put in a [Link](api.md#class-link) object into `myPerspective.add()`
-(`{source, predicate, target}`),
-but what this function returns is a [LinkExpression](api.md#class-linkexpression).
 
 Even though this Perspective is not shared (yet) but just our private, local
-graph database, we might want to share it [later](#2-publish-perspective-as-neighbourhood)
-as Neighbourhood.
-Then, all links added by some agent to their local Perspective will be shared
-with the other agents using a LinkLanguage - a Language which defines Expressions
-representing Links. That is LinkExpressions.
-
-Using the [generic Expression template](api.html#expressiongeneric),
-LinkExpressions wrap Links with author, timestamp and signature:
-
-```js
-{
-    author: "did:key:zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
-    timestamp: "Sun Oct 23 2022 15:31:52 GMT+0200 (Central European Summer Time)",
-    data: {
-        source: "did:key:zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
-        predicate: "literal://string:thinks",
-        target: "literal://string:AD4M%20will%20be%20the%20last%20social%20network",
-    },
-    proof: {
-        key: "#zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
-        signature: "xxxx",
-    }
-}
-```
+graph database, we might want to share it as [Neighbourhood](/neighbourhoods).
