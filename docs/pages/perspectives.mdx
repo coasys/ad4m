@@ -2,26 +2,26 @@ import { Callout } from "nextra-theme-docs";
 
 # Perspectives
 
-A Perspective is essentially a local graph databases that
-contains the associations between [Expressions](/essentials/expressions).
+A Perspective is essentially a **local graph database** that
+contain the associations between [Expressions](/essentials/expressions).
 
 While Expressions contain "objective data", Perspectives can associate meaning between Expressions
 by linking them together.
 
 ## Creating a Perspective
 
-Creating a Perspective can be done easily like this:
+Creating a new Perspective is easy:
 
 ```ts
 const myNotes = ad4m.perspective.add("My private notes");
 ```
 
 The returning object will be an instance of [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy/)
-which essentially will work as your database instance.
+– which essentially will work as your database instance.
 
 ## Adding a Link
 
-Perspectives only consist of a collection of “links,” which connect
+Perspectives only consist of a collection of **links**, which connect
 three Expression URLs:
 
 - **Subject**: The Expression that you want to store or retrieve information about.

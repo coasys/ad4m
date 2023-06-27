@@ -1,72 +1,82 @@
 import { Tab, Tabs } from "nextra-theme-docs";
 
-# Social DNA (SDNA)
+# Social DNA
 
-ADAM and Social DNA provide a flexible and semantically rich environment for
-representing and reasoning about data. To make this environment even more
-accessible and useful to app developers, we have introduced the concept of "Subject Classes".
+ADAMs goal is to arrive at scalable and interoparable communication infrastructure
+that enables **group agency without imposing a bias on how a group manages itself**.
 
-Subject Classes in Social DNA are akin to class definitions in Prolog. They represent
-ontology classes, complete with properties and collections. However, Subject Classes
-extend beyond traditional class definitions, incorporating the principles of subject-oriented
-programming, which focuses on representing objects from different subjective viewpoints.
+To achieve this, we need a way for Neigbourhoods to be able to define their own rules.
+In a social context this could mean different things:
 
-In essence, a Subject Class provides a template for overlaying a graph structure over a
-base expression. This allows the same base expression to be interpreted and treated in
-various ways depending on the Subject Class applied. This flexibility makes ADAM and Social
-DNA a highly versatile persistence layer for apps, as it can cater to diverse requirements
-and use-cases with ease.
+- **Rating systems**: Deciding how a Post or a Comment's rating is calculated.
+- **User rights**: Allowing certain Agents to do certain actions when certain conditions in the graph are met.
+- **Shared definitions**: Defining data structures in the graph that mean a certain thing to the social group.
 
-Consider the following example for TODO subject class:
+Social DNA enable Neigbourhoods to add computer programs that run on an Agents device,
+based on the structure of the graph data. With the power of Prolog, a turing complete
+logical programming language, any kind of alorithm can be run based on the state of the graph.
 
-<Tabs items={['SDNA Class', 'prolog output']}>
+## Creating a rule
+
+...
+
+## Subject Classes
+
+One of the first use cases of Social DNA is for Neigbourhoods to be able to agree that a certain
+collection of links represent one thing.
+
+Consider the following example for Todo definition:
+
+<Tabs items={['SDNA Class', 'Prolog output']}>
   <Tab>
+
     ```js
     @SDNAClass({
         name: "Todo",
-    })      
+    })
     export default class Todo {
-        @subjectFlag({
-            through: "flux://entry_type",
-            value: "flux://has_todo",
-        })
-        type: string;
-
-        @subjectProperty({
-            through: "rdf://status",
-            writable: true,
-            resolveLanguage: "literal",
-        })
-        state: boolean;
-
         @subjectProperty({
             through: "rdf://title",
             writable: true,
+            required: true,
             resolveLanguage: "literal",
+            value: ""
         })
         title: string;
 
+        @subjectProperty({
+            through: "rdf://done",
+            writable: true,
+            required: true,
+            resolveLanguage: "literal",
+            value: false,
+        })
+        isDone: boolean;
     }
-
-    ````
+    ```
 
   </Tab>
   <Tab>
     ```prolog
-    subject*class("Todo", c).
-    constructor(c, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
-    instance(c, Base) :- triple(Base, "todo://state", *).
-
-    property(c, "state").
-    property_getter(c, Base, "state", Value) :- triple(Base, "todo://state", Value).
-    property_setter(c, "state", '[{action: "setSingleTarget", source: "this", predicate: "todo://state", target: "value"}]').
+    subject_class("Todo", c).
+    constructor(c, '[
+      {action: "addLink", source: "this", predicate: "rdf://title", target: "literal://string:''"}, 
+      {action: "addLink", source: "this", predicate: "rdf://state", target: "literal://boolean:true"}
+    ]').
+    instance(c, Base) :- triple(Base, "rdf://state", *), triple(Base, "rdf://title", *).
 
     property(c, "title").
     property_resolve(c, "title").
     property_resolve_language(c, "title", "literal").
-    property_getter(c, Base, "title", Value) :- triple(Base, "todo://has_title", Value).
-    property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "todo://has_title", target: "value"}]').
-    ````
+    property_getter(c, Base, "title", Value) :- triple(Base, "rdf://has_title", Value).
+    property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "rdf://has_title", target: "value"}]').
+
+    property(c, "isDone").
+    property_resolve(c, "isDone").
+    property_resolve_language(c, "isDone", "literal").
+    property_getter(c, Base, "isDone", Value) :- triple(Base, "rdf://done", Value).
+    property_setter(c, "isDone", '[{action: "setSingleTarget", source: "this", predicate: "rdf://done", target: "value"}]').
+    ```
 
   </Tab>
 </Tabs>
