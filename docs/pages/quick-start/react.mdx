@@ -1,16 +1,25 @@
 # React
 
-More info is coming.
+This guide will get you up and running with AD4m and React.
 
-```jsx
+### Installing
+
+```
+npm install @perspect3vism/ad4m @perspect3vism/ad4m-connect @ad4m/react
+```
+
+### Initializing
+
+Create a new React app and authorize AD4M using [ad4m-connect](https://github.com/perspect3vism/ad4m/tree/dev/connect):
+
+```jsx filename="App.ts"
 import Ad4mConnect from "@perspect3vism/ad4m-connect";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 const options = {
-  appName: "ad4m-connect-example",
-  appDesc: "hello",
+  appName: "my-ad4m-app",
+  appDesc: "My AD4M app",
   appDomain: "dev.ad4m.connect.example",
-
   appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
   capabilities: [
     {
@@ -23,36 +32,189 @@ const options = {
 export default function App() {
   const [client, setClient] = useState();
 
-  const ui = Ad4mConnect(options);
-
-  function onLogin() {
-    ui.connect().then(setClient);
-  }
-
-  if (client) return <LoggedIn client={client} />;
+  useEffect(() => {
+    // Connect to AD4M on mount
+    Ad4mConnect(options);
+  }, []);
 
   return (
     <div className="App">
-      <button onClick={onLogin}>Login</button>
+      <h1>My AD4M APP</h1>
     </div>
   );
 }
+```
 
-function LoggedIn({ client }) {
-  const [perspectives, setPerspectives] = useState([]);
+### Display perspectives
+
+The above code will display the ad4m connection dialog the first time you run the app, but that's about it.
+
+Let's fetch and display your [perspectives](/perspectives/) from ad4m using the react helpers:
+
+```jsx filename="App.ts"  {3,8,17-19}
+import Ad4mConnect from "@perspect3vism/ad4m-connect";
+import { useEffect } from "react";
+import { usePerspectives } from "@adam/react";
+
+const options = {...};
+
+export default function App() {
+  const myPerspectives = usePerspectives();
 
   useEffect(() => {
-    client.perspective.all().then(setPerspectives);
-  }, [client]);
+    // Connect to AD4M on mount
+    Ad4mConnect(options);
+  }, []);
+
+  return (
+    <div className="App">
+        {myPerspectives.map((p) => (
+          <li>{p.name}</li>
+        ))}
+    </div>
+  );
+}
+```
+
+### Create perspectives
+
+If this is your first ADAM app, the list will be empty. Let's create a button that creates a new perspective for us:
+
+```jsx filename="App.ts"  {4,15-17, 25}
+import Ad4mConnect from "@perspect3vism/ad4m-connect";
+import { useEffect } from "react";
+import { usePerspectives } from "@adam/react";
+import Ad4m from "@perspect3vism/ad4m";
+
+const options = {...};
+
+export default function App() {
+  const myPerspectives = usePerspectives();
+
+  useEffect(() => {
+    Ad4mConnect(options);
+  }, []);
+
+  const onCreate = () => {
+    await ad4m.perspective.add("My new perspective");
+  }
+
+  return (
+    <div className="App">
+        {myPerspectives.map((p) => (
+          <li>{p.name}</li>
+        ))}
+
+        <button onClick={() => onCreate()}>Create new</button>
+    </div>
+  );
+}
+```
+
+### Creating data
+
+Let's say we want to create a list of tasks to be completed.
+
+First, we need a task model. We can use the [SDNA](/social-dna/) helpers to create this:
+
+```jsx filename="models/Task.ts"
+import { SDNAClass, subjectProperty, subjectFlag } from "@perspect3vism/ad4m";
+
+@SDNAClass({
+  name: "Task",
+})
+export default class Task {
+  @subjectFlag({
+    through: "flux://entry_type",
+    value: "flux://has_task",
+  })
+  type: string;
+
+  @subjectProperty({
+    through: "rdf://title",
+    writable: true,
+    resolveLanguage: "literal",
+  })
+  title: string;
+
+  @subjectProperty({
+    through: "rdf://status",
+    writable: true,
+    resolveLanguage: "literal",
+  })
+  done: boolean;
+}
+```
+
+Cool! Now let's clean things up a bit.
+
+First we'll create a new `PerspectiveDetails` component that takes in the ID of a perspective. In this file we'll use our new Task model to display all tasks in the current perspective:
+
+```jsx filename="PerspectiveDetails.ts"
+import { usePerspective } from "@adam/react";
+import { useEntries } from "@fluxapp/react";
+import Task from "./models/Task";
+
+export default function PerspectiveDetails({ id: string }) {
+  const myPerspective = usePerspective(id);
+
+  const { entries: tasks } = useEntries({
+    perspective,
+    model: Model,
+  });
 
   return (
     <div>
-      My perspectives:
+      <h2>{myPerspective.name}</h2>
+      <p>Tasks:</p>
       <ul>
-        {perspectives.map((p) => (
-          <li>{p.name}</li>
+        {tasks.map((task) => (
+          <li>
+            {task.name} - {task.status}
+          </li>
         ))}
       </ul>
+    </div>
+  );
+}
+```
+
+Finally, let's add a simple form to allow us to create new tasks inside PerspectiveDetails:
+
+```jsx filename="PerspectiveDetails.ts" {1, 8, 15-18, 32-33}
+import { useState } from "react";
+import { usePerspective } from "@adam/react";
+import { useEntries } from "@fluxapp/react";
+import Task from "./models/Task";
+
+export default function PerspectiveDetails({ id: string }) {
+  const myPerspective = usePerspective(id);
+  const [taskName, setTaskName] = useState("");
+
+  const { entries: tasks } = useEntries({
+    perspective,
+    model: Model,
+  });
+
+  function createTask() {
+    model.create({ title: taskName, status: "incomplete" });
+    setTaskName("");
+  }
+
+  return (
+    <div>
+      <h2>{myPerspective.name}</h2>
+      <p>Tasks:</p>
+      <ul>
+        {tasks.map((task) => (
+          <li>
+            {task.name} - {task.status}
+          </li>
+        ))}
+      </ul>
+
+      <input name="taskName" onChange={(e) => setTaskName(e.target.value)} />
+      <button onClick={() => createTask()}>Create new task</button>
     </div>
   );
 }
