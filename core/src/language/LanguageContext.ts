@@ -14,6 +14,7 @@ export interface SignaturesService {
 export interface LanguageContext {
     agent: AgentService;
     IPFS: IPFS;
+    gun: any;
     signatures: SignaturesService;
     storageDirectory: string;
     customSettings: object;

@@ -1,7 +1,4 @@
-const Gun = require("gun")
-require('gun/lib/load.js')
-require('gun/lib/then.js')
-require('gun/lib/unset.js')
+import Gun from "gun";
 
 const gun = {
     init: (dbFilePath: string) => {

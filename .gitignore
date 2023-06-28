@@ -20,6 +20,12 @@ docs-src/api.md
 docs-src/typedoc
 docs-src/_book
 
+docs/out
+tests/js/tst-tmp
+bootstrap-languages/**/build
+schema.gql
+tests/js/scripts/perspective-diff-sync-hash
+
 host/dist
 host/build
 

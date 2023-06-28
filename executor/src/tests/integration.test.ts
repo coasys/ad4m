@@ -25,6 +25,7 @@ import { Crypto } from "@peculiar/webcrypto"
 import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
+import gunDbTests from "./gun-link-language-test";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -211,5 +212,6 @@ describe("Integration tests", function () {
         describe('Direct Messages', directMessageTests(testContext))
         describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
+        describe('GunDB Test', gunDbTests(testContext))
     })
 })

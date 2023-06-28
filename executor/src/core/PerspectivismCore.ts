@@ -24,6 +24,7 @@ import { MainConfig } from './Config'
 import { OuterConfig } from '../main'
 import path from "path";
 import { sleep } from "./utils";
+import gun from "./storage-services/Gun";
 
 export interface InitIPFSParams {
     ipfsSwarmPort?: number,
@@ -52,6 +53,7 @@ export default class PerspectivismCore {
     #config: MainConfig;
     #holochain?: HolochainService
     #IPFS?: IPFSType
+    #gun?: any
 
     #agentService: AgentService
     #runtimeService: RuntimeService
@@ -137,6 +139,12 @@ export default class PerspectivismCore {
         console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
     }
 
+    async initGun(gunDbPath: string) {
+        console.log("Init GunDB service");
+        let gunInstance = await gun.init(gunDbPath);
+        this.#gun = gunInstance;
+    }
+
     async initIPFS(params: InitIPFSParams) {
         console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
         let basePath = params.ipfsRepoPath ? params.ipfsRepoPath : path.join(this.#config.dataPath, "ipfs");
@@ -214,6 +222,7 @@ export default class PerspectivismCore {
             agent: this.#agentService,
             runtime: this.#runtimeService,
             IPFS: this.#IPFS,
+            gun: this.#gun,
             signatures: this.#signatures,
             ad4mSignal: this.languageSignal,
             config: this.#config,
