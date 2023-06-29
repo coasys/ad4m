@@ -3,8 +3,8 @@
     "@perspect3vism/ad4m": "../core/lib/index.js",
     "get-port": "npm:get-port@5.1.1",
     "js-yaml": "npm:js-yaml@4.1.0",
-    "@noble/secp256k1": "npm:@noble/secp256k1@1.7.0",
-    "@msgpack/msgpack": "npm:@msgpack/msgpack@2.7.2",
+    "@noble/secp256k1": "https://esm.sh/@noble/secp256k1@1.7.0",
+    "@msgpack/msgpack": "https://esm.sh/@msgpack/msgpack@2.7.2",
     "uuid": "npm:uuid@8.3.1",
     "json-stable-stringify": "npm:json-stable-stringify@1.0.1",
     "async-mutex": "npm:async-mutex@0.3.2",
@@ -12,7 +12,7 @@
     "tmp": "npm:tmp@0.2.1",
     "sha256": "npm:sha256@0.2.0",
     "@holochain/client": "git:https://github.com/perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",
-    "@transmute/did-key.js": "npm:@transmute/did-key.js@0.2.1-unstable.29",
+    "@transmute/did-key.js": "https://esm.sh/@transmute/did-key.js@0.2.1-unstable.29",
     "lodash": "npm:lodash@4.17.21"
   },
   "lint": {
