@@ -53,22 +53,53 @@ Will return `true`
 
 ## Creating Social DNA
 
-Let's say we want to define `top_comments` as any expression in the Perspective with **more than 5 likes**:
+Let's say we want to define `top_posts` as any post in the Perspective with **more than 5 likes**.
+
+First let's create an Perspective, and add a post:
+
+```js
+const myPosts = await ad4m.perspective.add("My Posts");
+const expressionURL = await ad4m.expression.create("My first Post", "literal");
+
+myPosts.add({
+  source: "ad4m://self",
+  predicate: "sioc://has_post",
+  target: expressionURL,
+});
+```
+
+Then let's use our Agent's DID to say that we like our own post 10 times:
+
+```js
+const { did } = await ad4m.agent.me();
+
+for (let i = 0; i < 10; i++) {
+  myPosts.add({
+    source: did,
+    predicate: "sioc://likes",
+    target: expressionURL,
+  });
+}
+```
+
+Great! Now we have one post with 10 likes in our Perspective. Now let's define what `top_comments` mean
+to use in this Perspective:
 
 <Callout type="info" emoji="ℹ️">
-  Don't worry if this looks completely crazy right now. You will normally either
+  Don't worry if this looks very unfamiliar for now. You will normally either
   use AI to write it for you, or you will use some of our abstraction layers to
-  avoid the pain of writing Prolog code yourself.
+  avoid writing Prolog code yourself. (Think of ORMs vs raw SQL).
 </Callout>
 
-```prolog filename="top_comments.pl"
-top_comments(Source, Target, Author, Timestamp) :-
-    link(Source, "sioc:/likes", Target, Author, Timestamp),
-    count_likes(Target, Count),
+```prolog filename="top_posts.pl"
+top_posts(Post) :-
+    triple(Source, "sioc://has_post", Post),
+    link(Source, "sioc://likes", Post, Author, Timestamp),
+    count_likes(Post, Count),
     Count > 5.
 
-count_likes(Target, Count) :-
-    findall(_, link(_, "sioc:/likes", Target, _, _), Likes),
+count_likes(Post, Count) :-
+    findall(_, link(_, "sioc://likes", Post, _, _), Likes),
     length(Likes, Count).
 ```
 

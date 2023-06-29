@@ -2,7 +2,7 @@
 
 Apps need to be granted capabilities to be able to access your agents data.
 
-To avoid the complexity of setting up this authentication flow [ad4m-connect](https://github.com/perspect3vism/ad4m-connect)
+To avoid the complexity of setting up this authentication flow [ad4m-connect](https://github.com/perspect3vism/ad4m/tree/main/connect)
 will do all of this for you and just deliver an initialized and usable
 [Ad4mClient](/jsdoc/classes/Ad4mClient) object.
 
@@ -32,9 +32,6 @@ using a new app/UI and granting it access to all or parts of these perspectives
 and AD4M functionality is potentially risky.
 `ad4m-connect` not only makes it easy for app developers to connect to the users AD4M-executor,
 it also provides a recognizable interface/wizard for the user.
-
-Like in this example, an app should provide its name and an icon for the user
-to quickly understand what is going on.
 
 The `capabilities` property must hold a string that defines what capability
 (access to which perspectives and interface functions) should be requested.
