@@ -1,29 +1,29 @@
 import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language  } from '@perspect3vism/ad4m'
 import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@perspect3vism/ad4m'
 
-import * as Config from './Config'
-import * as Db from './db'
-import type { PerspectivismDb } from './db'
-import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService';
-import AgentService from './agent/AgentService'
-import PerspectivesController from './PerspectivesController'
-import LanguageController from './LanguageController'
-import * as GraphQL from './graphQL-interface/GraphQL'
-import * as DIDs from './agent/DIDs'
-import type { DIDResolver } from './agent/DIDs'
-import Signatures from './agent/Signatures'
-import * as PubSub from './graphQL-interface/PubSub'
-import EntanglementProofController from './EntanglementProof'
-import runDAppServer from "./DAppServer"
+import * as Config from './Config.ts'
+import * as Db from './db.ts'
+import type { PerspectivismDb } from './db.ts'
+import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService.ts';
+import AgentService from './agent/AgentService.ts'
+import PerspectivesController from './PerspectivesController.ts'
+import LanguageController from './LanguageController.ts'
+// import * as GraphQL from './graphQL-interface/GraphQL.ts'
+import * as DIDs from './agent/DIDs.ts'
+import type { DIDResolver } from './agent/DIDs.ts'
+import Signatures from './agent/Signatures.ts'
+import * as PubSub from './graphQL-interface/PubSub.ts'
+import EntanglementProofController from './EntanglementProof.ts'
+import runDAppServer from "./DAppServer.ts"
 import fs from 'fs'
 import { AgentInfoResponse } from '@holochain/client'
-import RuntimeService from './RuntimeService'
-import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
+import RuntimeService from './RuntimeService.ts'
+import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo.ts'
 import { v4 as uuidv4 } from 'uuid';
-import { MainConfig } from './Config'
-import { OuterConfig } from '../main'
+import { MainConfig } from './Config.ts'
+// import { OuterConfig } from '../main.ts'
 import path from "path";
-import { sleep } from "./utils";
+import { sleep } from "./utils.ts";
 
 export interface InitServicesParams {
     agentService: AgentService,

@@ -1,15 +1,15 @@
 import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest, EncodedAppSignal } from '@holochain/client'
 import path from 'path'
 import fs from 'fs'
-import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
-import { unpackDna, packDna } from "./HcExecution"
+import HolochainLanguageDelegate from "./HolochainLanguageDelegate.ts"
+import { unpackDna, packDna } from "./HcExecution.ts"
 import type { Dna } from '@perspect3vism/ad4m'
-import { AsyncQueue } from './Queue'
+import { AsyncQueue } from './Queue.ts'
 import { decode, encode } from "@msgpack/msgpack"
 
-import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
-import EntanglementProofController from '../../EntanglementProof'
-import AgentService from '../../agent/AgentService'
+import { HolochainUnlockConfiguration } from '../../PerspectivismCore.ts'
+import EntanglementProofController from '../../EntanglementProof.ts'
+import AgentService from '../../agent/AgentService.ts'
 
 export const bootstrapUrl = "https://bootstrap.holo.host"
 export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"

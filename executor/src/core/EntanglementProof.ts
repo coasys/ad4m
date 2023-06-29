@@ -1,6 +1,6 @@
 import path from "path";
 import fs from "fs";
-import AgentService from "./agent/AgentService";
+import AgentService from "./agent/AgentService.ts";
 
 import { EntanglementProof } from '@perspect3vism/ad4m';
 

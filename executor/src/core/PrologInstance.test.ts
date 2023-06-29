@@ -1,5 +1,5 @@
 import path from "path"
-import PrologInstance from "./PrologInstance"
+import PrologInstance from "./PrologInstance.ts"
 import { expect } from "chai";
 import { fileURLToPath } from "url";
 

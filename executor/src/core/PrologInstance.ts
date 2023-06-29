@@ -3,7 +3,7 @@ import path from "path";
 import swipl from 'swipl-stdio'
 //@ts-ignore
 import tmp from 'tmp'
-import { MainConfig } from "./Config";
+import { MainConfig } from "./Config.ts";
 
 export default class PrologInstance {
     #engine

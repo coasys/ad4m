@@ -1,10 +1,10 @@
 import path from 'path'
 import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid';
-import * as PubSub from './graphQL-interface/PubSub'
-import type PerspectiveContext from './PerspectiveContext'
+import * as PubSub from './graphQL-interface/PubSub.ts'
+import type PerspectiveContext from './PerspectiveContext.ts'
 import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression } from '@perspect3vism/ad4m'
-import Perspective from './Perspective'
+import Perspective from './Perspective.ts'
 
 export default class PerspectivesController {
     #perspectiveHandles: Map<string, PerspectiveHandle>

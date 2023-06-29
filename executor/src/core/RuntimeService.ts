@@ -1,7 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { PerspectiveExpression } from '@perspect3vism/ad4m';
-import { MainConfig } from './Config';
+import { MainConfig } from './Config.ts';
 
 const TRUSTED_AGENTS_FILE = "trustedAgents.json"
 const KNOW_LINK_LANGUAGES_FILE = "knownLinkLanguages.json"

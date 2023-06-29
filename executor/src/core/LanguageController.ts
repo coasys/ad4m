@@ -7,15 +7,15 @@ import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, 
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
 import fs from 'fs'
 import path from 'path'
-import * as Config from './Config'
-import type HolochainService from './storage-services/Holochain/HolochainService';
-import type AgentService from './agent/AgentService'
-import * as PubSub from './graphQL-interface/PubSub'
+import * as Config from './Config.ts'
+import type HolochainService from './storage-services/Holochain/HolochainService.ts';
+import type AgentService from './agent/AgentService.ts'
+import * as PubSub from './graphQL-interface/PubSub.ts'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
-import RuntimeService from './RuntimeService';
-import Signatures from './agent/Signatures';
-import { PerspectivismDb } from './db';
+import RuntimeService from './RuntimeService.ts';
+import Signatures from './agent/Signatures.ts';
+import { PerspectivismDb } from './db.ts';
 import stringify from 'json-stable-stringify'
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;

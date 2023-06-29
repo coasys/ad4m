@@ -77,8 +77,7 @@ const result = await esbuild.build({
                 });
             },
         },
-        ...denoPlugins({configPath: "/Users/josh/dev/ad4m/executor/scripts/deno.json"}), 
-        //...denoPlugins()
+        ...denoPlugins({configPath: "/Users/josh/dev/ad4m/executor/deno.json"}), 
     ],
 });
 console.log(result.outputFiles);

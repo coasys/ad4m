@@ -1,6 +1,6 @@
-import * as path from "path";
-import * as fs from "fs";
-import { Key } from "../../wallet_extension";
+import * as path from "node:path";
+import * as fs from "node:fs";
+import { Key } from "../../wallet_extension.d.ts";
 import {
   Language,
   Expression,
@@ -9,11 +9,9 @@ import {
   ExceptionType,
 } from "@perspect3vism/ad4m";
 import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@perspect3vism/ad4m";
-import secp256k1 from "secp256k1";
+import secp256k1 from "@noble/secp256k1";
 import * as secp256k1DIDKey from "@transmute/did-key-secp256k1";
-import Signatures from "./Signatures";
-import * as PubSubInstance from "../graphQL-interface/PubSub";
-import type { PubSub } from "graphql-subscriptions";
+import Signatures from "./Signatures.ts";
 import { resolver } from "@transmute/did-key.js";
 import { v4 as uuidv4 } from "uuid";
 import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
@@ -26,7 +24,7 @@ import {
   genRandomDigits,
   AGENT_AUTH_CAPABILITY,
   Capability,
-} from "./Auth";
+} from "./Auth.ts";
 import * as jose from "jose";
 import * as crypto from "crypto";
 import KeyEncoder from "key-encoder";
@@ -44,7 +42,6 @@ export default class AgentService {
   #fileProfile: string;
   #agent?: Agent;
   #agentLanguage?: Language;
-  #pubsub: PubSub;
   #requests: Map<string, AuthInfo>;
   #tokenValidPeriod: number;
   #adminCredential: string;
@@ -61,7 +58,6 @@ export default class AgentService {
     } catch (e) {
       this.#apps = [];
     }
-    this.#pubsub = PubSubInstance.get();
     this.#readyPromise = new Promise((resolve) => {
       this.#readyPromiseResolve = resolve;
     });

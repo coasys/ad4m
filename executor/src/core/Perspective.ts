@@ -1,14 +1,14 @@
 import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkStatus, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
 import { Link, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
-import type AgentService from "./agent/AgentService";
-import type LanguageController from "./LanguageController";
-import * as PubSub from './graphQL-interface/PubSub'
-import type PerspectiveContext from "./PerspectiveContext"
-import PrologInstance from "./PrologInstance";
-import { MainConfig } from "./Config";
+import type AgentService from "./agent/AgentService.ts";
+import type LanguageController from "./LanguageController.ts";
+import * as PubSub from './graphQL-interface/PubSub.ts'
+import type PerspectiveContext from "./PerspectiveContext.ts"
+import PrologInstance from "./PrologInstance.ts";
+import { MainConfig } from "./Config.ts";
 import { Mutex } from 'async-mutex'
 import { DID } from "@perspect3vism/ad4m/lib/src/DID";
-import { PerspectivismDb } from "./db";
+import { PerspectivismDb } from "./db.ts";
 
 const maxRetries = 10;
 const backoffStep = 200;
