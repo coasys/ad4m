@@ -32,13 +32,11 @@ let loadSource = async ({path}) => {
   }
 
   let contents = await source.text()
-  console.log('test 2', contents)
   let pattern = /\/\/# sourceMappingURL=(\S+)/
   let match = contents.match(pattern)
   if (match) {
       let url = new URL(match[1], source.url)
       let dataurl = await loadMap(url)
-      console.log('wow', dataurl)
       let comment = `//# sourceMappingURL=${dataurl}`
       contents = contents.replace(pattern, comment)
   }
