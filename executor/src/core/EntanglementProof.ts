@@ -1,5 +1,5 @@
-import path from "path";
-import fs from "fs";
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import AgentService from "./agent/AgentService.ts";
 
 import { EntanglementProof } from '@perspect3vism/ad4m';
@@ -28,7 +28,7 @@ export default class EntanglementProofController {
             entanglementProofs = entanglementProofs.concat(proofs);
             entanglementProofs = Array.from(new Set(entanglementProofs));
         } else {
-            entanglementProofs = proofs 
+            entanglementProofs = proofs
         }
 
         fs.writeFileSync(this.#entanglementProofsFile, JSON.stringify(entanglementProofs))
@@ -49,7 +49,7 @@ export default class EntanglementProofController {
             let entanglementProofs: EntanglementProof[] = Array.from(JSON.parse(fs.readFileSync(this.#entanglementProofsFile).toString()));
             return entanglementProofs
         } else {
-            return [] 
+            return []
         }
     }
 }

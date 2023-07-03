@@ -6,7 +6,7 @@ import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, ag
 // is missing on some machines...
 import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor.ts'
 import getPort from 'get-port';
-import fs from "fs";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import { createResolvers } from "./core/graphQL-interface/GraphQL.ts";
 
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
@@ -16,7 +16,7 @@ export interface OuterConfig {
   resourcePath: string
   //Path to be used for storing ad4m data
   appDataPath: string
-  //Seed file used to load initial languages & agent configuration 
+  //Seed file used to load initial languages & agent configuration
   networkBootstrapSeed: string
   //Should the ad4m-executor be started with only the languageLanguage, so it can be used for publish other system languages
   languageLanguageOnly?: boolean,
@@ -79,7 +79,7 @@ export interface SeedFileSchema {
   neighbourhoodLanguage: string,
   //Settings to be injected into neighbourhoodLanguage
   neighbourhoodLanguageSettings?: object,
-  //Bundle file containg langauge language code 
+  //Bundle file containg langauge language code
   languageLanguageBundle: string,
   //Settings to be injected into languageLanguage
   languageLanguageSettings?: object,
@@ -87,7 +87,7 @@ export interface SeedFileSchema {
 
 /// Main function which starts ad4m-executor
 export async function init(config: OuterConfig): Promise<PerspectivismCore> {
-    let { 
+    let {
       resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
       mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, adminCredential, swiplPath, swiplHomePath,runDappServer,
       dAppPort
@@ -120,7 +120,7 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       if (!networkBootstrapSeedData.agentLanguage) {
         throw new Error('Agent Language hash not passed in the seed file');
       }
-      
+
       if (!networkBootstrapSeedData.neighbourhoodLanguage) {
         throw new Error('Neighbourhood Language hash not passed in the seed file');
       }
@@ -133,11 +133,11 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
     //Core adm4-executor System languages
     let systemLanguages = [
       networkBootstrapSeedData.languageLanguageBundle,
-      networkBootstrapSeedData.agentLanguage,  
+      networkBootstrapSeedData.agentLanguage,
       networkBootstrapSeedData.neighbourhoodLanguage,
       networkBootstrapSeedData.perspectiveLanguage
     ]
-    //Languages to be pre-loaded as supplied in the appLanguageAliases 
+    //Languages to be pre-loaded as supplied in the appLanguageAliases
     let preloadLanguages: string[] = [];
 
     let coreLanguageAliases = {} as LanguageAlias;
@@ -158,16 +158,16 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
         preloadLanguages.push(address);
       })
     }
-    
 
-    console.log("\x1b[2m", 
+
+    console.log("\x1b[2m",
       "AD4M executor starting with version: ", ad4mExecutorVersion, "\n",
-      "Starting ad4m core with path:", appDataPath, "\n", 
+      "Starting ad4m core with path:", appDataPath, "\n",
       "=> AD4M core language addresses: languageLanguage bundle (hidden) + ", systemLanguages.slice(1, systemLanguages.length), "\n",
       "Languages to be preloaded, as supplied by appLangAliases", preloadLanguages, "\n",
-      "Language aliases:", languageAliases, "\n", 
+      "Language aliases:", languageAliases, "\n",
       "Bootstrap fixtures:", bootstrapFixtures, "\n",
-      "Resource path:", resourcePath, "\n", 
+      "Resource path:", resourcePath, "\n",
       "Bootstrap seed:", networkBootstrapSeed, "\n",
       "\x1b[0m"
     );

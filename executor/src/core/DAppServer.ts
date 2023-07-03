@@ -1,6 +1,6 @@
-import http from "http";
-import path from "path";
-import fs from "fs";
+import * as http from "https://deno.land/std@0.177.0/http/mod.ts";
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 
 export default function runDAppServer(port: number) {
     http.createServer(function (request, response) {
@@ -11,7 +11,7 @@ export default function runDAppServer(port: number) {
         } else {
             filePath = path.join(__dirname, "../../public", filePath || "")
         }
-    
+
         var extname = path.extname(filePath);
         var contentType = 'text/html';
         switch (extname) {
@@ -26,7 +26,7 @@ export default function runDAppServer(port: number) {
                 break;
             case '.png':
                 contentType = 'image/png';
-                break;      
+                break;
             case '.jpg':
                 contentType = 'image/jpg';
                 break;
@@ -45,7 +45,7 @@ export default function runDAppServer(port: number) {
                 else {
                     response.writeHead(500);
                     response.end('Sorry, check with the site admin for error: '+error.code+' ..\n');
-                    response.end(); 
+                    response.end();
                 }
             }
             else {
@@ -53,7 +53,7 @@ export default function runDAppServer(port: number) {
                 response.end(content, 'utf-8');
             }
         });
-    
+
     }).listen(port);
     console.log("\x1b[32m", `Ξ 🦄 DApp integration server running at: http://127.0.0.1:${port}/`, "\x1b[0m");
 }

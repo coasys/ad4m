@@ -23,7 +23,7 @@ import {
   Capability,
 } from "./Auth.ts";
 import * as jose from "jose";
-import * as crypto from "crypto";
+import * as crypto from "https://deno.land/std@0.177.0/path/mod.ts";
 import KeyEncoder from "key-encoder";
 import * as secp from "@noble/secp256k1";
 

@@ -22,7 +22,7 @@ import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo.ts'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config.ts'
 // import { OuterConfig } from '../main.ts'
-import path from "path";
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
 import { sleep } from "./utils.ts";
 
 export interface InitServicesParams {
@@ -101,7 +101,7 @@ export default class PerspectivismCore {
         }
         if (!args) {
             result = await this.resolvers[type][fnName](context);
-        } 
+        }
         if (!context) {
             result = await this.resolvers[type][fnName](args);
         }
@@ -163,7 +163,7 @@ export default class PerspectivismCore {
         }
         return this.#entanglementProofController
     }
-    
+
     get database(): PerspectivismDb {
         return this.#db
     }

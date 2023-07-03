@@ -1,7 +1,7 @@
-import path from "path"
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts"
 import PrologInstance from "./PrologInstance.ts"
 import { expect } from "chai";
-import { fileURLToPath } from "url";
+import { fileURLToPath } from "https://deno.land/std@0.177.0/url/mod.ts";
 
 const linksProgram = `
 linkFact(1,2).

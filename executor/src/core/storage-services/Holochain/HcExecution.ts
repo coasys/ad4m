@@ -1,4 +1,4 @@
-import child_process from "child_process";
+import * as child_process from "https://deno.land/std@0.177.0/node/child_process.ts";
 
 function escapeShellArg (arg: string) {
     return arg.replace(" ", "\ ");
