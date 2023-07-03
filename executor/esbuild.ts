@@ -120,7 +120,6 @@ const result = await esbuild.build({
             name: "https://deno.land/std@0.177.0/node/util.ts",
             setup(build) {
                 build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.177.0/node/util.ts$`) }, (args) => {
-                    console.log('test', args)
                     return { path: `https://deno.land/std@0.177.0/node/util.ts`, namespace: 'imports' };
                 });
 
@@ -133,7 +132,6 @@ const result = await esbuild.build({
             name: "https://deno.land/std@0.177.0/node/os.ts",
             setup(build) {
                 build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.177.0/node/os.ts$`) }, (args) => {
-                    console.log('test', args)
                     return { path: `https://deno.land/std@0.177.0/node/os.ts`, namespace: 'imports' };
                 });
 
@@ -146,7 +144,6 @@ const result = await esbuild.build({
             name: "https://deno.land/std@0.177.0/node/global.ts",
             setup(build) {
                 build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.177.0/node/global.ts$`) }, (args) => {
-                    console.log('test', args)
                     return { path: `https://deno.land/std@0.177.0/node/global.ts`, namespace: 'imports' };
                 });
 
@@ -159,7 +156,6 @@ const result = await esbuild.build({
             name: "https://deno.land/std@0.177.0/node/path.ts",
             setup(build) {
                 build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.177.0/node/path.ts$`) }, (args) => {
-                    console.log('test', args)
                     return { path: `https://deno.land/std@0.177.0/node/path.ts`, namespace: 'imports' };
                 });
 
