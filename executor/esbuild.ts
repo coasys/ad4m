@@ -1,7 +1,13 @@
 import * as esbuild from "https://deno.land/x/esbuild@v0.18.2/mod.js";
 import { denoPlugins } from "https://deno.land/x/esbuild_deno_loader@0.8.1/mod.ts";
 import customModule, { loadSource, resolveUrl } from './scripts/customHttpDownloader.js'
-import {join} from "https://deno.land/std@0.177.0/path/mod.ts";
+
+const stdLibs = [
+    'crypto', 'path', 'fs', 'net', 'dns', 'cluster', 'https',
+    'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
+    'zlib', 'assert', 'buffer', 'constants', 'querystring', 'string_decoder',
+    'global', 'process',
+]
 
 const currentWorkingDirectory = Deno.cwd();
 
@@ -12,39 +18,6 @@ function denoAlias(nodeModule) {
             build.onResolve({ filter: new RegExp(`^${nodeModule}$`) }, (args) => {
                 return { path: `https://deno.land/std@0.177.0/${nodeModule}/mod.ts`, external: true};
             });
-        },
-    }
-}
-
-function denoStdAlias() {
-    return {
-        name: `alias`,
-        setup(build) {
-        build.onResolve({ filter:  /[^https:\/\/]*/ }, (args) => {
-            if (args.path.startsWith(".")) {
-                    console.log('test3', args, args.path, join(args.resolveDir, args.path))
-                    return { path: join(args.resolveDir, args.path) };
-                } else {
-                    return { path: args.path, namespace: 'imports' }
-                }
-            });
-
-            build.onLoad({filter:/.*/, namespace: 'imports'}, (build) => {
-                console.log('test44', build)
-                if (build.path === 'swipl-stdio') {
-                    console.log('test4', build)
-                    return loadSource({
-                        ...build,
-                        path: "https://github.com/perspect3vism/node-swipl-stdio#2550966667fa24eebbb1e4fb030e5e7e486b4999"
-                    })
-                } else {
-                    console.log('test5', build)
-                    return loadSource({
-                        ...build,
-                        path: `https://deno.land/std@0.177.0/${build.path}/mod.ts`
-                    })
-                }
-            })
         },
     }
 }
@@ -60,13 +33,7 @@ const result = await esbuild.build({
     charset: 'ascii',
     legalComments: 'inline',
     plugins: [
-        denoStdAlias(),
-        ...[
-            'crypto', 'path', 'fs', 'net', 'dns', 'cluster', 'https',
-            'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
-            'zlib', 'assert', 'buffer', 'constants', 'querystring', 'string_decoder',
-            'global', 'process',
-        ].map(denoAlias),
+        ...stdLibs.map(denoAlias),
         {
             name: `dns-promisis-alias`,
             setup(build) {

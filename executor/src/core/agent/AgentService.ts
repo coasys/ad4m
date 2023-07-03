@@ -1,5 +1,5 @@
-import * as path from "path";
-import * as fs from "fs";
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import { Key } from "../../wallet_extension.d.ts";
 import {
   Language,
@@ -210,7 +210,7 @@ export default class AgentService {
     WALLET.createMainKey()
     const didDocument = WALLET.getMainKeyDocument()
     const key = didDocument.verificationMethod[0]
-    
+
     this.#did = key.controller;
     this.#didDocument = JSON.stringify(await resolver.resolve(this.#did));
     this.#agent = new Agent(this.#did);
@@ -355,7 +355,7 @@ export default class AgentService {
       this.#apps = apps;
       fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
 
-      await PUBSUB.publish(PubSubInstance.APPS_CHANGED, null);      
+      await PUBSUB.publish(PubSubInstance.APPS_CHANGED, null);
     }
 
     return jwt;
