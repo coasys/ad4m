@@ -20,6 +20,7 @@ export const os = internalOs
 
 import "https://deno.land/x/xhr@0.3.0/mod.ts";
 
-import { HTMLElement } from "https://esm.sh/linkedom"
+import { HTMLElement } from "linkedom"
 
+// @ts-ignore
 globalThis.HTMLElement = HTMLElement;
