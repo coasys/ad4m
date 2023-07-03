@@ -1,6 +1,0 @@
-{
-  "imports": {
-    "@perspect3vism/ad4m": "../../core/lib/index.js",
-    "get-port": "npm:get-port@5.1.1"
-  }
-}

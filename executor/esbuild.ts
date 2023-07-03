@@ -1,4 +1,5 @@
 import * as esbuild from "https://deno.land/x/esbuild@v0.18.2/mod.js";
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
 
 function denoAlias(nodeModule) {
     return {
