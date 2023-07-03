@@ -1,13 +1,13 @@
-import PerspectivismCore from "./core/PerspectivismCore.ts";
-import create from "./core/PerspectivismCore.ts";
-import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, agentLanguageAlias, neighbourhoodLanguageAlias, perspectiveLanguageAlias, ad4mExecutorVersion } from "./core/Config.ts"
+import PerspectivismCore from "./core/PerspectivismCore";
+import create from "./core/PerspectivismCore";
+import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, agentLanguageAlias, neighbourhoodLanguageAlias, perspectiveLanguageAlias, ad4mExecutorVersion } from "./core/Config"
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
-import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor.ts'
+import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
 import getPort from 'get-port';
 import fs from "fs";
-import { createResolvers } from "./core/graphQL-interface/GraphQL.ts";
+import { createResolvers } from "./core/graphQL-interface/GraphQL";
 
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 

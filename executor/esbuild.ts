@@ -1,5 +1,4 @@
 import * as esbuild from "https://deno.land/x/esbuild@v0.18.2/mod.js";
-import { denoPlugins } from "https://deno.land/x/esbuild_deno_loader@0.8.1/mod.ts";
 
 function denoAlias(nodeModule) {
     return {
@@ -13,7 +12,7 @@ function denoAlias(nodeModule) {
 }
 
 const result = await esbuild.build({
-    entryPoints: ['src/main.ts'],
+    entryPoints: ['src/deno.ts'],
     outfile: 'lib/bundle.js',
     bundle: true,
     platform: 'node',
@@ -76,9 +75,7 @@ const result = await esbuild.build({
                     return { path: `https://deno.land/std@0.177.0/media_types/mod.ts`, external: true };
                 });
             },
-        },
-        ...denoPlugins({configPath: "/Users/josh/dev/ad4m/executor/scripts/deno.json"}), 
-        //...denoPlugins()
+        }
     ],
 });
 console.log(result.outputFiles);
