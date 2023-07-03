@@ -1,11 +1,11 @@
 {
   "imports": {
     "@perspect3vism/ad4m": "../core/lib/index.js",
-    "get-port": "https://esm.sh/get-port@5.1.1",
-    "js-yaml": "https://esm.sh/js-yaml@4.1.0",
+    "get-port": "https://esm.sh/v122/get-port@5.1.1/es2022/get-port.mjs",
+    "js-yaml": "https://esm.sh/v127/js-yaml@4.1.0/es2022/js-yaml.mjs",
     "@noble/secp256k1": "https://esm.sh/v127/@noble/secp256k1@1.7.0/es2022/secp256k1.mjs",
     "@msgpack/msgpack": "https://esm.sh/v127/@msgpack/msgpack@2.7.2/es2022/msgpack.mjs",
-    "uuid": "https://esm.sh/uuid@8.3.1",
+    "uuid": "https://esm.sh/v127/uuid@8.3.1/es2022/uuid.mjs",
     "json-stable-stringify": "https://esm.sh/json-stable-stringify@1.0.1",
     "async-mutex": "https://esm.sh/async-mutex@0.3.2",
     "sha256": "https://esm.sh/sha256@0.2.0",
