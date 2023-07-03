@@ -1,5 +1,5 @@
 let setup = ({onResolve, onLoad}) => {
-  onResolve({filter: /^https:\/\//}, resolveFile)
+  onResolve({filter: /^https:\/\/github.com/}, resolveFile)
   onResolve({filter: /.*/, namespace: 'http-fetch'}, resolveUrl)
   onLoad({filter: /.*/, namespace: 'http-fetch'}, loadSource)
 }
@@ -13,8 +13,6 @@ let resolveFile = ({path}) => {
 }
 
 export let resolveUrl = ({path, importer}) => {
-  console.log('wow 2', path, importer)
-
   return {
     path: new URL(path, importer).href,
     namespace: 'http-fetch'
@@ -30,8 +28,6 @@ export let loadSource = async ({path}) => {
 
       path = url;
   }
-
-  console.log('test 1', path)
 
   source = await fetch(path)
 

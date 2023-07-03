@@ -23,7 +23,7 @@ function denoAlias(nodeModule) {
 }
 
 const result = await esbuild.build({
-    entryPoints: ['src/main.ts'],
+    entryPoints: ['src/deno.ts'],
     outfile: 'lib/bundle.js',
     bundle: true,
     platform: 'node',
