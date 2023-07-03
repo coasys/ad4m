@@ -6,7 +6,7 @@ const stdLibs = [
     'crypto', 'path', 'fs', 'net', 'dns', 'cluster', 'https',
     'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
     'zlib', 'assert', 'buffer', 'constants', 'querystring', 'string_decoder',
-    'global', 'process',
+    'global', 'process', 'ws'
 ]
 
 const currentWorkingDirectory = Deno.cwd();
@@ -16,6 +16,9 @@ function denoAlias(nodeModule) {
         name: `${nodeModule}-alias`,
         setup(build) {
             build.onResolve({ filter: new RegExp(`^${nodeModule}$`) }, (args) => {
+                console.log('aaaaa', args.path)
+                if (args.path === 'ws') {
+                }
                 return { path: `https://deno.land/std@0.177.0/${nodeModule}/mod.ts`, external: true};
             });
         },
@@ -62,10 +65,12 @@ const result = await esbuild.build({
             name: `ws-alias`,
             setup(build) {
                 build.onResolve({ filter: new RegExp(`^ws$`) }, (args) => {
+                    console.log('weeee', args)
                     return { path: `https://deno.land/x/websocket@v0.1.4/mod.ts`, external: true };
                 });
             },
         },
+
         // {
         //     name: "https://deno.land/std@0.150.0/media_types/mod.ts",
         //     setup(build) {

@@ -10,7 +10,7 @@
     "async-mutex": "https://esm.sh/async-mutex@0.3.2",
     "sha256": "https://esm.sh/sha256@0.2.0",
     "path": "https://deno.land/std@0.177.0/path/mod.ts",
-    "@holochain/client": "git:https://github.com/perspect3vism/holochain-client-js#f7d14774843f874e610f5ff3e89267c912ec5520",
+    "@holochain/client": "git:https://github.com/perspect3vism/holochain-client-js#b49ec6464dc8979571dc1d73355f36398be4cd20",
     "lodash": "https://esm.sh/lodash@4.17.21"
   },
   "lint": {
