@@ -66,14 +66,6 @@ const result = await esbuild.build({
                 });
             },
         },
-        {
-            name: `aloe`,
-            setup(build) {
-                build.onResolve({ filter: new RegExp(`^aloedb-node$`) }, (args) => {
-                    return { path: 'https://deno.land/x/aloedb@0.9.0/mod.ts', external: true };
-                });
-            },
-        }
         // {
         //     name: "https://deno.land/std@0.150.0/media_types/mod.ts",
         //     setup(build) {

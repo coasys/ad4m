@@ -23,5 +23,5 @@
       "include": ["ban-untagged-todo"],
       "exclude": ["no-unused-vars", "ban-ts-comment", "no-explicit-any", "ban-types", "prefer-const"]
     }
-  },
+  }
 }
