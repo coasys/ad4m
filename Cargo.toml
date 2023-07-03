@@ -6,3 +6,7 @@ members = [
     "rust-executor",
     "ui/src-tauri"
 ]
+
+
+[patch.crates-io]
+sodiumoxide = { git = "https://github.com/fayeed/sodiumoxide" }
