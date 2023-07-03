@@ -24,8 +24,6 @@ let loadSource = async ({path}) => {
       path = url;
   }
 
-  console.log('test 1', path)
-
   source = await fetch(path)
 
   if (!source.ok) {
