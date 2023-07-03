@@ -78,6 +78,7 @@
     "https://deno.land/x/esbuild_deno_loader@0.8.1/src/plugin_deno_loader.ts": "166356133ee63d80e5559a10c18e10b625da96e39a4518b8c7adfef718bb4e32",
     "https://deno.land/x/esbuild_deno_loader@0.8.1/src/plugin_deno_resolver.ts": "0449ed23ae93db1ec74d015a46934aefd7ba7a8f719f7a4980b616cb3f5bbee4",
     "https://deno.land/x/esbuild_deno_loader@0.8.1/src/shared.ts": "33052684aeb542ebd24da372816bbbf885cd090a7ab0fde7770801f7f5b49572",
+    "https://deno.land/x/esbuild_plugin_http_fetch@v1.0.2/index.js": "e4c54ff2747437390dbc1819fe10d38f6497fb1552a3e54a5f90c0b6d88ecfce",
     "https://deno.land/x/importmap@0.2.1/_util.ts": "ada9a9618b537e6c0316c048a898352396c882b9f2de38aba18fd3f2950ede89",
     "https://deno.land/x/importmap@0.2.1/mod.ts": "ae3d1cd7eabd18c01a4960d57db471126b020f23b37ef14e1359bbb949227ade"
   }

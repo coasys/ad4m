@@ -74,7 +74,7 @@
     "unzipper": "^0.10.11"
   },
   "dependencies": {
-    "@holochain/client": "perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",
+    "@holochain/client": "perspect3vism/holochain-client-js#f7d14774843f874e610f5ff3e89267c912ec5520",
     "@noble/secp256k1": "^1.7.0",
     "@perspect3vism/ad4m": "*",
     "@transmute/did-key-ed25519": "^0.2.1-unstable.29",
@@ -96,7 +96,7 @@
     "run-script-os": "^1.1.6",
     "sha256": "^0.2.0",
     "sha3": "^2.1.3",
-    "swipl-stdio": "https://github.com/perspect3vism/node-swipl-stdio.git",
+    "swipl-stdio": "perspect3vism/node-swipl-stdio#2550966667fa24eebbb1e4fb030e5e7e486b4999",
     "tmp": "^0.2.1",
     "@msgpack/msgpack": "^2.7.2"
   }

@@ -1,5 +1,8 @@
 import * as esbuild from "https://deno.land/x/esbuild@v0.18.2/mod.js";
 import { denoPlugins } from "https://deno.land/x/esbuild_deno_loader@0.8.1/mod.ts";
+import customModule from './scripts/customHttpDownloader.js'
+
+const currentWorkingDirectory = Deno.cwd();
 
 function denoAlias(nodeModule) {
     return {
@@ -27,7 +30,7 @@ const result = await esbuild.build({
             'crypto', 'path', 'fs', 'net', 'dns', 'cluster', 'https',
             'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
             'zlib', 'assert', 'buffer', 'constants', 'querystring', 'string_decoder',
-            'global', 'process', 
+            'global', 'process',
         ].map(denoAlias),
         {
             name: `dns-promisis-alias`,
@@ -77,7 +80,8 @@ const result = await esbuild.build({
                 });
             },
         },
-        ...denoPlugins({configPath: "/Users/josh/dev/ad4m/executor/deno.json"}), 
+        customModule,
+        ...denoPlugins({configPath: `${currentWorkingDirectory}/deno.json`}),
     ],
 });
 console.log(result.outputFiles);
