@@ -4,10 +4,6 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { fileURLToPath } from 'url';
 import { apolloClient, startExecutor } from "./utils";
-import fetch from 'node-fetch'
-
-//@ts-ignore
-global.fetch = fetch
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

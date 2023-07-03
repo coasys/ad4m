@@ -1,8 +1,6 @@
 import path from "path";
 //@ts-ignore
 import swipl from 'swipl-stdio'
-//@ts-ignore
-import tmp from 'tmp'
 import { MainConfig } from "./Config.ts";
 
 export default class PrologInstance {
@@ -40,12 +38,12 @@ export default class PrologInstance {
     };
 
     async consult(program: string) {
-        const tmpobj = tmp.fileSync()
-        //@ts-ignore
-        fs.writeFileSync(tmpobj.name, program);
-        const result = await this.call(`consult('${tmpobj.name}').`)
-        tmpobj.removeCallback()
-        return result
+        // const tmpobj = tmp.fileSync()
+        // //@ts-ignore
+        // fs.writeFileSync(tmpobj.name, program);
+        // const result = await this.call(`consult('${tmpobj.name}').`)
+        // tmpobj.removeCallback()
+        return program
     }
 
     close() {

@@ -1,5 +1,5 @@
-import * as path from "node:path";
-import * as fs from "node:fs";
+import * as path from "path";
+import * as fs from "fs";
 import { Key } from "../../wallet_extension.d.ts";
 import {
   Language,
@@ -9,10 +9,7 @@ import {
   ExceptionType,
 } from "@perspect3vism/ad4m";
 import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@perspect3vism/ad4m";
-import secp256k1 from "@noble/secp256k1";
-import * as secp256k1DIDKey from "@transmute/did-key-secp256k1";
 import Signatures from "./Signatures.ts";
-import { resolver } from "@transmute/did-key.js";
 import { v4 as uuidv4 } from "uuid";
 import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
 import {

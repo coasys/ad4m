@@ -9,7 +9,7 @@
 //import { makeExecutableSchema } from '@graphql-tools/schema';
 import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveHandle, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
-import type PerspectivismCore from '../PerspectivismCorets'
+import type PerspectivismCore from '../PerspectivismCore.ts'
 import * as PubSub from './PubSub.ts'
 //import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config.ts';
@@ -17,7 +17,6 @@ import * as Auth from '../agent/Auth.ts'
 import { checkCapability, checkTokenAuthorized } from '../agent/Auth.ts'
 //import { withFilter } from 'graphql-subscriptions';
 import { OuterConfig } from '../../main.ts';
-import path from 'path';
 import Perspective from '../Perspective.ts';
 import { Capability } from '../agent/Auth.ts'
 import { Capabilities } from '../agent/Auth.ts'

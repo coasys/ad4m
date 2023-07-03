@@ -1,6 +1,5 @@
-import path from 'path'
+//import path from 'node:path'
 //import fetch from 'node-fetch'
-import { resolver } from '@transmute/did-key.js';
 
 export class DIDResolver {
     #cacheMap = new Map()
@@ -13,7 +12,8 @@ export class DIDResolver {
         } 
         
         try {
-            const resolved = await resolver.resolve(did)
+            //const resolved = await resolver.resolve(did)
+            const resolved = null;
             if(resolved) {
                 return resolved
             }

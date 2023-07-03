@@ -1,6 +1,4 @@
 import lodash from "lodash";
-import path from "path";
-import * as fs from "fs";
 
 export type Capabilities = Capability[];
 export interface Capability {
