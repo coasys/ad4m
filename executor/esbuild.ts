@@ -83,7 +83,7 @@ const result = await esbuild.build({
         {
             name: `ws-alias`,
             setup(build) {
-                build.onResolve({ filter: new RegExp(`^ws$`) }, (args) => {
+                build.onResolve({ filter: new RegExp(`^https://deno.land/x/websocket@v0.1.4/mod.ts$`) }, (args) => {
                     return { path: `https://deno.land/x/websocket@v0.1.4/mod.ts`, external: true };
                 });
 
@@ -172,7 +172,6 @@ const result = await esbuild.build({
             name: "https://deno.land/x/xhr@0.3.0/mod.ts",
             setup(build) {
                 build.onResolve({ filter: new RegExp(`^https://deno.land/x/xhr@0.3.0/mod.ts$`) }, (args) => {
-                    console.log('test', args)
                     return { path: `https://deno.land/x/xhr@0.3.0/mod.ts`, namespace: 'imports' };
                 });
 
