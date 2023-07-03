@@ -50,12 +50,16 @@ const result = await esbuild.build({
                 build.onResolve({ filter: new RegExp(`^dns/promises$`) }, (args) => {
                     return { path: `https://deno.land/std@0.177.0/node/dns.ts`, external: true };
                 });
+
+                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
+                    return loadSource(args)
+                })
             },
         },
         {
             name: `child_process`,
             setup(build) {
-                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.177.0/node/child_process.ts$`) }, (args) => {
+                build.onResolve({ filter: new RegExp(`^child_process$`) }, (args) => {
                     return { path: `https://deno.land/std@0.177.0/node/child_process.ts`, namespace: 'imports' };
                 });
 
@@ -70,6 +74,10 @@ const result = await esbuild.build({
                 build.onResolve({ filter: new RegExp(`^fs/promises$`) }, (args) => {
                     return { path: `https://deno.land/std@0.177.0/node/fs.ts`, external: true };
                 });
+
+                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
+                    return loadSource(args)
+                })
             },
         },
         {
@@ -78,6 +86,10 @@ const result = await esbuild.build({
                 build.onResolve({ filter: new RegExp(`^ws$`) }, (args) => {
                     return { path: `https://deno.land/x/websocket@v0.1.4/mod.ts`, external: true };
                 });
+
+                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
+                    return loadSource(args)
+                })
             },
         },
         {
@@ -98,6 +110,10 @@ const result = await esbuild.build({
                 build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.150.0/media_types/mod.ts$`) }, (args) => {
                     return { path: `https://deno.land/std@0.177.0/media_types/mod.ts`, external: true };
                 });
+
+                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
+                    return loadSource(args)
+                })
             },
         },
         {
