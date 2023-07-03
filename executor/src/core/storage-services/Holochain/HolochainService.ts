@@ -1,6 +1,6 @@
 import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest, EncodedAppSignal } from '@holochain/client'
-import path from 'path'
-import fs from 'fs'
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate.ts"
 import { unpackDna, packDna } from "./HcExecution.ts"
 import type { Dna } from '@perspect3vism/ad4m'

@@ -15,7 +15,7 @@ import Signatures from './agent/Signatures.ts'
 import * as PubSub from './graphQL-interface/PubSub.ts'
 import EntanglementProofController from './EntanglementProof.ts'
 import runDAppServer from "./DAppServer.ts"
-import fs from 'fs'
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import { AgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService.ts'
 import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo.ts'

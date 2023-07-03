@@ -5,8 +5,8 @@ import {
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import fs from 'fs'
-import path from 'path'
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import * as Config from './Config.ts'
 import type HolochainService from './storage-services/Holochain/HolochainService.ts';
 import type AgentService from './agent/AgentService.ts'

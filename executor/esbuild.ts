@@ -73,16 +73,16 @@ const result = await esbuild.build({
                     return { path: 'https://deno.land/x/aloedb@0.9.0/mod.ts', external: true };
                 });
             },
-        },
-        {
-            name: "https://deno.land/std@0.150.0/media_types/mod.ts",
-            setup(build) {
-                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.150.0/media_types/mod.ts$`) }, (args) => {
-                    console.log('test 2', args)
-                    return { path: `https://deno.land/std@0.177.0/media_types/mod.ts`, external: true };
-                });
-            },
-        },
+        }
+        // {
+        //     name: "https://deno.land/std@0.150.0/media_types/mod.ts",
+        //     setup(build) {
+        //         build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.150.0/media_types/mod.ts$`) }, (args) => {
+        //             console.log('test 2', args)
+        //             return { path: `https://deno.land/std@0.177.0/media_types/mod.ts`, external: true };
+        //         });
+        //     },
+        // },
         customModule,
         ...denoPlugins({configPath: `${currentWorkingDirectory}/deno.json`}),
     ],

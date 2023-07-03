@@ -1,4 +1,3 @@
-import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
 // //@ts-ignore
 // import swipl from 'swipl-stdio'
 import { MainConfig } from "./Config.ts";

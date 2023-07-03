@@ -1,5 +1,5 @@
-import * as path from 'path';
-import * as fs from 'fs';
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import { MainConfig } from './Config.ts';
 
 const TRUSTED_AGENTS_FILE = "trustedAgents.json"

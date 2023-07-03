@@ -1,5 +1,5 @@
-import * as path from 'path';
-import * as fs from 'fs';
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import { Address, Expression } from '@perspect3vism/ad4m';
 
 export let ad4mExecutorVersion = "0.3.4";

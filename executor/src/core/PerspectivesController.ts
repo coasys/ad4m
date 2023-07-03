@@ -1,5 +1,5 @@
-import path from 'path'
-import fs from 'fs'
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSub from './graphQL-interface/PubSub.ts'
 import type PerspectiveContext from './PerspectiveContext.ts'

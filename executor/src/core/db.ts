@@ -1,6 +1,6 @@
-import { Database } from 'aloedb-node'
-import path from 'path'
-import fs from 'fs';
+import { Database } from 'https://deno.land/x/aloedb@0.9.0/mod.ts'
+import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.177.0/fs/mod.ts";
 import type { Expression, LinkExpression, LinkStatus, PerspectiveDiff } from "@perspect3vism/ad4m";  
 
 interface LinkSchema {
