@@ -11,8 +11,7 @@
     "swipl-stdio": "git:https://github.com/perspect3vism/node-swipl-stdio#2550966667fa24eebbb1e4fb030e5e7e486b4999",
     "sha256": "npm:sha256@0.2.0",
     "@holochain/client": "git:https://github.com/perspect3vism/holochain-client-js#f7d14774843f874e610f5ff3e89267c912ec5520",
-    "lodash": "npm:lodash@4.17.21",
-    "path": "https://deno.land/std@0.177.0/path/mod.ts"
+    "lodash": "npm:lodash@4.17.21"
   },
   "lint": {
     "files": {

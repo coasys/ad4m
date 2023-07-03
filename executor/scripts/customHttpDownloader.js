@@ -4,17 +4,24 @@ let setup = ({onResolve, onLoad}) => {
   onLoad({filter: /.*/, namespace: 'http-fetch'}, loadSource)
 }
 
-let resolveFile = ({path}) => ({
-  path: path,
-  namespace: 'http-fetch'
-})
+let resolveFile = ({path}) => {
+  console.log('wow', path)
+  return {
+    path: path,
+    namespace: 'http-fetch'
+  }
+}
 
-let resolveUrl = ({path, importer}) => ({
-  path: new URL(path, importer).href,
-  namespace: 'http-fetch'
-})
+export let resolveUrl = ({path, importer}) => {
+  console.log('wow 2', path, importer)
 
-let loadSource = async ({path}) => {
+  return {
+    path: new URL(path, importer).href,
+    namespace: 'http-fetch'
+  }
+}
+
+export let loadSource = async ({path}) => {
   let source;
   if (path.includes('perspect3vism')) {
       const commit = path.split("#");
@@ -23,6 +30,8 @@ let loadSource = async ({path}) => {
 
       path = url;
   }
+
+  console.log('test 1', path)
 
   source = await fetch(path)
 
