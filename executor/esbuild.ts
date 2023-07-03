@@ -22,6 +22,14 @@ const result = await esbuild.build({
     charset: 'ascii',
     legalComments: 'inline',
     plugins: [
+        {
+            name: `node:net`,
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^node:net$`) }, (args) => {
+                    return { path: path.resolve(`deno_std-0.177.0/node/net.ts`), external: false };
+                });
+            },
+        },
         ...[
             'crypto', 'path', 'fs', 'net', 'dns', 'cluster', 'https',
             'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
