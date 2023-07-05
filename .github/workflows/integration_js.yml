@@ -26,7 +26,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         override: true
-        toolchain: 1.63.0
+        toolchain: 1.68.2
 
     - name: Cache cargo
       id: cache-cargo
