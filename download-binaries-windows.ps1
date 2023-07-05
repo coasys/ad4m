@@ -1,4 +1,4 @@
-mkdir executor/temp/binary
+mkdir rust-executor/temp/binary
 
 wget https://github.com/perspect3vism/ad4m/releases/download/binary-deps-0.1.0/hc-windows-0.1.0.exe -O ./executor/temp/binary/hc.exe
 
@@ -11,4 +11,4 @@ if (-not (Test-Path $global_path -PathType Container)) {
   exit 1
 }
 
-Copy-Item ./executor/temp/binary/hc.exe $global_path
+Copy-Item ./rust-executor/temp/binary/hc.exe $global_path
