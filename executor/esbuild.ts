@@ -1,6 +1,6 @@
 import * as esbuild from "https://deno.land/x/esbuild@v0.18.2/mod.js";
 import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
-import { loadSource, resolveUrl } from "./scripts/customHttpDownloader.js";
+import { loadSource, resolveUrl } from "./customHttpDownloader.js";
 
 function denoAlias(nodeModule) {
     return {
