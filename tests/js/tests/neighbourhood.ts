@@ -1,5 +1,5 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput } from "@perspect3vism/ad4m";
-import { TestContext } from './full-integration.test'
+import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
 import fs from "fs";
 import { v4 as uuidv4 } from 'uuid';

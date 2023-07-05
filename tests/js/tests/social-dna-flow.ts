@@ -1,5 +1,5 @@
 import { Link, LinkQuery, Literal } from "@perspect3vism/ad4m";
-import { TestContext } from './full-integration.test'
+import { TestContext } from './integration.test'
 import { expect } from "chai";
 
 export default function socialDNATests(testContext: TestContext) {

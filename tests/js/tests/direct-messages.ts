@@ -1,5 +1,5 @@
 import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@perspect3vism/ad4m'
-import { TestContext } from './full-integration.test'
+import { TestContext } from './integration.test'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";
 import * as sinon from "sinon";
