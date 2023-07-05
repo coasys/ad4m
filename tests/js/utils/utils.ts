@@ -43,7 +43,7 @@ export async function startExecutor(dataPath: string,
     let executorProcess = null as ChildProcess | null;
     rmSync(dataPath, { recursive: true, force: true })
     console.log("Initialzing executor data directory")
-    execSync(`../../target/debug/ad4m init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {})
+    execSync(`../../target/release/ad4m init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {})
     
     console.log("Starting executor")
     try {
@@ -53,9 +53,9 @@ export async function startExecutor(dataPath: string,
     }
     
     if (!adminCredential) {
-        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
+        executorProcess = exec(`../../target/release/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
     } else {
-        executorProcess = exec(`../../target/debug/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
+        executorProcess = exec(`../../target/release/ad4m run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
