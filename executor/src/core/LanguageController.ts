@@ -10,13 +10,14 @@ import path from 'path'
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
-import * as PubSub from './graphQL-interface/PubSub'
+import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
 import { PerspectivismDb } from './db';
 import stringify from 'json-stable-stringify'
+import { getPubSub } from './utils';
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
@@ -28,8 +29,6 @@ interface Services {
     signatures: Signatures,
     db: PerspectivismDb
 }
-
-class ImportError extends Error {}
 
 const importModule = async (modulePath: string) => {
     // To deal with ESM on windows requires absolute path and file protocol
@@ -71,6 +70,7 @@ export default class LanguageController {
     #signatures: Signatures;
     #db: PerspectivismDb;
     #config: Config.MainConfig;
+    #pubSub: PubSub;
 
     #agentLanguage?: Language
     #languageLanguage?: Language
@@ -89,6 +89,7 @@ export default class LanguageController {
         this.#telepresenceSignalObservers = []
         this.#syncStateChangeObservers = []
         this.#config = (context as any).config;
+        this.#pubSub = getPubSub();
     }
 
     async loadLanguages() {
@@ -163,8 +164,8 @@ export default class LanguageController {
                         let errMsg = `LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE: ${bundlePath}`
                         console.error(errMsg)
                         console.error(e)
-                        await PUBSUB.publish(
-                            PubSub.EXCEPTION_OCCURRED_TOPIC,
+                        await this.#pubSub.publish(
+                            PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
                             {
                                 title: "Failed to load installed language",
                                 message: errMsg,
@@ -215,7 +216,7 @@ export default class LanguageController {
         // } catch (e) {
         //     const errMsg = `Could not load language ${e}`;
         //     console.error(errMsg);
-        //     await PUBSUB.publish(
+        //     await this.#pubSub.publish(
         //         PubSub.EXCEPTION_OCCURRED_TOPIC,
         //         {
         //             title: "Failed to load installed language",
@@ -241,7 +242,7 @@ export default class LanguageController {
         const storageDirectory = this.getLanguageStoragePath(hash)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: PUBSUB});
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.#pubSub});
         const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {
@@ -266,7 +267,7 @@ export default class LanguageController {
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
-                await PUBSUB.publish(PubSub.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
+                await this.#pubSub.publish(PubSubDefinitions.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
         }
 
@@ -289,7 +290,7 @@ export default class LanguageController {
         const storageDirectory = this.getLanguageStoragePath(hash)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: PUBSUB});
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: this.#pubSub});
         //@ts-ignore
         const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings})
 
@@ -315,7 +316,7 @@ export default class LanguageController {
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
             language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
-                await PUBSUB.publish(PubSub.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
+                await this.#pubSub.publish(PubSubDefinitions.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
         }
 
@@ -504,8 +505,8 @@ export default class LanguageController {
                 ) {
                     let errMsg = `Language not created by trusted agent: ${languageAuthor} and is not templated... aborting language install. Language metadata: ${stringify(languageMetaData)}`
                     console.error(errMsg)
-                    await PUBSUB.publish(
-                        PubSub.EXCEPTION_OCCURRED_TOPIC,
+                    await this.#pubSub.publish(
+                        PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
                         {
                             title: "Failed to install language",
                             message: errMsg,
@@ -543,8 +544,8 @@ export default class LanguageController {
                     }
                 } else {
                     let errMsg = "Agent which created source language for language trying to be installed is not a trustedAgent... aborting language install";
-                    await PUBSUB.publish(
-                        PubSub.EXCEPTION_OCCURRED_TOPIC,
+                    await this.#pubSub.publish(
+                        PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
                         {
                             title: "Failed to install language",
                             message: errMsg,
@@ -1069,8 +1070,8 @@ export default class LanguageController {
                 let errMsg = `Error trying to verify signature for expression: ${expressionFormatted}`
                 console.error(errMsg)
                 console.error(e)
-                await PUBSUB.publish(
-                    PubSub.EXCEPTION_OCCURRED_TOPIC,
+                await this.#pubSub.publish(
+                    PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
                     {
                         title: "Failed to get expression",
                         message: errMsg,

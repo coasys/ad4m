@@ -12,7 +12,7 @@ import * as GraphQL from './graphQL-interface/GraphQL'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
-import * as PubSub from './graphQL-interface/PubSub'
+import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import EntanglementProofController from './EntanglementProof'
 import runDAppServer from "./DAppServer"
 import fs from 'fs'
@@ -23,7 +23,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
 import { OuterConfig } from '../main'
 import path from "path";
-import { sleep } from "./utils";
+import { getPubSub, sleep } from "./utils";
 
 export interface InitServicesParams {
     agentService: AgentService,
@@ -254,9 +254,9 @@ export default class PerspectivismCore {
     async languageSignal(signal: any) {
         // //@ts-ignore
         // console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
-        //NOTE (optimization): worth considering if its worth keeping around pubsub in this or if we should just get a new pubsub here
+        let pubSub = getPubSub();
         //@ts-ignore
-        await PUBSUB.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
+        await pubSub.publish(PubSubDefinitions.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
     }
 
     initControllers() {

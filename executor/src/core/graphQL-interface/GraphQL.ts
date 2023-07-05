@@ -9,19 +9,20 @@
 //import { makeExecutableSchema } from '@graphql-tools/schema';
 import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveHandle, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
-import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
+// import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
 import type PerspectivismCore from '../PerspectivismCore'
-import * as PubSub from './PubSub'
+import * as PubSubDefinitions from './SubscriptionDefinitions'
 //import { GraphQLScalarType } from "graphql";
 import { ad4mExecutorVersion } from '../Config';
 import * as Auth from '../agent/Auth'
 import { checkCapability, checkTokenAuthorized } from '../agent/Auth'
 //import { withFilter } from 'graphql-subscriptions';
 import { OuterConfig } from '../../main';
-import path from 'path';
+// import path from 'path';
 import Perspective from '../Perspective';
 import { Capability } from '../agent/Auth'
 import { Capabilities } from '../agent/Auth'
+import { getPubSub } from '../utils';
 
 function checkLinkLanguageInstalled(perspective: Perspective) {
     if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
@@ -520,7 +521,8 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
                 const agent = core.agentService.dump();
 
-                await PUBSUB.publish(PubSub.AGENT_STATUS_CHANGED, agent)
+                let pubSub = getPubSub();
+                await pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, agent)
 
                 console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
 

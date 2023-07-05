@@ -12,7 +12,7 @@ import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@pers
 import secp256k1 from "secp256k1";
 import * as secp256k1DIDKey from "@transmute/did-key-secp256k1";
 import Signatures from "./Signatures";
-import * as PubSubInstance from "../graphQL-interface/PubSub";
+import * as PubSubInstance from "../graphQL-interface/SubscriptionDefinitions";
 import type { PubSub } from "graphql-subscriptions";
 import { resolver } from "@transmute/did-key.js";
 import { v4 as uuidv4 } from "uuid";
