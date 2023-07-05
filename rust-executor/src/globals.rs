@@ -23,7 +23,4 @@ lazy_static! {
 pub const MAINNET_JSON: &str = include_str!("mainnet_seed.json");
 
 /// Binary data of hc binary, included at buildtime from the hc binary
-pub const HC_BIN: &[u8] = include_bytes!("../temp/hc");
-
-/// Binary data of swipl binary, included at buildtime from the swipl binary
-pub const SWIPL_ZIP: &[u8] = include_bytes!("../temp/swipl.zip");
+pub const HC_BIN: &[u8] = include_bytes!("../temp/binary/hc");

@@ -6,8 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::utils::ad4m_data_directory;
-use crate::globals::{AD4M_VERSION, HC_BIN, MAINNET_JSON, OLDEST_VERSION, SWIPL_ZIP};
-use crate::utils::write_zip;
+use crate::globals::{AD4M_VERSION, HC_BIN, MAINNET_JSON, OLDEST_VERSION};
 
 /// Sets up the ad4m data directory and config files ready for the executor to consume
 pub fn init(
@@ -76,14 +75,6 @@ pub fn init(
     info!("write hc target");
     fs::write(&hc_target, hc_data)?;
     fs::set_permissions(hc_target, fs::Permissions::from_mode(0o755))?;
-
-    info!("write swipl target");
-    write_zip(SWIPL_ZIP.to_vec(), app_data_path.clone());
-
-    fs::set_permissions(
-        app_data_path.join("swipl").join("bin").join("swipl"),
-        fs::Permissions::from_mode(0o755),
-    )?;
 
     Ok(())
 }
