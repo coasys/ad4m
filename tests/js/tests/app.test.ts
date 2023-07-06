@@ -44,11 +44,9 @@ describe("Apps integration tests", () => {
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
       gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort , false, "123");
 
-    // @ts-ignore            
     adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"), false)
     await adminAd4mClient.agent.generate("passphrase")
     
-    // @ts-ignore
     unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
   })
 
@@ -74,10 +72,9 @@ describe("Apps integration tests", () => {
             }
         ] as CapabilityInput[]
       } as AuthInfoInput)
-      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
+      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain": "test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
-  
-      // @ts-ignore
+
       let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
   
       const call = async () => {
@@ -91,6 +88,7 @@ describe("Apps integration tests", () => {
       const oldApps = await adminAd4mClient!.agent.getApps();
   
       expect(oldApps.length).to.be.equal(1);
+      expect(oldApps[0].revoked).to.be.equal(null);
   
       const newApps = await adminAd4mClient!.agent.revokeToken(requestId);
   
@@ -113,12 +111,9 @@ describe("Apps integration tests", () => {
             }
         ] as CapabilityInput[]
       } as AuthInfoInput)
-      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
+      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain":"test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-      console.log("can revoke checking apps");
-
-      // @ts-ignore
       let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
   
       const call = async () => {
@@ -153,10 +148,8 @@ describe("Apps integration tests", () => {
             }
         ] as CapabilityInput[]
       } as AuthInfoInput)
-      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
+      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain":"test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
-
-      console.log("can remove checking apps");
 
       // @ts-ignore
       let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
