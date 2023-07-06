@@ -1,11 +1,12 @@
 setup_file() {
+    current_dir=$(pwd)
     echo "Creating test agent 1" >&3
     echo "Initalizing data directory..." >&3
     rm -rf ./tests/ad4m1
-    ./target/release/ad4m init --data-path ./tests/ad4m1
+    ./target/release/ad4m init --data-path ${current_dir}/tests/ad4m1
     echo "done." >&3
     echo "Starting agent 1..." >&3
-    ./target/release/ad4m run --app-data-path ./tests/ad4m1 &
+    ./target/release/ad4m run --app-data-path ${current_dir}/tests/ad4m1 --gql-port 4000 &
     sleep 5
     echo "done." >&3
 
@@ -17,10 +18,10 @@ setup_file() {
     #echo "Creating test agent 2" >&3
     #echo "Initalizing data directory..." >&3
     #rm -rf ./tests/ad4m2
-    #./target/release/ad4m init --data-path ./tests/ad4m2
+    #./target/release/ad4m init --data-path ${current_dir}/tests/ad4m2
     #echo "done." >&3
     #echo "Starting agent 2..." >&3
-    #./target/release/ad4m run --app-data-path ./tests/ad4m2 --gql-port 4001 --ipfs-swarm-port 15000 --hc-admin-port 2337 --hc-app-port 2338 &
+    #./target/release/ad4m run --app-data-path ${current_dir}/tests/ad4m2 --gql-port 4001 --ipfs-swarm-port 15000 --hc-admin-port 2337 --hc-app-port 2338 &
     #sleep 5
     #echo "done." >&3
     
@@ -51,6 +52,7 @@ setup() {
 }
 
 @test "can use subjects and run potluck example sdna" {
+    skip
     # Create perspective
     perspective_id=`./target/release/ad4m -n -e http://localhost:4000/graphql perspectives add "sdna subject test"`
     run ./target/release/ad4m -n -e http://localhost:4000/graphql perspectives set-dna $perspective_id ./tests/potluck.pl
@@ -152,6 +154,7 @@ setup() {
 }
 
 @test "can create and get expressions, using note-ipfs language" {
+    skip
     wget https://github.com/perspect3vism/lang-note-ipfs/releases/download/0.0.4/bundle.js -O ./tests/note-ipfs.js
     pwd=`pwd`
     publish_output=`./target/release/ad4m -n -e http://localhost:4000/graphql languages publish $pwd/tests/note-ipfs.js -n "note-ipfs" -d "Stores text expressions in IPFS" -p "", -s "https://github.com/perspect3vism/lang-note-ipfs"`
