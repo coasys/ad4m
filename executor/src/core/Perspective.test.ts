@@ -8,7 +8,7 @@ import * as sinon from "sinon";
 
 import Perspective from './Perspective'
 import type PerspectiveContext from './PerspectiveContext'
-import { PerspectivismDb } from './db'
+import { Ad4mDb } from './db'
 import { createLink } from '../testutils/links'
 import { createMockExpression } from '../testutils/expression'
 import { MainConfig } from './Config'
@@ -55,7 +55,7 @@ describe('Perspective', () => {
     beforeEach(() => {
         const TEST_DIR = `${__dirname}/../tst-tmp`
         const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
-        const db = new PerspectivismDb();
+        const db = new Ad4mDb();
         perspective = new Perspective(
             {
                 uuid: uuidv4(),

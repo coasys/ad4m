@@ -8,7 +8,7 @@ import PrologInstance from "./PrologInstance";
 import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
 import { DID } from "@perspect3vism/ad4m/lib/src/DID";
-import { PerspectivismDb } from "./db";
+import { Ad4mDb } from "./db";
 import { getPubSub } from "./utils";
 
 const maxRetries = 10;
@@ -26,7 +26,7 @@ export default class Perspective {
     state: PerspectiveState = PerspectiveState.Private;
     retries: number = 0;
 
-    #db: PerspectivismDb;
+    #db: Ad4mDb;
     #agent: AgentService;
     #languageController?: LanguageController
     #config?: MainConfig;

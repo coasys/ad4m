@@ -1,5 +1,5 @@
-import PerspectivismCore from "./core/PerspectivismCore";
-import create from "./core/PerspectivismCore";
+import Ad4mCore from "./core/Ad4mCore";
+import create from "./core/Ad4mCore";
 import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, agentLanguageAlias, neighbourhoodLanguageAlias, perspectiveLanguageAlias, ad4mExecutorVersion } from "./core/Config"
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
@@ -86,7 +86,7 @@ export interface SeedFileSchema {
 }
 
 /// Main function which starts ad4m-executor
-export async function init(config: OuterConfig): Promise<PerspectivismCore> {
+export async function init(config: OuterConfig): Promise<Ad4mCore> {
     let { 
       resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
       mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, adminCredential, swiplPath, swiplHomePath,runDappServer,
@@ -196,17 +196,12 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
 
     core.resolvers = createResolvers(core, config)
 
-    //console.log("\x1b[34m", "Init services...", "\x1b[0m");
-    //await core.initIPFS({ ipfsSwarmPort, ipfsRepoPath });
-    //console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
-    //await core.startGraphQLServer(gqlPort, mocks, config);
     if (runDappServer) { core.startDAppServer(dAppPort) };
-    //console.log("\x1b[31m", "GraphQL server started, Unlock the agent to start holohchain", "\x1b[0m");
 
     return core
 }
 
 export default {
   init,
-  PerspectivismCore
+  Ad4mCore
 }

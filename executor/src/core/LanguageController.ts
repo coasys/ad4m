@@ -15,7 +15,7 @@ import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
-import { PerspectivismDb } from './db';
+import { Ad4mDb } from './db';
 import stringify from 'json-stable-stringify'
 import { getPubSub } from './utils';
 
@@ -27,7 +27,7 @@ interface Services {
     holochainService: HolochainService,
     runtimeService: RuntimeService,
     signatures: Signatures,
-    db: PerspectivismDb
+    db: Ad4mDb
 }
 
 const importModule = async (modulePath: string) => {
@@ -68,7 +68,7 @@ export default class LanguageController {
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
     #signatures: Signatures;
-    #db: PerspectivismDb;
+    #db: Ad4mDb;
     #config: Config.MainConfig;
     #pubSub: PubSub;
 

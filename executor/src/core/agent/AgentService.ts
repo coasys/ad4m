@@ -24,9 +24,6 @@ import {
   AGENT_AUTH_CAPABILITY,
   Capability,
 } from "./Auth";
-import * as jose from "jose";
-import * as crypto from "crypto";
-import KeyEncoder from "key-encoder";
 import * as secp from "@noble/secp256k1";
 import { getPubSub } from "../utils";
 

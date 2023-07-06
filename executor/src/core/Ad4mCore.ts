@@ -3,12 +3,11 @@ import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@per
 
 import * as Config from './Config'
 import * as Db from './db'
-import type { PerspectivismDb } from './db'
+import type { Ad4mDb } from './db'
 import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService';
 import AgentService from './agent/AgentService'
 import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
-import * as GraphQL from './graphQL-interface/GraphQL'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
@@ -18,10 +17,8 @@ import runDAppServer from "./DAppServer"
 import fs from 'fs'
 import { AgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
-import { PERSPECT3VIMS_AGENT_INFO } from './perspect3vismAgentInfo'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
-import { OuterConfig } from '../main'
 import path from "path";
 import { getPubSub, sleep } from "./utils";
 
@@ -51,7 +48,7 @@ export interface ConnectHolochainParams {
     hcPortApp: number,
 }
 
-export default class PerspectivismCore {
+export default class Ad4mCore {
     #config: MainConfig;
     #holochain?: HolochainService
     //#IPFS?: IPFSType
@@ -59,7 +56,7 @@ export default class PerspectivismCore {
     #agentService: AgentService
     #runtimeService: RuntimeService
 
-    #db: PerspectivismDb
+    #db: Ad4mDb
     #didResolver: DIDResolver
     #signatures: Signatures
 
@@ -164,7 +161,7 @@ export default class PerspectivismCore {
         return this.#entanglementProofController
     }
     
-    get database(): PerspectivismDb {
+    get database(): Ad4mDb {
         return this.#db
     }
 
@@ -182,18 +179,6 @@ export default class PerspectivismCore {
         await this.#holochain?.stop();
         console.log("Done.")
     }
-
-    /*
-    async startGraphQLServer(port: number, mocks: boolean, config: OuterConfig) {
-        const { url, subscriptionsUrl } = await GraphQL.startServer({
-            core: this,
-            mocks,
-            port,
-            config
-        })
-        console.log(`🚀  GraphQL Server ready at ${url}`)
-        console.log(`🚀  GraphQL subscriptions ready at ${subscriptionsUrl}`)
-    }*/
 
     startDAppServer(port: number) {
         runDAppServer(port)
@@ -253,7 +238,7 @@ export default class PerspectivismCore {
 
     async languageSignal(signal: any) {
         // //@ts-ignore
-        // console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
+        // console.log(new Date().toISOString(), "Ad4mCore.languageSignal: Got signal");
         let pubSub = getPubSub();
         //@ts-ignore
         await pubSub.publish(PubSubDefinitions.SIGNAL, { signal: JSON.stringify(signal), language: this.language });
@@ -382,10 +367,10 @@ export default class PerspectivismCore {
         await this.#holochain!.addAgentInfos(agent_infos)
     }
 
-    async connectToHardwiredPerspect3vismAgent() {
-        //@ts-ignore
-        await this.holochainAddAgentInfos(PERSPECT3VIMS_AGENT_INFO())
-        console.debug("Added Perspect3vism Holochain agent infos.")
+    async connectToAd4mHolochainNode() {
+        // //@ts-ignore
+        // await this.holochainAddAgentInfos(PERSPECT3VIMS_AGENT_INFO())
+        console.debug("Added AD4M Holochain agent infos.")
     }
 
     async initializeAgentsDirectMessageLanguage() {
@@ -430,6 +415,6 @@ export default class PerspectivismCore {
     }
 }
 
-export function create(config: Config.CoreConfig): PerspectivismCore {
-    return new PerspectivismCore(config)
+export function create(config: Config.CoreConfig): Ad4mCore {
+    return new Ad4mCore(config)
 }
