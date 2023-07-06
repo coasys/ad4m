@@ -5,7 +5,7 @@ setup_file() {
     ./target/release/ad4m init --data-path ./tests/ad4m1
     echo "done." >&3
     echo "Starting agent 1..." >&3
-    ./target/release/ad4m serve --app-data-path ./tests/ad4m1 &
+    ./target/release/ad4m run --app-data-path ./tests/ad4m1 &
     sleep 5
     echo "done." >&3
 
@@ -20,7 +20,7 @@ setup_file() {
     #./target/release/ad4m init --data-path ./tests/ad4m2
     #echo "done." >&3
     #echo "Starting agent 2..." >&3
-    #./target/release/ad4m serve --app-data-path ./tests/ad4m2 --gql-port 4001 --ipfs-swarm-port 15000 --hc-admin-port 2337 --hc-app-port 2338 &
+    #./target/release/ad4m run --app-data-path ./tests/ad4m2 --gql-port 4001 --ipfs-swarm-port 15000 --hc-admin-port 2337 --hc-app-port 2338 &
     #sleep 5
     #echo "done." >&3
     
