@@ -628,7 +628,6 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId, rand } = args;
                 let jwt = await core.agentService.generateJwt(requestId, rand)
-                console.log("Generated JWT: ", jwt);
                 return jwt;
             },
             //@ts-ignore
