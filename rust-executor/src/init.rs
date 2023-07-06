@@ -2,6 +2,7 @@ use log::{info, warn};
 use semver::{Version, VersionReq};
 use std::error::Error;
 use std::fs;
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -70,11 +71,14 @@ pub fn init(
         _ => "hc",
     };
 
-    let hc_data = HC_BIN;
+    let hc_data = &HC_BIN;
     let hc_target = binary_path.join(hc);
     info!("write hc target");
-    fs::write(&hc_target, hc_data)?;
-    fs::set_permissions(hc_target, fs::Permissions::from_mode(0o755))?;
+    fs::write(&hc_target, hc_data.as_ref())?;
+    match platform {
+        os_info::Type::Windows => {}
+        _ => fs::set_permissions(hc_target, fs::Permissions::from_mode(0o755))?,
+    };
 
     Ok(())
 }
