@@ -66,6 +66,7 @@ pub fn init(
     }
 
     let platform = os_info::get().os_type();
+    println!("Got OS Platform: {:?}", platform);
     let hc = match platform {
         os_info::Type::Windows => "hc.exe",
         _ => "hc",
