@@ -2,11 +2,9 @@ use log::{info, warn};
 use semver::{Version, VersionReq};
 use std::error::Error;
 use std::fs;
-#[cfg(not(target_os = "windows"))]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::utils::ad4m_data_directory;
+use super::utils::{ad4m_data_directory, set_permissions};
 use crate::globals::{AD4M_VERSION, HC_BIN, MAINNET_JSON, OLDEST_VERSION};
 
 /// Sets up the ad4m data directory and config files ready for the executor to consume
@@ -66,7 +64,6 @@ pub fn init(
     }
 
     let platform = os_info::get().os_type();
-    println!("Got OS Platform: {:?}", platform);
     let hc = match platform {
         os_info::Type::Windows => "hc.exe",
         _ => "hc",
@@ -76,10 +73,8 @@ pub fn init(
     let hc_target = binary_path.join(hc);
     info!("write hc target");
     fs::write(&hc_target, hc_data.as_ref())?;
-    match platform {
-        os_info::Type::Windows => {}
-        _ => fs::set_permissions(hc_target, fs::Permissions::from_mode(0o755))?,
-    };
+
+    set_permissions(hc_target)?;
 
     Ok(())
 }
