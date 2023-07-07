@@ -101,7 +101,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const aliceP1 = await alice.perspective.add("friends")
                 const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test local links"}));
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
-
+                console.log("neighbourhoodUrl", neighbourhoodUrl);
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
                 await testContext.makeAllNodesKnown()
@@ -210,7 +210,9 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 it('they see each other in `otherAgents`', async () => {
                     await sleep(1000);
                     const aliceAgents = await aliceNH!.otherAgents()
+                    console.log("alice agents", aliceAgents);
                     const bobAgents = await bobNH!.otherAgents()
+                    console.log("bob agents", bobAgents);
                     expect(aliceAgents.length).to.be.equal(1)
                     expect(aliceAgents[0]).to.be.equal(bobDID)
                     expect(bobAgents.length).to.be.equal(1)
