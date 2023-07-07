@@ -3,6 +3,7 @@ mod graphql;
 mod holochain_service;
 mod js_core;
 mod utils;
+mod prolog;
 mod wallet;
 
 pub mod init;
@@ -16,6 +17,7 @@ use js_core::JsCore;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    prolog::run();
     env::set_var("RUST_LOG", "rust_executor=info");
     env_logger::init();
 
