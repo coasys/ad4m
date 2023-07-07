@@ -1,5 +1,3 @@
-import path from 'path'
-//import fetch from 'node-fetch'
 import { resolver } from '@transmute/did-key.js';
 
 export class DIDResolver {

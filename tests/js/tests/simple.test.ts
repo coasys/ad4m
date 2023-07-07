@@ -36,8 +36,8 @@ describe("Integration", () => {
   })
 
   after(async () => {
-    if (executorProcess) {
-      let status  = executorProcess.kill();
+    while (!executorProcess?.killed) {
+      let status  = executorProcess?.kill();
       console.log("killed executor with", status);
       await sleep(500);
     }

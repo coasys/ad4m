@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, startExecutor } from "../utils/utils";
+import { apolloClient, sleep, startExecutor } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 
@@ -43,8 +43,10 @@ describe("Authentication integration tests", () => {
         })
 
         after(async () => {
-            if (executorProcess) {
-                executorProcess.kill()
+            while (!executorProcess?.killed) {
+                let status  = executorProcess?.kill();
+                console.log("killed executor with", status);
+                await sleep(500);
             }
         })
 

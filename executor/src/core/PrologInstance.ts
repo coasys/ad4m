@@ -4,6 +4,7 @@ import swipl from 'swipl-stdio'
 //@ts-ignore
 import tmp from 'tmp'
 import { MainConfig } from "./Config";
+import fs from "fs";
 
 export default class PrologInstance {
     #engine

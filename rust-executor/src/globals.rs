@@ -22,8 +22,12 @@ lazy_static! {
 /// Raw JSON data for the mainnet seed, included at buildtime from the mainnet_seed.json file
 pub const MAINNET_JSON: &str = include_str!("mainnet_seed.json");
 
-/// Binary data of hc binary, included at buildtime from the hc binary
-pub const HC_BIN: &[u8] = include_bytes!("../temp/hc");
+#[cfg(target_os = "windows")]
+lazy_static! {
+    pub static ref HC_BIN: &'static [u8] = include_bytes!("../temp/binary/hc.exe");
+}
 
-/// Binary data of swipl binary, included at buildtime from the swipl binary
-pub const SWIPL_ZIP: &[u8] = include_bytes!("../temp/swipl.zip");
+#[cfg(not(target_os = "windows"))]
+lazy_static! {
+    pub static ref HC_BIN: &'static [u8] = include_bytes!("../temp/binary/hc");
+}

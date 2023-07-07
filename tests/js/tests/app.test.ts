@@ -4,7 +4,7 @@ import fs from "fs";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, startExecutor } from "../utils/utils";
+import { apolloClient, sleep, startExecutor } from "../utils/utils";
 import fetch from 'node-fetch'
 import { ChildProcess } from "child_process";
 
@@ -33,27 +33,28 @@ describe("Apps integration tests", () => {
   let executorProcess: ChildProcess | null = null
 
   before(async () => {
-    if (!fs.existsSync(appDataPath)) {
-        fs.mkdirSync(appDataPath, { recursive: true });
+    if(!fs.existsSync(TEST_DIR)) {
+        throw Error("Please ensure that prepare-test is run before running tests!");
     }
+    if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
+        fs.mkdirSync(path.join(TEST_DIR, 'agents'))
+    if(!fs.existsSync(appDataPath))
+        fs.mkdirSync(appDataPath)
 
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-      gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
-      // @ts-ignore            
-      adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"))
-      await adminAd4mClient.agent.generate("passphrase")
-      // await agentCore.waitForAgent();
-      // agentCore.initControllers()
-      // await agentCore.initLanguages()
-      
+      gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort , false, "123");
 
-      // @ts-ignore
-      unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort))
+    adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"), false)
+    await adminAd4mClient.agent.generate("passphrase")
+    
+    unAuthenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
   })
 
   after(async () => {
-    if (executorProcess) {
-        executorProcess.kill()
+    while (!executorProcess?.killed) {
+      let status  = executorProcess?.kill();
+      console.log("killed executor with", status);
+      await sleep(500);
     }
   })
 
@@ -73,11 +74,10 @@ describe("Apps integration tests", () => {
             }
         ] as CapabilityInput[]
       } as AuthInfoInput)
-      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
+      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain": "test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
-  
-      // @ts-ignore
-      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+
+      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
   
       const call = async () => {
           return await authenticatedAppAd4mClient!.agent.getApps();
@@ -90,6 +90,7 @@ describe("Apps integration tests", () => {
       const oldApps = await adminAd4mClient!.agent.getApps();
   
       expect(oldApps.length).to.be.equal(1);
+      expect(oldApps[0].revoked).to.be.equal(null);
   
       const newApps = await adminAd4mClient!.agent.revokeToken(requestId);
   
@@ -112,11 +113,10 @@ describe("Apps integration tests", () => {
             }
         ] as CapabilityInput[]
       } as AuthInfoInput)
-      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
+      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain":"test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-      // @ts-ignore
-      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
   
       const call = async () => {
         return await authenticatedAppAd4mClient!.agent.getApps();
@@ -150,11 +150,11 @@ describe("Apps integration tests", () => {
             }
         ] as CapabilityInput[]
       } as AuthInfoInput)
-      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
+      let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain":"test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
       // @ts-ignore
-      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt))
+      let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
 
       const call = async () => {
           return await authenticatedAppAd4mClient!.agent.getApps();

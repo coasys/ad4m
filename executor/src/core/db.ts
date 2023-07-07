@@ -26,7 +26,7 @@ interface PerspectiveDiffSchema {
     isPending: boolean
 }
 
-export class PerspectivismDb {
+export class Ad4mDb {
     #linkDb: Database<LinkSchema>;
     #expressionDb: Database<ExpressionSchema>;
     #diffDb: Database<PerspectiveDiffSchema>;
@@ -219,7 +219,7 @@ export class PerspectivismDb {
     }
 }
 
-export function init(dbFilePath: string): PerspectivismDb {
-    return new PerspectivismDb(dbFilePath)
+export function init(dbFilePath: string): Ad4mDb {
+    return new Ad4mDb(dbFilePath)
 }
 

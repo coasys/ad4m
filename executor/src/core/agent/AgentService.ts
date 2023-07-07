@@ -9,11 +9,8 @@ import {
   ExceptionType,
 } from "@perspect3vism/ad4m";
 import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@perspect3vism/ad4m";
-import secp256k1 from "secp256k1";
-import * as secp256k1DIDKey from "@transmute/did-key-secp256k1";
 import Signatures from "./Signatures";
-import * as PubSubInstance from "../graphQL-interface/PubSub";
-import type { PubSub } from "graphql-subscriptions";
+import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
 import { v4 as uuidv4 } from "uuid";
 import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
@@ -27,10 +24,8 @@ import {
   AGENT_AUTH_CAPABILITY,
   Capability,
 } from "./Auth";
-import * as jose from "jose";
-import * as crypto from "crypto";
-import KeyEncoder from "key-encoder";
 import * as secp from "@noble/secp256k1";
+import { getPubSub } from "../utils";
 
 
 export default class AgentService {
@@ -44,7 +39,7 @@ export default class AgentService {
   #fileProfile: string;
   #agent?: Agent;
   #agentLanguage?: Language;
-  #pubsub: PubSub;
+  #pubSub: PubSub;
   #requests: Map<string, AuthInfo>;
   #tokenValidPeriod: number;
   #adminCredential: string;
@@ -61,7 +56,7 @@ export default class AgentService {
     } catch (e) {
       this.#apps = [];
     }
-    this.#pubsub = PubSubInstance.get();
+    this.#pubSub = getPubSub();
     this.#readyPromise = new Promise((resolve) => {
       this.#readyPromiseResolve = resolve;
     });
@@ -145,7 +140,7 @@ export default class AgentService {
   async updateAgent(a: Agent) {
     this.#agent = a;
     await this.storeAgentProfile();
-    await PUBSUB.publish(PubSubInstance.AGENT_UPDATED, a);
+    await this.#pubSub.publish(PubSubDefinitions.AGENT_UPDATED, a);
   }
 
   setAgentLanguage(lang: Language) {
@@ -235,7 +230,7 @@ export default class AgentService {
   async unlock(password: string) {
     // @ts-ignore
     WALLET.unlock(password);
-    await PUBSUB.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
+    await this.#pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, this.dump());
     this.#readyPromiseResolve!();
     try {
       await this.storeAgentProfile();
@@ -251,7 +246,7 @@ export default class AgentService {
   async lock(password: string) {
     // @ts-ignore
     WALLET.lock(password);
-    await PUBSUB.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
+    await this.#pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, this.dump());
   }
 
   async save(password: string) {
@@ -320,7 +315,7 @@ export default class AgentService {
       auth: authInfo,
     } as AuthInfoExtended;
 
-    await PUBSUB.publish(PubSubInstance.EXCEPTION_OCCURRED_TOPIC, {
+    await this.#pubSub.publish(PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC, {
       title: "Request to authenticate application",
       message: `${authInfo.appName} is waiting for authentication, go to ad4m launcher for more information.`,
       type: ExceptionType.CapabilityRequested,
@@ -362,7 +357,7 @@ export default class AgentService {
       this.#apps = apps;
       fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
 
-      await PUBSUB.publish(PubSubInstance.APPS_CHANGED, null);      
+      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);      
     }
 
     return jwt;
@@ -378,7 +373,7 @@ export default class AgentService {
 
       fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
 
-      await PUBSUB.publish(PubSubInstance.APPS_CHANGED, null);
+      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
     } catch (e) {
       console.error("Error while removing app", e);
     }
@@ -392,7 +387,7 @@ export default class AgentService {
 
       fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
 
-      await PUBSUB.publish(PubSubInstance.APPS_CHANGED, null);
+      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
     } catch (e) {
       console.error("Error while revoking token", e);
     }

@@ -2,13 +2,14 @@ import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, 
 import { Link, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
-import * as PubSub from './graphQL-interface/PubSub'
+import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
 import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
 import { DID } from "@perspect3vism/ad4m/lib/src/DID";
-import { PerspectivismDb } from "./db";
+import { Ad4mDb } from "./db";
+import { getPubSub } from "./utils";
 
 const maxRetries = 10;
 const backoffStep = 200;
@@ -25,10 +26,11 @@ export default class Perspective {
     state: PerspectiveState = PerspectiveState.Private;
     retries: number = 0;
 
-    #db: PerspectivismDb;
+    #db: Ad4mDb;
     #agent: AgentService;
     #languageController?: LanguageController
     #config?: MainConfig;
+    #pubSub: PubSub;
 
     #prologEngine: PrologInstance|null
     #prologNeedsRebuild: boolean
@@ -52,6 +54,7 @@ export default class Perspective {
         this.#agent = context.agentService!
         this.#languageController = context.languageController!
         this.#config = context.config;
+        this.#pubSub = getPubSub();
 
         this.#prologEngine = null
         this.#prologNeedsRebuild = true
@@ -91,7 +94,7 @@ export default class Perspective {
 
     async updatePerspectiveState(state: PerspectiveState) {
         if (this.state != state) {
-            await PUBSUB.publish(PubSub.PERSPECTIVE_SYNC_STATE_CHANGE, {state, uuid: this.uuid})
+            await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_SYNC_STATE_CHANGE, {state, uuid: this.uuid})
             this.state = state
         }
     }
@@ -453,7 +456,7 @@ export default class Perspective {
 
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
-        await PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
+        await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
             perspective: perspectivePlain,
             link: linkExpression
         })
@@ -480,7 +483,7 @@ export default class Perspective {
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
-            await PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
+            await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
                 perspective: perspectivePlain,
                 link: link
             })
@@ -506,7 +509,7 @@ export default class Perspective {
         await Promise.all(linkExpressions.map(async l => await this.#db.removeLink(this.uuid!, l)))
         this.#prologNeedsRebuild = true;
         for (const link of linkExpressions) {
-            await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
+            await this.#pubSub.publish(PubSubDefinitions.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             })
@@ -531,13 +534,13 @@ export default class Perspective {
         await Promise.all(diff.removals.map(async l => await this.#db.removeLink(this.uuid!, l)));
         this.#prologNeedsRebuild = true;
         for (const link of diff.additions) {
-            await PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
+            await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             });
         };
         for (const link of diff.removals) {
-            await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
+            await this.#pubSub.publish(PubSubDefinitions.LINK_REMOVED_TOPIC, {
                 perspective: this.plain(),
                 link: link
             });
@@ -570,7 +573,7 @@ export default class Perspective {
 
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
-        await PUBSUB.publish(PubSub.LINK_UPDATED_TOPIC, {
+        await this.#pubSub.publish(PubSubDefinitions.LINK_UPDATED_TOPIC, {
             perspective,
             oldLink,
             newLink: newLinkExpression
@@ -597,7 +600,7 @@ export default class Perspective {
         }
 
         this.#prologNeedsRebuild = true;
-        await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
+        await this.#pubSub.publish(PubSubDefinitions.LINK_REMOVED_TOPIC, {
             perspective: this.plain(),
             link: linkExpression
         })

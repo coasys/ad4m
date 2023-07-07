@@ -1,8 +1,6 @@
 use std::env::var_os;
-use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::error::Error;
 use std::path::{Path, PathBuf};
-use zip::ZipArchive;
 
 pub(crate) fn ad4m_data_directory() -> PathBuf {
     let mut ad4m_dir = var_os("HOME")
@@ -13,34 +11,19 @@ pub(crate) fn ad4m_data_directory() -> PathBuf {
     Path::new(&ad4m_dir).to_path_buf()
 }
 
-pub(crate) fn write_zip(zip_data: Vec<u8>, target_path: PathBuf) {
-    // Read the zip archive from the byte data
-    let reader = Cursor::new(zip_data);
-    let mut archive = ZipArchive::new(reader).unwrap();
+#[cfg(not(target_os = "windows"))]
+pub fn set_permissions(path: PathBuf) -> Result<(), Box<dyn Error>> {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
 
-    // Extract the files from the zip archive
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i).unwrap();
-        let mut outpath = target_path.clone();
-        #[allow(deprecated)]
-        outpath.push(file.sanitized_name());
+    let mut perms = Permissions::from_mode(0o755);
+    perms.set_readonly(true);
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
 
-        if file.is_dir() {
-            // Create the directory if it doesn't exist
-            std::fs::create_dir_all(&outpath).unwrap();
-        } else {
-            // Create the parent directory if it doesn't exist
-            if let Some(parent) = outpath.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(&parent).unwrap();
-                }
-            }
-
-            // Write the file's contents
-            let mut outfile = File::create(&outpath).unwrap();
-            let mut buffer = Vec::new();
-            file.read_to_end(&mut buffer).unwrap();
-            outfile.write_all(&buffer).unwrap();
-        }
-    }
+#[cfg(target_os = "windows")]
+pub fn set_permissions(_path: PathBuf) -> Result<(), Box<dyn Error>> {
+    Ok(())
 }

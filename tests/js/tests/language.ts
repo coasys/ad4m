@@ -1,4 +1,4 @@
-import { TestContext } from './full-integration.test'
+import { TestContext } from './integration.test'
 import path from "path";
 import fs from "fs";
 import { sleep } from '../utils/utils';

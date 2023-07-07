@@ -1,6 +1,4 @@
 tst-tmp
 temp
-
-AloeDB-0.9.0
-linkedom
-xhr
+lib
+!customHttpDownloader.js

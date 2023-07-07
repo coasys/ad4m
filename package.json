@@ -15,7 +15,8 @@
   ],
   "private": true,
   "scripts": {
-    "build": "turbo run build",
+    "build": "turbo run build-languages --concurrency=1 && turbo run build-libs",
+    "build-no-cache": "turbo run build-languages --concurrency=1 --force && turbo run build-libs --force",
     "build-libs": "turbo run build-libs",
     "dev": "turbo run dev --parallel",
     "serve": "turbo run serve",

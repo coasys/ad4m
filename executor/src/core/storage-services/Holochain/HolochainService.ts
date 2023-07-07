@@ -7,7 +7,7 @@ import type { Dna } from '@perspect3vism/ad4m'
 import { AsyncQueue } from './Queue'
 import { decode, encode } from "@msgpack/msgpack"
 
-import { HolochainUnlockConfiguration } from '../../PerspectivismCore'
+import { HolochainUnlockConfiguration } from '../../Ad4mCore'
 import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
 
@@ -29,8 +29,6 @@ export interface HolochainConfiguration {
 export default class HolochainService {
     #ready?: Promise<void>
     #resourcePath: string
-    #conductorPath?: string
-    #conductorConfigPath?: string
     #signalCallbacks: [CellId, AppSignalCb, string][];
     #queue: Map<string, AsyncQueue>
     #languageDnaHashes: Map<string, Uint8Array[]>

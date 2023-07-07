@@ -8,25 +8,25 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: JS Ad4mClient <> AD4M Executor
-    runs-on: macos-latest
+  test-linux:
+    name: JS Ad4mClient <> AD4M Executor - Linux
+
     strategy:
       matrix:
+        platform: [ubuntu-22.04]
         node-version: [16.x]
+        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+
+    runs-on: ${{ matrix.platform }}
 
     steps:
-    - name: Fetch source code
-      uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
-    - name: git init submodule
-      run: git submodule init && git submodule update
-
-    - name: Install Rust stable
-      uses: actions-rs/toolchain@v1
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v2
       with:
-        override: true
-        toolchain: 1.63.0
+        node-version: ${{ matrix.node-version }}
+        cache: 'yarn'
 
     - name: Cache cargo
       id: cache-cargo
@@ -41,25 +41,110 @@ jobs:
         key: ${{ runner.os }}-cargo
     - run: rustup target add wasm32-unknown-unknown
 
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
+    - name: Install dependencies
+      run: yarn install
+
+    - name: Build the workspace
+      run: yarn run build
+      
+    - name: Run the tests
+      run: yarn test
+
+  test-windows:
+    name: JS Ad4mClient <> AD4M Executor - Windows
+    runs-on: windows-2019
+    strategy:
+      matrix:
+        node-version: [16.x]
+
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.68.2
+      - name: Cache cargo
+        id: cache-cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+            ${{ runner.os }}-cargo
+      - run: rustup target add wasm32-unknown-unknown
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v2
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'yarn'
+
+      - name: Install Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.32.4
+
+      - name: Install dependencies
+        run: yarn install
+
+      - name: Build the workspace
+        run: yarn run build
+
+      - name: Run the tests
+        run: |
+          choco install swi-prolog
+          $env:path += ";C:\Program Files\swipl\bin"
+          yarn run test:windows
+
+  test-macos:
+    name: JS Ad4mClient <> AD4M Executor - MacOS
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        node-version: [16.x]
+
+    steps:
+    - uses: actions/checkout@v3
+
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
+      uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
+        cache: 'yarn'
+
+    - name: Cache cargo
+      id: cache-cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo
+    - run: rustup target add wasm32-unknown-unknown
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
       with:
         deno-version: v1.32.4
 
-    - name: Yarn Install
+    - name: Install dependencies
       run: yarn install
 
-    - name: Yarn Build (builds entire workspace)
-      run: yarn build
-
-    - name: Run tests/js
-      run: |
-        cd tests/js
-        yarn install
-        yarn test
-    
+    - name: Build the workspace
+      run: yarn run build
+      
+    - name: Run the tests
+      run: yarn test

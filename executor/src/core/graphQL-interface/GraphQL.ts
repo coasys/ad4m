@@ -1,27 +1,15 @@
-//import { ApolloServer, gql, AuthenticationError } from 'apollo-server-express'
-//import express from 'express';
-//import { createServer } from 'http';
-//import {
-//    ApolloServerPluginDrainHttpServer,
-//} from "apollo-server-core";
-//import { WebSocketServer } from 'ws';
-//import { useServer } from 'graphql-ws/lib/use/ws';
-//import { makeExecutableSchema } from '@graphql-tools/schema';
-import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveHandle, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
 import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
-import { typeDefsString } from '@perspect3vism/ad4m/lib/src/typeDefs'
-import type PerspectivismCore from '../PerspectivismCore'
-import * as PubSub from './PubSub'
-//import { GraphQLScalarType } from "graphql";
+import type Ad4mCore from '../Ad4mCore'
+import * as PubSubDefinitions from './SubscriptionDefinitions'
 import { ad4mExecutorVersion } from '../Config';
 import * as Auth from '../agent/Auth'
 import { checkCapability, checkTokenAuthorized } from '../agent/Auth'
-//import { withFilter } from 'graphql-subscriptions';
 import { OuterConfig } from '../../main';
-import path from 'path';
 import Perspective from '../Perspective';
 import { Capability } from '../agent/Auth'
 import { Capabilities } from '../agent/Auth'
+import { getPubSub } from '../utils';
 
 function checkLinkLanguageInstalled(perspective: Perspective) {
     if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
@@ -29,7 +17,7 @@ function checkLinkLanguageInstalled(perspective: Perspective) {
     }
 }
 
-export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
+export function createResolvers(core: Ad4mCore, config: OuterConfig) {
     function signPerspectiveDeep(input: PerspectiveUnsignedInput): PerspectiveExpression {
         let out = new PerspectiveExpression()
         out.links = input.links.map(l => core.agentService.createSignedExpression(l))
@@ -520,7 +508,8 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
 
                 const agent = core.agentService.dump();
 
-                await PUBSUB.publish(PubSub.AGENT_STATUS_CHANGED, agent)
+                let pubSub = getPubSub();
+                await pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, agent)
 
                 console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
 
@@ -626,7 +615,6 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 checkCapability(context.capabilities, Auth.AGENT_AUTH_CAPABILITY)
                 const { requestId, rand } = args;
                 let jwt = await core.agentService.generateJwt(requestId, rand)
-                console.log("Generated JWT: ", jwt);
                 return jwt;
             },
             //@ts-ignore
@@ -1001,118 +989,3 @@ export function createResolvers(core: PerspectivismCore, config: OuterConfig) {
         }
     }
 }
-
-/*
-export interface StartServerParams {
-    core: PerspectivismCore,
-    mocks: boolean,
-    port: number,
-    config: OuterConfig;
-}
-
-export async function startServer(params: StartServerParams) {
-    const { core, mocks, port } = params
-    const app = express();
-    const httpServer = createServer(app);
-    const resolvers = createResolvers(core, params.config)
-    const typeDefs = gql(typeDefsString)
-    const schema = makeExecutableSchema({ typeDefs, resolvers });
-    const rootConfigPath = path.join(params.config.appDataPath, 'ad4m');
-    
-    let serverCleanup: any;
-    const server = new ApolloServer({
-        typeDefs,
-        resolvers,
-        context: async (context) => {
-            let headers = context.req?.headers;
-            let authToken = ''
-            
-            if(headers) {
-                // Get the request token from the authorization header.
-                authToken = headers.authorization || ''
-            }
-            const capabilities = await core.agentService.getCapabilities(authToken)
-            if(!capabilities) throw new AuthenticationError("User capability is empty.")
-
-            const isAd4minCredential =  core.agentService.isAdminCredential(authToken)
-            checkTokenAuthorized(core.agentService.getApps(), authToken, isAd4minCredential)
-
-            return { capabilities, authToken };
-        },
-        plugins: [
-            ApolloServerPluginDrainHttpServer({ httpServer }),
-            {
-                async serverWillStart() {
-                    return {
-                        async drainServer() {
-                            await serverCleanup.dispose();
-                        },
-                    };
-                },
-            },
-        ]
-    });
-
-
-    const wsServer = new WebSocketServer({
-        server: httpServer,
-        path: server.graphqlPath,
-    });
-
-    wsServer.on('error', (err) => {
-        console.error("WsServer got error: ", err);
-        wsServer.clients.clear();
-    });
-
-    serverCleanup = useServer({
-        schema,
-        context: async (context, msg, args) => {
-            let headers: any
-
-            // Depending on the transport, the context is different
-            // For normal http queries, it's the connection context
-            if(context.connectionParams) {
-                headers = context.connectionParams!.headers;
-            //@ts-ignore
-            } else if(context.req) {
-                //@ts-ignore
-                headers = context.req.headers;
-            // For subscriptions via websocket, it's the request context in `extra`
-            } else if(context.extra && context.extra.request) {
-                if(context.extra.request.headers) {
-                    headers = context.extra.request.headers;
-                } else if(context.extra.request.rawHeaders) {
-                    headers = context.extra.request.rawHeaders;
-                } else {
-                    console.error("Coulnd't find headers in context", context)
-                }
-            }
-            
-            let authToken = ''
-            
-            if(headers) {
-                // Get the request token from the authorization header.
-                authToken = headers.authorization || ''
-            }
-            const capabilities = await core.agentService.getCapabilities(authToken)
-            if(!capabilities) throw new AuthenticationError("User capability is empty.")
-
-            const isAd4minCredential =  core.agentService.isAdminCredential(authToken)
-            checkTokenAuthorized(core.agentService.getApps(), authToken, isAd4minCredential)
-
-            return { capabilities, authToken };
-        }
-    }, wsServer);
-
-    await server.start();
-
-    server.applyMiddleware({ app });
-
-    httpServer.listen({ port });
-
-    return { 
-        url: `http://localhost:${port}/graphql`,
-        subscriptionsUrl: `ws://localhost:${port}/graphql`
-    }
-}
-*/

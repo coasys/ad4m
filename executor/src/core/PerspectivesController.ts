@@ -1,20 +1,23 @@
 import path from 'path'
 import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid';
-import * as PubSub from './graphQL-interface/PubSub'
+import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import type PerspectiveContext from './PerspectiveContext'
 import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
+import { getPubSub } from './utils';
 
 export default class PerspectivesController {
     #perspectiveHandles: Map<string, PerspectiveHandle>
     #perspectiveInstances: Map<string, Perspective>
     #rootConfigPath
     #context
+    #pubSub: PubSub
 
     constructor(rootConfigPath: string, context: PerspectiveContext) {
         this.#context = context
         this.#rootConfigPath = rootConfigPath
+        this.#pubSub = getPubSub();
 
         this.#perspectiveHandles = new Map<string, PerspectiveHandle>()
         this.#perspectiveInstances = new Map<string, Perspective>()
@@ -42,14 +45,14 @@ export default class PerspectivesController {
                 try {
                     let perspectivePlain = perspective.plain();
                     for (const link of diff.additions) {
-                        await PUBSUB.publish(PubSub.LINK_ADDED_TOPIC, {
+                        await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
                             perspective: perspectivePlain,
                             link: link
                         })
                     }
 
                     for (const linkRemoved of diff.removals) {
-                        await PUBSUB.publish(PubSub.LINK_REMOVED_TOPIC, {
+                        await this.#pubSub.publish(PubSubDefinitions.LINK_REMOVED_TOPIC, {
                             perspective: perspectivePlain,
                             link: linkRemoved
                         })
@@ -65,7 +68,7 @@ export default class PerspectivesController {
         this.#context.languageController!.addTelepresenceSignalObserver(async (signal: PerspectiveExpression, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                await PUBSUB.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
+                await this.#pubSub.publish(PubSubDefinitions.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
                     signal: signal,
                     perspective: perspective.plain()
                 })
@@ -143,12 +146,12 @@ export default class PerspectivesController {
         this.#perspectiveHandles.set(perspective.uuid, perspective)
         this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood, createdFromJoin, state))
         this.save()
-        await PUBSUB.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, perspective)
+        await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_ADDED_TOPIC, perspective)
         return perspective
     }
 
     async replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
-        await PUBSUB.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, perspectiveHandle);
+        await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, perspectiveHandle);
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
         this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
         this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin, state));
@@ -165,7 +168,7 @@ export default class PerspectivesController {
             this.#perspectiveHandles.delete(uuid)
             this.#perspectiveInstances.delete(uuid)
             this.save()
-            await PUBSUB.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, uuid)
+            await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_REMOVED_TOPIC, uuid)
         } catch (e) {
             console.error("Error removing perspective:", e);
             throw new Error(`Error removing perspective: ${e}`);
@@ -186,7 +189,7 @@ export default class PerspectivesController {
             instance.updateFromId(perspective as PerspectiveHandle)
         }
 
-        await PUBSUB.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, {
+        await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, {
             uuid: perspective.uuid,
             name: perspective.name,
             state: perspective.state,
