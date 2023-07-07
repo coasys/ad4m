@@ -4,7 +4,7 @@ import fs from "fs";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, startExecutor } from "../utils/utils";
+import { apolloClient, sleep, startExecutor } from "../utils/utils";
 import fetch from 'node-fetch'
 import { ChildProcess } from "child_process";
 
@@ -51,8 +51,10 @@ describe("Apps integration tests", () => {
   })
 
   after(async () => {
-    if (executorProcess) {
-        executorProcess.kill()
+    while (!executorProcess?.killed) {
+      let status  = executorProcess?.kill();
+      console.log("killed executor with", status);
+      await sleep(500);
     }
   })
 

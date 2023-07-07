@@ -3,7 +3,7 @@ import { Ad4mClient, LanguageMetaInput } from "@perspect3vism/ad4m";
 import fs from "fs-extra";
 import { exit } from "process";
 import { fileURLToPath } from 'url';
-import { apolloClient, startExecutor } from "./utils";
+import { apolloClient, sleep, startExecutor } from "./utils";
 import fetch from 'node-fetch'
 
 //@ts-ignore
@@ -96,8 +96,10 @@ async function publish() {
     injectSystemLanguages()
     injectLangAliasHashes();
 
-    if (executorProcess) {
-        executorProcess.kill()
+    while (!executorProcess.killed){
+        let status = executorProcess.kill()
+        console.log("killed executor with", status);
+        await sleep(500); 
     }
 
     exit();

@@ -1,6 +1,6 @@
 import fs from 'fs-extra'
 import path from 'path'
-import { isProcessRunning } from "../utils/utils";
+import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
@@ -104,8 +104,10 @@ describe("Integration tests", function () {
     })
 
     after(async () => {
-      if (executorProcess) {
-          executorProcess.kill()
+      while (!executorProcess?.killed) {
+        let status  = executorProcess?.kill();
+        console.log("killed executor with", status);
+        await sleep(500);
       }
     })
 
@@ -145,10 +147,11 @@ describe("Integration tests", function () {
         })
 
         after(async () => {
-          if (bobExecutorProcess) {
-              bobExecutorProcess.kill()
+          while (!bobExecutorProcess?.killed) {
+            let status  = bobExecutorProcess?.kill();
+            console.log("killed bobs executor with", status);
+            await sleep(500);
           }
-          await new Promise((resolve)=>setTimeout(resolve, 500))
         })
 
         describe('Agent Language', agentLanguageTests(testContext))

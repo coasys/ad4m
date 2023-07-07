@@ -43,9 +43,11 @@ describe("Prolog + Literals", () => {
         console.log("Done")
     })
 
-    after(() => {
-        if (executorProcess) {
-            executorProcess.kill()
+    after(async () => {
+        while (!executorProcess?.killed) {
+            let status  = executorProcess?.kill();
+            console.log("killed executor with", status);
+            await sleep(500);
         }
     })
 
