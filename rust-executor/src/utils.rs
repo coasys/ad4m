@@ -24,4 +24,6 @@ pub fn set_permissions(path: PathBuf) -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn set_permissions(_path: PathBuf) {}
+pub fn set_permissions(_path: PathBuf) -> Result<(), Box<dyn Error>> {
+    Ok(())
+}
