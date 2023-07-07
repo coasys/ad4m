@@ -31,8 +31,7 @@ setup_file() {
 }
 
 teardown_file() {
-    killall ad4m-macos-x64
-    killall holochain
+    killall ad4m
 }
 
 setup() {
