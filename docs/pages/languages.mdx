@@ -1,21 +1,56 @@
-# Creating AD4M Languages
+# Languages
 
-COMING SOON
+Languages are essentially Node.js modules that encapsulate how to retrieve
+and create content. You can think of them as **small edge functions** that are executed on the Agents device and that can communicate with different backends and technologies.
 
-### Languages
+## Creating a Language
 
-For creating an expression we need to select a language that we create an expression in:
+There are several types of Languages, but let's start with the most common one – an Expression Language.
+Let's create a super simple `Readonly` Language that gives you the Open Graph data for a given website.
 
-```js
-const languages = await ad4mClient.languages.all();
-const noteIpfsAddress = languages.find((l) => l.name === "note-ipfs").address;
+```js filename="adapter.js"
+import type {
+  Address,
+  Expression,
+  ExpressionAdapter,
+  ReadonlyLanguage,
+  LanguageContext,
+} from "@perspect3vism/ad4m";
+import PutAdapter from "./putAdapter.js";
+import openGraph from "open-graph-scraper";
+
+class PutAdapter implements ReadonlyLanguage {
+  getAddress(url: string) {
+    return url;
+  }
+}
+
+class Adapter implements ExpressionAdapter {
+  putAdapter: ReadonlyLanguage;
+
+  constructor() {
+    this.putAdapter = new PutAdapter();
+  }
+
+  async get(address: Address): Promise<Expression> {
+    const url = address.toString();
+    const data = await openGraph({ url });
+    return data;
+  }
+}
 ```
 
-### Creating an Expression
-
 ```js
-const exprAddress = await ad4mClient.expression.create(
-  "A new text note",
-  noteIpfsAddress
-);
+import type { LanguageContext, Language} from '@perspect3vism/ad4m'
+
+
+export default function create(context: LanguageContext): Language {
+    return {
+        name: 'open-graph',
+        expressionAdapter: new Adapter(context),
+        isImmutableExpression: true
+    } as Language
+}
 ```
+
+[Language interface](/jsdoc/interfaces/Language)

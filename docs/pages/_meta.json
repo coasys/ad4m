@@ -1,21 +1,43 @@
 {
-    "index": "Introduction",
-    "getting-started": "Getting Started",
-    "concepts": "Concepts",
-    "languages": "AD4M Languages",
-    "social-dna": "Social DNA",
-    "tutorial": "Tutorial",
-    "jsdoc": "API Reference",
-    "download": {
-        "title": "AD4M Website",
-        "type": "page",
-        "href": "https://ad4m.dev",
-        "newWindow": true
-    },
-    "community": {
-        "title": "Community",
-        "type": "page",
-        "href": "https://ad4m.dev/community/",
-        "newWindow": true
-    }
+  "--start": {
+    "type": "separator",
+    "title": "Getting Started"
+  },
+  "index": "Introduction",
+  "installation": "Installation",
+  "quick-start": "Quick Start",
+  "--essentials": {
+    "type": "separator",
+    "title": "Essentials"
+  },
+  "auth": "Authentication",
+  "agents": "Agents",
+  "expressions": "Expressions",
+  "languages": "Languages",
+  "perspectives": "Perspectives",
+  "neighbourhoods": "Neighbourhoods",
+  "social-dna": "Social DNA",
+  "--build": {
+    "type": "separator",
+    "title": "Tutorials"
+  },
+  "make-lang": "Create your own language",
+  "todo-app": "Create a Todo App",
+  "--api": {
+    "type": "separator",
+    "title": "API Reference"
+  },
+  "jsdoc": "API Reference",
+  "download": {
+    "title": "AD4M Website",
+    "type": "page",
+    "href": "https://ad4m.dev",
+    "newWindow": true
+  },
+  "community": {
+    "title": "Community",
+    "type": "page",
+    "href": "https://ad4m.dev/community/",
+    "newWindow": true
+  }
 }
