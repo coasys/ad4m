@@ -21,7 +21,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: 1.68.2
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
@@ -38,7 +40,10 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-cargo
+        key: ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+          ${{ runner.os }}-cargo
     - run: rustup target add wasm32-unknown-unknown
 
     - name: Install Deno
@@ -115,7 +120,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: 1.68.2
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
@@ -132,7 +139,10 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-cargo
+        key: ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+          ${{ runner.os }}-cargo
     - run: rustup target add wasm32-unknown-unknown
 
     - name: Install Deno
