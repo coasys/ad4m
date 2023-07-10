@@ -51,10 +51,12 @@ describe("Apps integration tests", () => {
   })
 
   after(async () => {
-    while (!executorProcess?.killed) {
-      let status  = executorProcess?.kill();
-      console.log("killed executor with", status);
-      await sleep(500);
+    if (executorProcess) {
+      while (!executorProcess?.killed) {
+        let status = executorProcess?.kill();
+        console.log("killed executor with", status);
+        await sleep(500);
+      }
     }
   })
 

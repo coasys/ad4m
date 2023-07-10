@@ -80,10 +80,10 @@ describe("Integration tests", function () {
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
     const ipfsRepoPath = path.join(appDataPath)
-    const gqlPort = 15000
-    const hcAdminPort = 15001
-    const hcAppPort = 15002
-    const ipfsSwarmPort = 15005
+    const gqlPort = 15300
+    const hcAdminPort = 15301
+    const hcAppPort = 15302
+    const ipfsSwarmPort = 15303
 
     let executorProcess: ChildProcess | null = null
 
@@ -104,10 +104,12 @@ describe("Integration tests", function () {
     })
 
     after(async () => {
-      while (!executorProcess?.killed) {
-        let status  = executorProcess?.kill();
-        console.log("killed executor with", status);
-        await sleep(500);
+      if (executorProcess) {
+        while (!executorProcess?.killed) {
+          let status  = executorProcess?.kill();
+          console.log("killed executor with", status);
+          await sleep(500);
+        }
       }
     })
 
@@ -122,10 +124,10 @@ describe("Integration tests", function () {
         before(async () => {
           const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
           const bobBootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-          const bobGqlPort = 14000
-          const bobHcAdminPort = 12000
-          const bobHcAppPort = 11337
-          const bobIpfsSwarmPort = 14002
+          const bobGqlPort = 15400
+          const bobHcAdminPort = 15401
+          const bobHcAppPort = 15402
+          const bobIpfsSwarmPort = 15403
 
           if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
             fs.mkdirSync(path.join(TEST_DIR, 'agents'))
@@ -147,10 +149,12 @@ describe("Integration tests", function () {
         })
 
         after(async () => {
-          while (!bobExecutorProcess?.killed) {
-            let status  = bobExecutorProcess?.kill();
-            console.log("killed bobs executor with", status);
-            await sleep(500);
+          if (executorProcess) {
+            while (!bobExecutorProcess?.killed) {
+              let status  = bobExecutorProcess?.kill();
+              console.log("killed bobs executor with", status);
+              await sleep(500);
+            }
           }
         })
 

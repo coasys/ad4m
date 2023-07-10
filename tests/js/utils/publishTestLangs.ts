@@ -18,10 +18,10 @@ const publishLanguagesPath = path.join(TEST_DIR, "languages");
 const publishingBootstrapSeedPath = path.join(`${__dirname}/../publishBootstrapSeed.json`);
 const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
 const perspectiveDiffSyncHashPath = path.join(`${__dirname}/../scripts/perspective-diff-sync-hash`);
-const gqlPort = 4000;
-const hcAdminPort = 15000;
-const hcAppPort = 15001;
-const ipfsSwarmPort = 15003;
+const gqlPort = 15700;
+const hcAdminPort = 15701;
+const hcAppPort = 15702;
+const ipfsSwarmPort = 15703;
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -96,10 +96,12 @@ async function publish() {
     injectSystemLanguages()
     injectLangAliasHashes();
 
-    while (!executorProcess.killed){
-        let status = executorProcess.kill()
-        console.log("killed executor with", status);
-        await sleep(500); 
+    if (executorProcess) {
+        while (!executorProcess.killed){
+            let status = executorProcess.kill()
+            console.log("killed executor with", status);
+            await sleep(500); 
+        }
     }
 
     exit();
