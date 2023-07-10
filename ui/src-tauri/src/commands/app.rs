@@ -1,9 +1,12 @@
 extern crate remove_dir_all;
+use std::time::{Duration, SystemTime};
+
+use crate::Payload;
 use crate::{config::data_path, get_main_window, util::find_and_kill_processes};
 
 use remove_dir_all::*;
 
-use tauri::LogicalSize;
+use tauri::{LogicalSize, Manager};
 use tauri::Size;
 use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -34,6 +37,29 @@ pub fn open_tray(app_handle: tauri::AppHandle) {
         }));
         let _ = window.set_decorations(false);
         let _ = window.set_always_on_top(true);
+    }
+}
+
+#[tauri::command]
+pub fn open_tray_message(app_handle: tauri::AppHandle) {
+    let tray_window = app_handle.get_window("TrayMessage").unwrap();
+    let _ = tray_window.show();
+
+    let _ = tray_window.emit("tray_message_open", Payload {message: "".to_string()});
+
+    let seconds = Duration::from_secs(5);
+
+    let start = SystemTime::now();
+    loop {
+        std::thread::sleep(Duration::new(5, 0));
+
+        match start.elapsed() {
+            Ok(elapsed) if elapsed > seconds => {
+                let _ = tray_window.hide();
+                return;
+            }
+            _ => (),
+        }
     }
 }
 
