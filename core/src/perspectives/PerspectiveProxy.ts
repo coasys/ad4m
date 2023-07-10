@@ -47,10 +47,15 @@ export class PerspectiveProxy {
 
     async executeAction(actions, expression, parameters: Parameter[]) {
         const replaceThis = (input: string|undefined) => {
-            if(input)
-                return input.replace('this', expression)
-            else
+            if(input) {
+                if (input === 'this') {
+                    return expression
+                } else {
+                    return input
+                }
+            } else {
                 return undefined
+            }
         }
 
         const replaceParameters = (input: string|undefined) => {
