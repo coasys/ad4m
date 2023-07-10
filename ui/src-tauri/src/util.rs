@@ -1,12 +1,17 @@
 use crate::app_url;
+use crate::config::app_tray_message_url;
 use crate::config::executor_port_path;
 use crate::menu::open_logs_folder;
 use std::fs::remove_file;
 use std::fs::File;
 use std::io::prelude::*;
+use std::time::Duration;
+use std::time::SystemTime;
 use sysinfo::Process;
 use sysinfo::{ProcessExt, Signal, System, SystemExt};
 use tauri::{AppHandle, Manager, WindowBuilder, WindowEvent, WindowUrl, Wry};
+use tauri_plugin_positioner::Position;
+use tauri_plugin_positioner::WindowExt;
 
 pub fn find_port(start_port: u16, end_port: u16) -> u16 {
     for x in start_port..end_port {
@@ -79,6 +84,25 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
             }
         }
     });
+}
+
+
+pub fn create_tray_message_windows(app: &AppHandle<Wry>) {
+    let url = app_tray_message_url();
+
+    let new_ad4m_window = WindowBuilder::new(app, "TrayMessage", WindowUrl::App(url.into()))
+        .center()
+        .focused(false)
+        .inner_size(300.0, 80.0)
+        .title("TrayMessage")
+        .visible(false);
+
+    let _ = new_ad4m_window.build();
+
+    let tray_window = app.get_window("TrayMessage").unwrap();
+    let _ = tray_window.move_window(Position::TopRight);
+    let _ = tray_window.set_decorations(false);
+    let _ = tray_window.set_always_on_top(true);
 }
 
 pub fn save_executor_port(port: u16) {
