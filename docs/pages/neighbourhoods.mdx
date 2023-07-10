@@ -1,0 +1,80 @@
+# Neighbourhoods
+
+Neighbourhoods are essentially just [Perspectives](/perspectives) (graph databases) that are
+shared and synced between Agents.
+
+Every Neighborhood needs to use a **Link Language** to decide what technology it uses to store
+the associations (links) between the Expressions.
+
+Currently, there is one Link Language implemented called [Perspective Diff Sync](https://github.com/perspect3vism/perspective-diff-sync)
+based on Holochain:
+
+```js
+const langs = await client.runtime.knownLinkLanguageTemplates();
+console.log(langs[0]); // The uuid of the default Link Language
+```
+
+## Creating a Neighborhood
+
+As mentioned before, the Link Language is responsible for storing and synchronizing
+the links in a Neighborhood. If we want to avoid storing the links in the same
+location as everyone else following this guide, we should create a duplicate of
+the language. By giving it a unique ID, we can ensure that the links are saved
+in a new and private network:
+
+```js
+const uniqueLinkLanguage = await ad4m.languages.applyTemplateAndPublish(
+  langs[0],
+  JSON.stringify({
+    uuid: "84a329-77384c-1510fb",
+    name: "Perspective Diff Sync clone",
+  })
+);
+```
+
+With that new Link Language, actually creating the Neighbourhood is simple.
+We just have to provide the ID of the perspective we want to upgrade to a
+Neighbourhood and the address of the Link Language:
+
+```js
+const meta = new Perspective();
+
+const neighbourhoodUrl = await ad4m.neighbourhood.publishFromPerspective(
+  myNotes.uuid,
+  uniqueLinkLanguage.address,
+  meta
+);
+
+console.log(neighbourhoodUrl); // => neighbourhood://Qm123456789abcdef
+```
+
+The `meta` field is a Perspective that is immutably stored with
+the Neighbourhood. It can hold arbitrary meta information about the
+Neighbourhood but can technically stay empty, just like we did here.
+
+## Joining a Neighborhood
+
+Assume everything above happened on Alice's agent. Alice now shares the Neighbourhood's URL with Bob.
+This is what Bob does to join the Neigbourhood:
+
+```js
+const { uuid } = await ad4m.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+const sharedNotes = await ad4m.perspective.byUUID(uuid);
+```
+
+Now Bob can read what used to be Alice's private notes:
+
+```js
+const links = await sharedNotes.get(
+  new LinkQuery({
+    predicate: "sioc://likes",
+  })
+);
+
+links.forEach(async (link) => {
+  const { data: who } = await ad4m.expression.get(link.source);
+  const { data: what } = await ad4m.expression.get(link.target);
+  console.log(who, "likes", what);
+});
+```

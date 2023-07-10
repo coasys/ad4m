@@ -1,5 +1,6 @@
 import { useConfig } from "nextra-theme-docs";
 import { useRouter } from "next/router";
+import { version } from "../core/package.json";
 
 export default {
   project: {
@@ -8,7 +9,7 @@ export default {
   logo: (
     <>
       <img src="/images/logo.svg" style={{ marginRight: "10px" }} />
-      AD4M Docs
+      AD4M Docs {version}
     </>
   ),
   darkMode: true,

@@ -1,0 +1,74 @@
+import { Callout } from "nextra-theme-docs";
+
+# Perspectives
+
+A Perspective is essentially a **local graph database** that
+contain the associations between [Expressions](/essentials/expressions).
+
+While Expressions contain "objective data", Perspectives can associate meaning between Expressions
+by linking them together.
+
+## Creating a Perspective
+
+Creating a new Perspective is easy:
+
+```ts
+const myNotes = ad4m.perspective.add("My private notes");
+```
+
+The returning object will be an instance of [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy/)
+– which essentially will work as your database instance.
+
+## Adding a Link
+
+Perspectives only consist of a collection of **links**, which connect
+three Expression URLs:
+
+- **Subject**: The Expression that you want to store or retrieve information about.
+- **Predicate**: Describes the relationship between the subject and the target.
+- **Target**: The Expression that is connected to the subject.
+
+```ts
+const link = {
+  subject: "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+  predicate: "sioc://likes",
+  target: "literal://ad4m",
+};
+
+myNotes.add(link);
+```
+
+[Perspective class definition](/jsdoc/classes/Agent)
+
+## Query Links
+
+We can query all links on a [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy/) using the `get` function:
+
+```js
+const allLinks = await myNotes.get(
+  new LinkQuery({ predicate: "sioc://likes" })
+);
+```
+
+What you get back will be an array of [LinkExpressions](/jsdoc/classes/LinkExpression/):
+
+```json
+[
+  {
+    "author": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+    "timestamp": "2023-06-21T14:47:48.935Z",
+    "data": {
+      "subject": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+      "predicate": "sioc://likes",
+      "target": "literal://ad4m"
+    },
+    "proof": {
+      "key": "#zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
+      "signature": "xxxx"
+    }
+  }
+]
+```
+
+Even though this Perspective is not shared (yet) but just our private, local
+graph database, we might want to share it as [Neighbourhood](/neighbourhoods).
