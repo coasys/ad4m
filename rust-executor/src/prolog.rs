@@ -1,23 +1,44 @@
+use std::io::Read;
+
 use scryer_prolog::machine::Machine;
 use scryer_prolog::machine::streams::*;
 
+fn string_2_stream(string: String, machine: &mut Machine) -> Stream {
+    let machine_st = machine.prelude_view_and_machine_st().1;
+    Stream::from_owned_string(string, &mut machine_st.arena)
+}
+
+fn print_output(machine: &mut Machine) {
+    let output_bytes: Vec<_> = machine.user_output.bytes().map(|b| b.unwrap()).collect();
+    let output_string = String::from_utf8(output_bytes).unwrap();
+    println!("{}", output_string);
+}
 
 pub fn run() {
-    // Create a new Scryer Prolog machine
-    let mut machine = Machine::with_test_streams();
-    let machine_st = machine.prelude_view_and_machine_st().1;
-    //let &mut arena = &mut ;
+    std::thread::spawn(|| {
+        
+        let mut machine = Machine::with_test_streams();
+        
 
-    // Example Prolog query to be executed
-    let query = String::from("?- append([1, 2], [3, 4], X).");
-    
-    let stream = Stream::from_owned_string(
-        query,
-        &mut machine_st.arena,
-    );
 
-    machine.load_file(String::from("query.pl").as_str(), stream);
-    //let result: Vec<u8> = machine.write_to_vec();
+        let facts = String::from("triple(\"a\", \"p1\", \"b\").");
+        println!("Loading facts: {}", facts);
+        let fact_stream = string_2_stream(facts, &mut machine);
+        machine.load_file(String::from("facts.pl").as_str(), fact_stream);
+        print_output(&mut machine);
+        println!("Facts loaded");
+        
+        
+        //let query = String::from("triple(\"a\", \"b\", \"c\").\nhalt.\n");
+        let query = String::from("halt.\n");
+        println!("Loading query: {}", query);
+        let query_stream = string_2_stream(query, &mut machine);
+        machine.user_input = query_stream;
 
-    //println!("Prolog Result: {:?}", result);
-}
+        println!("run toplevel");
+        machine.run_top_level();
+        println!("toplevel done");
+
+        print_output(&mut machine);
+    });
+}   
