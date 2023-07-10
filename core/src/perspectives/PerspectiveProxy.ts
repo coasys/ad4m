@@ -73,9 +73,11 @@ export class PerspectiveProxy {
             let source = replaceThis(replaceParameters(command.source))
             let predicate = replaceThis(replaceParameters(command.predicate))
             let target = replaceThis(replaceParameters(command.target))
+            let local = command?.local ?? false
+
             switch(command.action) {
                 case 'addLink':
-                    await this.add(new Link({source, predicate, target}))
+                    await this.add(new Link({source, predicate, target}), local ? 'local' : 'shared')
                     break;
                 case 'removeLink':
                     const linkExpressions = await this.get(new LinkQuery({source, predicate, target}))
@@ -84,12 +86,12 @@ export class PerspectiveProxy {
                     }
                     break;
                 case 'setSingleTarget':
-                    await this.setSingleTarget(new Link({source, predicate, target}))
+                    await this.setSingleTarget(new Link({source, predicate, target}), local ? 'local' : 'shared')
                     break;
                 case 'collectionSetter':
                     const links = await this.get(new LinkQuery({ source, predicate }))
                     await this.removeLinks(links);
-                    await this.addLinks(parameters.map(p => new Link({source, predicate, target: p.value})))
+                    await this.addLinks(parameters.map(p => new Link({source, predicate, target: p.value})), local ? 'local' : 'shared')
                     break;
             }
         }
@@ -136,8 +138,8 @@ export class PerspectiveProxy {
     }
 
     /** Adds multiple links to this perspective **/
-    async addLinks(links: Link[]): Promise<LinkExpression[]> {
-        return await this.#client.addLinks(this.#handle.uuid, links)
+    async addLinks(links: Link[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
+        return await this.#client.addLinks(this.#handle.uuid, links, status)
     }
 
     /** Removes multiple links from this perspective **/
@@ -146,8 +148,8 @@ export class PerspectiveProxy {
     }
 
     /** Adds and removes multiple links from this perspective **/
-    async linkMutations(mutations: LinkMutations): Promise<LinkExpressionMutations> {
-        return await this.#client.linkMutations(this.#handle.uuid, mutations)
+    async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
+        return await this.#client.linkMutations(this.#handle.uuid, mutations, status)
     }
 
     /** Adds a linkExpression to this perspective */
@@ -257,7 +259,7 @@ export class PerspectiveProxy {
      *
      * Works best together with @member getSingleTarget()
      */
-    async setSingleTarget(link: Link) {
+    async setSingleTarget(link: Link, status: LinkStatus = 'shared') {
         const query = new LinkQuery({source: link.source, predicate: link.predicate})
         const foundLinks = await this.get(query)
         const removals = [];
@@ -269,7 +271,7 @@ export class PerspectiveProxy {
         }
         const additions = [link];
 
-        await this.linkMutations({additions, removals})
+        await this.linkMutations({additions, removals}, status)
     }
 
     /** Returns all the Social DNA flows defined in this perspective */
@@ -326,7 +328,7 @@ export class PerspectiveProxy {
             source: "ad4m://self",
             predicate: "ad4m://has_zome",
             target: Literal.from(sdnaCode).toUrl()
-        }))
+        }), 'shared')
     }
 
     /** Returns the perspective's Social DNA code
@@ -495,19 +497,23 @@ export class PerspectiveProxy {
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
         // Collect all string properties of the object in a list
-        let properties = Object.keys(obj).filter(key => !Array.isArray(obj[key]))
+        let properties = []
 
         // Collect all collections of the object in a list
-        let collections = Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance')
+        let collections = []
 
         // Collect all string properties of the object in a list
         if(Object.getPrototypeOf(obj).__properties) {
-            Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => !properties.includes(p) ?? properties.push(p))
+            Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => properties.push(p))
+        } else {
+            properties.push(...Object.keys(obj).filter(key => !Array.isArray(obj[key])))
         }
 
         // Collect all collections of the object in a list
         if (Object.getPrototypeOf(obj).__collections) {
             Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
+        } else {
+            collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
         }
 
         // Collect all set functions of the object in a list
