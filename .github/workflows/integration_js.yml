@@ -40,9 +40,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+          ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
           ${{ runner.os }}-cargo
     - run: rustup target add wasm32-unknown-unknown
 
@@ -82,9 +82,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+            ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
             ${{ runner.os }}-cargo
       - run: rustup target add wasm32-unknown-unknown
 
@@ -139,9 +139,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-${{ hashFiles('./holochain_version.nix') }}
+          ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
           ${{ runner.os }}-cargo
     - run: rustup target add wasm32-unknown-unknown
 
