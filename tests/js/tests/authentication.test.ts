@@ -22,10 +22,10 @@ describe("Authentication integration tests", () => {
         const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "unauth-agent");
         const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-        const gqlPort = 16000
-        const hcAdminPort = 16001
-        const hcAppPort = 16002
-        const ipfsSwarmPort = 16004
+        const gqlPort = 15100
+        const hcAdminPort = 15101
+        const hcAppPort = 15102
+        const ipfsSwarmPort = 15103
 
         let executorProcess: ChildProcess | null = null
         let ad4mClient: Ad4mClient | null = null
@@ -43,10 +43,12 @@ describe("Authentication integration tests", () => {
         })
 
         after(async () => {
-            while (!executorProcess?.killed) {
-                let status  = executorProcess?.kill();
-                console.log("killed executor with", status);
-                await sleep(500);
+            if (executorProcess) {
+                while (!executorProcess?.killed) {
+                    let status  = executorProcess?.kill();
+                    console.log("killed executor with", status);
+                    await sleep(500);
+                }
             }
         })
 
@@ -83,10 +85,10 @@ describe("Authentication integration tests", () => {
         const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "auth-agent");
         const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-        const gqlPort = 15000
-        const hcAdminPort = 15001
-        const hcAppPort = 15002
-        const ipfsSwarmPort = 15003
+        const gqlPort = 15200
+        const hcAdminPort = 15202
+        const hcAppPort = 15203
+        const ipfsSwarmPort = 15204
 
         let executorProcess: ChildProcess | null = null
         let adminAd4mClient: Ad4mClient | null = null

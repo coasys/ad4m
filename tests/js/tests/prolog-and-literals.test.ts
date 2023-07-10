@@ -27,10 +27,10 @@ describe("Prolog + Literals", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "integration-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15000
-    const hcAdminPort = 15001
-    const hcAppPort = 15002
-    const ipfsSwarmPort = 15006
+    const gqlPort = 15500
+    const hcAdminPort = 15501
+    const hcAppPort = 15502
+    const ipfsSwarmPort = 15503
 
     before(async () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
@@ -44,10 +44,12 @@ describe("Prolog + Literals", () => {
     })
 
     after(async () => {
-        while (!executorProcess?.killed) {
-            let status  = executorProcess?.kill();
-            console.log("killed executor with", status);
-            await sleep(500);
+        if (executorProcess) {
+            while (!executorProcess?.killed) {
+                let status  = executorProcess?.kill();
+                console.log("killed executor with", status);
+                await sleep(500);
+            }
         }
     })
 

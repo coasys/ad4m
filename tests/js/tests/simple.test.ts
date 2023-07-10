@@ -16,10 +16,10 @@ describe("Integration", () => {
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "alice");
   const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-  const gqlPort = 15000
-  const hcAdminPort = 15001
-  const hcAppPort = 15002
-  const ipfsSwarmPort = 15007
+  const gqlPort = 15600
+  const hcAdminPort = 15601
+  const hcAppPort = 15602
+  const ipfsSwarmPort = 15603
 
   let ad4m: Ad4mClient | null = null
   let executorProcess: ChildProcess | null = null
@@ -36,10 +36,12 @@ describe("Integration", () => {
   })
 
   after(async () => {
-    while (!executorProcess?.killed) {
-      let status  = executorProcess?.kill();
-      console.log("killed executor with", status);
-      await sleep(500);
+    if (executorProcess) {
+      while (!executorProcess?.killed) {
+        let status  = executorProcess?.kill();
+        console.log("killed executor with", status);
+        await sleep(500);
+      }
     }
   })
 
