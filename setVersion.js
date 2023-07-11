@@ -56,6 +56,16 @@ console.log("Executor version: " + executor.version + " -> " + VERSION)
 executor.version = VERSION
 fs.writeFileSync('executor/package.json', JSON.stringify(executor, null, 2) + '\n')
 
+const rustExecutor = JSON.parse(fs.readFileSync('rust-executor/package.json', 'utf8'))
+console.log("Executor version: " + rustExecutor.version + " -> " + VERSION)
+rustExecutor.version = VERSION
+fs.writeFileSync('rust-executor/package.json', JSON.stringify(rustExecutor, null, 2) + '\n')
+
+const tests = JSON.parse(fs.readFileSync('tests/js/package.json', 'utf8'))
+console.log("Executor version: " + tests.version + " -> " + VERSION)
+tests.version = VERSION
+fs.writeFileSync('tests/js/package.json', JSON.stringify(tests, null, 2) + '\n')
+
 
 const executorHardWired = replaceVersionLine(
     fs.readFileSync('executor/src/core/Config.ts', 'utf8'), 
@@ -64,11 +74,6 @@ const executorHardWired = replaceVersionLine(
     ';')
 console.log("Hard-wired version string in executor's Config.ts: " + executorHardWired.oldVersion + " -> " + VERSION)
 fs.writeFileSync('executor/src/core/Config.ts', executorHardWired.newContent)
-
-const host = JSON.parse(fs.readFileSync('host/package.json', 'utf8'))
-console.log("Host version: " + host.version + " -> " + VERSION)
-host.version = VERSION
-fs.writeFileSync('host/package.json', JSON.stringify(host, null, 2) + '\n')
 
 const rustClient = replaceVersionLine(fs.readFileSync('rust-client/Cargo.toml', 'utf8'), VERSION)
 console.log("rust-client version: " + rustClient.oldVersion + " -> " + VERSION)
