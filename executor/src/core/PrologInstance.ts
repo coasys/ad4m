@@ -1,19 +1,19 @@
 import path from "path";
 //@ts-ignore
-import swipl from 'swipl-stdio'
+// import swipl from 'swipl-stdio'
 //@ts-ignore
 import tmp from 'tmp'
 import { MainConfig } from "./Config";
 import fs from "fs";
 
 export default class PrologInstance {
-    #engine
+    #engine: any
 
     constructor(config: MainConfig) {
-        this.#engine = new swipl.Engine(
-            config.swiplPath ? config.swiplPath : path.join(config.resourcePath, "swipl"),
-            config.swiplHomePath
-        )
+        // this.#engine = new swipl.Engine(
+        //     config.swiplPath ? config.swiplPath : path.join(config.resourcePath, "swipl"),
+        //     config.swiplHomePath
+        // )
     }
 
     async query(input: string) {
@@ -50,6 +50,6 @@ export default class PrologInstance {
     }
 
     close() {
-        this.#engine.close()
+        // this.#engine.close()
     }
 }
