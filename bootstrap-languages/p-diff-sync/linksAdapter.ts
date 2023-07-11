@@ -1,6 +1,6 @@
 import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
-  LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";;
-import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";;
+  LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";;
+import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";;
 import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
 
 class PeerInfo {

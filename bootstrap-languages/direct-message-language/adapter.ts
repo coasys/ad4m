@@ -1,4 +1,4 @@
-import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { DNA, DNA_NICK } from "./build/dna.js";
 
 //!@ad4m-template-variable
