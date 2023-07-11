@@ -21,7 +21,7 @@ testLink.proof = {
 }
 
 /**
- * Resolver classes are used here to define the GraphQL schema 
+ * Resolver classes are used here to define the GraphQL schema
  * (through the type-graphql annotations)
  * and are spawned in the client tests in Ad4mClient.test.ts.
  * For the latter, they return test fixtures.
@@ -103,7 +103,7 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => [LinkExpression])
-    perspectiveAddLinks(@Arg('uuid') uuid: string, @Arg('links', type => [LinkInput]) links: LinkInput[], @PubSub() pubSub: any): LinkExpression[] {
+    perspectiveAddLinks(@Arg('uuid') uuid: string, @Arg('links', type => [LinkInput]) links: LinkInput[], @Arg('status', { nullable: true}) status: string, @PubSub() pubSub: any): LinkExpression[] {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
@@ -128,7 +128,7 @@ export default class PerspectiveResolver {
         l.timestamp = Date.now()
         l.proof = testLink.proof
         l.data = links[0].data
-        
+
         const l2 = new LinkExpression()
         l2.author = 'did:ad4m:test'
         l2.timestamp = Date.now()
@@ -141,8 +141,8 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => LinkExpressionMutations)
-    perspectiveLinkMutations(@Arg('uuid') uuid: string, @Arg('mutations') mutations: LinkMutations, @PubSub() pubSub: any): LinkExpressionMutations {
-        const perspectiveAddLinks = this.perspectiveAddLinks(uuid, mutations.additions, pubSub);
+    perspectiveLinkMutations(@Arg('uuid') uuid: string, @Arg('mutations') mutations: LinkMutations, @Arg('status', { nullable: true}) status: LinkStatus, @PubSub() pubSub: any): LinkExpressionMutations {
+        const perspectiveAddLinks = this.perspectiveAddLinks(uuid, mutations.additions, status, pubSub);
         const perspectiveRemoveLinks = this.perspectiveRemoveLinks(uuid, mutations.removals, pubSub);
         return new LinkExpressionMutations(perspectiveAddLinks, perspectiveRemoveLinks)
     }
@@ -153,7 +153,7 @@ export default class PerspectiveResolver {
         link.status = status;
         return link as LinkExpression
     }
- 
+
     @Mutation(returns => LinkExpression)
     perspectiveUpdateLink(@Arg('uuid') uuid: string, @Arg('oldLink') oldlink: LinkExpressionInput, @Arg('newLink') newlink: LinkInput, @PubSub() pubSub: any): LinkExpression {
         const l = new LinkExpression()
@@ -164,7 +164,7 @@ export default class PerspectiveResolver {
 
         pubSub.publish(LINK_REMOVED_TOPIC, { link: l })
 
-        return l    
+        return l
     }
 
     @Mutation(returns => Boolean)
