@@ -19,9 +19,8 @@ pub fn run() {
         
         let mut machine = Machine::with_test_streams();
         
-
-
         let facts = String::from("triple(\"a\", \"p1\", \"b\").");
+        //let facts = String::from("a.\n\n");
         println!("Loading facts: {}", facts);
         let fact_stream = string_2_stream(facts, &mut machine);
         machine.load_file(String::from("facts.pl").as_str(), fact_stream);
@@ -29,16 +28,19 @@ pub fn run() {
         println!("Facts loaded");
         
         
-        //let query = String::from("triple(\"a\", \"b\", \"c\").\nhalt.\n");
-        let query = String::from("halt.\n");
+        //let query = String::from("triple(A,B,C), write(\"A = \"), write(A), nl, write(\"B = \"), write(B), write(\"C = \"), write(C), nl ; write(\"no triple matched\").\n");
+        let query = String::from("triple(A,B,C).\n");
+        //let query = String::from("write(\"A = \").");
+        //let query = String::from("halt.\n");
         println!("Loading query: {}", query);
         let query_stream = string_2_stream(query, &mut machine);
         machine.user_input = query_stream;
 
-        println!("run toplevel");
-        machine.run_top_level();
-        println!("toplevel done");
+        println!("run once");
+        machine.run_once();
+        println!("run once done");
 
         print_output(&mut machine);
+        println!("print output done");
     });
 }   
