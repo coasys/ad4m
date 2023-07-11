@@ -464,7 +464,17 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                 if (!currentAgent) {
                     throw Error("No current agent init'd")
                 }
-                currentAgent.perspective = perspective;
+
+                currentAgent.perspective = {
+                    ...perspective,
+                    links: perspective.links.map((l: any) => {
+                        const link = {...l};
+                        delete link.status
+                  
+                        return link
+                    })
+                };
+
                 await core.agentService.updateAgent(currentAgent);
                 return currentAgent;
             },
@@ -674,24 +684,24 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveAddLink: async (parent, args, context, info) => {
-                const { uuid, link } = args
+                const { uuid, link, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLink(link)
+                return await perspective.addLink(link, status)
             },
             //@ts-ignore
             perspectiveAddLinks: async (parent, args, context, info) => {
-                const { uuid, links } = args
+                const { uuid, links, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLinks(links)
+                return await perspective.addLinks(links, status)
             },
             //@ts-ignore
             perspectiveAddLinkExpression: async (parent, args, context, info) => {
-                const { uuid, link } = args
+                const { uuid, link, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLink(link)
+                return await perspective.addLink(link, status)
             },
             //@ts-ignore
             perspectiveRemove: (parent, args, context, info) => {
@@ -718,10 +728,10 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             },
             //@ts-ignore
             perspectiveLinkMutations: async (parent, args, context, info) => {
-                const { uuid, mutations } = args
+                const { uuid, mutations, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.linkMutations(mutations)
+                return await perspective.linkMutations(mutations, status)
             },
             //@ts-ignore
             perspectiveUpdate: (parent, args, context, info) => {
@@ -810,6 +820,15 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
         },
 
         Subscription: {
+            agentAppsChanged: {
+                //@ts-ignore
+                subscribe: (parent, args, context, info) => {
+                    checkCapability(context.capabilities, Auth.AGENT_SUBSCRIBE_CAPABILITY)
+                    return pubsub.asyncIterator(PubSub.APPS_CHANGED)
+                },
+                //@ts-ignore
+                resolve: payload => payload
+            },
             agentUpdated: {
                 //@ts-ignore
                 subscribe: (parent, args, context, info) => {
@@ -838,14 +857,12 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
                     )(undefined, args)
                 },
                 resolve: async (payload: any) => {
-                    console.debug("GQL neighbourhoodSignal:", payload)
                     await core.languageController?.tagExpressionSignatureStatus(payload?.signal)
                     if (payload?.signal?.data.links) {
                         for (const link of payload?.signal.data.links) {
                             await core.languageController?.tagExpressionSignatureStatus(link);
                         }
                     };
-                    console.debug("GQL neighbourhoodSignal sent")
                     return payload?.signal
                 }
             },
@@ -949,6 +966,11 @@ function createResolvers(core: PerspectivismCore, config: OuterConfig) {
             language: async (expression) => {
                 //console.log("GQL LANGUAGE", expression)
                 let lang
+
+                if(expression.ref.language.address === "literal") {
+                    return { address: "literal", name: "literal" }
+                }
+
                 try {
                     lang = await core.languageController.languageForExpression(expression.ref) as any    
                 } catch(e) {

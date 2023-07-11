@@ -5,11 +5,12 @@ import { ApolloClient, InMemoryCache } from "@apollo/client/core/index.js";
 import { HttpLink } from "@apollo/client/link/http/index.js";
 import Websocket from "ws";
 import { createClient } from "graphql-ws";
-import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
-    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
+import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
+    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
     instanceQuery, Subject, subjectProperty,
     subjectCollection, subjectFlag,
     SDNAClass,
+    SubjectEntity,
 } from "@perspect3vism/ad4m";
 import { rmSync, readFileSync } from "node:fs";
 import fetch from 'node-fetch';
@@ -26,7 +27,7 @@ function apolloClient(port: number, token?: string): ApolloClient<any> {
         //@ts-ignore
         fetch
       });
-  
+
     return new ApolloClient({
         link: wsLink,
         cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
@@ -48,19 +49,19 @@ describe("Integration", () => {
     before(async () => {
         //ad4m = new Ad4mClient(apolloClient(4000))
         //return
-        
+
         rmSync("../ad4mJS", { recursive: true, force: true })
         console.log("Initialzing executor data directory")
         //@ts-ignore
         execSync('../../host/dist/ad4m-macos-x64 init --dataPath ../ad4mJS', {})
-        
+
         console.log("Starting executor")
         try {
             execSync("killall holochain")
         } catch (e) {
             console.log("No holochain process running")
         }
-        
+
         //@ts-ignore
         executorProcess = exec('../../host/dist/ad4m-macos-x64 serve --dataPath ../ad4mJS', {})
 
@@ -78,15 +79,16 @@ describe("Integration", () => {
         executorProcess!.stderr!.on('data', (data) => {
             console.log(`${data}`);
         });
-    
+
         console.log("Waiting for executor to settle...")
         await executorReady
         console.log("Creating ad4m client")
+        // @ts-ignore
         ad4m = new Ad4mClient(apolloClient(4000))
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
         console.log("Done")
-        
+
     })
 
     after(() => {
@@ -141,7 +143,7 @@ describe("Integration", () => {
             expect(subject).to.have.property("setState")
             expect(subject).to.have.property("title")
         })
-    
+
         describe("with an instance", () => {
             let subject: Subject | null = null
 
@@ -164,8 +166,8 @@ describe("Integration", () => {
 
             it("should work with a property that is not set initially and that auto-resolves", async () => {
                 //@ts-ignore
-                expect(await subject.title).to.be.false
-        
+                expect(await subject.title).to.be.undefined
+
                 let title = "test title"
                 //@ts-ignore
                 await subject.setTitle(title)
@@ -182,7 +184,7 @@ describe("Integration", () => {
                 let c1 = Literal.from("comment 1").toUrl()
                 await perspective!.add(new Link({
                     source: subject!.baseExpression,
-                    predicate: "todo://comment", 
+                    predicate: "todo://comment",
                     target: c1
                 }))
 
@@ -192,7 +194,7 @@ describe("Integration", () => {
                 let c2 = Literal.from("comment 2").toUrl()
                 await perspective!.add(new Link({
                     source: subject!.baseExpression,
-                    predicate: "todo://comment", 
+                    predicate: "todo://comment",
                     target: c2
                 }))
 
@@ -202,7 +204,7 @@ describe("Integration", () => {
 
             it("should be able to add to collections", async () => {
                 let commentLinks = await perspective!.get(new LinkQuery({
-                    source: subject!.baseExpression, 
+                    source: subject!.baseExpression,
                     predicate: "todo://comment"
                 }))
                 for(let link of commentLinks) {
@@ -318,7 +320,7 @@ describe("Integration", () => {
 
                 //@ts-ignore
                 @subjectProperty({
-                    through: "todo://state", 
+                    through: "todo://state",
                     initial: "todo://ready",
                     writable: true,
                 })
@@ -333,14 +335,14 @@ describe("Integration", () => {
             class Todo {
                 // Setting this member "subjectConstructer" allows for adding custom
                 // actions that will be run when a subject is constructed.
-                // 
+                //
                 // In this test, we don't need to use it, because the used "initial"
                 // parameter on "state" below will have the same effect as the following:
                 // subjectConstructor = [addLink("this", "todo://state", "todo://ready")]
 
                 // Setting this member "isSubjectInstance" allows for adding custom clauses
                 // to the instance check.
-                // 
+                //
                 // In this test, we don't need to use it, because the used "required"
                 // parameter on "state" below will have the same effect as the following:
                 // isSubjectInstance = [hasLink("todo://state")]
@@ -360,7 +362,7 @@ describe("Integration", () => {
 
                 //@ts-ignore
                 @subjectProperty({
-                    through: "todo://state", 
+                    through: "todo://state",
                     initial:"todo://ready",
                     writable: true,
                     required: true
@@ -407,11 +409,11 @@ describe("Integration", () => {
             it("should generate correct SDNA from a JS class", async () => {
                 // @ts-ignore
                 let sdna = Todo.generateSDNA()
-                
+
                 const regExp = /\("Todo", ([^)]+)\)/;
                 const matches = regExp.exec(sdna);
                 const value = matches![1];
-                
+
                 const equal = readFileSync("./subject.pl").toString().replace(/c\)/g, `${value})`).replace(/\(c/g, `(${value}`);
 
                 expect(sdna.normalize('NFC')).to.equal(equal.normalize('NFC'))
@@ -462,7 +464,7 @@ describe("Integration", () => {
                 let todo = todos[0]
                 //@ts-ignore
                 await perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
-                
+
                 todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(1)
             })
@@ -470,7 +472,7 @@ describe("Integration", () => {
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
                 let todo = todos[0]
-                expect(await todo.title).to.equal(false)
+                expect(await todo.title).to.be.undefined
 
                 // @ts-ignore
                 await todo.setTitle("new title")
@@ -527,7 +529,7 @@ describe("Integration", () => {
 
                 // @ts-ignore
                 const liked1 = await todo.isLiked
-                expect(liked1).to.be.false
+                expect(liked1).to.be.undefined
 
                 await perspective?.add(new Link({source: root, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
 
@@ -544,7 +546,7 @@ describe("Integration", () => {
 
                 it("can find instances through the exact flag link", async() => {
                     await perspective!.add(new Link({
-                        source: "test://message", 
+                        source: "test://message",
                         predicate: "ad4m://type",
                         target: "ad4m://undefined"
                     }))
@@ -553,7 +555,7 @@ describe("Integration", () => {
                     expect(first.length).to.be.equal(0)
 
                     await perspective!.add(new Link({
-                        source: "test://message", 
+                        source: "test://message",
                         predicate: "ad4m://type",
                         target: "ad4m://message"
                     }))
@@ -565,24 +567,190 @@ describe("Integration", () => {
                 it("can constrain collection entries through 'where' clause", async () => {
                     let root = Literal.from("Collection where test").toUrl()
                     let todo = await perspective!.createSubject(new Todo(), root)
-    
+
                     let messageEntry = Literal.from("test message").toUrl()
-    
+
                     // @ts-ignore
                     await todo.addEntries(messageEntry)
-    
+
                     let entries = await todo.entries
                     expect(entries.length).to.equal(1)
-    
+
                     let messageEntries = await todo.messages
                     expect(messageEntries.length).to.equal(0)
-    
+
                     await perspective!.createSubject(new Message(), messageEntry)
-    
+
                     messageEntries = await todo.messages
                     expect(messageEntries.length).to.equal(1)
                 })
 
+            })
+
+            describe("Active record implementation", () => {
+                @SDNAClass({
+                    name: "Recipe"
+                })
+                class Recipe extends SubjectEntity {
+                    //@ts-ignore
+                    @subjectFlag({
+                        through: "ad4m://type",
+                        value: "ad4m://recipe"
+                    })
+                    type: string = ""
+
+                    //@ts-ignore
+                    @subjectProperty({
+                        through: "recipe://name",
+                        writable: true,
+                    })
+                    name: string = ""
+
+                    //@ts-ignore
+                    @subjectCollection({ through: "recipe://entries" })
+                    entries: string[] = []
+
+                    // @ts-ignore
+                    @subjectCollection({
+                        through: "recipe://entries",
+                        where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
+                    })
+                    // @ts-ignore
+                    ingredients: [];
+
+                    //@ts-ignore
+                    @subjectCollection({ through: "recipe://comment" })
+                    // @ts-ignore
+                    comments: string[] = []
+
+                    //@ts-ignore
+                    @subjectProperty({
+                        through: "recipe://local",
+                        writable: true,
+                        local: true
+                    })
+                    local: string = ""
+                }
+
+                before(async () => {
+                    // @ts-ignore
+                    perspective!.addSdna(Recipe.generateSDNA())
+                })
+
+                it("save() & get()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test";
+
+                    await recipe.save();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test")
+                })
+
+                it("update()", async () => {
+                    let root = Literal.from("Active record implementation test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test1";
+
+                    await recipe.update();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://test1")
+                })
+
+                it("find()", async () => {
+                    const recipes = await Recipe.all(perspective!);
+
+                    expect(recipes.length).to.equal(1)
+                })
+
+                it("can constrain collection entries clause", async () => {
+                    let root = Literal.from("Active record implementation collection test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://collection_test";
+
+                    recipe.comments = ['test', 'test1']
+
+                    await recipe.save()
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.comments.length).to.equal(2)
+                })
+
+                it("save() & get() local", async () => {
+                    let root = Literal.from("Active record implementation test local link").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://locallink";
+                    recipe.local = 'test'
+
+                    await recipe.save();
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.name).to.equal("recipe://locallink")
+                    expect(recipe2.local).to.equal("test")
+
+                    // @ts-ignore
+                    const links = await perspective?.get({
+                        source: root,
+                        predicate: "recipe://local"
+                    })
+
+                    expect(links!.length).to.equal(1)
+                    expect(links![0].status).to.equal('local')
+                })
+
+                it("delete()", async () => {
+                    const recipe2 = await Recipe.all(perspective!);
+
+                    expect(recipe2.length).to.equal(3)
+
+                    await recipe2[0].delete();
+
+                    const recipe3 = await Recipe.all(perspective!);
+
+                    expect(recipe3.length).to.equal(2)
+                })
+
+                it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                    let root = Literal.from("Active record implementation collection test with where").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    let recipeEntries = Literal.from("test recipes").toUrl()
+
+                    recipe.entries = [recipeEntries]
+                    // @ts-ignore
+                    recipe.comments = ['test', 'test1']
+                    recipe.name = "recipe://collection_test";
+
+                    await recipe.save()
+
+                    await perspective?.add(new Link({source: recipeEntries, predicate: "recipe://has_ingredient", target: "recipe://test"}))
+
+                    await recipe.get()
+
+                    const recipe2 = new Recipe(perspective!, root);
+
+                    await recipe2.get();
+
+                    expect(recipe2.ingredients.length).to.equal(1)
+                })
             })
         })
     })

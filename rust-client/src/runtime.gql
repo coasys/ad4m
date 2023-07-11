@@ -70,6 +70,7 @@ query FriendStatus($did: String!) {
                 timestamp
                 data { source, predicate, target }
                 proof { valid, invalid, signature, key }
+                status
             }  
         }
         proof { valid, invalid, signature, key }
@@ -90,6 +91,7 @@ query MessageInbox($filter: String) {
                 timestamp
                 data { source, predicate, target }
                 proof { valid, invalid, signature, key }
+                status
             }  
         }
         proof { valid, invalid, signature, key }
@@ -108,6 +110,7 @@ query MessageOutbox($filter: String) {
                     timestamp
                     data { source, predicate, target }
                     proof { valid, invalid, signature, key }
+                    status
                 }  
             }
             proof { valid, invalid, signature, key }

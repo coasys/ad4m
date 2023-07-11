@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-connect",
-  "version": "0.3.4",
+  "version": "0.5.0",
   "description": "Lib for handling everything needed to setup a connection to a local or remote ad4m-executor",
   "license": "CAL-1.0",
   "main": "dist/web.js",
@@ -37,7 +37,7 @@
     "release:beta": "np --no-2fa --no-tests --tag=beta --any-branch",
     "dev": "NODE_ENV=dev && vite dev",
     "serve": "npx serve",
-    "build": "npm run build:core && npm run build:web && npm run build:electron && npm run build:utils && tsc",
+    "build": "yarn run build:core && yarn run build:web && yarn run build:electron && yarn run build:utils && tsc",
     "build:core": "tsc --project tsconfig.json && node scripts/esbuild.js",
     "build:web": "tsc --project tsconfig.json && node scripts/esbuild_web.js",
     "build:utils": "tsc --project tsconfig.json && node scripts/esbuild_utils.js",
@@ -60,8 +60,11 @@
   },
   "dependencies": {
     "@undecaf/barcode-detector-polyfill": "^0.9.15",
+    "@undecaf/zbar-wasm": "^0.9.12",
     "auto-bind": "^5.0.1",
     "electron": "^20.0.3",
+    "esbuild-plugin-copy": "^2.1.1",
+    "esbuild-plugin-replace": "^1.4.0",
     "lit": "^2.3.1"
   }
 }

@@ -147,7 +147,7 @@ export default class PerspectivismCore {
         while (fs.existsSync(repoPath)) {
             await sleep(1000);
             retries++;
-            if (retries > 10) {
+            if (retries >= 10) {
                 console.log("Waited long enough for repo.lock to be released, deleting...");
                 fs.rmdirSync(repoPath, { recursive: true });
                 fs.rmSync(path.join(basePath, "datastore", "LOCK"));
@@ -202,8 +202,8 @@ export default class PerspectivismCore {
     }
 
     languageSignal(signal: any) {
-        //@ts-ignore
-        console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
+        // //@ts-ignore
+        // console.log(new Date().toISOString(), "PerspectivismCore.languageSignal: Got signal");
         //NOTE (optimization): worth considering if its worth keeping around pubsub in this or if we should just get a new pubsub here
         //@ts-ignore
         this.pubsub.publish(PubSub.SIGNAL, { signal: JSON.stringify(signal), language: this.language });

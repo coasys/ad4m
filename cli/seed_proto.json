@@ -1,5 +1,5 @@
 {
-    "languageLanguageRef": "/Users/josh/dev/language-persistence/build/bundle.js",
+    "languageLanguageRef": "../bootstrap-languages/language-language/build/bundle.js",
     "linkLanguages": [
         {
             "meta": {
@@ -8,7 +8,7 @@
                 "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
-            "resource": "/Users/josh/dev/perspective-diff-sync/build/bundle.js"
+            "resource": "../bootstrap-languages/p-diff-sync/build/bundle.js"
         }
     ],
     "agentLanguage": {
@@ -18,7 +18,7 @@
             "sourceCodeLink": "https://github.com/perspect3vism/agent-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "/Users/josh/dev/agent-language/build//bundle.js"
+        "resource": "../bootstrap-languages/agent-language/build//bundle.js"
     },
     "directMessageLanguage": {
         "meta": {
@@ -27,7 +27,7 @@
             "sourceCodeLink": "https://github.com/perspect3vism/direct-message-language", 
             "possibleTemplateParams": ["recipient_did", "recipient_hc_agent_pubkey"]
         },
-        "resource": "/Users/josh/dev/direct-message-language/build/bundle.js"
+        "resource": "../bootstrap-languages/direct-message-language/build/bundle.js"
     },
     "neighbourhoodLanguage": {
         "meta": {
@@ -36,7 +36,7 @@
             "sourceCodeLink": "https://github.com/fluxsocial/neighbourhood-language", 
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "/Users/josh/dev/neighbourhood-language/build/bundle.js"
+        "resource": "../bootstrap-languages/neighbourhood-language/build/bundle.js"
     },
     "perspectiveLanguage": {
         "meta": {
@@ -45,17 +45,17 @@
             "sourceCodeLink": "https://github.com/perspect3vism/perspective-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "/Users/josh/dev/perspective-language/build/bundle.js"
+        "resource": "../bootstrap-languages/perspective-language/build/bundle.js"
     },
     "alsoPublish": [
         {
             "meta": {
-                "name": "note-ipfs", 
-                "description": "IPFS based language for storing metadata", 
-                "sourceCodeLink": "https://github.com/perspect3vism/note-ipfs",
-                "possibleTemplateParams": []
+                "name": "fileStorageLanguage", 
+                "description": "Holochain based language for storing files", 
+                "sourceCodeLink": "https://github.com/perspect3vism/file-storage-language",
+                "possibleTemplateParams": ["uid", "name", "description"]
             },
-            "resource": "/Users/josh/Downloads/bundle.js"
+            "resource": "../bootstrap-languages/file-storage/build/bundle.js"
         }
     ]
 }

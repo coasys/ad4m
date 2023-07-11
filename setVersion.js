@@ -104,10 +104,10 @@ if (isPreRelease) {
 }
 fs.writeFileSync('ui/src-tauri/Cargo.toml', uiTauriCargo.newContent)
 
-const book = JSON.parse(fs.readFileSync('docs-src/book.json', 'utf8'))
-console.log("Docs version: " + book.variables.ad4mVersion + " -> " + VERSION)
-book.variables.ad4mVersion = VERSION
-fs.writeFileSync('docs-src/book.json', JSON.stringify(book, null, 2) + '\n')
+const book = JSON.parse(fs.readFileSync('docs/package.json', 'utf8'))
+console.log("Docs version: " + book.version + " -> " + VERSION)
+book.version = VERSION
+fs.writeFileSync('docs/package.json', JSON.stringify(book, null, 2) + '\n')
 
 const testRunner = JSON.parse(fs.readFileSync('test-runner/package.json', 'utf8'))
 console.log("Test runner version: " + testRunner.version + " -> " + VERSION)
@@ -117,4 +117,25 @@ fs.writeFileSync('test-runner/package.json', JSON.stringify(testRunner, null, 2)
 const perspectiveDiffSync = JSON.parse(fs.readFileSync('bootstrap-languages/p-diff-sync/package.json', 'utf8'))
 console.log("Perspective diff sync: " + perspectiveDiffSync.version + " -> " + VERSION)
 perspectiveDiffSync.version = VERSION
+fs.writeFileSync('bootstrap-languages/p-diff-sync/package.json', JSON.stringify(perspectiveDiffSync, null, 2) + '\n')
+
+const agentLanguage = JSON.parse(fs.readFileSync('bootstrap-languages/agent-language/package.json', 'utf8'))
+console.log("Agent language: " + agentLanguage.version + " -> " + VERSION)
+agentLanguage.version = VERSION
+fs.writeFileSync('bootstrap-languages/agent-language/package.json', JSON.stringify(agentLanguage, null, 2) + '\n')
+
+const directMessageLanguage = JSON.parse(fs.readFileSync('bootstrap-languages/direct-message-language/package.json', 'utf8'))
+console.log("Direct message language: " + directMessageLanguage.version + " -> " + VERSION)
+directMessageLanguage.version = VERSION
+fs.writeFileSync('bootstrap-languages/direct-message-language/package.json', JSON.stringify(directMessageLanguage, null, 2) + '\n')
+
+const neighbourhoodLanguage = JSON.parse(fs.readFileSync('bootstrap-languages/neighbourhood-language/package.json', 'utf8'))
+console.log("Neighbourhood language: " + neighbourhoodLanguage.version + " -> " + VERSION)
+neighbourhoodLanguage.version = VERSION
+fs.writeFileSync('bootstrap-languages/neighbourhood-language/package.json', JSON.stringify(neighbourhoodLanguage, null, 2) + '\n')
+
+const perspectiveLanguage = JSON.parse(fs.readFileSync('bootstrap-languages/perspective-language/package.json', 'utf8'))
+console.log("Perspective language: " + perspectiveLanguage.version + " -> " + VERSION)
+perspectiveLanguage.version = VERSION
+fs.writeFileSync('bootstrap-languages/perspective-language/package.json', JSON.stringify(perspectiveLanguage, null, 2) + '\n')
 fs.writeFileSync('bootstrap-languages/p-diff-sync/package.json', JSON.stringify(perspectiveDiffSync, null, 2) + '\n')

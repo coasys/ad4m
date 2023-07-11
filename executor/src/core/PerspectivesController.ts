@@ -39,7 +39,6 @@ export default class PerspectivesController {
         this.#context.languageController!.addLinkObserver(async (diff: PerspectiveDiff, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                console.log("PerspectiveController: received signal from linkObserver, adding remote links from a language to a local perspective...");
                 perspective.populateLocalLinks(diff.additions, diff.removals);
 
                 try {
@@ -51,8 +50,6 @@ export default class PerspectivesController {
                         })
                     }
 
-                    console.log("PerspectiveController: published link additions");
-
                     for (const linkRemoved of diff.removals) {
                         console.log("publishing removal:", linkRemoved)
                         await this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
@@ -60,8 +57,6 @@ export default class PerspectivesController {
                             link: linkRemoved
                         })
                     }
-
-                    console.log("PerspectiveController: published link removals");
                 } catch (e) {
                     console.error("PerspectiveController: error publishing link additions/removals", e);
                 }
@@ -73,7 +68,6 @@ export default class PerspectivesController {
         this.#context.languageController!.addTelepresenceSignalObserver((signal: any, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                console.log("PerspectiveController: received telepresence signal...");
                 this.pubsub.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
                     signal: signal,
                     perspective: perspective.plain()
@@ -85,8 +79,10 @@ export default class PerspectivesController {
 
         this.#context.languageController!.addSyncStateChangeObserver(async (state: PerspectiveState, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
+            let perspectiveHandle = Array.from(this.#perspectiveHandles.values()).find((p) => p.uuid === perspective?.uuid);
             if (perspective) {
                 await perspective.updatePerspectiveState(state);
+                perspectiveHandle!.state = state;
             } else {
                 console.warn(`Could not find perspective sync state change signal with lang: ${lang}`)
             }

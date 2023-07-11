@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
+import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkStatus, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
 import { Link, linkEqual, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import { SHA3 } from "sha3";
 import type AgentService from "./agent/AgentService";
@@ -319,7 +319,7 @@ export default class Perspective {
                 const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
                     const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
-                    console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args).substring(0, 50)})`)
+                    //console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args).substring(0, 50)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
                     //console.debug("Got result:", result)
@@ -460,19 +460,23 @@ export default class Perspective {
         return onlineAgents.filter(o => o)
     }
 
-    async addLink(link: LinkInput | LinkExpressionInput): Promise<LinkExpression> {
+    async addLink(link: LinkInput | LinkExpressionInput, status: LinkStatus = 'shared'): Promise<LinkExpression> {
         const linkExpression = this.ensureLinkExpression(link);
-        const diff = {
-            additions: [linkExpression],
-            removals: []
-        } as PerspectiveDiff
-        const addLink = await this.commit(diff);
 
-        if (!addLink) {
-            await this.#db.addPendingDiff(this.uuid!, diff);
+        if (status === 'shared') {
+            const diff = {
+                additions: [linkExpression],
+                removals: []
+            } as PerspectiveDiff
+            const addLink = await this.commit(diff);
+    
+            if (!addLink) {
+                this.#db.addPendingDiff(this.uuid!, diff);
+            }
         }
 
-        await this.#db.addLink(this.uuid!, linkExpression);
+        await this.#db.addLink(this.uuid!, linkExpression, status);
+
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         this.#pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
@@ -480,10 +484,12 @@ export default class Perspective {
             link: linkExpression
         })
 
+        linkExpression.status = status;
+
         return linkExpression
     }
 
-    async addLinks(links: (LinkInput | LinkExpressionInput)[]): Promise<LinkExpression[]> {
+    async addLinks(links: (LinkInput | LinkExpressionInput)[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
         const linkExpressions = links.map(l => this.ensureLinkExpression(l));
         const diff = {
             additions: linkExpressions,
@@ -495,7 +501,7 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
-        await this.#db.addManyLinks(this.uuid!, linkExpressions);
+        await this.#db.addManyLinks(this.uuid!, linkExpressions, status);
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
@@ -505,7 +511,8 @@ export default class Perspective {
             })
         };
 
-        return linkExpressions
+        // @ts-ignore
+        return linkExpressions.map(l => ({...l, status}))
     }
 
     async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
@@ -532,7 +539,7 @@ export default class Perspective {
         return linkExpressions
     }
 
-    async linkMutations(mutations: LinkMutations): Promise<LinkExpressionMutations> {
+    async linkMutations(mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
         const diff = {
             additions: mutations.additions.map(l => this.ensureLinkExpression(l)),
             removals: mutations.removals.map(l => this.ensureLinkExpression(l))
@@ -543,7 +550,7 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         };
 
-        await this.#db.addManyLinks(this.uuid!, diff.additions);
+        await this.#db.addManyLinks(this.uuid!, diff.additions, status);
         await Promise.all(diff.removals.map(async l => await this.#db.removeLink(this.uuid!, l)));
         this.#prologNeedsRebuild = true;
         for (const link of diff.additions) {
@@ -566,7 +573,6 @@ export default class Perspective {
         const link = await this.#db.getLink(this.uuid!, oldLink);
         if (!link) {
             const allLinks = await this.#db.getAllLinks(this.uuid!);
-            console.log("all links", allLinks);
             throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
         }
 
@@ -591,6 +597,10 @@ export default class Perspective {
             oldLink,
             newLink: newLinkExpression
         });
+
+        if (link.status) {
+            newLinkExpression.status = link.status
+        }
 
         return newLinkExpression
     }
@@ -869,8 +879,14 @@ export default class Perspective {
         lines.push(":- dynamic property/2.")
         lines.push(":- dynamic property_getter/4.")
         lines.push(":- dynamic property_setter/3.")
+        lines.push(":- dynamic property_resolve/2.")
+        lines.push(":- dynamic property_resolve_language/3.")
+        lines.push(":- dynamic property_named_option/4.")
         lines.push(":- dynamic collection_getter/4.")
         lines.push(":- dynamic collection_setter/3.")
+        lines.push(":- dynamic p3_class_icon/2.")
+        lines.push(":- dynamic p3_class_color/2.")
+        lines.push(":- dynamic p3_instance_color/3.")
 
         lines.push(":- discontiguous subject_class/2.")
         lines.push(":- discontiguous constructor/2.")
@@ -878,8 +894,14 @@ export default class Perspective {
         lines.push(":- discontiguous property/2.")
         lines.push(":- discontiguous property_getter/4.")
         lines.push(":- discontiguous property_setter/3.")
+        lines.push(":- discontiguous property_resolve/2.")
+        lines.push(":- discontiguous property_resolve_language/3.")
+        lines.push(":- discontiguous property_named_option/4.")
         lines.push(":- discontiguous collection_getter/4.")
         lines.push(":- discontiguous collection_setter/3.")
+        lines.push(":- discontiguous p3_class_icon/2.")
+        lines.push(":- discontiguous p3_class_color/2.")
+        lines.push(":- discontiguous p3_instance_color/3.")
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data

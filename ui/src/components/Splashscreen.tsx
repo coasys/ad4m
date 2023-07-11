@@ -29,7 +29,7 @@ export default function Splashscreen() {
         error.style.opacity = "1";
         error.style.height = "160px";
       }
-    }, 10000);
+    }, 30000);
   }, []);
 
   return (

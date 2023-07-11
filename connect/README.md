@@ -32,26 +32,23 @@ This package makes it easy for AD4M apps to connect to a local or remote AD4M ex
 ```js
 import Ad4mConnectUI from "@perspect3vism/ad4m-connect";
 
-const ui = Ad4mConnectUI({
-  appName: "ad4m-connect-example",
-  appDesc: "hello",
-  appDomain: "dev.ad4m.connect.example",
-
+const ui = Ad4mConnect({
+  appName: "Example",
+  appDesc: "This is a sample app.",
+  appDomain: "ad4m.dev",
   appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
-  capabilities: [
-    {
-      with: { domain: "*", pointers: ["*"] },
-      can: ["*"],
-    },
-  ],
+  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
 });
 
-ui.connect();
-
 ui.addEventListener("authstatechange", (e) => {
-  if (auth.authState === "connected") {
-    console.log("connected");
+  if (e.detail === "authenticated") {
+    // We are authenticated
   }
+});
+
+// Open popup and save the client when we are done
+ui.connect().then((client) => {
+  // Save the client
 });
 ```
 

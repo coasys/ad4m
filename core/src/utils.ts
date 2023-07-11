@@ -16,7 +16,7 @@ export function capSentence(cap) {
   const can = cap.can.includes("*") ? ["READ", "WRITE", "UPDATE"] : cap.can;
   const domain = cap.with.domain === "*" ? "" : cap.with.domain;
   const pointers = cap.with.pointers.includes("*")
-    ? ["everything"]
+    ? ["all AD4M data"]
     : cap.with.pointers;
 
   return `${formatList(

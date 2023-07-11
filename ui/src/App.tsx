@@ -14,6 +14,7 @@ import Settings from "./components/Settings";
 import { appWindow } from "@tauri-apps/api/window";
 import { Connect } from "./components/Connect";
 import Apps from "./components/Apps";
+import TrayMessage from "./components/TrayMessage";
 
 const App = () => {
   const [opened, setOpened] = useState(false);
@@ -45,6 +46,7 @@ const App = () => {
     <div className="App">
       <Routes>
         <Route path="/splashscreen" element={<Splashscreen />} />
+        <Route path="/tray_message" element={<TrayMessage />} />
         <Route
           path="/login"
           element={
