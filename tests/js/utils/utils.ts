@@ -42,7 +42,7 @@ export async function startExecutor(dataPath: string,
     languageLanguageOnly: boolean = false,
     adminCredential?: string
 ): Promise<ChildProcess> {
-    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m.exe');
+    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m');
 
     console.log(bootstrapSeedPath);
     console.log(dataPath);
