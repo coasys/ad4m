@@ -1,6 +1,7 @@
 js/tst-tmp
 
 !cleanTestingData.js
+!cleanup.js
 !get-builtin-test-langs.js
 !injectLanguageLanguageBundle.js
 !injectPublishingAgent.js
