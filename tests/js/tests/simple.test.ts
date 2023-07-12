@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 
 describe("Integration", () => {
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
-  const appDataPath = path.join(TEST_DIR, "agents", "alice");
+  const appDataPath = path.join(TEST_DIR, "agents", "simpleAlice");
   const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
   const gqlPort = 15600
   const hcAdminPort = 15601
