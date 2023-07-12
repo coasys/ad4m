@@ -196,6 +196,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     const aliceP1 = await alice.perspective.add("telepresence")
                     const linkLang = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood for Telepresence"}));
                     const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
+                    await sleep(60000)
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                     const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
                     await testContext.makeAllNodesKnown()
@@ -204,7 +205,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     bobNH = bobP1!.getNeighbourhoodProxy()
                     aliceDID = (await alice.agent.me()).did
                     bobDID = (await bob.agent.me()).did
-                    await sleep(5000)
+                    await sleep(60000)
                 })
 
                 it('they see each other in `otherAgents`', async () => {
