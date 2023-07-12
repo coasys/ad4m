@@ -201,11 +201,24 @@ impl HolochainService {
                     },
                 }];
             } else {
-                kitsune_config.transport_pool = vec![TransportConfig::Quic {
-                    bind_to: None,
-                    override_host: None,
-                    override_port: None,
-                }];
+                kitsune_config.transport_pool = vec![
+                    TransportConfig::Quic {
+                        bind_to: None,
+                        override_host: None,
+                        override_port: None,
+                    },
+                    TransportConfig::Mem {},
+                    TransportConfig::Proxy {
+                        sub_transport: Box::new(TransportConfig::Quic {
+                            bind_to: None,
+                            override_host: None,
+                            override_port: None,
+                        }),
+                        proxy_config: ProxyConfig::RemoteProxyClient {
+                            proxy_url: Url2::parse(local_config.proxy_url),
+                        },
+                    },
+                ];
             }
             config.network = Some(kitsune_config);
 
