@@ -819,7 +819,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return await perspective.addLink(link, status)
             },
             //@ts-ignore
-            perspectiveAddLinks: async (parent, args, context, info) => {
+            perspectiveAddLinks: async (args, context, info) => {
                 const { uuid, links, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
@@ -859,7 +859,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return await perspective.removeLinks(links)
             },
             //@ts-ignore
-            perspectiveLinkMutations: async (parent, args, context, info) => {
+            perspectiveLinkMutations: async (args, context, info) => {
                 const { uuid, mutations, status } = args
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
