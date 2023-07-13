@@ -1,7 +1,11 @@
 import killProcess from 'kill-process-by-name';
 
 async function cleanup() {
-  killProcess('ad4m');
+  try {
+    killProcess('ad4m');
+  } catch (e) {
+    console.log('Error: ', e)
+  }
 }
 
 cleanup()
