@@ -2,8 +2,9 @@ mod globals;
 mod graphql;
 mod holochain_service;
 mod js_core;
-mod utils;
 mod prolog;
+mod prolog_service;
+mod utils;
 mod wallet;
 
 pub mod init;

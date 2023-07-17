@@ -3,6 +3,7 @@ mod globals;
 pub mod graphql;
 mod holochain_service;
 mod js_core;
+mod prolog_service;
 mod utils;
 mod wallet;
 
