@@ -82,3 +82,46 @@ impl PrologService {
         Ok(service)
     }
 }
+
+#[cfg(test)]
+mod prolog_test {
+    use super::PrologService;
+    use crate::prolog_service::interface::get_prolog_service;
+
+    #[tokio::test]
+    async fn test_init_prolog_engine() {
+        let service = PrologService::init().await;
+        assert!(service.is_ok());
+
+        let interface = get_prolog_service().await;
+
+        let facts = String::from(
+            r#"
+        triple("a", "p1", "b").
+        triple("a", "p2", "b").
+        "#,
+        );
+
+        let load_facts = interface
+            .load_module_string("facts".to_string(), facts)
+            .await;
+        assert!(load_facts.is_ok());
+        println!("Facts loaded");
+
+        let query = String::from("triple(\"a\",P,\"b\").");
+        //let query = String::from("write(\"A = \").");
+        //let query = String::from("halt.\n");
+        println!("Running query: {}", query);
+        let output = interface.run_query(query).await;
+        println!("Output: {:?}", output);
+        assert!(output.is_ok());
+
+        let query = String::from("triple(\"a\",\"p1\",\"b\").");
+        //let query = String::from("write(\"A = \").");
+        //let query = String::from("halt.\n");
+        println!("Running query: {}", query);
+        let output = interface.run_query(query).await;
+        println!("Output: {:?}", output);
+        assert!(output.is_ok());
+    }
+}

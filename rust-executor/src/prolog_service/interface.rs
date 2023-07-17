@@ -11,7 +11,7 @@ pub struct PrologServiceInterface {
 }
 
 impl PrologServiceInterface {
-    pub async fn run_query(self, query: String) -> Result<QueryResult, Error> {
+    pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let (response_sender, response_receiver) = oneshot::channel();
         self.sender
             .send(PrologServiceRequest::RunQuery(query, response_sender))
@@ -27,7 +27,7 @@ impl PrologServiceInterface {
     }
 
     pub async fn load_module_string(
-        self,
+        &self,
         module_name: String,
         program: String,
     ) -> Result<(), Error> {
@@ -75,5 +75,5 @@ pub async fn set_prolog_service(service: PrologServiceInterface) {
 
 pub async fn get_prolog_service() -> PrologServiceInterface {
     let lock = PROLOG_SERVICE.read().await;
-    lock.clone().expect("Holochain Conductor not started")
+    lock.clone().expect("PrologServiceInterface not set")
 }
