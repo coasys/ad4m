@@ -59,10 +59,7 @@ export default class Perspective {
         this.#prologEngine = null
         this.#prologNeedsRebuild = true
 
-        const that = this
-
         process.on("SIGINT", () => {
-            that.#prologEngine?.close()
             clearInterval(this.#pollingInterval);
         });
 
@@ -908,20 +905,15 @@ export default class Perspective {
     }
 
     async spawnPrologEngine(): Promise<any> {
-        if(this.#prologEngine) {
-            await this.#prologEngine.close()
-            this.#prologEngine = null
-        }
-
         let error
-        const prolog = new PrologInstance(this.#config!)
+        const prolog = new PrologInstance()
+        await prolog.start();
 
         try {
             const facts = await this.initEngineFacts()
-            await prolog.consult(facts)
+            await prolog.consult(facts, this.uuid)
         } catch(e) {
             error = e
-            prolog.close()
         }
 
         if(error) throw error
@@ -938,7 +930,7 @@ export default class Perspective {
                 console.log("Perspective.prologQuery: Making prolog query but first rebuilding facts");
                 this.#prologNeedsRebuild = false
                 const facts = await this.initEngineFacts()
-                await this.#prologEngine!.consult(facts)
+                await this.#prologEngine!.consult(facts, this.uuid)
             }
         })
         
@@ -947,11 +939,6 @@ export default class Perspective {
 
     clearPolling() {
         clearInterval(this.#pollingInterval);
-    }
-
-    closePrologEngine() {
-        if(this.#prologEngine)
-            this.#prologEngine.close()
     }
 }
 

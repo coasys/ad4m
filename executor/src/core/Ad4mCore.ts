@@ -171,7 +171,6 @@ export default class Ad4mCore {
         for(let ph of this.perspectivesController.allPerspectiveHandles()) {
             const perspective = this.perspectivesController.perspective(ph.uuid)
             perspective.clearPolling()
-            perspective.closePrologEngine()
         }
         console.log("Stopping IPFS")
         //await this.#IPFS?.stop({timeout: 15});
