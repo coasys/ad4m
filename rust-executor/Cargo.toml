@@ -46,7 +46,7 @@ cid = "0.10.1"
 once_cell = "1.17.1"
 
 juniper = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol", features = ["chrono"] }
-juniper_subscriptions = {git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol" }
+juniper_subscriptions = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol" }
 juniper_graphql_transport_ws = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol" }
 juniper_warp = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol", features = ["subscriptions"] }
 warp = "0.3.4"
