@@ -1,4 +1,4 @@
-import type { Address, Interaction, Language, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import type { Address, Interaction, Language, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import Adapter from './adapter.ts'
 import { UI } from "./build/expressionUI.js";
 

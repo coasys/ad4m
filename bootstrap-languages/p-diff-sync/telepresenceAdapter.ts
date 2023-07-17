@@ -1,4 +1,4 @@
-import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";;
+import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";;
 import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
 
 export class TelepresenceAdapterImplementation implements TelepresenceAdapter {

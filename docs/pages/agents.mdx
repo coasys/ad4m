@@ -1,0 +1,25 @@
+# Agents
+
+In ADAM, individuals are referred to as "Agents" instead of "Users" to
+highlight their active role and contribution. They are not simply users who use the
+network, but actively participate by operating as nodes, facilitating communication
+and enhancing network security.
+
+In the same way computers have their own unique IP address on the internet,
+each agent in ADAM has their own [Decentralized Identifier](https://en.wikipedia.org/wiki/Decentralized_identifier). Users can either use their
+existing identity or create a new one:
+
+```js
+await ad4m.agent.generate("Password123");
+```
+
+To retrieve your own Decentralized Identifier (DID) you can call `me()` on the AgentClient:
+
+```js
+const { did, perspective } = await ad4m.agent.me();
+```
+
+Each Agent also has their own [Perspective](/essentials/perspectives) that can
+contain public information about the Agent.
+
+[Agent class definition](/jsdoc/classes/Agent)

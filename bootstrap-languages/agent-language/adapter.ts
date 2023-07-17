@@ -1,4 +1,4 @@
-import type { Address, Agent, Expression, PublicSharing, LanguageContext, HolochainLanguageDelegate, ExpressionAdapter, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import type { Address, Agent, Expression, PublicSharing, LanguageContext, HolochainLanguageDelegate, ExpressionAdapter, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { DNA_NICK } from "./build/dna.js";
 
 export default class ExpressionAdapterImpl implements ExpressionAdapter {

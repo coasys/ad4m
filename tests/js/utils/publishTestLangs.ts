@@ -12,12 +12,12 @@ global.fetch = fetch
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
-const appDataPath = path.join(TEST_DIR, "agents", "p");
-const publishLanguagesPath = path.join(TEST_DIR, "languages");
-const publishingBootstrapSeedPath = path.join(`${__dirname}/../publishBootstrapSeed.json`);
-const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-const perspectiveDiffSyncHashPath = path.join(`${__dirname}/../scripts/perspective-diff-sync-hash`);
+const TEST_DIR = path.resolve(__dirname, '..', 'tst-tmp');
+const appDataPath = path.resolve(TEST_DIR, "agents", "p");
+const publishLanguagesPath = path.resolve(TEST_DIR, "languages");
+const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootstrapSeed.json');
+const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
+const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
 const gqlPort = 15700;
 const hcAdminPort = 15701;
 const hcAppPort = 15702;
@@ -73,7 +73,7 @@ async function publish() {
     await ad4mClient.agent.generate("passphrase");
 
     for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
-        let bundlePath = path.join(publishLanguagesPath, language, "build", "bundle.js");
+        let bundlePath = path.join(publishLanguagesPath, language, "build", "bundle.js").replace(/\\/g, "/");
         console.log("Attempting to publish language", bundlePath);
         let publishedLang = await ad4mClient.languages.publish(bundlePath, languageMeta);
         console.log("Published with result", publishedLang);

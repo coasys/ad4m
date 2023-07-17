@@ -519,7 +519,7 @@ export default class Perspective {
         return linkExpressions
     }
 
-    async linkMutations(mutations: LinkMutations): Promise<LinkExpressionMutations> {
+    async linkMutations(mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
         const diff = {
             additions: mutations.additions.map(l => this.ensureLinkExpression(l)),
             removals: mutations.removals.map(l => this.ensureLinkExpression(l))
@@ -530,7 +530,7 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         };
 
-        await this.#db.addManyLinks(this.uuid!, diff.additions);
+        await this.#db.addManyLinks(this.uuid!, diff.additions, status);
         await Promise.all(diff.removals.map(async l => await this.#db.removeLink(this.uuid!, l)));
         this.#prologNeedsRebuild = true;
         for (const link of diff.additions) {

@@ -1,4 +1,4 @@
-import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { LinkAdapter } from "./linksAdapter.ts";
 import { TelepresenceAdapterImplementation } from "./telepresenceAdapter.ts";
 import { DNA, DNA_NICK, ZOME_NAME } from "./build/dna.js";

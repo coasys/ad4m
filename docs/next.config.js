@@ -6,7 +6,7 @@ const withNextra = require("nextra")({
 module.exports = withNextra({
   images: { unoptimized: true },
   output: "export",
-  exportTrailingSlash: true,
+  trailingSlash: true,
 });
 
 // If you have other Next.js configurations, you can pass them as the parameter:

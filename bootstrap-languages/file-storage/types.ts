@@ -1,4 +1,4 @@
-import { ExpressionGeneric } from "https://esm.sh/@perspect3vism/ad4m@0.3.4";
+import { ExpressionGeneric } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 
 export type EntryHash = Uint8Array;
 
