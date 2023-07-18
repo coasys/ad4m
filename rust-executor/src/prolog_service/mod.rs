@@ -76,7 +76,7 @@ impl PrologService {
 
     pub fn new() -> Result<PrologService, Error> {
         let service = PrologService {
-            machine: Arc::new(Mutex::new(Machine::with_test_streams())),
+            machine: Arc::new(Mutex::new(Machine::new_lib())),
         };
 
         Ok(service)
