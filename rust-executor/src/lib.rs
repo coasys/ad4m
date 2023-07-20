@@ -1,3 +1,6 @@
+#[cfg(test)]
+#[macro_use] extern crate maplit;
+
 mod config;
 mod globals;
 pub mod graphql;

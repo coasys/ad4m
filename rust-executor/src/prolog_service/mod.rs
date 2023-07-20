@@ -77,6 +77,8 @@ pub async fn get_prolog_service() -> PrologService {
 
 #[cfg(test)]
 mod prolog_test {
+    use scryer_prolog::machine::parsed_results::{QueryResolution, QueryMatch, Value};
+
     use super::*;
 
     #[tokio::test]
@@ -99,18 +101,49 @@ mod prolog_test {
             .load_module_string(engine_name.clone(), "facts".to_string(), facts)
             .await;
         assert!(load_facts.is_ok());
-        println!("Facts loaded");
 
         let query = String::from("triple(\"a\",P,\"b\").");
-        let output = service.run_query(engine_name.clone(), query).await;
-        assert!(output.is_ok());
+        let result = service
+            .run_query(engine_name.clone(), query)
+            .await
+            .expect("Error running query");
+
+        assert_eq!(
+            result,
+            Ok(QueryResolution::Matches(vec![
+                QueryMatch::from(btreemap! {
+                    "P" => Value::from("p1"),
+                }),
+                QueryMatch::from(btreemap! {
+                    "P" => Value::from("p2"),
+                }),
+            ]))
+        );
 
         let query = String::from("triple(\"a\",\"p1\",\"b\").");
-        //let query = String::from("write(\"A = \").");
-        //let query = String::from("halt.\n");
-        println!("Running query: {}", query);
-        let output = service.run_query(engine_name.clone(), query).await;
-        println!("Output: {:?}", output);
-        assert!(output.is_ok());
+
+        let result = service
+            .run_query(engine_name.clone(), query)
+            .await
+            .expect("Error running query");
+
+        assert_eq!(
+            result,
+            Ok(QueryResolution::True)
+        );    
+        
+
+        let query = String::from("non_existant_predicate(\"a\",\"p1\",\"b\").");
+
+        let result = service
+            .run_query(engine_name.clone(), query)
+            .await
+            .expect("Error running query");
+
+        assert_eq!(
+            result,
+            Err(String::from("error(existence_error(procedure,non_existant_predicate/3),non_existant_predicate/3)."))
+        );    
+    
     }
 }
