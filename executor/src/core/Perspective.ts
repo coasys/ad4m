@@ -731,12 +731,9 @@ export default class Perspective {
             if(link.data.target) nodes.add(link.data.target)
         }
 
-        langAddrs.push(":- dynamic languageAddress/2.")
-        langAddrs.push(":- discontiguous languageAddress/2.")
-        langNames.push(":- dynamic languageName/2.")  
-        langNames.push(":- discontiguous languageName/2.")  
-        exprAddrs.push(":- dynamic expressionAddress/2.")  
-        exprAddrs.push(":- discontiguous expressionAddress/2.")  
+        langAddrs.push(":- discontiguous(languageAddress/2).")
+        langNames.push(":- discontiguous(languageName/2).")
+        exprAddrs.push(":- discontiguous(expressionAddress/2).")
 
         for(let node of nodes) {
             //node.replace('\n', '\n\c')
@@ -812,10 +809,8 @@ export default class Perspective {
         // triple/3
         // link/5
         //-------------------
-        lines.push(":- dynamic triple/3.")
-        lines.push(":- discontiguous triple/3.")
-        lines.push(":- dynamic link/5.")
-        lines.push(":- discontiguous link/5.")  
+        lines.push(":- discontiguous(triple/3).")
+        lines.push(":- discontiguous(link/5).")  
 
         for (const link of allLinks) {
             lines.push(this.tripleFact(link));
@@ -827,16 +822,14 @@ export default class Perspective {
         //-------------------
         // reachable/2
         //-------------------
-        lines.push(":- dynamic reachable/2.")
-        lines.push(":- discontiguous reachable/2.")  
+        lines.push(":- discontiguous(reachable/2).")  
         lines.push("reachable(A,B) :- triple(A,_,B).")
         lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
 
         //-------------------
         // hiddenExpression/1
         //-------------------
-        lines.push(":- dynamic hiddenExpression/1.")
-        lines.push(":- discontiguous hiddenExpression/1.")
+        lines.push(":- discontiguous(hiddenExpression/1).")
 
 
 
@@ -846,47 +839,25 @@ export default class Perspective {
         // Social DNA zomes
         //-------------------
 
-        lines.push(":- dynamic register_sdna_flow/2.")
-        lines.push(":- dynamic flowable/2.")
-        lines.push(":- dynamic flow_state/3.")
-        lines.push(":- dynamic start_action/2.")
-        lines.push(":- dynamic action/4.")
-
-        lines.push(":- discontiguous register_sdna_flow/2.")
-        lines.push(":- discontiguous flowable/2.")
-        lines.push(":- discontiguous flow_state/3.")
-        lines.push(":- discontiguous start_action/2.")
-        lines.push(":- discontiguous action/4.")
-
-        lines.push(":- dynamic subject_class/2.")
-        lines.push(":- dynamic constructor/2.")
-        lines.push(":- dynamic instance/2.")
-        lines.push(":- dynamic property/2.")
-        lines.push(":- dynamic property_getter/4.")
-        lines.push(":- dynamic property_setter/3.")
-        lines.push(":- dynamic property_resolve/2.")
-        lines.push(":- dynamic property_resolve_language/3.")
-        lines.push(":- dynamic property_named_option/4.")
-        lines.push(":- dynamic collection_getter/4.")
-        lines.push(":- dynamic collection_setter/3.")
-        lines.push(":- dynamic p3_class_icon/2.")
-        lines.push(":- dynamic p3_class_color/2.")
-        lines.push(":- dynamic p3_instance_color/3.")
-
-        lines.push(":- discontiguous subject_class/2.")
-        lines.push(":- discontiguous constructor/2.")
-        lines.push(":- discontiguous instance/2.")
-        lines.push(":- discontiguous property/2.")
-        lines.push(":- discontiguous property_getter/4.")
-        lines.push(":- discontiguous property_setter/3.")
-        lines.push(":- discontiguous property_resolve/2.")
-        lines.push(":- discontiguous property_resolve_language/3.")
-        lines.push(":- discontiguous property_named_option/4.")
-        lines.push(":- discontiguous collection_getter/4.")
-        lines.push(":- discontiguous collection_setter/3.")
-        lines.push(":- discontiguous p3_class_icon/2.")
-        lines.push(":- discontiguous p3_class_color/2.")
-        lines.push(":- discontiguous p3_instance_color/3.")
+        lines.push(":- discontiguous(register_sdna_flow/2).")
+        lines.push(":- discontiguous(flowable/2).")
+        lines.push(":- discontiguous(flow_state/3).")
+        lines.push(":- discontiguous(start_action/2).")
+        lines.push(":- discontiguous(action/4).")
+        lines.push(":- discontiguous(subject_class/2).")
+        lines.push(":- discontiguous(constructor/2).")
+        lines.push(":- discontiguous(instance/2).")
+        lines.push(":- discontiguous(property/2).")
+        lines.push(":- discontiguous(property_getter/4).")
+        lines.push(":- discontiguous(property_setter/3).")
+        lines.push(":- discontiguous(property_resolve/2).")
+        lines.push(":- discontiguous(property_resolve_language/3).")
+        lines.push(":- discontiguous(property_named_option/4).")
+        lines.push(":- discontiguous(collection_getter/4).")
+        lines.push(":- discontiguous(collection_setter/3).")
+        lines.push(":- discontiguous(p3_class_icon/2).")
+        lines.push(":- discontiguous(p3_class_color/2).")
+        lines.push(":- discontiguous(p3_instance_color/3).")
 
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
