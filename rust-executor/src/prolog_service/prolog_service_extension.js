@@ -2,9 +2,6 @@
     const core = Deno.core;
 
     globalThis.PROLOG_SERVICE = {
-        initPrologService: async () => {
-            return core.opAsync("init_prolog_service");
-        },
         spawnEngine: async () => {
             return core.opAsync("spawn_engine");
         },
