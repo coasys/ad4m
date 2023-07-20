@@ -2,14 +2,17 @@
     const core = Deno.core;
 
     globalThis.PROLOG_SERVICE = {
-        startPrologService: async () => {
-            return core.opAsync("start_prolog_service");
+        initPrologService: async () => {
+            return core.opAsync("init_prolog_service");
         },
-        runQuery: async (query) => {
-            return core.opAsync("run_query"), query;
+        spawnEngine: async () => {
+            return core.opAsync("spawn_engine");
         },
-        loadModuleString: async (module_name, program) => {
-            return core.opAsync("load_module_string", module_name, program);
+        runQuery: async (engineName, query) => {
+            return core.opAsync("run_query"), engineName, query;
+        },
+        loadModuleString: async (engineName, module_name, program) => {
+            return core.opAsync("load_module_string", engineName, module_name, program);
         }
     };
   })(globalThis);

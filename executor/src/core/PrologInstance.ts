@@ -1,15 +1,19 @@
+import { randomUUID } from "crypto";
+
 export default class PrologInstance {
     prologService = PROLOG;
+    name: string;
 
     constructor() {
+        this.name = randomUUID()
     }
 
     async start() {
-        return await this.prologService.startPrologService()
+        return await this.prologService.spawnEngine(this.name)
     }
 
     async query(input: string) {
-        return await this.prologService.runQuery(input)
+        return await this.prologService.runQuery(this.name, input)
 
         //TODO; add parsing of the result
 
@@ -33,7 +37,7 @@ export default class PrologInstance {
     }
 
     async call(query: string) {
-        return await this.prologService.runQuery(query)
+        return await this.prologService.runQuery(this.name, query)
 
         //TODO; add parsing of the result
 
@@ -41,7 +45,7 @@ export default class PrologInstance {
     };
 
     async consult(program: string, moduleName?: string) {
-        return await this.prologService.loadModuleString(program, moduleName || "main")
+        return await this.prologService.loadModuleString(this.name, program, moduleName || "main")
         // const tmpobj = tmp.fileSync()
         // //@ts-ignore
         // fs.writeFileSync(tmpobj.name, program);

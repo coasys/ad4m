@@ -3,9 +3,15 @@ use deno_core::{error::AnyError, include_js_files, op, Extension};
 use super::{get_prolog_service, init_prolog_service};
 
 #[op]
-async fn start_prolog_service() -> Result<(), AnyError> {
+async fn init() -> Result<(), AnyError> {
     init_prolog_service().await;
     Ok(())
+}
+
+#[op]
+async fn spawn_engine(engine_name: String) -> Result<(), AnyError> {
+    let mut service = get_prolog_service().await;
+    service.spawn_engine(engine_name).await
 }
 
 #[op]
@@ -32,7 +38,7 @@ pub fn build() -> Extension {
     Extension::builder("prolog_service")
         .js(include_js_files!(holochain_service "prolog_service_extension.js",))
         .ops(vec![
-            start_prolog_service::decl(),
+            spawn_engine::decl(),
             run_query::decl(),
             load_module_string::decl(),
         ])
