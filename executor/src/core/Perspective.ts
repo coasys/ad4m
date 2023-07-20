@@ -930,7 +930,7 @@ export default class Perspective {
                 console.log("Perspective.prologQuery: Making prolog query but first rebuilding facts");
                 this.#prologNeedsRebuild = false
                 const facts = await this.initEngineFacts()
-                await this.#prologEngine!.consult(facts, this.uuid)
+                await this.#prologEngine!.consult(facts)
             }
         })
         

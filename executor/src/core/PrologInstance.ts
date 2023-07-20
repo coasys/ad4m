@@ -1,19 +1,24 @@
 import { randomUUID } from "crypto";
 
 export default class PrologInstance {
-    prologService = PROLOG;
+    //@ts-ignore
+    prologService = PROLOG_SERVICE;
     name: string;
 
     constructor() {
-        this.name = randomUUID()
+        this.name = randomUUID().toString()
     }
 
     async start() {
+        //console.log("Starting prolog instance", this.name)
         return await this.prologService.spawnEngine(this.name)
     }
 
     async query(input: string) {
-        return await this.prologService.runQuery(this.name, input)
+        //console.log("Querying prolog instance", this.name, input)
+        let result = await this.prologService.runQuery(this.name, input)
+        //console.log("Got Prolog result", result)
+        return result
 
         //TODO; add parsing of the result
 
@@ -37,6 +42,7 @@ export default class PrologInstance {
     }
 
     async call(query: string) {
+        //console.log("Calling prolog instance", this.name, query)
         return await this.prologService.runQuery(this.name, query)
 
         //TODO; add parsing of the result
@@ -45,7 +51,8 @@ export default class PrologInstance {
     };
 
     async consult(program: string, moduleName?: string) {
-        return await this.prologService.loadModuleString(this.name, program, moduleName || "main")
+        //console.log("PrologInstance.consult", this.name, program, moduleName)
+        return await this.prologService.loadModuleString(this.name, program, "main")
         // const tmpobj = tmp.fileSync()
         // //@ts-ignore
         // fs.writeFileSync(tmpobj.name, program);
