@@ -1,3 +1,4 @@
+import Perspective from "./Perspective";
 import { randomUUID } from "crypto";
 
 export default class PrologInstance {
@@ -5,8 +6,8 @@ export default class PrologInstance {
     prologService = PROLOG_SERVICE;
     name: string;
 
-    constructor() {
-        this.name = randomUUID().toString()
+    constructor(perspective: Perspective) {
+        this.name = perspective.uuid || randomUUID()
     }
 
     async start() {
@@ -50,9 +51,9 @@ export default class PrologInstance {
         // return await this.#engine.call(query)
     };
 
-    async consult(program: string, moduleName?: string) {
+    async consult(program: string) {
         //console.log("PrologInstance.consult", this.name, program, moduleName)
-        return await this.prologService.loadModuleString(this.name, program, "main")
+        return await this.prologService.loadModuleString(this.name, program, "main.pl")
         // const tmpobj = tmp.fileSync()
         // //@ts-ignore
         // fs.writeFileSync(tmpobj.name, program);

@@ -906,12 +906,12 @@ export default class Perspective {
 
     async spawnPrologEngine(): Promise<any> {
         let error
-        const prolog = new PrologInstance()
+        const prolog = new PrologInstance(this)
         await prolog.start();
 
         try {
             const facts = await this.initEngineFacts()
-            await prolog.consult(facts, this.uuid)
+            await prolog.consult(facts)
         } catch(e) {
             error = e
         }
