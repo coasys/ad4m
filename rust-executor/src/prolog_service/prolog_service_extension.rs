@@ -1,6 +1,6 @@
 use deno_core::{error::AnyError, include_js_files, op, Extension};
 
-use super::{get_prolog_service, PrologService, init_prolog_service};
+use super::{get_prolog_service, init_prolog_service};
 
 #[op]
 async fn start_prolog_service() -> Result<(), AnyError> {

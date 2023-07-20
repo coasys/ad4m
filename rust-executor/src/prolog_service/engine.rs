@@ -1,6 +1,5 @@
 use deno_core::anyhow::Error;
 use scryer_prolog::machine::{Machine, parsed_results::QueryResult};
-use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug)]

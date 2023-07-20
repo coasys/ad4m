@@ -2,10 +2,9 @@ use deno_core::anyhow::Error;
 use scryer_prolog::machine::parsed_results::QueryResult;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::RwLock;
 use lazy_static::lazy_static;
 
-pub(crate) mod interface;
 pub(crate) mod prolog_service_extension;
 pub(crate) mod engine;
 
@@ -77,9 +76,9 @@ mod prolog_test {
         init_prolog_service().await;
         let mut service = get_prolog_service().await;
 
-        let ENGINE_NAME = "test".to_string();
+        let engine_name = "test".to_string();
 
-        assert!(service.spawn_engine(ENGINE_NAME.clone()).await.is_ok());
+        assert!(service.spawn_engine(engine_name.clone()).await.is_ok());
 
         let facts = String::from(
             r#"
@@ -91,7 +90,7 @@ mod prolog_test {
 
         let load_facts = service
             .load_module_string(
-                ENGINE_NAME.clone(),
+                engine_name.clone(),
                 "facts".to_string(), 
                 facts
             )
@@ -100,14 +99,14 @@ mod prolog_test {
         println!("Facts loaded");
 
         let query = String::from("triple(\"a\",P,\"b\").");
-        let output = service.run_query(ENGINE_NAME.clone(), query).await;
+        let output = service.run_query(engine_name.clone(), query).await;
         assert!(output.is_ok());
 
         let query = String::from("triple(\"a\",\"p1\",\"b\").");
         //let query = String::from("write(\"A = \").");
         //let query = String::from("halt.\n");
         println!("Running query: {}", query);
-        let output = service.run_query(ENGINE_NAME.clone(), query).await;
+        let output = service.run_query(engine_name.clone(), query).await;
         println!("Output: {:?}", output);
         assert!(output.is_ok());
     }
