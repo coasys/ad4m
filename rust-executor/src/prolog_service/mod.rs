@@ -1,100 +1,85 @@
 use deno_core::anyhow::Error;
-use scryer_prolog::machine::Machine;
+use scryer_prolog::machine::parsed_results::QueryResult;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::oneshot;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{RwLock, Mutex};
+use lazy_static::lazy_static;
 
 pub(crate) mod interface;
 pub(crate) mod prolog_service_extension;
 pub(crate) mod engine;
 
-pub(crate) use interface::{
-    get_prolog_service, PrologServiceInterface, PrologServiceRequest, PrologServiceResponse,
-};
-
-use self::interface::set_prolog_service;
+use self::engine::PrologEngine;
 
 #[derive(Clone)]
 pub struct PrologService {
-    pub machine: Arc<Mutex<Machine>>,
+    engines: Arc<RwLock<HashMap<String, PrologEngine>>>,
 }
 
 impl PrologService {
-    pub async fn init() -> Result<(), Error> {
-        let (sender, mut receiver) = mpsc::channel::<PrologServiceRequest>(32);
-        let inteface = PrologServiceInterface { sender };
-        set_prolog_service(inteface).await;
+    pub fn new() -> Self {
+        PrologService { engines: Arc::new(RwLock::new(HashMap::new())) }
+    }
 
-        let (response_sender, response_receiver) = oneshot::channel();
+    pub async fn spawn_engine(&mut self, engine_name: String) -> Result<(), Error> {
+        if self.engines.read().await.contains_key(&engine_name) {
+            return Err(Error::msg("Engine already exists"));
+        }
 
-        std::thread::spawn(move || {
-            let service = PrologService::new().unwrap();
+        let mut engine = PrologEngine::new();
+        engine.spawn().await?;
 
-            response_sender
-                .send(PrologServiceResponse::InitComplete(Ok(())))
-                .unwrap();
-
-            loop {
-                match receiver.try_recv() {
-                    Ok(message) => match message {
-                        PrologServiceRequest::RunQuery(query, response) => {
-                            let mut machine = loop {
-                                match service.machine.try_lock() {
-                                    Ok(machine) => break machine,
-                                    Err(_err) => {
-                                        std::thread::sleep(std::time::Duration::from_millis(5))
-                                    }
-                                }
-                            };
-                            let result = machine.run_query(query);
-                            let _ = response.send(PrologServiceResponse::QueryResult(result));
-                        }
-                        PrologServiceRequest::LoadModuleString(module_name, program, response) => {
-                            let mut machine = loop {
-                                match service.machine.try_lock() {
-                                    Ok(machine) => break machine,
-                                    Err(_err) => {
-                                        std::thread::sleep(std::time::Duration::from_millis(5))
-                                    }
-                                }
-                            };
-                            let _result = machine.load_module_string(module_name.as_str(), program);
-                            let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
-                        }
-                    },
-                    Err(_err) => std::thread::sleep(std::time::Duration::from_millis(5)),
-                }
-            }
-        });
-
-        match response_receiver.await? {
-            PrologServiceResponse::InitComplete(result) => result?,
-            _ => unreachable!(),
-        };
-
+        self.engines.write().await.insert(engine_name, engine);
         Ok(())
     }
 
-    pub fn new() -> Result<PrologService, Error> {
-        let service = PrologService {
-            machine: Arc::new(Mutex::new(Machine::new_lib())),
-        };
+    pub async fn run_query(&self, engine_name: String, query: String) -> Result<QueryResult, Error> {
+        let engines = self.engines.read().await;
+        let engine = engines.get(&engine_name).ok_or_else(|| Error::msg("Engine not found"))?;
+        let result = engine.run_query(query).await?;
+        Ok(result)
+    }
 
-        Ok(service)
+    pub async fn load_module_string(
+        &self,
+        engine_name: String,
+        module_name: String,
+        program: String,
+    ) -> Result<(), Error> {
+        let engines = self.engines.read().await;
+        let engine = engines.get(&engine_name).ok_or_else(|| Error::msg("Engine not found"))?;
+        engine.load_module_string(module_name, program).await
     }
 }
 
+lazy_static! {
+    static ref PROLOG_SERVICE: Arc<RwLock<Option<PrologService>>> =
+        Arc::new(RwLock::new(None));
+}
+
+pub async fn init_prolog_service() {
+    let mut lock = PROLOG_SERVICE.write().await;
+    *lock = Some(PrologService::new());
+}
+
+pub async fn get_prolog_service() -> PrologService {
+    let lock = PROLOG_SERVICE.read().await;
+    lock.clone().expect("PrologServiceInterface not set")
+}
+
+
 #[cfg(test)]
 mod prolog_test {
-    use super::PrologService;
-    use crate::prolog_service::interface::get_prolog_service;
+    use super::*;
 
     #[tokio::test]
     async fn test_init_prolog_engine() {
-        let service = PrologService::init().await;
-        assert!(service.is_ok());
+        init_prolog_service().await;
+        let mut service = get_prolog_service().await;
 
-        let interface = get_prolog_service().await;
+        let ENGINE_NAME = "test".to_string();
+
+        assert!(service.spawn_engine(ENGINE_NAME.clone()).await.is_ok());
 
         let facts = String::from(
             r#"
@@ -103,25 +88,26 @@ mod prolog_test {
         "#,
         );
 
-        let load_facts = interface
-            .load_module_string("facts".to_string(), facts)
+
+        let load_facts = service
+            .load_module_string(
+                ENGINE_NAME.clone(),
+                "facts".to_string(), 
+                facts
+            )
             .await;
         assert!(load_facts.is_ok());
         println!("Facts loaded");
 
         let query = String::from("triple(\"a\",P,\"b\").");
-        //let query = String::from("write(\"A = \").");
-        //let query = String::from("halt.\n");
-        println!("Running query: {}", query);
-        let output = interface.run_query(query).await;
-        println!("Output: {:?}", output);
+        let output = service.run_query(ENGINE_NAME.clone(), query).await;
         assert!(output.is_ok());
 
         let query = String::from("triple(\"a\",\"p1\",\"b\").");
         //let query = String::from("write(\"A = \").");
         //let query = String::from("halt.\n");
         println!("Running query: {}", query);
-        let output = interface.run_query(query).await;
+        let output = service.run_query(ENGINE_NAME.clone(), query).await;
         println!("Output: {:?}", output);
         assert!(output.is_ok());
     }

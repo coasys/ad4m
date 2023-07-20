@@ -1,25 +1,25 @@
 use deno_core::{error::AnyError, include_js_files, op, Extension};
 
-use super::{get_prolog_service, PrologService};
+use super::{get_prolog_service, PrologService, init_prolog_service};
 
 #[op]
 async fn start_prolog_service() -> Result<(), AnyError> {
-    PrologService::init().await?;
+    init_prolog_service().await;
     Ok(())
 }
 
 #[op]
-async fn run_query(query: String) -> Result<String, AnyError> {
-    let interface = get_prolog_service().await;
-    let result = interface.run_query(query).await;
+async fn run_query(engine_name: String, query: String) -> Result<String, AnyError> {
+    let service = get_prolog_service().await;
+    let result = service.run_query(engine_name, query).await;
     let string_result = format!("{:?}", result);
     Ok(string_result)
 }
 
 #[op]
-async fn load_module_string(module_name: String, program: String) -> Result<(), AnyError> {
-    let interface = get_prolog_service().await;
-    interface.load_module_string(module_name, program).await
+async fn load_module_string(engine_name: String, module_name: String, program: String) -> Result<(), AnyError> {
+    let service = get_prolog_service().await;
+    service.load_module_string(engine_name, module_name, program).await
 }
 
 pub fn build() -> Extension {
