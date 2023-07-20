@@ -53,7 +53,7 @@ export default class PrologInstance {
 
     async consult(program: string) {
         //console.log("PrologInstance.consult", this.name, program, moduleName)
-        return await this.prologService.loadModuleString(this.name, program, "main.pl")
+        return await this.prologService.loadModuleString(this.name, "main.pl", program)
         // const tmpobj = tmp.fileSync()
         // //@ts-ignore
         // fs.writeFileSync(tmpobj.name, program);
