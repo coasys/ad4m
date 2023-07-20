@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, Mutex};
 
 pub(crate) mod interface;
 pub(crate) mod prolog_service_extension;
+pub(crate) mod engine;
 
 pub(crate) use interface::{
     get_prolog_service, PrologServiceInterface, PrologServiceRequest, PrologServiceResponse,
