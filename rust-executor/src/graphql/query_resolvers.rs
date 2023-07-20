@@ -372,7 +372,7 @@ impl Query {
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let script = format!(
-            r#"await core.callResolver("Query", "perspectiveQueryProlog", {{ query: '{}', uuid: "{}" }}, {{ capabilities: {} }})"#,
+            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryProlog", {{ query: '{}', uuid: "{}" }}, {{ capabilities: {} }}))"#,
             query, uuid, capabilities
         );
         let result = js.execute(script).await?;
