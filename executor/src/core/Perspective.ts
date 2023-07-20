@@ -864,7 +864,7 @@ export default class Perspective {
             if(this.isSDNALink(link)) {
                 try {
                     let code = Literal.fromUrl(link.target).get()
-                    lines.concat(code.split('\n'))
+                    lines = lines.concat(code.split('\n'))
                 } catch {
                     console.error("Perspective.initEngineFacts: Error loading SocialDNA link target as literal... Ignoring SocialDNA link.");
                 }
