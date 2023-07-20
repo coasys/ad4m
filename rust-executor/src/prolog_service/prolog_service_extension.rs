@@ -89,11 +89,11 @@ async fn run_query(engine_name: String, query: String) -> Result<String, AnyErro
 async fn load_module_string(
     engine_name: String,
     module_name: String,
-    program: String,
+    program_lines: Vec<String>,
 ) -> Result<(), AnyError> {
     let service = get_prolog_service().await;
     service
-        .load_module_string(engine_name, module_name, program)
+        .load_module_string(engine_name, module_name, program_lines)
         .await
 }
 

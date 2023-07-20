@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Debug)]
 pub enum PrologServiceRequest {
     RunQuery(String, oneshot::Sender<PrologServiceResponse>),
-    LoadModuleString(String, String, oneshot::Sender<PrologServiceResponse>),
+    LoadModuleString(String, Vec<String>, oneshot::Sender<PrologServiceResponse>),
 }
 
 #[derive(Debug)]
@@ -51,7 +51,14 @@ impl PrologEngine {
                             let result = machine.run_query(query);
                             let _ = response.send(PrologServiceResponse::QueryResult(result));
                         }
-                        PrologServiceRequest::LoadModuleString(module_name, program, response) => {
+                        PrologServiceRequest::LoadModuleString(module_name, program_lines, response) => {
+                            let program = program_lines
+                                .iter()
+                                .map(|l| l
+                                    .replace("\n", "")
+                                    .replace("\r", ""))
+                                .collect::<Vec<String>>()
+                                .join("\n");
                             let _result = machine.load_module_string(module_name.as_str(), program);
                             let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
                         }
@@ -87,13 +94,13 @@ impl PrologEngine {
     pub async fn load_module_string(
         &self,
         module_name: String,
-        program: String,
+        program_lines: Vec<String>,
     ) -> Result<(), Error> {
         let (response_sender, response_receiver) = oneshot::channel();
         self.request_sender
             .send(PrologServiceRequest::LoadModuleString(
                 module_name,
-                program,
+                program_lines,
                 response_sender,
             ))
             .await

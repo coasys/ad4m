@@ -51,13 +51,13 @@ impl PrologService {
         &self,
         engine_name: String,
         module_name: String,
-        program: String,
+        program_lines: Vec<String>,
     ) -> Result<(), Error> {
         let engines = self.engines.read().await;
         let engine = engines
             .get(&engine_name)
             .ok_or_else(|| Error::msg("Engine not found"))?;
-        engine.load_module_string(module_name, program).await
+        engine.load_module_string(module_name, program_lines).await
     }
 }
 

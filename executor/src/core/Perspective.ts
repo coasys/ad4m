@@ -801,7 +801,7 @@ export default class Perspective {
         return link.source == 'ad4m://self' && link.predicate == 'ad4m://has_zome'
     }
 
-    async initEngineFacts(): Promise<string> {
+    async initEngineFacts(): Promise<string[]> {
         let lines = []
 
         const allLinks = await this.getLinks(new LinkQuery({}))
@@ -864,15 +864,14 @@ export default class Perspective {
             if(this.isSDNALink(link)) {
                 try {
                     let code = Literal.fromUrl(link.target).get()
-                    lines.push(code)
+                    lines.concat(code.split('\n'))
                 } catch {
                     console.error("Perspective.initEngineFacts: Error loading SocialDNA link target as literal... Ignoring SocialDNA link.");
                 }
             }
         }
 
-        const factsCode = lines.join('\n')
-        return factsCode
+        return lines
     }
 
     async spawnPrologEngine(): Promise<any> {
