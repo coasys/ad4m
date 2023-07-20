@@ -1,5 +1,5 @@
 use deno_core::anyhow::Error;
-use scryer_prolog::machine::{Machine, parsed_results::QueryResult};
+use scryer_prolog::machine::{parsed_results::QueryResult, Machine};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug)]
@@ -23,15 +23,18 @@ pub struct PrologEngine {
 impl PrologEngine {
     pub fn new() -> PrologEngine {
         let (request_sender, request_receiver) = mpsc::channel::<PrologServiceRequest>(32);
-        
+
         PrologEngine {
-            request_sender, 
-            request_receiver: Some(request_receiver)
+            request_sender,
+            request_receiver: Some(request_receiver),
         }
     }
 
     pub async fn spawn(&mut self) -> Result<(), Error> {
-        let mut receiver = self.request_receiver.take().ok_or_else(|| Error::msg("PrologEngine::spawn called twice"))?;
+        let mut receiver = self
+            .request_receiver
+            .take()
+            .ok_or_else(|| Error::msg("PrologEngine::spawn called twice"))?;
         let (response_sender, response_receiver) = oneshot::channel();
 
         std::thread::spawn(move || {
@@ -103,8 +106,6 @@ impl PrologEngine {
             _ => unreachable!(),
         }
     }
-
-
 }
 
 #[cfg(test)]
@@ -123,9 +124,7 @@ mod prolog_test {
         "#,
         );
 
-        let load_facts = engine
-            .load_module_string("facts".to_string(), facts)
-            .await;
+        let load_facts = engine.load_module_string("facts".to_string(), facts).await;
         assert!(load_facts.is_ok());
         println!("Facts loaded");
 

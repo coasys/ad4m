@@ -1,12 +1,12 @@
 use deno_core::anyhow::Error;
+use lazy_static::lazy_static;
 use scryer_prolog::machine::parsed_results::QueryResult;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use lazy_static::lazy_static;
 
-pub(crate) mod prolog_service_extension;
 pub(crate) mod engine;
+pub(crate) mod prolog_service_extension;
 
 use self::engine::PrologEngine;
 
@@ -17,7 +17,9 @@ pub struct PrologService {
 
 impl PrologService {
     pub fn new() -> Self {
-        PrologService { engines: Arc::new(RwLock::new(HashMap::new())) }
+        PrologService {
+            engines: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     pub async fn spawn_engine(&mut self, engine_name: String) -> Result<(), Error> {
@@ -32,9 +34,15 @@ impl PrologService {
         Ok(())
     }
 
-    pub async fn run_query(&self, engine_name: String, query: String) -> Result<QueryResult, Error> {
+    pub async fn run_query(
+        &self,
+        engine_name: String,
+        query: String,
+    ) -> Result<QueryResult, Error> {
         let engines = self.engines.read().await;
-        let engine = engines.get(&engine_name).ok_or_else(|| Error::msg("Engine not found"))?;
+        let engine = engines
+            .get(&engine_name)
+            .ok_or_else(|| Error::msg("Engine not found"))?;
         let result = engine.run_query(query).await?;
         Ok(result)
     }
@@ -46,14 +54,15 @@ impl PrologService {
         program: String,
     ) -> Result<(), Error> {
         let engines = self.engines.read().await;
-        let engine = engines.get(&engine_name).ok_or_else(|| Error::msg("Engine not found"))?;
+        let engine = engines
+            .get(&engine_name)
+            .ok_or_else(|| Error::msg("Engine not found"))?;
         engine.load_module_string(module_name, program).await
     }
 }
 
 lazy_static! {
-    static ref PROLOG_SERVICE: Arc<RwLock<Option<PrologService>>> =
-        Arc::new(RwLock::new(None));
+    static ref PROLOG_SERVICE: Arc<RwLock<Option<PrologService>>> = Arc::new(RwLock::new(None));
 }
 
 pub async fn init_prolog_service() {
@@ -65,7 +74,6 @@ pub async fn get_prolog_service() -> PrologService {
     let lock = PROLOG_SERVICE.read().await;
     lock.clone().expect("PrologServiceInterface not set")
 }
-
 
 #[cfg(test)]
 mod prolog_test {
@@ -87,13 +95,8 @@ mod prolog_test {
         "#,
         );
 
-
         let load_facts = service
-            .load_module_string(
-                engine_name.clone(),
-                "facts".to_string(), 
-                facts
-            )
+            .load_module_string(engine_name.clone(), "facts".to_string(), facts)
             .await;
         assert!(load_facts.is_ok());
         println!("Facts loaded");
