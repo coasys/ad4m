@@ -22,7 +22,19 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
         Value::Float(f) => format!("{}", f),
         Value::Rational(r) => format!("{}", r),
         Value::Atom(a) => format!("{}", a.as_str()),
-        Value::String(s) => format!("\"{}\"", s),
+        Value::String(s) => 
+            if let Err(e) = serde_json::from_str::<serde_json::Value>(s.as_str()) {
+                //treat as string literal
+                //escape double quotes
+                format!("\"{}\"", s
+                    .replace("\"", "\\\"")
+                    .replace("\n", "\\n")
+                    .replace("\t", "\\t")
+                    .replace("\r", "\\r"))
+            } else {
+                //return valid json string
+                s
+            },
         Value::List(l) => {
             let mut string_result = "[".to_string();
             for (i, v) in l.iter().enumerate() {
