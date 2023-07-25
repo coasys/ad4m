@@ -20,6 +20,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Fixed
  - Added missing Prolog declarations for new SDNA predicates `collection_adder/collection_remover`, fixing breaking apps using SDNA Subject Classes that don't have collections defined [PR#398](https://github.com/coasys/ad4m/pull/398)
  - Replaced old and depreciated link to AD4Min launcher in docs with link to ADAM Launcher releases [PR#393](https://github.com/coasys/ad4m/pull/393)
+
+### Changed
+ - Moved code that deals with the IPFS repo lock from JS to Rust, improving (in most cases: unblocking) startup of the Launcher on Windows [PR#392](https://github.com/coasys/ad4m/pull/392)
 ## [0.5.0] - 10/07/2023
 
 ### Added
