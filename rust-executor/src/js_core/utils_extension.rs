@@ -1,8 +1,8 @@
 use cid::Cid;
 use deno_core::{error::AnyError, include_js_files, op, Extension};
-use log::info;
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
+use tracing::{error, info, debug, warn};
 
 use super::JS_CORE_HANDLE;
 
@@ -18,6 +18,34 @@ fn hash(data: String) -> Result<String, AnyError> {
     let encoded_cid = multibase::encode(Base::Base58Btc, cid.to_bytes());
 
     Ok(format!("Qm{}", encoded_cid))
+}
+
+#[op]
+fn console_log(data: String) -> Result<String, AnyError> {
+    info!("[JSCORE]: {:?}", data);
+
+    Ok(String::from("temp"))
+}
+
+#[op]
+fn console_debug(data: String) -> Result<String, AnyError> {
+    debug!("[JSCORE]: {:?}", data);
+
+    Ok(String::from("temp"))
+}
+
+#[op]
+fn console_error(data: String) -> Result<String, AnyError> {
+    error!("[JSCORE]: {:?}", data);
+
+    Ok(String::from("temp"))
+}
+
+#[op]
+fn console_warn(data: String) -> Result<String, AnyError> {
+    warn!("[JSCORE]: {:?}", data);
+
+    Ok(String::from("temp"))
 }
 
 #[op]
@@ -37,7 +65,14 @@ async fn load_module(path: String) -> Result<String, AnyError> {
 pub fn build() -> Extension {
     Extension::builder("utils")
         .js(include_js_files!(utils "utils_extension.js",))
-        .ops(vec![hash::decl(), load_module::decl()])
+        .ops(vec![
+                hash::decl(),
+                load_module::decl(),
+                console_log::decl(),
+                console_debug::decl(),
+                console_error::decl(),
+                console_warn::decl(),
+            ])
         .force_op_registration()
         .build()
 }
