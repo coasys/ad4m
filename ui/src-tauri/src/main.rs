@@ -80,7 +80,7 @@ fn main() {
     let file = Arc::new(Mutex::new(file));
 
     let format = format::debug_fn(move |writer, _field, value| {
-        let _ = writeln!(file.lock().unwrap(), "{:?}" value);
+        let _ = writeln!(file.lock().unwrap(), "{:?}", value);
         write!(writer, "{:?}", value)
     });
 
