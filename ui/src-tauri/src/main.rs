@@ -187,7 +187,7 @@ fn main() {
                     main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
                 };
 
-                match rust_executor::run(config.clone()).await {
+                match rust_executor::run_with_tokio(config.clone()).await {
                     () => {
                         my_closure();
 
