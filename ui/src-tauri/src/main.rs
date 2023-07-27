@@ -74,7 +74,13 @@ pub struct AppState {
 fn main() {
     env::set_var("RUST_LOG", "rust_executor=info,error,warn,debugad4m-launcher=info,warn,error");
 
-    let _ = fs::remove_file(log_path());
+    if !data_path().exists() {
+        let _ = fs::create_dir_all(data_path());
+    }
+
+    if log_path().exists() {
+        let _ = fs::remove_file(log_path());
+    }
 
     let file = File::create(log_path()).unwrap();
     let file = Arc::new(Mutex::new(file));
@@ -98,10 +104,6 @@ fn main() {
     if has_processes_running(app_name) > 1 {
         println!("AD4M is already running");
         return;
-    }
-
-    if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
-        let _ = remove_dir_all(data_path());
     }
 
     let free_port = find_port(12000, 13000);
