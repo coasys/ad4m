@@ -8,7 +8,7 @@ mod wallet;
 pub mod init;
 mod pubsub;
 
-use log::{error, info};
+use tracing::{error, info};
 use rust_executor::Ad4mConfig;
 use std::env;
 
@@ -17,7 +17,7 @@ use js_core::JsCore;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     env::set_var("RUST_LOG", "rust_executor=info");
-    env_logger::init();
+    env_logger::try_init();
 
     let mut config = Ad4mConfig::default();
     config.prepare();
