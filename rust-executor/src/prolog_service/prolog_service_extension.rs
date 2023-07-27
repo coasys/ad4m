@@ -1,13 +1,7 @@
 use deno_core::{error::AnyError, include_js_files, op, Extension, anyhow::bail};
 use scryer_prolog::machine::parsed_results::{Value, QueryMatch, QueryResolution};
 
-use super::{get_prolog_service, init_prolog_service};
-
-#[op]
-async fn init() -> Result<(), AnyError> {
-    init_prolog_service().await;
-    Ok(())
-}
+use super::{get_prolog_service};
 
 #[op]
 async fn spawn_engine(engine_name: String) -> Result<(), AnyError> {
@@ -23,7 +17,7 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
         Value::Rational(r) => format!("{}", r),
         Value::Atom(a) => format!("{}", a.as_str()),
         Value::String(s) => 
-            if let Err(e) = serde_json::from_str::<serde_json::Value>(s.as_str()) {
+            if let Err(_e) = serde_json::from_str::<serde_json::Value>(s.as_str()) {
                 //treat as string literal
                 //escape double quotes
                 format!("\"{}\"", s
