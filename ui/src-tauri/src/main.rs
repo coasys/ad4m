@@ -3,13 +3,17 @@
     windows_subsystem = "windows"
 )]
 
+use log::info;
+use rust_executor::Ad4mConfig;
 use tauri::LogicalSize;
 use tauri::Size;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format;
+use std::env;
 use std::sync::Mutex;
 extern crate remove_dir_all;
 use remove_dir_all::*;
 
-use config::holochain_binary_path;
 use config::app_url;
 use logs::setup_logs;
 use menu::build_menu;
@@ -43,6 +47,8 @@ use crate::menu::{handle_menu_event, open_logs_folder};
 use crate::util::has_processes_running;
 use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
 
+use tracing_subscriber::{fmt::format::FmtSpan, FmtSubscriber};
+
 // the payload type must implement `Serialize` and `Clone`.
 #[derive(Clone, serde::Serialize)]
 struct Payload {
@@ -64,6 +70,22 @@ pub struct AppState {
 }
 
 fn main() {
+    env::set_var("RUST_LOG", "rust_executor=info,warp::server");
+
+    let format = format::debug_fn(|writer, field, value| {
+        write!(writer, "{:?}", value)
+    });
+
+    let filter = EnvFilter::from_default_env();
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .fmt_fields(format)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set tracing subscriber");
+
     let app_name = if std::env::consts::OS == "windows" { "AD4M.exe" } else { "AD4M" };
     if has_processes_running(app_name) > 1 {
         println!("AD4M is already running");
@@ -88,22 +110,18 @@ fn main() {
 
     find_and_kill_processes("holochain");
 
-    let prepare = Command::new_sidecar("ad4m-host")
-        .expect("Failed to create ad4m command")
-        .args(["prepare"])
-        .status()
-        .expect("Failed to run ad4m prepare");
-    assert!(prepare.success());
-
-    if !holochain_binary_path().exists() {
-        log::info!("init command by copy holochain binary");
-        let status = Command::new_sidecar("ad4m-host")
-            .expect("Failed to create ad4m command")
-            .args(["init"])
-            .status()
-            .expect("Failed to run ad4m init");
-        assert!(status.success());
-    }
+    match rust_executor::init::init(
+        Some(String::from(data_path().to_str().unwrap())),
+         None
+        ) {
+        Ok(()) => {
+            println!("Ad4m initialized sucessfully");
+        },
+        Err(e) => {
+            println!("Ad4m initialization failed: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let req_credential = Uuid::new_v4().to_string();
 
@@ -147,57 +165,38 @@ fn main() {
                 open_logs_folder();
             });
 
-            let (mut rx, _child) = Command::new_sidecar("ad4m-host")
-            .expect("Failed to create ad4m command")
-            .args([
-                "serve",
-                "--port", &free_port.to_string(),
-                "--reqCredential", &req_credential,
-            ])
-            .spawn()
-            .expect("Failed to spawn ad4m serve");
+            let mut config = Ad4mConfig::default();
+            config.admin_credential = Some(req_credential.to_string());
+            config.app_data_path = Some(String::from(data_path().to_str().unwrap()));
+            config.gql_port = Some(free_port);
+            config.network_bootstrap_seed = None;
 
             let handle = app.handle();
 
-            tauri::async_runtime::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    match event.clone() {
-                        CommandEvent::Stdout(line) => {
-                            log::info!("{}", line);
 
-                            if line.contains("GraphQL server started, Unlock the agent to start holohchain") {
-                                let url = app_url();
-                                log::info!("Executor started on: {:?}", url);
-                                let _ = splashscreen_clone.hide();
-                                create_tray_message_windows(&handle);
-                                let main = get_main_window(&handle);
-                                main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
-                            }
-                        },
-                        CommandEvent::Stderr(line) => {
-                            let is_prolog_redefined_line = line.starts_with("Warning: /var") || line.starts_with("Warning:    Redefined") || line.starts_with("Warning:    Previously");
-                            if !is_prolog_redefined_line {
-                                log::error!("{}", line);
-                            }
-                        }
-                        CommandEvent::Terminated(line) => {
-                            log::info!("Terminated {:?}", line);
-                            let main = get_main_window(&handle);
 
-                            if let Ok(true) = &splashscreen_clone.is_visible() {
-                                log_error(&splashscreen_clone, "Something went wrong while starting ad4m-executor please check the logs");
-                            }
 
-                            if let Ok(true) = main.is_visible() {
-                                log_error(&main, "There was an error with the AD4M Launcher. Restarting may fix this, otherwise please contact the AD4M team for support.");
-                            }
+            async fn test(config: Ad4mConfig, splashscreen_clone: Window, handle: &AppHandle) {
+                let my_closure = || {
+                    let url = app_url();
+                    log::info!("Executor clone on: {:?}", url);
+                    let _ = splashscreen_clone.hide();
+                    create_tray_message_windows(&handle);
+                    let main = get_main_window(&handle);
+                    main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
+                };
 
-                            log::info!("Terminated {:?}", line);
-                        },
-                        CommandEvent::Error(line) => log::info!("Error {:?}", line),
-                        _ => log::error!("{:?}", event),
+                match rust_executor::run(config.clone()).await {
+                    () => {
+                        my_closure();
+
+                        info!("GraphQL server stopped.")
                     }
                 }
+            }
+
+            tauri::async_runtime::spawn(async move {
+                test(config.clone(), splashscreen.clone(), &handle).await
             });
 
             Ok(())
