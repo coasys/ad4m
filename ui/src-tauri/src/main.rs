@@ -3,19 +3,21 @@
     windows_subsystem = "windows"
 )]
 
-use log::info;
+use tracing::{info, error};
 use rust_executor::Ad4mConfig;
 use tauri::LogicalSize;
 use tauri::Size;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format;
 use std::env;
+use std::fs;
+use std::fs::File;
+use std::sync::Arc;
 use std::sync::Mutex;
 extern crate remove_dir_all;
 use remove_dir_all::*;
 
 use config::app_url;
-use logs::setup_logs;
 use menu::build_menu;
 use system_tray::{ build_system_tray, handle_system_tray_event };
 use tauri::{
@@ -30,7 +32,6 @@ use uuid::Uuid;
 
 mod config;
 mod util;
-mod logs;
 mod system_tray;
 mod menu;
 mod commands;
@@ -41,12 +42,13 @@ use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::commands::app::{close_application, close_main_window, clear_state, open_tray, open_tray_message};
 use crate::config::data_path;
+use crate::config::log_path;
 use crate::util::create_tray_message_windows;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
 use crate::util::has_processes_running;
 use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
-
+use std::io::{self, Write};
 use tracing_subscriber::{fmt::format::FmtSpan, FmtSubscriber};
 
 // the payload type must implement `Serialize` and `Clone`.
@@ -70,9 +72,15 @@ pub struct AppState {
 }
 
 fn main() {
-    env::set_var("RUST_LOG", "rust_executor=info,warp::server");
+    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debugad4m-launcher=info,warn,error");
 
-    let format = format::debug_fn(|writer, field, value| {
+    let _ = fs::remove_file(log_path());
+
+    let file = File::create(log_path()).unwrap();
+    let file = Arc::new(Mutex::new(file));
+
+    let format = format::debug_fn(move |writer, _field, value| {
+        let _ = writeln!(file.lock().unwrap(), "{:?}" value);
         write!(writer, "{:?}", value)
     });
 
@@ -96,13 +104,9 @@ fn main() {
         let _ = remove_dir_all(data_path());
     }
 
-    if let Err(err) = setup_logs() {
-        println!("Error setting up the logs: {:?}", err);
-    }
-
     let free_port = find_port(12000, 13000);
 
-    log::info!("Free port: {:?}", free_port);
+    info!("Free port: {:?}", free_port);
 
     save_executor_port(free_port);
 
@@ -157,10 +161,8 @@ fn main() {
 
             let splashscreen = app.get_window("splashscreen").unwrap();
 
-            let splashscreen_clone = splashscreen.clone();
-
             let _id = splashscreen.listen("copyLogs", |event| {
-                log::info!("got window event-name with payload {:?} {:?}", event, event.payload());
+                info!("got window event-name with payload {:?} {:?}", event, event.payload());
 
                 open_logs_folder();
             });
@@ -173,13 +175,10 @@ fn main() {
 
             let handle = app.handle();
 
-
-
-
-            async fn test(config: Ad4mConfig, splashscreen_clone: Window, handle: &AppHandle) {
+            async fn spawn_executor(config: Ad4mConfig, splashscreen_clone: Window, handle: &AppHandle) {
                 let my_closure = || {
                     let url = app_url();
-                    log::info!("Executor clone on: {:?}", url);
+                    info!("Executor clone on: {:?}", url);
                     let _ = splashscreen_clone.hide();
                     create_tray_message_windows(&handle);
                     let main = get_main_window(&handle);
@@ -196,7 +195,7 @@ fn main() {
             }
 
             tauri::async_runtime::spawn(async move {
-                test(config.clone(), splashscreen.clone(), &handle).await
+                spawn_executor(config.clone(), splashscreen.clone(), &handle).await
             });
 
             Ok(())
@@ -234,7 +233,7 @@ fn main() {
                 };
             });
         }
-        Err(err) => log::error!("Error building the app: {:?}", err),
+        Err(err) => error!("Error building the app: {:?}", err),
     }
 }
 

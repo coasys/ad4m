@@ -16,7 +16,7 @@ use holochain::prelude::{
     Signature, Timestamp, TransportConfig, ZomeCallResponse, ZomeCallUnsigned,
 };
 use holochain::test_utils::itertools::Either;
-use log::info;
+use tracing::info;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};

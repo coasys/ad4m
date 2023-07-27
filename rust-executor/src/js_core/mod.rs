@@ -4,7 +4,7 @@ use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
-use log::{error, info};
+use tracing::{error, info};
 use once_cell::sync::Lazy;
 use std::env::current_dir;
 use std::sync::Arc;
@@ -215,8 +215,8 @@ impl JsCore {
         let wrapped_script = format!(
             r#"
         globalThis.asyncResult = undefined;
-        (async () => {{ 
-            globalThis.asyncResult = ({}); 
+        (async () => {{
+            globalThis.asyncResult = ({});
         }})();
         "#,
             script
