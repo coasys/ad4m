@@ -810,12 +810,14 @@ export default class Perspective {
         // link/5
         //-------------------
         lines.push(":- discontiguous(triple/3).")
-        lines.push(":- discontiguous(link/5).")  
+        lines.push(":- discontiguous(link/5).")
+        
+        const linksWithoutSDNA = allLinks.filter(l => !this.isSDNALink(l.data))
 
-        for (const link of allLinks) {
+        for (const link of linksWithoutSDNA) {
             lines.push(this.tripleFact(link));
         }
-        for (const link of allLinks) {
+        for (const link of linksWithoutSDNA) {
             lines.push(this.linkFact(link));
         };
 
@@ -833,7 +835,7 @@ export default class Perspective {
 
 
 
-        lines = [...lines, ...await this.nodeFacts(allLinks)]
+        lines = [...lines, ...await this.nodeFacts(linksWithoutSDNA)]
 
         //-------------------
         // Social DNA zomes
