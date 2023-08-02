@@ -36,11 +36,15 @@ export class Subject {
                     if(results && results.length > 0) {
                         let expressionURI = results[0].Value
                         if(resolveExpressionURI) {
-                            const expression = await this.#perspective.getExpression(expressionURI)
                             try {
-                                return JSON.parse(expression.data)
-                            } catch(e) {
-                                return expression.data
+                                const expression = await this.#perspective.getExpression(expressionURI)
+                                try {
+                                    return JSON.parse(expression.data)
+                                } catch(e) {
+                                    return expression.data
+                                }
+                            } catch (err) {
+                                return expressionURI
                             }
                         } else {
                             return expressionURI
