@@ -84,6 +84,10 @@ export default class LanguageController {
         this.#signatures = services.signatures
         this.#db = services.db
         this.#languages = new Map()
+        this.#languages.set("literal", {
+            name: "literal",
+            interactions() { return [] },
+        } as Language)
         this.#languageConstructors = new Map()
         this.#linkObservers = []
         this.#telepresenceSignalObservers = []
