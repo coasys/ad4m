@@ -49,13 +49,16 @@ export class SubjectEntity {
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, "${tempId}", "${p}", Value)`)
         if (results && results.length > 0) {
           let expressionURI = results[0].Value
-
           if (resolveExpressionURI) {
-            const expression = await this.#perspective.getExpression(expressionURI)
             try {
-              return JSON.parse(expression.data)
-            } catch (e) {
-              return expression.data
+              const expression = await this.#perspective.getExpression(expressionURI)
+              try {
+                return JSON.parse(expression.data)
+              } catch (e) {
+                return expression.data
+              }
+            } catch (err) {
+              return expressionURI
             }
           } else {
             return expressionURI
@@ -101,7 +104,7 @@ export class SubjectEntity {
       if (resolveLanguageResults && resolveLanguageResults.length > 0) {
         resolveLanguage = resolveLanguageResults[0].Language
       }
-
+      
       if (resolveLanguage) {
         value = await this.#perspective.createExpression(value, resolveLanguage)
       }
