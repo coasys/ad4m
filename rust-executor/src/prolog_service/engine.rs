@@ -59,7 +59,7 @@ impl PrologEngine {
                                     .replace("\r", ""))
                                 .collect::<Vec<String>>()
                                 .join("\n");
-                            let _result = machine.load_module_string(module_name.as_str(), program);
+                            let _result = machine.consult_module_string(module_name.as_str(), program);
                             let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
                         }
                     },
