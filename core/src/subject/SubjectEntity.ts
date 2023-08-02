@@ -95,9 +95,8 @@ export class SubjectEntity {
   private async setProperty(key: string, value: any) {
     const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, "${key}", Setter)`)
     if (setters && setters.length > 0) {
-      const property = setters[0].Property
       const actions = eval(setters[0].Setter)
-      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${property}", Language)`)
+      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${key}", Language)`)
       let resolveLanguage
       if (resolveLanguageResults && resolveLanguageResults.length > 0) {
         resolveLanguage = resolveLanguageResults[0].Language
