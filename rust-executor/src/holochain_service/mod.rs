@@ -64,98 +64,102 @@ impl HolochainService {
 
         let (response_sender, response_receiver) = oneshot::channel();
 
-        tokio::spawn(async move {
+        std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to create Tokio runtime");
             let _guard = rt.enter();
 
-            let mut service = HolochainService::new(local_config).await.unwrap();
+            rt.block_on(async move {
+                let mut service = HolochainService::new(local_config).await.unwrap();
 
-            set_holochain_service(inteface).await;
+                set_holochain_service(inteface).await;
 
-            let conductor_clone = service.conductor.clone();
-            // Spawn a new task to forward items from the stream to the receiver
-            tokio::spawn(async move {
-                let sig_broadcasters = conductor_clone.signal_broadcaster();
+                let conductor_clone = service.conductor.clone();
+                // Spawn a new task to forward items from the stream to the receiver
+                tokio::spawn(async move {
+                    let sig_broadcasters = conductor_clone.signal_broadcaster();
 
-                let mut streams = tokio_stream::StreamMap::new();
-                for (i, rx) in sig_broadcasters
-                    .subscribe_separately()
-                    .into_iter()
-                    .enumerate()
-                {
-                    streams.insert(i, tokio_stream::wrappers::BroadcastStream::new(rx));
-                }
-                let mut stream =
-                    streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
+                    let mut streams = tokio_stream::StreamMap::new();
+                    for (i, rx) in sig_broadcasters
+                        .subscribe_separately()
+                        .into_iter()
+                        .enumerate()
+                    {
+                        streams.insert(i, tokio_stream::wrappers::BroadcastStream::new(rx));
+                    }
+                    let mut stream =
+                        streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
 
-                response_sender
-                    .send(HolochainServiceResponse::InitComplete(Ok(())))
-                    .unwrap();
+                    response_sender
+                        .send(HolochainServiceResponse::InitComplete(Ok(())))
+                        .unwrap();
 
-                loop {
-                    while let Some(item) = stream.next().await {
-                        let _ = stream_sender.send(item);
+                    loop {
+                        while let Some(item) = stream.next().await {
+                            let _ = stream_sender.send(item);
+                        }
+                    }
+                });
+
+                while let Some(message) = receiver.recv().await {
+                    match message {
+                        HolochainServiceRequest::InstallApp(payload, response) => {
+                            let result = service.install_app(payload).await;
+                            let _ = response.send(HolochainServiceResponse::InstallApp(result));
+                        }
+                        HolochainServiceRequest::CallZomeFunction {
+                            app_id,
+                            cell_name,
+                            zome_name,
+                            fn_name,
+                            payload,
+                            response,
+                        } => {
+                            let result = service
+                                .call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
+                                .await;
+                            let _ =
+                                response.send(HolochainServiceResponse::CallZomeFunction(result));
+                        }
+                        HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
+                            let result = service.remove_app(app_id).await;
+                            let _ = response_tx.send(HolochainServiceResponse::RemoveApp(result));
+                        }
+                        HolochainServiceRequest::AgentInfos(response_tx) => {
+                            let result = service.agent_infos().await;
+                            let _ = response_tx.send(HolochainServiceResponse::AgentInfos(result));
+                        }
+                        HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
+                            let result = service.add_agent_infos(agent_infos).await;
+                            let _ =
+                                response_tx.send(HolochainServiceResponse::AddAgentInfos(result));
+                        }
+                        HolochainServiceRequest::Sign(data, response_tx) => {
+                            let result = service.sign(data).await;
+                            let _ = response_tx.send(HolochainServiceResponse::Sign(result));
+                        }
+                        HolochainServiceRequest::Shutdown(response_tx) => {
+                            let result = service.shutdown().await;
+                            let _ = response_tx.send(HolochainServiceResponse::Shutdown(result));
+                        }
+                        HolochainServiceRequest::GetAgentKey(response_tx) => {
+                            let result = service.get_agent_key().await;
+                            let _ = response_tx.send(HolochainServiceResponse::GetAgentKey(result));
+                        }
+                        HolochainServiceRequest::GetAppInfo(app_id, response_tx) => {
+                            let result = service.get_app_info(app_id).await;
+                            let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
+                        }
+                        HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
+                            let result = service.get_network_metrics().await;
+                            let _ = response_tx
+                                .send(HolochainServiceResponse::GetNetworkMetrics(result));
+                        }
                     }
                 }
             });
-
-            while let Some(message) = receiver.recv().await {
-                match message {
-                    HolochainServiceRequest::InstallApp(payload, response) => {
-                        let result = service.install_app(payload).await;
-                        let _ = response.send(HolochainServiceResponse::InstallApp(result));
-                    }
-                    HolochainServiceRequest::CallZomeFunction {
-                        app_id,
-                        cell_name,
-                        zome_name,
-                        fn_name,
-                        payload,
-                        response,
-                    } => {
-                        let result = service
-                            .call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
-                            .await;
-                        let _ = response.send(HolochainServiceResponse::CallZomeFunction(result));
-                    }
-                    HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
-                        let result = service.remove_app(app_id).await;
-                        let _ = response_tx.send(HolochainServiceResponse::RemoveApp(result));
-                    }
-                    HolochainServiceRequest::AgentInfos(response_tx) => {
-                        let result = service.agent_infos().await;
-                        let _ = response_tx.send(HolochainServiceResponse::AgentInfos(result));
-                    }
-                    HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
-                        let result = service.add_agent_infos(agent_infos).await;
-                        let _ = response_tx.send(HolochainServiceResponse::AddAgentInfos(result));
-                    }
-                    HolochainServiceRequest::Sign(data, response_tx) => {
-                        let result = service.sign(data).await;
-                        let _ = response_tx.send(HolochainServiceResponse::Sign(result));
-                    }
-                    HolochainServiceRequest::Shutdown(response_tx) => {
-                        let result = service.shutdown().await;
-                        let _ = response_tx.send(HolochainServiceResponse::Shutdown(result));
-                    }
-                    HolochainServiceRequest::GetAgentKey(response_tx) => {
-                        let result = service.get_agent_key().await;
-                        let _ = response_tx.send(HolochainServiceResponse::GetAgentKey(result));
-                    }
-                    HolochainServiceRequest::GetAppInfo(app_id, response_tx) => {
-                        let result = service.get_app_info(app_id).await;
-                        let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
-                    }
-                    HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
-                        let result = service.get_network_metrics().await;
-                        let _ =
-                            response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
-                    }
-                }
-            }
         });
 
         match response_receiver.await? {

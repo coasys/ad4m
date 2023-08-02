@@ -182,7 +182,7 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
     Ok(ad4m_client)
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
