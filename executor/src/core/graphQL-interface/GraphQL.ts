@@ -98,14 +98,14 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     let lang
 
                     if(expression.ref.language.address === "literal") {
-                        return { address: "literal", name: "literal" }
-                    }
-
-                    try {
-                        lang = await core.languageController.languageForExpression(expression.ref) as any    
-                    } catch(e) {
-                        console.error("While trying to get language for expression", expression, ":", e)
-                        lang = {}
+                        lang = { address: "literal", name: "literal" }
+                    } else {
+                        try {
+                            lang = await core.languageController.languageForExpression(expression.ref) as any    
+                        } catch(e) {
+                            console.error("While trying to get language for expression", expression, ":", e)
+                            lang = {}
+                        }
                     }
                     
                     lang.address = expression.ref.language.address
