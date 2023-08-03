@@ -86,7 +86,7 @@ jobs:
       run: yarn install
 
     - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
-      f: matrix.platform != 'windows-latest'
+      if: matrix.platform != 'windows-latest'
       run: yarn run package-ad4m
 
     - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
