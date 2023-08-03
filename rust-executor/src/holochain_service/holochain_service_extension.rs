@@ -6,7 +6,7 @@ use holochain::{
         Signature, ZomeCallResponse,
     },
 };
-use log::info;
+use tracing::info;
 
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 

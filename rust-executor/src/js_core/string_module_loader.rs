@@ -7,7 +7,7 @@ use deno_core::ModuleSpecifier;
 use deno_core::ModuleType;
 use deno_core::ResolutionKind;
 use deno_runtime::deno_core::error::AnyError;
-use log::info;
+use tracing::info;
 use std::collections::HashMap;
 use std::pin::Pin;
 
