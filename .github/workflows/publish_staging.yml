@@ -47,7 +47,7 @@ jobs:
 
     needs: 
       - create-release
-      - npm-publish
+      # - npm-publish
 
     runs-on: ${{ matrix.platform }}
 
@@ -181,43 +181,43 @@ jobs:
     #     releaseBody: "See the assets to download this version and install."
     #     projectPath: "./ui"
   
-  npm-publish:
-    runs-on: GH-hosted-ubuntu
-    steps:
-      - uses: actions/checkout@v3
-      # Setup .npmrc file to publish to npm
-      - name: Use Node.js 16.x
-        uses: actions/setup-node@v1
-        with:
-          node-version: 16.x
-      - name: Install deps
-        run: yarn install
-      - name: Install Deno
-        uses: denoland/setup-deno@v1
-        with:
-          deno-version: v1.32.4
-      - name: Build modules
-        run: yarn run build-libs
-      - name: Publish core
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: core/package.json
-      - name: Publish connect
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: connect/package.json
-      - name: Publish executor
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: executor/package.json
-      - name: Publish Test runner
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          package: test-runner/package.json
+  # npm-publish:
+  #   runs-on: GH-hosted-ubuntu
+  #   steps:
+  #     - uses: actions/checkout@v3
+  #     # Setup .npmrc file to publish to npm
+  #     - name: Use Node.js 16.x
+  #       uses: actions/setup-node@v1
+  #       with:
+  #         node-version: 16.x
+  #     - name: Install deps
+  #       run: yarn install
+  #     - name: Install Deno
+  #       uses: denoland/setup-deno@v1
+  #       with:
+  #         deno-version: v1.32.4
+  #     - name: Build modules
+  #       run: yarn run build-libs
+  #     - name: Publish core
+  #       uses: JS-DevTools/npm-publish@v1
+  #       with:
+  #         token: ${{ secrets.NPM_TOKEN }}
+  #         package: core/package.json
+  #     - name: Publish connect
+  #       uses: JS-DevTools/npm-publish@v1
+  #       with:
+  #         token: ${{ secrets.NPM_TOKEN }}
+  #         package: connect/package.json
+  #     - name: Publish executor
+  #       uses: JS-DevTools/npm-publish@v1
+  #       with:
+  #         token: ${{ secrets.NPM_TOKEN }}
+  #         package: executor/package.json
+  #     - name: Publish Test runner
+  #       uses: JS-DevTools/npm-publish@v1
+  #       with:
+  #         token: ${{ secrets.NPM_TOKEN }}
+  #         package: test-runner/package.json
       
   
   crates-publish:
