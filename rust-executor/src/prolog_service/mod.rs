@@ -34,6 +34,14 @@ impl PrologService {
         Ok(())
     }
 
+    pub async fn remove_engine(&mut self, engine_name: String) -> Result<(), Error> {
+        let mut engines = self.engines.write().await;
+        engines
+            .remove(&engine_name)
+            .ok_or_else(|| Error::msg("Engine not found"))?;
+        Ok(())
+    }
+
     pub async fn run_query(
         &self,
         engine_name: String,

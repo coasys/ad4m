@@ -61,4 +61,8 @@ export default class PrologInstance {
         // tmpobj.removeCallback()
         // return result
     }
+
+    async remove() {
+        return await this.prologService.removeEngine(this.name)
+    }
 }

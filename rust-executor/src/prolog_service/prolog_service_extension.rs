@@ -9,6 +9,12 @@ async fn spawn_engine(engine_name: String) -> Result<(), AnyError> {
     service.spawn_engine(engine_name).await
 }
 
+#[op]
+async fn remove_engine(engine_name: String) -> Result<(), AnyError> {
+    let mut service = get_prolog_service().await;
+    service.remove_engine(engine_name).await
+}
+
 
 pub fn prolog_value_to_json_tring(value: Value) -> String {
     match value {
@@ -108,6 +114,7 @@ pub fn build() -> Extension {
         .js(include_js_files!(holochain_service "prolog_service_extension.js",))
         .ops(vec![
             spawn_engine::decl(),
+            remove_engine::decl(),
             run_query::decl(),
             load_module_string::decl(),
         ])

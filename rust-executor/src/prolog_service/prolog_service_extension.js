@@ -5,6 +5,9 @@
         spawnEngine: async (engineName) => {
             return core.opAsync("spawn_engine", engineName);
         },
+        removeEngine: async (engineName) => {
+            return core.opAsync("remove_engine", engineName);
+        },
         runQuery: async (engineName, query) => {
             if(!query.endsWith(".")) query = query+".";
             return JSON.parse(await core.opAsync("run_query", engineName, query));
