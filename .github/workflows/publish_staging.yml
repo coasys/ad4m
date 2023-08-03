@@ -60,6 +60,10 @@ jobs:
       with:
         override: true
         toolchain: 1.68.2
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
     - run: rustup target add wasm32-unknown-unknown
 
     - name: install dependencies (ubuntu only)
@@ -188,6 +192,10 @@ jobs:
           node-version: 16.x
       - name: Install deps
         run: yarn install
+      - name: Install Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.32.4
       - name: Build modules
         run: yarn run build-libs
       - name: Publish core
