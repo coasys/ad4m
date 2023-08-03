@@ -43,7 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
-        node-version: [16.x]
+        node-version: [18.17.0]
 
     needs: 
       - create-release
