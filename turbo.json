@@ -18,7 +18,7 @@
     },
 
     "ad4m-launcher#package-ad4m": {
-      "dependsOn": ["build-libs", "build-languages"],
+      "dependsOn": ["build-libs"],
       "outputs": ["dist/**"]
     },
 
