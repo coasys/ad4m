@@ -849,6 +849,7 @@ export default class Perspective {
 
         lines.push(":- discontiguous(subject_class/2).")
         lines.push(":- discontiguous(constructor/2).")
+        lines.push(":- discontiguous(destructor/2).")
         lines.push(":- discontiguous(instance/2).")
 
         lines.push(":- discontiguous(property/2).")
