@@ -3,7 +3,7 @@ name: Publish Staging AD4M
 on:
   push:
     branches:
-      - staging
+      - rust-refactor-ci
 
 jobs:
   create-release:
@@ -85,8 +85,15 @@ jobs:
     - name: Yarn Install
       run: yarn install
 
-    - name: Build AD4M-CLI & build Launcher binary (macos-latest)
+    - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
+      f: matrix.platform != 'windows-latest'
       run: yarn run package-ad4m
+
+    - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
+      if: matrix.platform == 'windows-latest'
+      run: |
+          choco install curl cygwin gnuwin32-m4 libgcc make mingw
+          yarn run package-ad4m
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
