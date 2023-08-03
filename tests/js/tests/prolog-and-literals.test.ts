@@ -635,7 +635,7 @@ describe("Prolog + Literals", () => {
 
                     recipe.name = "recipe://collection_test";
 
-                    recipe.comments = ['test', 'test1']
+                    recipe.comments = ['recipe://test', 'recipe://test1']
 
                     await recipe.save()
 
@@ -651,7 +651,7 @@ describe("Prolog + Literals", () => {
                     const recipe = new Recipe(perspective!, root)
 
                     recipe.name = "recipe://locallink";
-                    recipe.local = 'test'
+                    recipe.local = 'recipe://test'
 
                     await recipe.save();
 
@@ -660,7 +660,7 @@ describe("Prolog + Literals", () => {
                     await recipe2.get();
 
                     expect(recipe2.name).to.equal("recipe://locallink")
-                    expect(recipe2.local).to.equal("test")
+                    expect(recipe2.local).to.equal("recipe://test")
 
                     // @ts-ignore
                     const links = await perspective?.get({
@@ -669,7 +669,7 @@ describe("Prolog + Literals", () => {
                     })
 
                     expect(links!.length).to.equal(1)
-                    expect(links![0].status).to.equal('local')
+                    expect(links![0].status).to.equal('recipe://local')
                 })
 
                 it("delete()", async () => {
@@ -692,7 +692,7 @@ describe("Prolog + Literals", () => {
 
                     recipe.entries = [recipeEntries]
                     // @ts-ignore
-                    recipe.comments = ['test', 'test1']
+                    recipe.comments = ['recipe://test', 'recipe://test1']
                     recipe.name = "recipe://collection_test";
 
                     await recipe.save()
