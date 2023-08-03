@@ -38,34 +38,41 @@ impl PrologEngine {
         let (response_sender, response_receiver) = oneshot::channel();
 
         std::thread::spawn(move || {
-            let mut machine = Machine::new_lib();
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .build()
+                .expect("Failed to create Tokio runtime");
+            let _guard = rt.enter();
 
-            response_sender
-                .send(PrologServiceResponse::InitComplete(Ok(())))
-                .unwrap();
+            rt.block_on(async move {
+                let mut machine = Machine::new_lib();
 
-            loop {
-                match receiver.try_recv() {
-                    Ok(message) => match message {
+                response_sender
+                    .send(PrologServiceResponse::InitComplete(Ok(())))
+                    .unwrap();
+
+                while let Some(message) = receiver.recv().await {
+                    match message {
                         PrologServiceRequest::RunQuery(query, response) => {
                             let result = machine.run_query(query);
                             let _ = response.send(PrologServiceResponse::QueryResult(result));
                         }
-                        PrologServiceRequest::LoadModuleString(module_name, program_lines, response) => {
+                        PrologServiceRequest::LoadModuleString(
+                            module_name,
+                            program_lines,
+                            response,
+                        ) => {
                             let program = program_lines
                                 .iter()
-                                .map(|l| l
-                                    .replace("\n", "")
-                                    .replace("\r", ""))
+                                .map(|l| l.replace("\n", "").replace("\r", ""))
                                 .collect::<Vec<String>>()
                                 .join("\n");
-                            let _result = machine.consult_module_string(module_name.as_str(), program);
+                            let _result =
+                                machine.consult_module_string(module_name.as_str(), program);
                             let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
                         }
-                    },
-                    Err(_err) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    }
                 }
-            }
+            })
         });
 
         match response_receiver.await? {
