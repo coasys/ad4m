@@ -10,3 +10,4 @@ members = [
 
 [patch.crates-io]
 sodiumoxide = { git = "https://github.com/fayeed/sodiumoxide" }
+libffi = { git = "https://github.com/coasys/libffi-rs.git", branch = "windows-space" }
