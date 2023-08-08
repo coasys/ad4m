@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, graphql_value, FieldResult};
-use log::debug;
+use tracing::debug;
 
 use super::graphql_types::*;
 use super::utils::get_capabilies;
@@ -823,7 +823,7 @@ impl Mutation {
                 {{ mutations: {}, uuid: "{}", status: {} }},
                 {{ capabilities: {} }}
             ))"#,
-            mutations_json, uuid, status, capabilities 
+            mutations_json, uuid, status, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<LinkExpressionMutations> = serde_json::from_str(&result)?;

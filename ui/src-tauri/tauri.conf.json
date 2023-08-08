@@ -32,9 +32,6 @@
         "icons/icon.ico"
       ],
       "resources": [],
-      "externalBin": [
-        "bins/ad4m-host"
-      ],
       "copyright": "",
       "category": "DeveloperTool",
       "shortDescription": "",

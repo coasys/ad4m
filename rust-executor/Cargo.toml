@@ -1,7 +1,15 @@
 [package]
 name = "rust-executor"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
+authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]
+description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
+keywords = ["ad4m", "perspect3vism", "cli"]
+license = "CAL-1.0"
+homepage = "https://ad4m.dev"
+repository = "https://github.com/perspect3vism/ad4m"
+documentation = "https://docs.ad4m.dev"
+readme = "README.md"
 
 [lib]
 name = "rust_executor"
@@ -60,3 +68,4 @@ scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-pro
 
 [dev-dependencies]
 maplit = "1.0.2"
+tracing = "0.1"

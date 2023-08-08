@@ -10,7 +10,7 @@ mod wallet;
 pub mod init;
 mod pubsub;
 
-use log::{error, info};
+use tracing::{error, info};
 use rust_executor::Ad4mConfig;
 use std::env;
 
@@ -20,7 +20,7 @@ use js_core::JsCore;
 async fn main() {
     prolog::run();
     env::set_var("RUST_LOG", "rust_executor=info");
-    env_logger::init();
+    env_logger::try_init();
 
     let mut config = Ad4mConfig::default();
     config.prepare();

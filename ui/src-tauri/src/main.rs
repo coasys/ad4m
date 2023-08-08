@@ -3,15 +3,21 @@
     windows_subsystem = "windows"
 )]
 
+use tracing::{info, error};
+use rust_executor::Ad4mConfig;
 use tauri::LogicalSize;
 use tauri::Size;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format;
+use std::env;
+use std::fs;
+use std::fs::File;
+use std::sync::Arc;
 use std::sync::Mutex;
 extern crate remove_dir_all;
 use remove_dir_all::*;
 
-use config::holochain_binary_path;
 use config::app_url;
-use logs::setup_logs;
 use menu::build_menu;
 use system_tray::{ build_system_tray, handle_system_tray_event };
 use tauri::{
@@ -26,7 +32,6 @@ use uuid::Uuid;
 
 mod config;
 mod util;
-mod logs;
 mod system_tray;
 mod menu;
 mod commands;
@@ -37,11 +42,14 @@ use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::commands::app::{close_application, close_main_window, clear_state, open_tray, open_tray_message};
 use crate::config::data_path;
+use crate::config::log_path;
 use crate::util::create_tray_message_windows;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
 use crate::util::has_processes_running;
 use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
+use std::io::{self, Write};
+use tracing_subscriber::{fmt::format::FmtSpan, FmtSubscriber};
 
 // the payload type must implement `Serialize` and `Clone`.
 #[derive(Clone, serde::Serialize)]
@@ -64,23 +72,55 @@ pub struct AppState {
 }
 
 fn main() {
+    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debugad4m-launcher=info,warn,error");
+
+    if !data_path().exists() {
+        let _ = fs::create_dir_all(data_path());
+    }
+
+    if log_path().exists() {
+        let _ = fs::remove_file(log_path());
+    }
+  
+    let mut waited_seconds = 0;
+    while data_path().join("ipfs").join("repo.lock").exists() {
+        println!("IPFS repo.lock exists, waiting...");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        waited_seconds = waited_seconds + 1;
+        if waited_seconds > 10 {
+            println!("Waited long enough, removing lock...");
+            let _ = remove_dir_all(data_path().join("ipfs").join("repo.lock"));
+            let _ = remove_dir_all(data_path().join("ipfs").join("datastore").join("LOCK"));
+        }
+    }
+
+    let file = File::create(log_path()).unwrap();
+    let file = Arc::new(Mutex::new(file));
+
+    let format = format::debug_fn(move |writer, _field, value| {
+        let _ = writeln!(file.lock().unwrap(), "{:?}", value);
+        write!(writer, "{:?}", value)
+    });
+
+    let filter = EnvFilter::from_default_env();
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .fmt_fields(format)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set tracing subscriber");
+
     let app_name = if std::env::consts::OS == "windows" { "AD4M.exe" } else { "AD4M" };
     if has_processes_running(app_name) > 1 {
         println!("AD4M is already running");
         return;
     }
 
-    if data_path().exists() && !data_path().join("ad4m").join("agent.json").exists() {
-        let _ = remove_dir_all(data_path());
-    }
-
-    if let Err(err) = setup_logs() {
-        println!("Error setting up the logs: {:?}", err);
-    }
-
     let free_port = find_port(12000, 13000);
 
-    log::info!("Free port: {:?}", free_port);
+    info!("Free port: {:?}", free_port);
 
     save_executor_port(free_port);
 
@@ -88,22 +128,18 @@ fn main() {
 
     find_and_kill_processes("holochain");
 
-    let prepare = Command::new_sidecar("ad4m-host")
-        .expect("Failed to create ad4m command")
-        .args(["prepare"])
-        .status()
-        .expect("Failed to run ad4m prepare");
-    assert!(prepare.success());
-
-    if !holochain_binary_path().exists() {
-        log::info!("init command by copy holochain binary");
-        let status = Command::new_sidecar("ad4m-host")
-            .expect("Failed to create ad4m command")
-            .args(["init"])
-            .status()
-            .expect("Failed to run ad4m init");
-        assert!(status.success());
-    }
+    match rust_executor::init::init(
+        Some(String::from(data_path().to_str().unwrap())),
+         None
+        ) {
+        Ok(()) => {
+            println!("Ad4m initialized sucessfully");
+        },
+        Err(e) => {
+            println!("Ad4m initialization failed: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let req_credential = Uuid::new_v4().to_string();
 
@@ -139,65 +175,41 @@ fn main() {
 
             let splashscreen = app.get_window("splashscreen").unwrap();
 
-            let splashscreen_clone = splashscreen.clone();
-
             let _id = splashscreen.listen("copyLogs", |event| {
-                log::info!("got window event-name with payload {:?} {:?}", event, event.payload());
+                info!("got window event-name with payload {:?} {:?}", event, event.payload());
 
                 open_logs_folder();
             });
 
-            let (mut rx, _child) = Command::new_sidecar("ad4m-host")
-            .expect("Failed to create ad4m command")
-            .args([
-                "serve",
-                "--port", &free_port.to_string(),
-                "--reqCredential", &req_credential,
-            ])
-            .spawn()
-            .expect("Failed to spawn ad4m serve");
+            let mut config = Ad4mConfig::default();
+            config.admin_credential = Some(req_credential.to_string());
+            config.app_data_path = Some(String::from(data_path().to_str().unwrap()));
+            config.gql_port = Some(free_port);
+            config.network_bootstrap_seed = None;
 
             let handle = app.handle();
 
-            tauri::async_runtime::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    match event.clone() {
-                        CommandEvent::Stdout(line) => {
-                            log::info!("{}", line);
+            async fn spawn_executor(config: Ad4mConfig, splashscreen_clone: Window, handle: &AppHandle) {
+                let my_closure = || {
+                    let url = app_url();
+                    info!("Executor clone on: {:?}", url);
+                    let _ = splashscreen_clone.hide();
+                    create_tray_message_windows(&handle);
+                    let main = get_main_window(&handle);
+                    main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
+                };
 
-                            if line.contains("GraphQL server started, Unlock the agent to start holohchain") {
-                                let url = app_url();
-                                log::info!("Executor started on: {:?}", url);
-                                let _ = splashscreen_clone.hide();
-                                create_tray_message_windows(&handle);
-                                let main = get_main_window(&handle);
-                                main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
-                            }
-                        },
-                        CommandEvent::Stderr(line) => {
-                            let is_prolog_redefined_line = line.starts_with("Warning: /var") || line.starts_with("Warning:    Redefined") || line.starts_with("Warning:    Previously");
-                            if !is_prolog_redefined_line {
-                                log::error!("{}", line);
-                            }
-                        }
-                        CommandEvent::Terminated(line) => {
-                            log::info!("Terminated {:?}", line);
-                            let main = get_main_window(&handle);
+                match rust_executor::run_with_tokio(config.clone()).await {
+                    () => {
+                        my_closure();
 
-                            if let Ok(true) = &splashscreen_clone.is_visible() {
-                                log_error(&splashscreen_clone, "Something went wrong while starting ad4m-executor please check the logs");
-                            }
-
-                            if let Ok(true) = main.is_visible() {
-                                log_error(&main, "There was an error with the AD4M Launcher. Restarting may fix this, otherwise please contact the AD4M team for support.");
-                            }
-
-                            log::info!("Terminated {:?}", line);
-                        },
-                        CommandEvent::Error(line) => log::info!("Error {:?}", line),
-                        _ => log::error!("{:?}", event),
+                        info!("GraphQL server stopped.")
                     }
                 }
+            }
+
+            tauri::async_runtime::spawn(async move {
+                spawn_executor(config.clone(), splashscreen.clone(), &handle).await
             });
 
             Ok(())
@@ -235,7 +247,7 @@ fn main() {
                 };
             });
         }
-        Err(err) => log::error!("Error building the app: {:?}", err),
+        Err(err) => error!("Error building the app: {:?}", err),
     }
 }
 

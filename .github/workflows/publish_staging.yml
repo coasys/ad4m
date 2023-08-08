@@ -43,7 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
-        node-version: [16.x]
+        node-version: [18.17.0]
 
     needs: 
       - create-release
@@ -60,6 +60,10 @@ jobs:
       with:
         override: true
         toolchain: 1.68.2
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
     - run: rustup target add wasm32-unknown-unknown
 
     - name: install dependencies (ubuntu only)
@@ -85,8 +89,15 @@ jobs:
     - name: Yarn Install
       run: yarn install
 
-    - name: Build AD4M-CLI & build Launcher binary (macos-latest)
+    - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
+      if: matrix.platform != 'windows-latest'
       run: yarn run package-ad4m
+
+    - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
+      if: matrix.platform == 'windows-latest'
+      run: |
+          choco install curl cygwin gnuwin32-m4 libgcc make mingw
+          yarn run package-ad4m
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
@@ -181,6 +192,10 @@ jobs:
           node-version: 16.x
       - name: Install deps
         run: yarn install
+      - name: Install Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.32.4
       - name: Build modules
         run: yarn run build-libs
       - name: Publish core

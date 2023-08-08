@@ -98,7 +98,7 @@ export default class Ad4mCore {
         }
         if (!args) {
             result = await this.resolvers[type][fnName](context);
-        } 
+        }
         if (!context) {
             result = await this.resolvers[type][fnName](args);
         }
@@ -160,7 +160,7 @@ export default class Ad4mCore {
         }
         return this.#entanglementProofController
     }
-    
+
     get database(): Ad4mDb {
         return this.#db
     }
@@ -184,21 +184,7 @@ export default class Ad4mCore {
     }
 
     async initIPFS(params: InitIPFSParams) {
-        console.log("Init IPFS service with optional swarm port ", params.ipfsSwarmPort, " at optional repo path: ", params.ipfsRepoPath);
-        let basePath = params.ipfsRepoPath ? params.ipfsRepoPath : path.join(this.#config.dataPath, "ipfs");
-        let repoPath = path.join(basePath, "repo.lock");
-        console.log("Check if repo.lock exists at: ", repoPath);
-
-        let retries = 0;
-        while (fs.existsSync(repoPath)) {
-            await sleep(1000);
-            retries++;
-            if (retries >= 10) {
-                console.log("Waited long enough for repo.lock to be released, deleting...");
-                fs.rmdirSync(repoPath, { recursive: true });
-                fs.rmSync(path.join(basePath, "datastore", "LOCK"));
-            }
-        }
+        console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
 
         //let ipfs = await IPFS.init(params.ipfsSwarmPort, params.ipfsRepoPath);
         //this.#IPFS = ipfs;

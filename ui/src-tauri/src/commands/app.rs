@@ -65,10 +65,6 @@ pub fn open_tray_message(app_handle: tauri::AppHandle) {
 
 #[tauri::command]
 pub fn clear_state(app_handle: tauri::AppHandle) {
-    find_and_kill_processes("ad4m-host");
-
-    find_and_kill_processes("holochain");
-
     let _ = remove_dir_all(data_path());
 
     app_handle.restart();

@@ -35,6 +35,9 @@ tauri-plugin-positioner = { version = "1.0", features = ["system-tray"] }
 remove_dir_all = "0.7.0"
 reqwest = { version = "0.11", features = ["json"] }
 ad4m-client = { path = "../../rust-client" }
+rust-executor = { path = "../../rust-executor" }
+tracing = "0.1"
+tracing-subscriber = "0.2"
 
 [features]
 # by default Tauri runs in production mode
