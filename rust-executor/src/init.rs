@@ -72,7 +72,7 @@ pub fn init(
     let hc_data = &HC_BIN;
     let hc_target = binary_path.join(hc);
     info!("write hc target");
-    fs::write(&hc_target, hc_data.as_ref())?;
+    fs::write::<&PathBuf, &[u8]>(&hc_target, hc_data.as_ref())?;
 
     set_permissions(hc_target)?;
 

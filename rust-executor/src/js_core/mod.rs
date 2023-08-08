@@ -200,7 +200,7 @@ impl JsCore {
             .lock()
             .expect("init_core(): couldn't lock worker");
         let _init_core =
-            worker.execute_script("js_core", format!("initCore({})", config.get_json()))?;
+            worker.execute_script("js_core", format!("initCore({})", config.get_json()).into())?;
         Ok(GlobalVariableFuture::new(
             self.worker.clone(),
             "core".to_string(),
@@ -221,7 +221,7 @@ impl JsCore {
         "#,
             script
         );
-        let _execute_async = worker.execute_script("js_core", wrapped_script)?;
+        let _execute_async = worker.execute_script("js_core", wrapped_script.into())?;
         Ok(GlobalVariableFuture::new(
             self.worker.clone(),
             "asyncResult".to_string(),

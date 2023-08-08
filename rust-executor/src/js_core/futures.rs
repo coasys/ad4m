@@ -41,7 +41,7 @@ impl Future for GlobalVariableFuture {
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut worker = self.worker.lock().unwrap();
-        if let Ok(global_value) = worker.execute_script("global_var_future", self.name.clone()) {
+        if let Ok(global_value) = worker.execute_script("global_var_future", self.name.clone().into()) {
             let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
             let context = v8::Context::new(scope);
             let scope = &mut v8::ContextScope::new(scope, context);

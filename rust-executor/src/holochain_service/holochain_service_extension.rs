@@ -1,4 +1,6 @@
-use deno_core::{error::AnyError, include_js_files, op, Extension};
+use std::borrow::Cow;
+
+use deno_core::{error::AnyError, include_js_files, op, Extension, Op};
 use holochain::{
     conductor::api::AppInfo,
     prelude::{
@@ -95,21 +97,22 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyError> {
 //Implement signal callbacks from dna/holochain to js
 
 pub fn build() -> Extension {
-    Extension::builder("holochain_service")
-        .js(include_js_files!(holochain_service "holochain_service_extension.js",))
-        .ops(vec![
-            start_holochain_conductor::decl(),
-            log_dht_status::decl(),
-            install_app::decl(),
-            get_app_info::decl(),
-            call_zome_function::decl(),
-            agent_infos::decl(),
-            add_agent_infos::decl(),
-            remove_app::decl(),
-            sign_string::decl(),
-            shutdown::decl(),
-            get_agent_key::decl(),
-        ])
-        .force_op_registration()
-        .build()
+    Extension {
+        name: "holochain_service",
+        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/holochain_service/holochain_service_extension.js",)),
+        ops: Cow::Borrowed(&[
+            start_holochain_conductor::DECL,
+            log_dht_status::DECL,
+            install_app::DECL,
+            get_app_info::DECL,
+            call_zome_function::DECL,
+            agent_infos::DECL,
+            add_agent_infos::DECL,
+            remove_app::DECL,
+            sign_string::DECL,
+            shutdown::DECL,
+            get_agent_key::DECL,
+        ]),
+        ..Default::default()
+    }
 }

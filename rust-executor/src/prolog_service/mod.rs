@@ -85,6 +85,7 @@ pub async fn get_prolog_service() -> PrologService {
 
 #[cfg(test)]
 mod prolog_test {
+    use maplit::btreemap;
     use scryer_prolog::machine::parsed_results::{QueryResolution, QueryMatch, Value};
 
     use super::*;
@@ -106,7 +107,7 @@ mod prolog_test {
         );
 
         let load_facts = service
-            .load_module_string(engine_name.clone(), "facts".to_string(), facts)
+            .load_module_string(engine_name.clone(), "facts".to_string(), vec![facts])
             .await;
         assert!(load_facts.is_ok());
 

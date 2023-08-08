@@ -1,5 +1,7 @@
+use std::borrow::Cow;
+
 use base64::{engine::general_purpose as base64engine, Engine as _};
-use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension};
+use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension, Op};
 use did_key::{CoreSign, PatchedKeyPair};
 use tracing::error;
 use serde::{Deserialize, Serialize};
@@ -121,20 +123,21 @@ fn wallet_verify(did: String, message: &[u8], signature: &[u8]) -> bool {
 }
 
 pub fn build() -> Extension {
-    Extension::builder("wallet")
-        .js(include_js_files!(wallet "wallet_extension.js",))
-        .ops(vec![
-            wallet_get_main_key::decl(),
-            wallet_get_main_key_document::decl(),
-            wallet_create_main_key::decl(),
-            wallet_is_unlocked::decl(),
-            wallet_unlock::decl(),
-            wallet_lock::decl(),
-            wallet_export::decl(),
-            wallet_load::decl(),
-            wallet_sign::decl(),
-            wallet_verify::decl(),
-        ])
-        .force_op_registration()
-        .build()
+    Extension {
+        name: "wallet",
+        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/wallet_extension.js",)),
+        ops: Cow::Borrowed(&[
+            wallet_get_main_key::DECL,
+            wallet_get_main_key_document::DECL,
+            wallet_create_main_key::DECL,
+            wallet_is_unlocked::DECL,
+            wallet_unlock::DECL,
+            wallet_lock::DECL,
+            wallet_export::DECL,
+            wallet_load::DECL,
+            wallet_sign::DECL,
+            wallet_verify::DECL,
+        ]),
+        ..Default::default()
+    }
 }

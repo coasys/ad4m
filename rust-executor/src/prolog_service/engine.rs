@@ -138,7 +138,7 @@ mod prolog_test {
         "#,
         );
 
-        let load_facts = engine.load_module_string("facts".to_string(), facts).await;
+        let load_facts = engine.load_module_string("facts".to_string(), vec![facts]).await;
         assert!(load_facts.is_ok());
         println!("Facts loaded");
 

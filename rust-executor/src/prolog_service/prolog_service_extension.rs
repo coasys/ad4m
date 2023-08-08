@@ -1,7 +1,9 @@
-use deno_core::{error::AnyError, include_js_files, op, Extension, anyhow::bail};
+use std::borrow::Cow;
+
+use deno_core::{error::AnyError, include_js_files, op, Extension, anyhow::bail, Op};
 use scryer_prolog::machine::parsed_results::{Value, QueryMatch, QueryResolution};
 
-use super::{get_prolog_service};
+use super::get_prolog_service;
 
 #[op]
 async fn spawn_engine(engine_name: String) -> Result<(), AnyError> {
@@ -110,14 +112,15 @@ async fn load_module_string(
 }
 
 pub fn build() -> Extension {
-    Extension::builder("prolog_service")
-        .js(include_js_files!(holochain_service "prolog_service_extension.js",))
-        .ops(vec![
-            spawn_engine::decl(),
-            remove_engine::decl(),
-            run_query::decl(),
-            load_module_string::decl(),
-        ])
-        .force_op_registration()
-        .build()
+    Extension {
+        name: "prolog_service",
+        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/prolog_service/prolog_service_extension.js",)),
+        ops: Cow::Borrowed(&[
+            spawn_engine::DECL,
+            remove_engine::DECL,
+            run_query::DECL,
+            load_module_string::DECL,
+        ]),
+        ..Default::default()
+    }
 }

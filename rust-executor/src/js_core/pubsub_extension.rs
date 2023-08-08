@@ -1,4 +1,6 @@
-use deno_core::{error::AnyError, include_js_files, op, Extension};
+use std::borrow::Cow;
+
+use deno_core::{error::AnyError, include_js_files, op, Extension, Op};
 
 use crate::pubsub::get_global_pubsub;
 
@@ -10,9 +12,12 @@ async fn publish(topic: String, data: String) -> Result<(), AnyError> {
 }
 
 pub fn build() -> Extension {
-    Extension::builder("pubsub")
-        .js(include_js_files!(pub_sub "pubsub_extension.js",))
-        .ops(vec![publish::decl()])
-        .force_op_registration()
-        .build()
+    Extension {
+        name: "pubsub",
+        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/pubsub_extension.js",)),
+        ops: Cow::Borrowed(&[
+            publish::DECL
+        ]),
+        ..Default::default()
+    }
 }

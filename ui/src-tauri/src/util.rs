@@ -5,8 +5,6 @@ use crate::menu::open_logs_folder;
 use std::fs::remove_file;
 use std::fs::File;
 use std::io::prelude::*;
-use std::time::Duration;
-use std::time::SystemTime;
 use sysinfo::Process;
 use sysinfo::{ProcessExt, Signal, System, SystemExt};
 use tauri::{AppHandle, Manager, WindowBuilder, WindowEvent, WindowUrl, Wry};
