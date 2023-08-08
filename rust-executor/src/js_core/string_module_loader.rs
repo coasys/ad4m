@@ -8,7 +8,6 @@ use deno_core::ModuleType;
 use deno_core::ResolutionKind;
 use deno_runtime::deno_core::error::AnyError;
 use tracing::info;
-use log::info;
 use url::Url;
 use std::collections::HashMap;
 use std::pin::Pin;

@@ -2,7 +2,6 @@ use std::borrow::Cow;
 
 use cid::Cid;
 use deno_core::{error::AnyError, include_js_files, op, Extension, Op};
-use log::info;
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
 use tracing::{error, info, debug, warn};
