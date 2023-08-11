@@ -13,5 +13,5 @@ derive_more = "0"
 serde = "1"
 chrono = { version = "0.4.22", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 
-hdi = "0.2.0"
-hdk = "0.1.0"
+hdi = "0.4.0-beta-dev.8"
+hdk = "0.3.0-beta-dev.12"
