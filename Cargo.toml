@@ -10,3 +10,4 @@ members = [
 
 [patch.crates-io]
 sodiumoxide = { git = "https://github.com/fayeed/sodiumoxide" }
+# rusqlite = { path = "../rusqlite" }

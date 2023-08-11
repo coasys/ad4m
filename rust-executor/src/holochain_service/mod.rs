@@ -194,33 +194,14 @@ impl HolochainService {
                 kitsune_config.network_type = NetworkType::QuicBootstrap;
             }
             if local_config.use_proxy {
-                kitsune_config.transport_pool = vec![TransportConfig::Proxy {
-                    sub_transport: Box::new(TransportConfig::Quic {
-                        bind_to: None,
-                        override_host: None,
-                        override_port: None,
-                    }),
-                    proxy_config: ProxyConfig::RemoteProxyClient {
-                        proxy_url: Url2::parse(local_config.proxy_url),
-                    },
+                kitsune_config.transport_pool = vec![TransportConfig::WebRTC {
+                    signal_url: local_config.proxy_url,
                 }];
             } else {
                 kitsune_config.transport_pool = vec![
-                    TransportConfig::Quic {
-                        bind_to: None,
-                        override_host: None,
-                        override_port: None,
-                    },
                     TransportConfig::Mem {},
-                    TransportConfig::Proxy {
-                        sub_transport: Box::new(TransportConfig::Quic {
-                            bind_to: None,
-                            override_host: None,
-                            override_port: None,
-                        }),
-                        proxy_config: ProxyConfig::RemoteProxyClient {
-                            proxy_url: Url2::parse(local_config.proxy_url),
-                        },
+                    TransportConfig::WebRTC {
+                        signal_url: local_config.proxy_url,
                     },
                 ];
             }
