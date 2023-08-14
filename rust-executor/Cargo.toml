@@ -63,7 +63,7 @@ jsonwebtoken = "8.3.0"
 
 holochain = { version = "0.3.0-beta-dev.13", features = ["test_utils"] }
 
-scryer-prolog = { version = "0.9.1", path = "../../scryer-prolog" }
+scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m-compatible" }
 # scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", rev = "ce1c8aac4ccc0a49ce4816c0870634a703b1fc1f" }
 
 tracing = "0.1"
