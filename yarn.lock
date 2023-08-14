@@ -1903,19 +1903,21 @@
   dependencies:
     client-only "^0.0.1"
 
-"@holochain/client@0.12.5":
-  version "0.12.5"
-  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.12.5.tgz#6cbfe32c33f94fb0689d986adeb43f2b43813303"
-  integrity sha512-9Q1G8sKEGsqnCl067CaRbzwPZZ5zeDCJdvQ8TJpb+psP2kLJBbHZ2qulMXAlNUz7Pg0l4B1Eh/BFJByJHRLlow==
+"@holochain/client@0.16.0":
+  version "0.16.0"
+  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.16.0.tgz#3800ecc0551eef9a2b8e3534f6a6651f87b9af82"
+  integrity sha512-GJEl6F3OSlDX71H+rtyUXpEuor7O9MhvNIi+Tq6obrysu71JsbXfR1rtmSBiNb9fttHOZLW60EzY/Lj3I9dv8g==
   dependencies:
     "@holochain/serialization" "^0.1.0-beta-rc.3"
     "@msgpack/msgpack" "^2.7.2"
+    "@noble/ed25519" "^2.0.0"
     "@tauri-apps/api" "^1.2.0"
     emittery "^1.0.1"
     isomorphic-ws "^5.0.0"
     js-base64 "^3.7.3"
+    libsodium-wrappers "^0.7.11"
     lodash-es "^4.17.21"
-    tweetnacl "^1.0.3"
+    ws "^8.13.0"
 
 "@holochain/client@perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b":
   version "0.12.5"
@@ -2583,6 +2585,11 @@
     "@types/mdx" "^2.0.0"
     "@types/react" ">=16"
 
+"@msgpack/msgpack@3.0.0-beta2":
+  version "3.0.0-beta2"
+  resolved "https://registry.yarnpkg.com/@msgpack/msgpack/-/msgpack-3.0.0-beta2.tgz#5bccee30f84df220b33905e3d8249ba96deca0b7"
+  integrity sha512-y+l1PNV0XDyY8sM3YtuMLK5vE3/hkfId+Do8pLo/OPxfxuFAUwcGz3oiiUuV46/aBpwTzZ+mRWVMtlSKbradhw==
+
 "@msgpack/msgpack@^2.7.2":
   version "2.8.0"
   resolved "https://registry.yarnpkg.com/@msgpack/msgpack/-/msgpack-2.8.0.tgz#4210deb771ee3912964f14a15ddfb5ff877e70b9"
@@ -2723,6 +2730,11 @@
   integrity sha512-54/JRvkLIzzDWshCWfuhadfrfZVPiElY8Fcgmg1HroEly/EDSszzhBAsarCux+D/kOslTRquNzuyGSmUSTTHGg==
   dependencies:
     eslint-scope "5.1.1"
+
+"@noble/ed25519@^2.0.0":
+  version "2.0.0"
+  resolved "https://registry.yarnpkg.com/@noble/ed25519/-/ed25519-2.0.0.tgz#5964c8190a4b4b804985717ca566113b93379e43"
+  integrity sha512-/extjhkwFupyopDrt80OMWKdLgP429qLZj+z6sYJz90rF2Iz0gjZh2ArMKPImUl13Kx+0EXI2hN9T/KJV0/Zng==
 
 "@noble/secp256k1@^1.7.0":
   version "1.7.1"
@@ -13655,6 +13667,18 @@ libphonenumber-js@^1.9.43:
   version "1.10.34"
   resolved "https://registry.yarnpkg.com/libphonenumber-js/-/libphonenumber-js-1.10.34.tgz#63374bb988688ac28b03ed6c4b344d412199d56c"
   integrity sha512-p6g4NaQH4gK1gre32+kV14Mk6GPo2EDcPDvjbi+D2ycsPFsN4gVWNbs0itdHLZqByg6YEK8mE7OeP200I/ScTQ==
+
+libsodium-wrappers@^0.7.11:
+  version "0.7.11"
+  resolved "https://registry.yarnpkg.com/libsodium-wrappers/-/libsodium-wrappers-0.7.11.tgz#53bd20606dffcc54ea2122133c7da38218f575f7"
+  integrity sha512-SrcLtXj7BM19vUKtQuyQKiQCRJPgbpauzl3s0rSwD+60wtHqSUuqcoawlMDheCJga85nKOQwxNYQxf/CKAvs6Q==
+  dependencies:
+    libsodium "^0.7.11"
+
+libsodium@^0.7.11:
+  version "0.7.11"
+  resolved "https://registry.yarnpkg.com/libsodium/-/libsodium-0.7.11.tgz#cd10aae7bcc34a300cc6ad0ac88fcca674cfbc2e"
+  integrity sha512-WPfJ7sS53I2s4iM58QxY3Inb83/6mjlYgcmZs7DJsvDlnmVUwNinBCi5vBT43P6bHRy01O4zsMU2CoVR6xJ40A==
 
 lilconfig@^2.0.3, lilconfig@^2.0.5, lilconfig@^2.1.0:
   version "2.1.0"
