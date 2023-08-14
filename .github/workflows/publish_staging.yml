@@ -59,7 +59,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         override: true
-        toolchain: 1.68.2
+        toolchain: 1.71.1
     - name: Install Deno
       uses: denoland/setup-deno@v1
       with:
