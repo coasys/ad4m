@@ -5025,7 +5025,7 @@ dependencies = [
  "mockall",
  "observability",
  "serde",
- "serde_derive",
+ "serde_derive 1.0.183 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
  "tokio",
  "tracing",
@@ -5049,7 +5049,7 @@ dependencies = [
  "holochain_zome_types",
  "kitsune_p2p",
  "serde",
- "serde_derive",
+ "serde_derive 1.0.183 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_yaml 0.9.25",
  "structopt",
  "thiserror",
@@ -5221,7 +5221,7 @@ dependencies = [
  "rusqlite",
  "scheduled-thread-pool",
  "serde",
- "serde_derive",
+ "serde_derive 1.0.183 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json",
  "shrinkwraprs",
  "sqlformat 0.1.8",
@@ -5327,7 +5327,8 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_bytes",
- "serde_derive",
+ "serde_derive 1.0.183 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json",
  "serde_with 1.14.0",
  "serde_yaml 0.9.25",
  "shrinkwraprs",
@@ -5597,7 +5598,7 @@ dependencies = [
  "backtrace",
  "os_info",
  "serde",
- "serde_derive",
+ "serde_derive 1.0.183 (registry+https://github.com/rust-lang/crates.io-index)",
  "toml 0.7.6",
  "uuid 1.4.1",
 ]
@@ -7409,7 +7410,7 @@ dependencies = [
  "rmp-serde 0.15.5",
  "serde",
  "serde_bytes",
- "serde_derive",
+ "serde_derive 1.0.183 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_yaml 0.9.25",
  "thiserror",
 ]
@@ -10470,10 +10471,9 @@ dependencies = [
 [[package]]
 name = "serde"
 version = "1.0.183"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32ac8da02677876d532745a130fc9d8e6edfa81a269b107c5b00829b91d8eb3c"
+source = "git+https://github.com/fayeed/serde.git?branch=ad4m-compatible#a81bd97dcd5254e28104146d45b62b8f91f0e192"
 dependencies = [
- "serde_derive",
+ "serde_derive 1.0.183 (git+https://github.com/fayeed/serde.git?branch=ad4m-compatible)",
 ]
 
 [[package]]
@@ -10509,6 +10509,16 @@ name = "serde_derive"
 version = "1.0.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aafe972d60b0b9bee71a91b92fee2d4fb3c9d7e8f6b179aa99f27203d99a4816"
+dependencies = [
+ "proc-macro2 1.0.66",
+ "quote 1.0.32",
+ "syn 2.0.28",
+]
+
+[[package]]
+name = "serde_derive"
+version = "1.0.183"
+source = "git+https://github.com/fayeed/serde.git?branch=ad4m-compatible#a81bd97dcd5254e28104146d45b62b8f91f0e192"
 dependencies = [
  "proc-macro2 1.0.66",
  "quote 1.0.32",
