@@ -6709,14 +6709,6 @@ checksum = "b4668fb0ea861c1df094127ac5f1da3409a82116a4ba74fca2e58ef927159bb3"
 [[package]]
 name = "libffi"
 version = "3.2.0"
-dependencies = [
- "libc",
- "libffi-sys 2.3.0",
-]
-
-[[package]]
-name = "libffi"
-version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce826c243048e3d5cec441799724de52e2d42f820468431fc3fceee2341871e2"
 dependencies = [
@@ -6725,10 +6717,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "libffi-sys"
-version = "2.3.0"
+name = "libffi"
+version = "3.2.0"
+source = "git+https://github.com/coasys/libffi-rs.git?branch=window-space-no-link#ed07c20dfc2a239e6e89f978c3b67c85577f35d4"
 dependencies = [
- "cc",
+ "libc",
+ "libffi-sys 2.3.0 (git+https://github.com/coasys/libffi-rs.git?branch=window-space-no-link)",
 ]
 
 [[package]]
@@ -6736,6 +6730,14 @@ name = "libffi-sys"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f36115160c57e8529781b4183c2bb51fdc1f6d6d1ed345591d84be7703befb3c"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "libffi-sys"
+version = "2.3.0"
+source = "git+https://github.com/coasys/libffi-rs.git?branch=window-space-no-link#ed07c20dfc2a239e6e89f978c3b67c85577f35d4"
 dependencies = [
  "cc",
 ]
@@ -10233,6 +10235,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "scryer-prolog"
 version = "0.9.1"
+source = "git+https://github.com/coasys/scryer-prolog?branch=ad4m-compatible#1bf263815b74ff9750eeefca4ada42e2ca43af95"
 dependencies = [
  "base64 0.12.3",
  "bit-set",
@@ -10259,8 +10262,8 @@ dependencies = [
  "lazy_static",
  "lexical 5.2.2",
  "libc",
- "libffi 3.2.0",
- "libloading",
+ "libffi 3.2.0 (git+https://github.com/coasys/libffi-rs.git?branch=window-space-no-link)",
+ "libloading 0.7.4",
  "modular-bitfield",
  "native-tls",
  "ordered-float",
