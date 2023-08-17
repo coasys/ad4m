@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
-import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
-    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
+import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
+    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
     instanceQuery, Subject, subjectProperty,
     subjectCollection, subjectFlag,
     SDNAClass,
@@ -25,12 +25,12 @@ describe("Prolog + Literals", () => {
     let executorProcess: ChildProcess | null = null
 
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
-    const appDataPath = path.join(TEST_DIR, "agents", "integration-agent");
+    const appDataPath = path.join(TEST_DIR, "agents", "prolog-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15500
-    const hcAdminPort = 15501
-    const hcAppPort = 15502
-    const ipfsSwarmPort = 15503
+    const gqlPort = 16600
+    const hcAdminPort = 16601
+    const hcAppPort = 16602
+    const ipfsSwarmPort = 16603
 
     before(async () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
@@ -369,7 +369,7 @@ describe("Prolog + Literals", () => {
                 const regExp = /\("Todo", ([^)]+)\)/;
                 const matches = regExp.exec(sdna);
                 const value = matches![1];
-                
+
                 const equal = readFileSync("./sdna/subject.pl").toString().replace(/c\)/g, `${value})`).replace(/\(c/g, `(${value}`);
 
                 expect(sdna.normalize('NFC')).to.equal(equal.normalize('NFC'))
