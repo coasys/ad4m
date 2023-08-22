@@ -669,7 +669,7 @@ describe("Prolog + Literals", () => {
                     })
 
                     expect(links!.length).to.equal(1)
-                    expect(links![0].status).to.equal('recipe://local')
+                    expect(links![0].status).to.equal('LOCAL')
                 })
 
                 it("delete()", async () => {
