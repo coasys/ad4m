@@ -12,7 +12,7 @@ import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
 
 export const bootstrapUrl = "https://bootstrap.holo.host"
-export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"
+export const kitsuneProxy = "wss://signal.holotest.net"
 
 export interface HolochainConfiguration {
     conductorPath?: string, 
