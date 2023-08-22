@@ -52,15 +52,40 @@ export async function startExecutor(dataPath: string,
     
     console.log("Starting executor")
     try {
-        execSync("killall holochain")
+        execSync("killall ad4m")
     } catch (e) {
-        console.log("No holochain process running")
+        console.log("No ad4m process running")
     }
+
+    console.log(`Current directory: ${process.cwd()}`);
+    let servicesProcess = exec("./tst-tmp/agents/p/binary/hc run-local-services");
+
+    let bootstrapUrl = null;
+    let proxyUrl = null;
+
+    let servicesReady = new Promise<void>((resolve, reject) => {
+        servicesProcess.stdout!.on('data', (data) => {
+            if (data.includes("HC BOOTSTRAP - ADDR")) {
+                bootstrapUrl = data.split(" ")[5];
+                bootstrapUrl = bootstrapUrl.substring(0, bootstrapUrl.length - 3);
+            }
+
+            if (data.includes("HC SIGNAL - ADDR")) {
+                proxyUrl = data.split(" ")[5];
+                proxyUrl = proxyUrl.substring(0, proxyUrl.length - 3);
+                resolve();
+            }
+        });
+    });
+
+    await servicesReady;
+
+    console.log("USING LOCAL BOOTSTRAP & PROXY URL: ", bootstrapUrl, proxyUrl);
     
     if (!adminCredential) {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns false --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
+        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns false --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
     } else {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns false --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
+        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns false --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
