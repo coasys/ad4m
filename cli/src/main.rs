@@ -142,6 +142,10 @@ enum Domain {
         hc_use_mdns: Option<bool>,
         #[arg(long, action)]
         hc_use_proxy: Option<bool>,
+        #[arg(long, action)]
+        hc_proxy_url: Option<String>,
+        #[arg(long, action)]
+        hc_bootstrap_url: Option<String>,
         #[arg(short, long, action)]
         ipfs_swarm_port: Option<u16>,
         #[arg(short, long, action)]
@@ -219,6 +223,8 @@ async fn main() -> Result<()> {
         hc_use_local_proxy,
         hc_use_mdns,
         hc_use_proxy,
+        hc_proxy_url,
+        hc_bootstrap_url,
         ipfs_swarm_port,
         connect_holochain,
         admin_credential,
@@ -239,6 +245,8 @@ async fn main() -> Result<()> {
             hc_use_local_proxy,
             hc_use_mdns,
             hc_use_proxy,
+            hc_proxy_url,
+            hc_bootstrap_url,
             ipfs_swarm_port,
             connect_holochain,
             admin_credential,
@@ -286,6 +294,8 @@ async fn main() -> Result<()> {
             hc_use_local_proxy: _,
             hc_use_mdns: _,
             hc_use_proxy: _,
+            hc_proxy_url: _,
+            hc_bootstrap_url: _,
             ipfs_swarm_port: _,
             connect_holochain: _,
             admin_credential: _,

@@ -48,6 +48,8 @@ export interface OuterConfig {
   hcUseProxy?: boolean,
   //Should holochain use a bootstrap server
   hcUseBootstrap?: boolean,
+  hcProxyUrl: string,
+  hcBootstrapUrl: string,
   //Should ad4m-executor connect to an existing holochain instance, or spawn its own
   connectHolochain?: boolean,
   //The credential used by admin client to make request

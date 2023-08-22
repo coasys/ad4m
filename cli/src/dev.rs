@@ -111,6 +111,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     admin_credential: None,
                     swipl_path: None,
                     swipl_home_path: None,
+                    hc_proxy_url: None,
+                    hc_bootstrap_url: None,
                 })
                 .await;
             };

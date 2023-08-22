@@ -19,6 +19,8 @@ pub struct Ad4mConfig {
     pub hc_use_mdns: Option<bool>,
     pub hc_use_proxy: Option<bool>,
     pub hc_use_bootstrap: Option<bool>,
+    pub hc_proxy_url: Option<String>,
+    pub hc_bootstrap_url: Option<String>,
     pub ipfs_swarm_port: Option<u16>,
     pub connect_holochain: Option<bool>,
     pub admin_credential: Option<String>,
@@ -67,6 +69,12 @@ impl Ad4mConfig {
         }
         if self.connect_holochain.is_none() {
             self.connect_holochain = Some(false);
+        }
+        if self.hc_proxy_url.is_none() {
+            self.hc_proxy_url = Some("wss://signal.holotest.net".to_string());
+        }
+        if self.hc_bootstrap_url.is_none() {
+            self.hc_bootstrap_url = Some("https://bootstrap.holo.host".to_string());
         }
         if self.swipl_path.is_none() {
             let mut data_path = PathBuf::from(self.app_data_path.clone().unwrap());
@@ -117,6 +125,8 @@ impl Default for Ad4mConfig {
             hc_use_mdns: None,
             hc_use_proxy: None,
             hc_use_bootstrap: None,
+            hc_proxy_url: None,
+            hc_bootstrap_url: None,
             ipfs_swarm_port: None,
             connect_holochain: None,
             admin_credential: None,

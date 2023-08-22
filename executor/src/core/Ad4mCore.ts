@@ -37,6 +37,8 @@ export interface InitHolochainParams {
     hcUseLocalProxy?: boolean,
     hcUseMdns?: boolean,
     passphrase?: string
+    hcProxyUrl: string,
+    hcBootstrapUrl: string,
 }
 
 export interface HolochainUnlockConfiguration extends HolochainConfiguration {
@@ -204,6 +206,8 @@ export default class Ad4mCore {
             useProxy: params.hcUseProxy,
             useLocalProxy: params.hcUseLocalProxy,
             useMdns: params.hcUseMdns,
+            hcProxyUrl: params.hcProxyUrl,
+            hcBootstrapUrl: params.hcBootstrapUrl,
         }
 
         this.#holochain = new HolochainService(holochainConfig, this.#agentService, this.entanglementProofController)

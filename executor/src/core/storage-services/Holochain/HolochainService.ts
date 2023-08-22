@@ -11,13 +11,12 @@ import { HolochainUnlockConfiguration } from '../../Ad4mCore'
 import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
 
-export const bootstrapUrl = "https://bootstrap.holo.host"
-export const kitsuneProxy = "wss://signal.holotest.net"
-
 export interface HolochainConfiguration {
     conductorPath?: string, 
     dataPath: string, 
     resourcePath: string
+    hcProxyUrl: string,
+    hcBootstrapUrl: string,
     adminPort?: number;
     appPort?: number;
     useBootstrap?: boolean,
@@ -116,8 +115,8 @@ export default class HolochainService {
             useProxy: config.useProxy!,
             useLocalProxy: config.useLocalProxy!,
             useMdns: config.useMdns!,
-            proxyUrl: kitsuneProxy,
-            bootstrapUrl,
+            proxyUrl: config.hcProxyUrl,
+            bootstrapUrl: config.hcBootstrapUrl,
             adminPort: config.adminPort!
         } as ConductorConfig);
 

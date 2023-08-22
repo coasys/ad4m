@@ -492,9 +492,9 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 checkCapability(context.capabilities, Auth.AGENT_CREATE_CAPABILITY)
                 await core.agentService.createNewKeys()
                 await core.agentService.save(args.passphrase)
-                const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
+                const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
 
-                await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
                 console.log("Holochain init complete");
 
                 await core.waitForAgent();
@@ -538,9 +538,9 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         await core.initLanguages();
                     } catch (e) {
                         // @ts-ignore
-                        const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap} = config;
+                        const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
     
-                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase });
+                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
                         await core.waitForAgent();
                         core.initControllers()
                         await core.initLanguages()
