@@ -12,7 +12,7 @@ use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::kitsune_p2p::dependencies::url2::Url2;
 use holochain::prelude::{
-    ExternIO, HoloHash, InstallAppPayload, KitsuneP2pConfig, NetworkType, ProxyConfig, Signal,
+    ExternIO, HoloHash, InstallAppPayload, KitsuneP2pConfig, NetworkType, Signal,
     Signature, Timestamp, TransportConfig, ZomeCallResponse, ZomeCallUnsigned,
 };
 use holochain::test_utils::itertools::Either;

@@ -13,7 +13,7 @@ pub fn init(
     network_bootstrap_seed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     std::env::set_var("RUST_LOG", "info");
-    env_logger::try_init();
+    let _ = env_logger::try_init();
 
     //Get the default data path if none is provided
     let app_data_path = match data_path {
