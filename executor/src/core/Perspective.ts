@@ -885,10 +885,6 @@ export default class Perspective {
     }
 
     async spawnPrologEngine(): Promise<any> {
-        if(this.#prologEngine) {
-            await this.#prologEngine.remove()
-        }
-
         let error
         const prolog = new PrologInstance(this)
         await prolog.start();
@@ -906,19 +902,16 @@ export default class Perspective {
 
     async prologQuery(query: string): Promise<any> {
         await this.#prologMutex.runExclusive(async () => {
-            await this.spawnPrologEngine()
-            /*
             if(!this.#prologEngine) {
                 await this.spawnPrologEngine()
                 this.#prologNeedsRebuild = false
             }
             if(this.#prologNeedsRebuild) {
-                console.log("Perspective.prologQuery: Making prolog query but first rebuilding facts");
+                //console.log("Perspective.prologQuery: Making prolog query but first rebuilding facts");
                 this.#prologNeedsRebuild = false
                 const facts = await this.initEngineFacts()
                 await this.#prologEngine!.consult(facts)
             }
-            */
         })
         
         return await this.#prologEngine!.query(query)

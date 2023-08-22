@@ -3,15 +3,6 @@ import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom } from "./SDNADecorators";
 import { singularToPlural } from "./util";
 
-const flattenPrologList = (list: object): any[] => {
-  let result = []
-  while (list && list["head"]) {
-    result.push(list["head"])
-    list = list["tail"]
-  }
-  return result
-}
-
 export type QueryPartialEntity<T> = {
   [P in keyof T]?: T[P] | (() => string);
 };
@@ -78,7 +69,7 @@ export class SubjectEntity {
       const getProperty = async () => {
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_getter(C, "${tempId}", "${c}", Value)`)
         if (results && results.length > 0 && results[0].Value) {
-          return flattenPrologList(eval(results[0].Value))
+          return eval(results[0].Value)
         } else {
           return []
         }
