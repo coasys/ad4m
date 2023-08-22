@@ -210,7 +210,7 @@ impl HolochainService {
             config
         };
 
-        info!("Starting holochain conductor with config: {:?}", config);
+        info!("Starting holochain conductor with config: {:#?}", config);
         let conductor = ConductorBuilder::new()
             .config(config)
             .passphrase(Some(local_config.passphrase.as_bytes().into()))
