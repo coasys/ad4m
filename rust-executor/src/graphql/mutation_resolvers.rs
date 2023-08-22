@@ -772,20 +772,33 @@ impl Mutation {
         context: &RequestContext,
         links: Vec<LinkInput>,
         uuid: String,
+        status: Option<String>,
     ) -> FieldResult<Vec<LinkExpression>> {
         let capabilities =
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let links_json = serde_json::to_string(&links)?;
+        let status = match status {
+            Some(status) => {
+                if status != String::from("shared") && status != String::from("local") {
+                    return Err(juniper::FieldError::new(
+                        "Invalid status, must be either 'shared' or 'local'",
+                        graphql_value!({ "invalid_status": status }),
+                    ));
+                }
+                format!(r#""{}""#, status)
+            }
+            None => String::from("null"),
+        };
         let script = format!(
             r#"JSON.stringify(
             await core.callResolver(
                 "Mutation",
                 "perspectiveAddLinks",
-                {{ links: {}, uuid: "{}" }},
+                {{ links: {}, uuid: "{}", status: {} }},
                 {{ capabilities: {} }}
             ))"#,
-            links_json, uuid, capabilities
+            links_json, uuid, status, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;

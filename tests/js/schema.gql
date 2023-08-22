@@ -205,8 +205,8 @@ type Mutation {
   perspectiveAdd(name: String!): PerspectiveHandle!
   perspectiveAddLink(link: LinkInput!, uuid: String!, status: String): LinkExpression!
   perspectiveAddLinkExpression(link: LinkExpressionInput!, uuid: String!, status: String): LinkExpression!
-  perspectiveAddLinks(links: [LinkInput!]!, uuid: String!): [LinkExpression!]!
-  perspectiveLinkMutations(mutations: LinkMutations!, uuid: String!): LinkExpressionMutations!
+  perspectiveAddLinks(links: [LinkInput!]!, uuid: String!, status: String): [LinkExpression!]!
+  perspectiveLinkMutations(mutations: LinkMutations!, uuid: String!, status: String): LinkExpressionMutations!
   perspectivePublishSnapshot(uuid: String!): String!
   perspectiveRemove(uuid: String!): Boolean!
   perspectiveRemoveLink(link: LinkExpressionInput!, uuid: String!): Boolean!
