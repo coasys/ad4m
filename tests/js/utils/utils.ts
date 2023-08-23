@@ -58,7 +58,8 @@ export async function startExecutor(dataPath: string,
     }
 
     console.log(`Current directory: ${process.cwd()}`);
-    let servicesProcess = exec("./tst-tmp/agents/p/binary/hc run-local-services");
+    const hc = path.resolve(__dirname, '..', 'tst-tmp', 'agents', 'p','binary', 'hc');
+    let servicesProcess = exec(`${hc} run-local-services`);
 
     let bootstrapUrl = null;
     let proxyUrl = null;
