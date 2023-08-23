@@ -153,10 +153,10 @@ impl HolochainService {
                             let result = service.get_app_info(app_id).await;
                             let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
                         }
-                        HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
-                            let result = service.get_network_metrics().await;
+                        HolochainServiceRequest::LogNetworkMetrics(response_tx) => {
+                            let result = service.log_network_metrics().await;
                             let _ = response_tx
-                                .send(HolochainServiceResponse::GetNetworkMetrics(result));
+                                .send(HolochainServiceResponse::LogNetworkMetrics(result));
                         }
                         HolochainServiceRequest::PackDna(path, response_tx) => {
                             let result = HolochainService::pack_dna(path).await;
@@ -434,8 +434,13 @@ impl HolochainService {
         Ok(self.conductor.get_app_info(&app_id).await?)
     }
 
-    pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
-        Ok(self.conductor.dump_network_metrics(None).await?)
+    pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
+        let metrics = self.conductor.dump_network_metrics(None).await?;
+        info!("Network metrics: {}", serde_json::to_string_pretty(&serde_json::Value::try_from(metrics)?)?);
+
+        let stats = self.conductor.dump_network_stats().await?;
+        info!("Network stats: {}", serde_json::to_string_pretty(&serde_json::Value::try_from(stats)?)?);
+        Ok(())
     }
 
     pub async fn pack_dna(path: String) -> Result<String, AnyError> {

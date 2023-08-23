@@ -8,7 +8,6 @@ use holochain::{
         Signature, ZomeCallResponse,
     },
 };
-use tracing::info;
 
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 
@@ -23,8 +22,7 @@ async fn start_holochain_conductor(config: LocalConductorConfig) -> Result<(), A
 #[op]
 async fn log_dht_status() -> Result<(), AnyError> {
     let interface = get_holochain_service().await;
-    let metrics = interface.get_network_metrics().await?;
-    info!("DHT metrics: {:?}", serde_json::Value::try_from(metrics)?);
+    interface.log_network_metrics().await?;
     Ok(())
 }
 

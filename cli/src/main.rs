@@ -259,7 +259,7 @@ async fn main() -> Result<()> {
     };
 
     if let Domain::RunLocalHcServices {} = args.domain {
-        rust_executor::run_local_hc_services().await;
+        rust_executor::run_local_hc_services().await?;
         return Ok(());
     }
 

@@ -37,7 +37,7 @@ pub enum HolochainServiceRequest {
     Shutdown(oneshot::Sender<HolochainServiceResponse>),
     GetAgentKey(oneshot::Sender<HolochainServiceResponse>),
     GetAppInfo(String, oneshot::Sender<HolochainServiceResponse>),
-    GetNetworkMetrics(oneshot::Sender<HolochainServiceResponse>),
+    LogNetworkMetrics(oneshot::Sender<HolochainServiceResponse>),
     PackDna(String, oneshot::Sender<HolochainServiceResponse>),
     UnPackDna(String, oneshot::Sender<HolochainServiceResponse>),
 }
@@ -54,7 +54,7 @@ pub enum HolochainServiceResponse {
     GetAgentKey(Result<HoloHash<Agent>, AnyError>),
     GetAppInfo(Result<Option<AppInfo>, AnyError>),
     InitComplete(Result<(), AnyError>),
-    GetNetworkMetrics(Result<String, AnyError>),
+    LogNetworkMetrics(Result<(), AnyError>),
     PackDna(Result<String, AnyError>),
     UnPackDna(Result<String, AnyError>),
 }
@@ -179,13 +179,13 @@ impl HolochainServiceInterface {
         }
     }
 
-    pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
+    pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender
-            .send(HolochainServiceRequest::GetNetworkMetrics(response_tx))
+            .send(HolochainServiceRequest::LogNetworkMetrics(response_tx))
             .await?;
         match response_rx.await.unwrap() {
-            HolochainServiceResponse::GetNetworkMetrics(result) => result,
+            HolochainServiceResponse::LogNetworkMetrics(result) => result,
             _ => unreachable!(),
         }
     }
