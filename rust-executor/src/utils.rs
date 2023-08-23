@@ -1,5 +1,4 @@
 use std::env::var_os;
-use std::error::Error;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn ad4m_data_directory() -> PathBuf {
