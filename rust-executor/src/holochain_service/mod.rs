@@ -16,6 +16,7 @@ use holochain::prelude::{
     Signature, Timestamp, TransportConfig, ZomeCallResponse, ZomeCallUnsigned,
 };
 use holochain::test_utils::itertools::Either;
+use holochain_types::dna::ValidatedDnaManifest;
 use tracing::info;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -437,17 +438,19 @@ impl HolochainService {
         Ok(self.conductor.dump_network_metrics(None).await?)
     }
 
-    pub async fn pack_dna(path: String) -> Result<(), AnyError> {
-        let path = PathBuf::try_from(path)?;
-        let command = holochain_cli::CliSubcommand::Dna(holochain_cli_bundle::HcDnaBundle {subcommand: holochain_cli_bundle::HcDnaBundleSubcommand::Pack { path: path, output: None, recursive: true }});
-        command.run().await?;
-        Ok(())
+    pub async fn pack_dna(path: String) -> Result<String, AnyError> {
+        let path = PathBuf::from(path);
+        let name = holochain_cli_bundle::get_dna_name(&path).await?;
+        info!("Got dna name: {:?}", name);
+        let pack = holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name, false).await?;
+        info!("Packed dna at path: {:#?}", pack.0);
+        Ok(pack.0.to_str().unwrap().to_string())
     }
 
-    pub async fn unpack_dna(path: String) -> Result<(), AnyError> {
-        let path = PathBuf::try_from(path)?;
-        let command = holochain_cli::CliSubcommand::Dna(holochain_cli_bundle::HcDnaBundle {subcommand: holochain_cli_bundle::HcDnaBundleSubcommand::Unpack { path: path, output: None, raw: false, force: true }});
-        command.run().await?;
-        Ok(())
+    pub async fn unpack_dna(path: String) -> Result<String, AnyError> {
+        let path = PathBuf::from(path);
+        let pack = holochain_cli_bundle::unpack::<ValidatedDnaManifest>("dna", &path, None, true).await?;
+        info!("UnPacked dna at path: {:#?}", pack);
+        Ok(pack.to_str().unwrap().to_string())
     }
 }

@@ -55,8 +55,8 @@ pub enum HolochainServiceResponse {
     GetAppInfo(Result<Option<AppInfo>, AnyError>),
     InitComplete(Result<(), AnyError>),
     GetNetworkMetrics(Result<String, AnyError>),
-    PackDna(Result<(), AnyError>),
-    UnPackDna(Result<(), AnyError>),
+    PackDna(Result<String, AnyError>),
+    UnPackDna(Result<String, AnyError>),
 }
 
 impl HolochainServiceInterface {
@@ -190,7 +190,7 @@ impl HolochainServiceInterface {
         }
     }
 
-    pub async fn pack_dna(&self, path: String) -> Result<(), AnyError> {
+    pub async fn pack_dna(&self, path: String) -> Result<String, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender
             .send(HolochainServiceRequest::PackDna(path, response_tx))
@@ -201,7 +201,7 @@ impl HolochainServiceInterface {
         }
     }
 
-    pub async fn unpack_dna(&self, path: String) -> Result<(), AnyError> {
+    pub async fn unpack_dna(&self, path: String) -> Result<String, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender
             .send(HolochainServiceRequest::UnPackDna(path, response_tx))

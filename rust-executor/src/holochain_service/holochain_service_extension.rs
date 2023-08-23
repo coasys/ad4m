@@ -93,13 +93,13 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyError> {
 }
 
 #[op]
-async fn pack_dna(path: String) -> Result<(), AnyError> {
+async fn pack_dna(path: String) -> Result<String, AnyError> {
     let interface = get_holochain_service().await;
     interface.pack_dna(path).await
 }
 
 #[op]
-async fn unpack_dna(path: String) -> Result<(), AnyError> {
+async fn unpack_dna(path: String) -> Result<String, AnyError> {
     let interface = get_holochain_service().await;
     interface.unpack_dna(path).await
 }

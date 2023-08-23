@@ -2,7 +2,6 @@ import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallApp
 import path from 'path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
-import { unpackDna, packDna } from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import { AsyncQueue } from './Queue'
 import { decode, encode } from "@msgpack/msgpack"
@@ -131,8 +130,8 @@ export default class HolochainService {
         await HOLOCHAIN_SERVICE.shutdown();
     }
 
-    unpackDna(dnaPath: string): string {
-        let result = unpackDna(`${this.#resourcePath}/hc`, dnaPath);
+    async unpackDna(dnaPath: string): Promise<String> {
+        let result = await HOLOCHAIN_SERVICE.unPackDna(dnaPath);
         let splitResult = result.split("Unpacked to directory ");
         if (splitResult.length == 2) {
             return splitResult[1]
@@ -141,8 +140,8 @@ export default class HolochainService {
         }
     }
 
-    packDna(workdirPath: string): string {
-        let result = packDna(`${this.#resourcePath}/hc`, workdirPath);
+    async packDna(workdirPath: string): Promise<String> {
+        let result = await HOLOCHAIN_SERVICE.packDna(workdirPath);
         let splitResult = result.split("Wrote bundle ");
         if (splitResult.length == 2) {
             return splitResult[1]
