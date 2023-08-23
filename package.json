@@ -25,10 +25,6 @@
     "test:macos": "turbo run test:macos --concurrency=1",
     "test:linux": "turbo run test:linux --concurrency=1",
     "test:windows": "turbo run test:windows --concurrency=1",
-    "fetch-binaries": "run-script-os",
-    "fetch-binaries:macos": "./download-binaries-macos.sh",
-    "fetch-binaries:windows": "powershell.exe -ExecutionPolicy Bypass -File download-binaries-windows.ps1",
-    "fetch-binaries:linux": "./download-binaries-linux.sh",
     "package-ad4m": "turbo run package-ad4m",
     "build-languages": "turbo run build-languages",
     "docs": "jsdoc -c jsdoc.json",
@@ -46,8 +42,7 @@
     "build-all-windows": "turbo run build-all-windows",
     "patchpackage": "patch-package",
     "set-version": "node setVersion.js",
-    "patch-package": "^6.5.0",
-    "postinstall": "yarn run fetch-binaries"
+    "patch-package": "^6.5.0"
   },
   "devDependencies": {
     "@changesets/cli": "^2.25.2",

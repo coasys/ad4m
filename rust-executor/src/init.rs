@@ -56,26 +56,6 @@ pub fn init(
     //Write the mainnet seed to the data directory
     write_seed_config(&app_data_path, network_bootstrap_seed)?;
 
-    //Create the path for binaries if it doesn't already exist
-    let binary_path = Path::new(&app_data_path).join("binary");
-    if !Path::new(&binary_path).exists() {
-        info!("Creating binary path");
-        fs::create_dir_all(&binary_path)?;
-    }
-
-    let platform = os_info::get().os_type();
-    let hc = match platform {
-        os_info::Type::Windows => "hc.exe",
-        _ => "hc",
-    };
-
-    let hc_data = &HC_BIN;
-    let hc_target = binary_path.join(hc);
-    info!("write hc target");
-    fs::write::<&PathBuf, &[u8]>(&hc_target, hc_data.as_ref())?;
-
-    set_permissions(hc_target)?;
-
     Ok(())
 }
 
