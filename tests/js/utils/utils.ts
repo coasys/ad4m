@@ -57,8 +57,7 @@ export async function startExecutor(dataPath: string,
         //console.log("No ad4m process running")
     }
 
-    console.log(`Current directory: ${process.cwd()}`);
-    let servicesProcess = exec("./tst-tmp/agents/p/binary/hc run-local-services");
+    let servicesProcess = exec(`${command} run-local-hc-services`);
 
     let bootstrapUrl = null;
     let proxyUrl = null;
