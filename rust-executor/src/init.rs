@@ -4,8 +4,8 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::utils::{ad4m_data_directory, set_permissions};
-use crate::globals::{AD4M_VERSION, HC_BIN, MAINNET_JSON, OLDEST_VERSION};
+use super::utils::ad4m_data_directory;
+use crate::globals::{AD4M_VERSION, MAINNET_JSON, OLDEST_VERSION};
 
 /// Sets up the ad4m data directory and config files ready for the executor to consume
 pub fn init(
