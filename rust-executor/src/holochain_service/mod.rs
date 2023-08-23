@@ -261,24 +261,20 @@ impl HolochainService {
 
         match app_info {
             None => {
-                info!("installing app rust");
                 self.conductor
                     .clone()
                     .install_app_bundle(install_app_payload)
                     .await
                     .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
 
-                info!("activating app rust");
-                let activate = self
+                self
                     .conductor
                     .clone()
                     .enable_app(app_id.clone())
                     .await
                     .map_err(|e| anyhow!("Could not activate app: {:?}", e))?;
-                info!("Installed app with result: {:?}", activate);
 
                 let app_info = self.conductor.get_app_info(&app_id).await?;
-
                 Ok(app_info.unwrap())
             }
             Some(app_info) => {
@@ -401,7 +397,6 @@ impl HolochainService {
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
         let keystore = self.conductor.keystore();
         let pub_keys = keystore.list_public_keys().await?;
-        info!("Public keys: {:?}", pub_keys);
         if pub_keys.len() == 0 {
             return Err(anyhow!("No public keys found"));
         }
@@ -426,7 +421,6 @@ impl HolochainService {
             return Err(anyhow!("No public keys found"));
         }
         let agent = pub_keys.first().unwrap();
-        info!("Agent key: {:?}", agent);
         Ok(agent.to_owned())
     }
 
