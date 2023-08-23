@@ -179,15 +179,20 @@ export default class HolochainService {
                 //Did should only ever be undefined when the system DNA's get init'd before agent create occurs
                 //These system DNA's do not currently need EP proof's
                 let membraneProof = {};
+                console.log("get agent key from holochain service holocahin service");
                 const agentKey = await HOLOCHAIN_SERVICE.getAgentKey();
+                console.log("done");
                 if(did) {
+                    console.log("signing did");
                     const signedDid = await HOLOCHAIN_SERVICE.signString(did).toString();
+                    console.log("done");
                     const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(agentKey.toString(), signedDid);
                     membraneProof = {"ad4mDidEntanglement": Buffer.from(JSON.stringify(didHolochainEntanglement))};
                 } else {
                     membraneProof = {};
                 }
 
+                console.log("install app");
                 const installAppResult = await HOLOCHAIN_SERVICE.installApp({
                     installed_app_id: lang, agent_key: agentKey, membrane_proofs: membraneProof, bundle: {
                         manifest: {
@@ -199,6 +204,7 @@ export default class HolochainService {
                         resources: {}
                     }
                 } as InstallAppRequest)
+                console.log("done");
 
                 appInfo = installAppResult
                 

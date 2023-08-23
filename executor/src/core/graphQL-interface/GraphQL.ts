@@ -501,6 +501,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 console.log("Wait for agent");
                 core.initControllers()
                 await core.initLanguages()
+                console.log("Core languages init'd");
 
                 if (!config.languageLanguageOnly) {
                     await core.initializeAgentsDirectMessageLanguage()

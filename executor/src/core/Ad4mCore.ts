@@ -344,10 +344,6 @@ export default class Ad4mCore {
         }
     }
 
-    async pubKeyForLanguage(lang: string): Promise<Buffer> {
-        return Buffer.from(await HOLOCHAIN_SERVICE.getAgentKey());
-    }
-
     async holochainRequestAgentInfos(): Promise<AgentInfoResponse> {
         return await this.#holochain!.requestAgentInfos()
     }
@@ -363,11 +359,14 @@ export default class Ad4mCore {
     }
 
     async initializeAgentsDirectMessageLanguage() {
+        console.log("wait for languages");
         await this.waitForLanguages()
+        console.log("finished wait");
         const agent = this.#agentService.agent!
         if(agent.directMessageLanguage) return
         console.log("Agent doesn't have direct message language set yet. Creating from template...")
 
+        console.log("Cloning direct message language from template...");
         const templateParams = {
             uid: uuidv4(),
             recipient_did: this.#agentService.agent?.did,
