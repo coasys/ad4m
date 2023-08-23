@@ -92,7 +92,17 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyError> {
     interface.get_agent_key().await
 }
 
-//TODO: implement dna packing and unpacking (not currently possible with holochain_cli_bundle unpack / pack functions since it does not exposed the functions in lib)
+#[op]
+async fn pack_dna(path: String) -> Result<(), AnyError> {
+    let interface = get_holochain_service().await;
+    interface.pack_dna(path).await
+}
+
+#[op]
+async fn unpack_dna(path: String) -> Result<(), AnyError> {
+    let interface = get_holochain_service().await;
+    interface.unpack_dna(path).await
+}
 
 //Implement signal callbacks from dna/holochain to js
 
@@ -112,6 +122,8 @@ pub fn build() -> Extension {
             sign_string::DECL,
             shutdown::DECL,
             get_agent_key::DECL,
+            pack_dna::DECL,
+            unpack_dna::DECL,
         ]),
         ..Default::default()
     }

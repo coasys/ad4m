@@ -157,6 +157,14 @@ impl HolochainService {
                             let _ = response_tx
                                 .send(HolochainServiceResponse::GetNetworkMetrics(result));
                         }
+                        HolochainServiceRequest::PackDna(path, response_tx) => {
+                            let result = HolochainService::pack_dna(path).await;
+                            let _ = response_tx.send(HolochainServiceResponse::PackDna(result));
+                        }
+                        HolochainServiceRequest::UnPackDna(path, response_tx) => {
+                            let result = HolochainService::unpack_dna(path).await;
+                            let _ = response_tx.send(HolochainServiceResponse::UnPackDna(result));
+                        }
                     }
                 }
             });
@@ -252,12 +260,14 @@ impl HolochainService {
 
         match app_info {
             None => {
+                info!("installing app rust");
                 self.conductor
                     .clone()
                     .install_app_bundle(install_app_payload)
                     .await
                     .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
 
+                info!("activating app rust");
                 let activate = self
                     .conductor
                     .clone()
@@ -390,6 +400,7 @@ impl HolochainService {
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
         let keystore = self.conductor.keystore();
         let pub_keys = keystore.list_public_keys().await?;
+        info!("Public keys: {:?}", pub_keys);
         if pub_keys.len() == 0 {
             return Err(anyhow!("No public keys found"));
         }
@@ -424,5 +435,19 @@ impl HolochainService {
 
     pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
         Ok(self.conductor.dump_network_metrics(None).await?)
+    }
+
+    pub async fn pack_dna(path: String) -> Result<(), AnyError> {
+        let path = PathBuf::try_from(path)?;
+        let command = holochain_cli::CliSubcommand::Dna(holochain_cli_bundle::HcDnaBundle {subcommand: holochain_cli_bundle::HcDnaBundleSubcommand::Pack { path: path, output: None, recursive: true }});
+        command.run().await?;
+        Ok(())
+    }
+
+    pub async fn unpack_dna(path: String) -> Result<(), AnyError> {
+        let path = PathBuf::try_from(path)?;
+        let command = holochain_cli::CliSubcommand::Dna(holochain_cli_bundle::HcDnaBundle {subcommand: holochain_cli_bundle::HcDnaBundleSubcommand::Unpack { path: path, output: None, raw: false, force: true }});
+        command.run().await?;
+        Ok(())
     }
 }
