@@ -49,7 +49,7 @@ const loadModule = async (modulePath: string) => {
     } catch (err) {
         //@ts-ignore
         if (err instanceof Deno.errors.NotFound) {
-        throw new Error(`File not found: ${modulePath}`);
+            throw new Error(`File not found: ${modulePath}`);
         }
         throw err;
     }
@@ -215,21 +215,21 @@ export default class LanguageController {
         const hash = await this.ipfsHash(bundleBytes)
         console.debug("LanguageController.loadLanguage: loading language at path", sourceFilePath, "with hash", hash);
         let languageSource;
-        //try {
-        languageSource = await loadModule(sourceFilePath);
-        // } catch (e) {
-        //     const errMsg = `Could not load language ${e}`;
-        //     console.error(errMsg);
-        //     await this.#pubSub.publish(
-        //         PubSub.EXCEPTION_OCCURRED_TOPIC,
-        //         {
-        //             title: "Failed to load installed language",
-        //             message: errMsg,
-        //             type: ExceptionType.LanguageIsNotLoaded
-        //         } as ExceptionInfo
-        //     );
-        //     throw new Error(errMsg);
-        // }
+        try {
+            languageSource = await loadModule(sourceFilePath);
+        } catch (e) {
+            const errMsg = `Could not load language ${e}`;
+            console.error(errMsg);
+            await this.#pubSub.publish(
+                PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
+                {
+                    title: "Failed to load installed language",
+                    message: errMsg,
+                    type: ExceptionType.LanguageIsNotLoaded
+                } as ExceptionInfo
+            );
+            throw new Error(errMsg);
+        }
         console.warn("LanguageController.loadLanguage: language loaded!");
         let create;
         if (!languageSource.default) {
