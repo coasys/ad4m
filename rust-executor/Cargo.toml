@@ -64,6 +64,7 @@ jsonwebtoken = "8.3.0"
 holochain = { git = "https://github.com/holochain/holochain", branch = "rust-1.71.1", features = ["test_utils", "default"] }
 holochain_cli_bundle = { path = "../../holochain/crates/hc_bundle" }
 holochain_types = { path = "../../holochain/crates/holochain_types" }
+holochain_cli_run_local_services = { path = "../../holochain/crates/hc_run_local_services" }
 
 scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m-compatible" }
 # scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", rev = "ce1c8aac4ccc0a49ce4816c0870634a703b1fc1f" }

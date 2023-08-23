@@ -454,3 +454,9 @@ impl HolochainService {
         Ok(pack.to_str().unwrap().to_string())
     }
 }
+
+pub async fn run_local_hc_services() -> Result<(), AnyError> {
+    let ops = holochain_cli_run_local_services::HcRunLocalServices::new(None, String::from("127.0.0.1"), 0, false, None, String::from("127.0.0.1"), 0, false);
+    ops.run().await;
+    Ok(())
+}
