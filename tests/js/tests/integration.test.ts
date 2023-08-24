@@ -4,7 +4,7 @@ import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, apolloClient } from "../utils/utils";
+import { startExecutor, apolloClient, runHcLocalServices } from "../utils/utils";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
@@ -85,6 +85,10 @@ describe("Integration tests", function () {
 
     let executorProcess: ChildProcess | null = null
 
+    let proxyUrl: string | null = null;
+    let bootstrapUrl: string | null = null;
+    let localServicesProcess: ChildProcess | null = null;
+
     before(async () => {    
         if(!fs.existsSync(TEST_DIR)) {
           throw Error("Please ensure that prepare-test is run before running tests!");
@@ -94,8 +98,13 @@ describe("Integration tests", function () {
         if(!fs.existsSync(appDataPath))
             fs.mkdirSync(appDataPath)
 
+        let localServices = await runHcLocalServices();
+        proxyUrl = localServices.proxyUrl;
+        bootstrapUrl = localServices.bootstrapUrl;
+        localServicesProcess = localServices.process;
+
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-          gqlPort, hcAdminPort, hcAppPort);
+          gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
 
         testContext.alice = new Ad4mClient(apolloClient(gqlPort))
         testContext.aliceCore = executorProcess
@@ -106,6 +115,13 @@ describe("Integration tests", function () {
         while (!executorProcess?.killed) {
           let status  = executorProcess?.kill();
           console.log("killed executor with", status);
+          await sleep(500);
+        }
+      }
+      if (localServicesProcess) {
+        while (!localServicesProcess?.killed) {
+          let status  = localServicesProcess?.kill();
+          console.log("killed local services with", status);
           await sleep(500);
         }
       }
@@ -132,7 +148,7 @@ describe("Integration tests", function () {
             fs.mkdirSync(bobAppDataPath)
 
           bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
-            bobGqlPort, bobHcAdminPort, bobHcAppPort);
+            bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
 
           testContext.bob = new Ad4mClient(apolloClient(bobGqlPort))
           testContext.bobCore = bobExecutorProcess

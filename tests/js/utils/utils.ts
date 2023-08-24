@@ -11,9 +11,6 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-let proxyUrl: null | string = null;
-let bootstrapUrl: null | string = null;
-
 export async function isProcessRunning(processName: string): Promise<boolean> {
     const cmd = (() => {
       switch (process.platform) {
@@ -33,8 +30,34 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
 
         resolve(stdout.toLowerCase().indexOf(processName.toLowerCase()) > -1)
       })
-    })
-  }
+    }) 
+}
+
+export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, process: ChildProcess}> {
+    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m');
+    let servicesProcess = exec(`${command} run-local-hc-services`);
+
+    let proxyUrl: string | null = null;
+    let bootstrapUrl: string | null = null;
+
+    let servicesReady = new Promise<void>((resolve, reject) => {
+        servicesProcess.stdout!.on('data', (data) => {
+            if (data.includes("HC BOOTSTRAP - ADDR")) {
+                bootstrapUrl = data.split(" ")[5];
+                bootstrapUrl = bootstrapUrl!.substring(0, bootstrapUrl!.length - 3);
+            }
+
+            if (data.includes("HC SIGNAL - ADDR")) {
+                proxyUrl = data.split(" ")[5];
+                proxyUrl = proxyUrl!.substring(0, proxyUrl!.length - 3);
+                resolve();
+            }
+        });
+    });
+
+    await servicesReady;
+    return {proxyUrl, bootstrapUrl, process: servicesProcess};
+}
 
 export async function startExecutor(dataPath: string, 
     bootstrapSeedPath: string, 
@@ -42,7 +65,9 @@ export async function startExecutor(dataPath: string,
     hcAdminPort: number,
     hcAppPort: number,
     languageLanguageOnly: boolean = false,
-    adminCredential?: string
+    adminCredential?: string,
+    proxyUrl: string = "wss://signal.holotest.net",
+    bootstrapUrl: string = "https://bootstrap.holo.host",
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m');
 
@@ -53,32 +78,6 @@ export async function startExecutor(dataPath: string,
     execSync(`${command} init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
     
     console.log("Starting executor")
-    try {
-        execSync("killall ad4m")
-    } catch (e) {
-        //console.log("No ad4m process running")
-    }
-
-    if (proxyUrl === null || bootstrapUrl === null) {
-        let servicesProcess = exec(`${command} run-local-hc-services`);
-
-        let servicesReady = new Promise<void>((resolve, reject) => {
-            servicesProcess.stdout!.on('data', (data) => {
-                if (data.includes("HC BOOTSTRAP - ADDR")) {
-                    bootstrapUrl = data.split(" ")[5];
-                    bootstrapUrl = bootstrapUrl!.substring(0, bootstrapUrl!.length - 3);
-                }
-
-                if (data.includes("HC SIGNAL - ADDR")) {
-                    proxyUrl = data.split(" ")[5];
-                    proxyUrl = proxyUrl!.substring(0, proxyUrl!.length - 3);
-                    resolve();
-                }
-            });
-        });
-
-        await servicesReady;
-    };
 
     console.log("USING LOCAL BOOTSTRAP & PROXY URL: ", bootstrapUrl, proxyUrl);
     
