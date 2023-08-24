@@ -50,7 +50,7 @@ pub struct LocalConductorConfig {
     pub use_mdns: bool,
     pub proxy_url: String,
     pub bootstrap_url: String,
-    pub admin_port: u16,
+    pub app_port: u16,
 }
 
 impl HolochainService {
@@ -236,7 +236,7 @@ impl HolochainService {
 
         let interface = conductor
             .clone()
-            .add_app_interface(Either::Left(local_config.admin_port))
+            .add_app_interface(Either::Left(local_config.app_port))
             .await;
 
         info!("Added app interface: {:?}", interface);

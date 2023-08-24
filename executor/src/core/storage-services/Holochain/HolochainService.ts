@@ -116,7 +116,7 @@ export default class HolochainService {
             useMdns: config.useMdns!,
             proxyUrl: config.hcProxyUrl,
             bootstrapUrl: config.hcBootstrapUrl,
-            adminPort: config.adminPort!
+            appPort: config.appPort!
         } as ConductorConfig);
 
         console.log("Holochain run complete");
