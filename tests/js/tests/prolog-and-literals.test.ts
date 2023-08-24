@@ -30,11 +30,10 @@ describe("Prolog + Literals", () => {
     const gqlPort = 16600
     const hcAdminPort = 16601
     const hcAppPort = 16602
-    const ipfsSwarmPort = 16603
 
     before(async () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
+            gqlPort, hcAdminPort, hcAppPort);
 
         console.log("Creating ad4m client")
         ad4m = new Ad4mClient(apolloClient(gqlPort))

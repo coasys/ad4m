@@ -121,8 +121,6 @@ enum Domain {
         #[arg(short, long, action)]
         app_data_path: Option<String>,
         #[arg(short, long, action)]
-        resource_path: Option<String>,
-        #[arg(short, long, action)]
         network_bootstrap_seed: Option<String>,
         #[arg(short, long, action)]
         language_language_only: Option<bool>,
@@ -147,15 +145,9 @@ enum Domain {
         #[arg(long, action)]
         hc_bootstrap_url: Option<String>,
         #[arg(short, long, action)]
-        ipfs_swarm_port: Option<u16>,
-        #[arg(short, long, action)]
         connect_holochain: Option<bool>,
         #[arg(long, action)]
-        admin_credential: Option<String>,
-        #[arg(long, action)]
-        swipl_path: Option<String>,
-        #[arg(long, action)]
-        swipl_home_path: Option<String>,
+        admin_credential: Option<String>
     },
     RunLocalHcServices {}
 }
@@ -213,7 +205,6 @@ async fn main() -> Result<()> {
 
     if let Domain::Run {
         app_data_path,
-        resource_path,
         network_bootstrap_seed,
         language_language_only,
         run_dapp_server,
@@ -226,16 +217,12 @@ async fn main() -> Result<()> {
         hc_use_proxy,
         hc_proxy_url,
         hc_bootstrap_url,
-        ipfs_swarm_port,
         connect_holochain,
-        admin_credential,
-        swipl_path,
-        swipl_home_path,
+        admin_credential
     } = args.domain
     {
         rust_executor::run(Ad4mConfig {
             app_data_path,
-            resource_path,
             network_bootstrap_seed,
             language_language_only,
             run_dapp_server,
@@ -248,11 +235,8 @@ async fn main() -> Result<()> {
             hc_use_proxy,
             hc_proxy_url,
             hc_bootstrap_url,
-            ipfs_swarm_port,
             connect_holochain,
-            admin_credential,
-            swipl_path,
-            swipl_home_path,
+            admin_credential
         })
         .await;
         return Ok(());
@@ -289,7 +273,6 @@ async fn main() -> Result<()> {
         } => unreachable!(),
         Domain::Run {
             app_data_path: _,
-            resource_path: _,
             network_bootstrap_seed: _,
             language_language_only: _,
             run_dapp_server: _,
@@ -302,11 +285,8 @@ async fn main() -> Result<()> {
             hc_use_proxy: _,
             hc_proxy_url: _,
             hc_bootstrap_url: _,
-            ipfs_swarm_port: _,
             connect_holochain: _,
-            admin_credential: _,
-            swipl_path: _,
-            swipl_home_path: _,
+            admin_credential: _
         } => unreachable!(),
         Domain::RunLocalHcServices {} => unreachable!(),
     }

@@ -93,7 +93,6 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             let run_fut = async move {
                 rust_executor::run(rust_executor::Ad4mConfig {
                     app_data_path: Some(data_path.to_str().unwrap().to_string()),
-                    resource_path: None,
                     network_bootstrap_seed: Some(
                         temp_publish_bootstrap_path.to_str().unwrap().to_string(),
                     ),
@@ -106,11 +105,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_use_local_proxy: None,
                     hc_use_mdns: None,
                     hc_use_proxy: None,
-                    ipfs_swarm_port: None,
                     connect_holochain: None,
                     admin_credential: None,
-                    swipl_path: None,
-                    swipl_home_path: None,
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
                 })

@@ -19,14 +19,13 @@ describe("Integration", () => {
   const gqlPort = 15600
   const hcAdminPort = 15601
   const hcAppPort = 15602
-  const ipfsSwarmPort = 15603
 
   let ad4m: Ad4mClient | null = null
   let executorProcess: ChildProcess | null = null
 
   before(async () => {
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-        gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
+        gqlPort, hcAdminPort, hcAppPort);
 
     console.log("Creating ad4m client")
     ad4m = new Ad4mClient(apolloClient(gqlPort))

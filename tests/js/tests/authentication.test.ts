@@ -25,7 +25,6 @@ describe("Authentication integration tests", () => {
         const gqlPort = 15100
         const hcAdminPort = 15101
         const hcAppPort = 15102
-        const ipfsSwarmPort = 15103
 
         let executorProcess: ChildProcess | null = null
         let ad4mClient: Ad4mClient | null = null
@@ -36,7 +35,7 @@ describe("Authentication integration tests", () => {
             }
 
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-                gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
+                gqlPort, hcAdminPort, hcAppPort);
 
             ad4mClient = new Ad4mClient(apolloClient(gqlPort), false)
             await ad4mClient.agent.generate("passphrase")
@@ -88,7 +87,6 @@ describe("Authentication integration tests", () => {
         const gqlPort = 15200
         const hcAdminPort = 15202
         const hcAppPort = 15203
-        const ipfsSwarmPort = 15204
 
         let executorProcess: ChildProcess | null = null
         let adminAd4mClient: Ad4mClient | null = null
@@ -100,7 +98,7 @@ describe("Authentication integration tests", () => {
             }
 
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-                gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort, false, "123");
+                gqlPort, hcAdminPort, hcAppPort, false, "123");
        
             adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"), false)
             await adminAd4mClient.agent.generate("passphrase")

@@ -21,7 +21,6 @@ const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'pe
 const gqlPort = 15700;
 const hcAdminPort = 15701;
 const hcAppPort = 15702;
-const ipfsSwarmPort = 15703;
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -67,7 +66,7 @@ function injectLangAliasHashes() {
 async function publish() {
     createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort, true);
+    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, true);
     
     const ad4mClient = new Ad4mClient(apolloClient(gqlPort));
     await ad4mClient.agent.generate("passphrase");

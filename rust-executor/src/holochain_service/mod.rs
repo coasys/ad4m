@@ -227,6 +227,7 @@ impl HolochainService {
             .await;
 
         if conductor.is_err() {
+            info!("Could not start holochain conductor: {:#?}", conductor.err());
             panic!("Could not start holochain conductor");
         }
 

@@ -32,68 +32,91 @@ export default function socialDNATests(testContext: TestContext) {
                 const perspective = await ad4mClient.perspective.add("sdna-test");
                 expect(perspective.name).to.be.equal("sdna-test");
             
+                console.log("adding link");
                 await perspective.add(new Link({
                     source: 'ad4m://self', 
                     predicate: 'ad4m://has_zome',
                     target: Literal.from(sdna.join('\n')).toUrl(),
                 }))
+                console.log("added link");
 
                 let sDNAFacts = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "ad4m://self", predicate: "ad4m://has_zome"}));
                 expect(sDNAFacts.length).to.be.equal(1);
+                console.log("got sDNAFacts");
                 let flows = await perspective.sdnaFlows()
                 expect(flows[0]).to.be.equal('TODO')
+                console.log("got flows");
 
+                console.log("adding link");
                 await perspective.add(new Link({source: 'ad4m://self', target: 'test-lang://1234'}))
+                console.log("added link");
                 let availableFlows = await perspective.availableFlows('test-lang://1234')
                 expect(availableFlows.length).to.be.equal(1)
                 expect(availableFlows[0]).to.be.equal('TODO')
+                console.log("got availableFlows");
                 let startAction = await perspective.infer(`start_action(Action, F), register_sdna_flow("TODO", F)`)
+                console.log("got startAction");
                 await perspective.startFlow('TODO', 'test-lang://1234')
+                console.log("started flow");
 
+                console.log("getting flowLinks")
                 let flowLinks = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "test-lang://1234", predicate: "todo://state"}))
                 expect(flowLinks.length).to.be.equal(1)
                 expect(flowLinks[0].data.target).to.be.equal("todo://ready")
+                console.log("got flowLinks")
 
                 let todoState = await perspective.flowState('TODO', 'test-lang://1234')
                 expect(todoState).to.be.equal(0)
+                console.log("got todoState")
 
                 let expressionsInTodo = await perspective.expressionsInFlowState('TODO', 0)
                 expect(expressionsInTodo.length).to.be.equal(1)
                 expect(expressionsInTodo[0]).to.be.equal('test-lang://1234')
+                console.log("got expressionsInTodo")
 
 
                 // continue flow
                 let flowActions = await perspective.flowActions('TODO', 'test-lang://1234')
                 expect(flowActions.length).to.be.equal(1)
                 expect(flowActions[0]).to.be.equal("Start")
+                console.log("got flowActions")
 
 
                 await perspective.runFlowAction('TODO', 'test-lang://1234', "Start")
+                console.log("ran flow action")
                 todoState = await perspective.flowState('TODO', 'test-lang://1234')
                 expect(todoState).to.be.equal(0.5)
+                console.log("got todoState")
 
                 flowLinks = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "test-lang://1234", predicate: "todo://state"}))
+                console.log("got flowLinks")
                 expect(flowLinks.length).to.be.equal(1)
                 expect(flowLinks[0].data.target).to.be.equal("todo://doing")
 
                 expressionsInTodo = await perspective.expressionsInFlowState('TODO', 0.5)
+                console.log("got expressionsInTodo")
                 expect(expressionsInTodo.length).to.be.equal(1)
                 expect(expressionsInTodo[0]).to.be.equal('test-lang://1234')
 
                 // continue flow
                 flowActions = await perspective.flowActions('TODO', 'test-lang://1234')
+                console.log("got flowActions")
                 expect(flowActions.length).to.be.equal(1)
                 expect(flowActions[0]).to.be.equal("Finish")
 
 
                 await perspective.runFlowAction('TODO', 'test-lang://1234', "Finish")
+                console.log("ran flow action")
                 todoState = await perspective.flowState('TODO', 'test-lang://1234')
                 expect(todoState).to.be.equal(1)
+                console.log("got todoState")
 
                 flowLinks = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "test-lang://1234", predicate: "todo://state"}))
                 expect(flowLinks.length).to.be.equal(1)
                 expect(flowLinks[0].data.target).to.be.equal("todo://done")
+                console.log("got flowLinks")
                 expressionsInTodo = await perspective.expressionsInFlowState('TODO', 1)
+                console.log("got expressionsInTodo")
                 expect(expressionsInTodo.length).to.be.equal(1)
                 expect(expressionsInTodo[0]).to.be.equal('test-lang://1234')
 
