@@ -151,7 +151,7 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
       })
     }
 
-    console.log("AD4M executor starting with version: ");
+    console.log("AD4M executor starting with config:");
     console.dir(config);
 
     const core = new create({
