@@ -157,6 +157,7 @@ enum Domain {
         #[arg(long, action)]
         swipl_home_path: Option<String>,
     },
+    RunLocalHcServices {}
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -257,6 +258,11 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
+    if let Domain::RunLocalHcServices {} = args.domain {
+        rust_executor::run_local_hc_services().await?;
+        return Ok(());
+    }
+
     let ad4m_client = get_ad4m_client(&args).await?;
 
     match args.domain {
@@ -302,6 +308,7 @@ async fn main() -> Result<()> {
             swipl_path: _,
             swipl_home_path: _,
         } => unreachable!(),
+        Domain::RunLocalHcServices {} => unreachable!(),
     }
 
     Ok(())

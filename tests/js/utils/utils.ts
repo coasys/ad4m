@@ -54,10 +54,9 @@ export async function startExecutor(dataPath: string,
     try {
         execSync("killall ad4m")
     } catch (e) {
-        console.log("No ad4m process running")
+        //console.log("No ad4m process running")
     }
 
-    console.log(`Current directory: ${process.cwd()}`);
     const hc = path.resolve(__dirname, '..', 'tst-tmp', 'agents', 'p','binary', 'hc');
     let servicesProcess = exec(`${hc} run-local-services`);
 

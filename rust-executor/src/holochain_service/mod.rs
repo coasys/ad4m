@@ -16,6 +16,7 @@ use holochain::prelude::{
     Signature, Timestamp, TransportConfig, ZomeCallResponse, ZomeCallUnsigned,
 };
 use holochain::test_utils::itertools::Either;
+use holochain_types::dna::ValidatedDnaManifest;
 use tracing::info;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -152,10 +153,18 @@ impl HolochainService {
                             let result = service.get_app_info(app_id).await;
                             let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
                         }
-                        HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
-                            let result = service.get_network_metrics().await;
+                        HolochainServiceRequest::LogNetworkMetrics(response_tx) => {
+                            let result = service.log_network_metrics().await;
                             let _ = response_tx
-                                .send(HolochainServiceResponse::GetNetworkMetrics(result));
+                                .send(HolochainServiceResponse::LogNetworkMetrics(result));
+                        }
+                        HolochainServiceRequest::PackDna(path, response_tx) => {
+                            let result = HolochainService::pack_dna(path).await;
+                            let _ = response_tx.send(HolochainServiceResponse::PackDna(result));
+                        }
+                        HolochainServiceRequest::UnPackDna(path, response_tx) => {
+                            let result = HolochainService::unpack_dna(path).await;
+                            let _ = response_tx.send(HolochainServiceResponse::UnPackDna(result));
                         }
                     }
                 }
@@ -258,16 +267,14 @@ impl HolochainService {
                     .await
                     .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
 
-                let activate = self
+                self
                     .conductor
                     .clone()
                     .enable_app(app_id.clone())
                     .await
                     .map_err(|e| anyhow!("Could not activate app: {:?}", e))?;
-                info!("Installed app with result: {:?}", activate);
 
                 let app_info = self.conductor.get_app_info(&app_id).await?;
-
                 Ok(app_info.unwrap())
             }
             Some(app_info) => {
@@ -414,7 +421,6 @@ impl HolochainService {
             return Err(anyhow!("No public keys found"));
         }
         let agent = pub_keys.first().unwrap();
-        info!("Agent key: {:?}", agent);
         Ok(agent.to_owned())
     }
 
@@ -422,7 +428,34 @@ impl HolochainService {
         Ok(self.conductor.get_app_info(&app_id).await?)
     }
 
-    pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
-        Ok(self.conductor.dump_network_metrics(None).await?)
+    pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
+        let metrics = self.conductor.dump_network_metrics(None).await?;
+        info!("Network metrics: {}", serde_json::to_string_pretty(&serde_json::Value::try_from(metrics)?)?);
+
+        let stats = self.conductor.dump_network_stats().await?;
+        info!("Network stats: {}", serde_json::to_string_pretty(&serde_json::Value::try_from(stats)?)?);
+        Ok(())
     }
+
+    pub async fn pack_dna(path: String) -> Result<String, AnyError> {
+        let path = PathBuf::from(path);
+        let name = holochain_cli_bundle::get_dna_name(&path).await?;
+        info!("Got dna name: {:?}", name);
+        let pack = holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name, false).await?;
+        info!("Packed dna at path: {:#?}", pack.0);
+        Ok(pack.0.to_str().unwrap().to_string())
+    }
+
+    pub async fn unpack_dna(path: String) -> Result<String, AnyError> {
+        let path = PathBuf::from(path);
+        let pack = holochain_cli_bundle::unpack::<ValidatedDnaManifest>("dna", &path, None, true).await?;
+        info!("UnPacked dna at path: {:#?}", pack);
+        Ok(pack.to_str().unwrap().to_string())
+    }
+}
+
+pub async fn run_local_hc_services() -> Result<(), AnyError> {
+    let ops = holochain_cli_run_local_services::HcRunLocalServices::new(None, String::from("127.0.0.1"), 0, false, None, String::from("127.0.0.1"), 0, false);
+    ops.run().await;
+    Ok(())
 }

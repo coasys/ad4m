@@ -18,10 +18,10 @@ mod pubsub;
 use std::env;
 use tracing::{info, error};
 
-//use graphql::start_server;
 use js_core::JsCore;
 
 pub use config::Ad4mConfig;
+pub use holochain_service::run_local_hc_services;
 
 use crate::prolog_service::init_prolog_service;
 

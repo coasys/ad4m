@@ -8,7 +8,6 @@ use holochain::{
         Signature, ZomeCallResponse,
     },
 };
-use tracing::info;
 
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 
@@ -23,8 +22,7 @@ async fn start_holochain_conductor(config: LocalConductorConfig) -> Result<(), A
 #[op]
 async fn log_dht_status() -> Result<(), AnyError> {
     let interface = get_holochain_service().await;
-    let metrics = interface.get_network_metrics().await?;
-    info!("DHT metrics: {:?}", serde_json::Value::try_from(metrics)?);
+    interface.log_network_metrics().await?;
     Ok(())
 }
 
@@ -92,7 +90,17 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyError> {
     interface.get_agent_key().await
 }
 
-//TODO: implement dna packing and unpacking (not currently possible with holochain_cli_bundle unpack / pack functions since it does not exposed the functions in lib)
+#[op]
+async fn pack_dna(path: String) -> Result<String, AnyError> {
+    let interface = get_holochain_service().await;
+    interface.pack_dna(path).await
+}
+
+#[op]
+async fn unpack_dna(path: String) -> Result<String, AnyError> {
+    let interface = get_holochain_service().await;
+    interface.unpack_dna(path).await
+}
 
 //Implement signal callbacks from dna/holochain to js
 
@@ -112,6 +120,8 @@ pub fn build() -> Extension {
             sign_string::DECL,
             shutdown::DECL,
             get_agent_key::DECL,
+            pack_dna::DECL,
+            unpack_dna::DECL,
         ]),
         ..Default::default()
     }

@@ -2,7 +2,6 @@ import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallApp
 import path from 'path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
-import { unpackDna, packDna } from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import { AsyncQueue } from './Queue'
 import { decode, encode } from "@msgpack/msgpack"
@@ -131,8 +130,8 @@ export default class HolochainService {
         await HOLOCHAIN_SERVICE.shutdown();
     }
 
-    unpackDna(dnaPath: string): string {
-        let result = unpackDna(`${this.#resourcePath}/hc`, dnaPath);
+    async unpackDna(dnaPath: string): Promise<String> {
+        let result = await HOLOCHAIN_SERVICE.unPackDna(dnaPath);
         let splitResult = result.split("Unpacked to directory ");
         if (splitResult.length == 2) {
             return splitResult[1]
@@ -141,8 +140,8 @@ export default class HolochainService {
         }
     }
 
-    packDna(workdirPath: string): string {
-        let result = packDna(`${this.#resourcePath}/hc`, workdirPath);
+    async packDna(workdirPath: string): Promise<String> {
+        let result = await HOLOCHAIN_SERVICE.packDna(workdirPath);
         let splitResult = result.split("Wrote bundle ");
         if (splitResult.length == 2) {
             return splitResult[1]
@@ -179,20 +178,15 @@ export default class HolochainService {
                 //Did should only ever be undefined when the system DNA's get init'd before agent create occurs
                 //These system DNA's do not currently need EP proof's
                 let membraneProof = {};
-                console.log("get agent key from holochain service holocahin service");
                 const agentKey = await HOLOCHAIN_SERVICE.getAgentKey();
-                console.log("done");
                 if(did) {
-                    console.log("signing did");
                     const signedDid = await HOLOCHAIN_SERVICE.signString(did).toString();
-                    console.log("done");
                     const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(agentKey.toString(), signedDid);
                     membraneProof = {"ad4mDidEntanglement": Buffer.from(JSON.stringify(didHolochainEntanglement))};
                 } else {
                     membraneProof = {};
                 }
 
-                console.log("install app");
                 const installAppResult = await HOLOCHAIN_SERVICE.installApp({
                     installed_app_id: lang, agent_key: agentKey, membrane_proofs: membraneProof, bundle: {
                         manifest: {
@@ -204,11 +198,12 @@ export default class HolochainService {
                         resources: {}
                     }
                 } as InstallAppRequest)
-                console.log("done");
 
                 appInfo = installAppResult
                 
-                console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
+                console.log("HolochainService: Installed DNA's:", roles)
+                console.log(" with result:");
+                console.dir(installAppResult);
             } catch(e) {
                 console.error("HolochainService: InstallApp, got error: ", e);
                 return [];
