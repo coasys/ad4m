@@ -453,13 +453,15 @@ export default class Perspective {
 
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
+
+        linkExpression.status = status;
+
         await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
             perspective: perspectivePlain,
             link: linkExpression
         })
         this.#prologNeedsRebuild = true
 
-        linkExpression.status = status;
 
         return linkExpression
     }
