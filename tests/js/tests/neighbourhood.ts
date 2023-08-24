@@ -86,6 +86,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 let tries = 1
 
                 while(bobLinks.length < 1 && tries < 20) {
+                    console.log("Bob retrying getting links...");
                     await sleep(1000)
                     bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
@@ -116,6 +117,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 let tries = 1
 
                 while(bobLinks.length < 1 && tries < 20) {
+                    console.log("Bob retrying getting NOT received links...");
                     await sleep(1000)
                     bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
