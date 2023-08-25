@@ -51,6 +51,9 @@ jobs:
       with:
         deno-version: v1.32.4
 
+    - name: Install HC
+      run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+
     - name: Install dependencies
       run: yarn install
 

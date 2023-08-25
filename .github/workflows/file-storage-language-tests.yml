@@ -45,8 +45,9 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/file-storage/hc-dna/tests && yarn install && yarn run test
 
   integration:
@@ -83,6 +84,7 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/file-storage && yarn run integration-test

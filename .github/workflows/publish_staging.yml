@@ -23,6 +23,9 @@ jobs:
         with:
           deno-version: v1.32.4
 
+      - name: Install HC
+        run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+
       - name: Create Tags From
         id: create_tag
         uses: jaywcjlove/create-tag-action@v1.3.14

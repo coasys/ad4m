@@ -74,8 +74,9 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-pull
 
   render:
@@ -112,8 +113,9 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-render
 
   revisions:
@@ -150,8 +152,9 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-revisions
 
   signals:
@@ -188,8 +191,9 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-signals
 
 
@@ -227,8 +231,9 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-stress
 
   telepresence:
@@ -265,8 +270,9 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-telepresence
 
   integration:
@@ -303,6 +309,7 @@ jobs:
         cache: 'npm'
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync && yarn run integration-test
