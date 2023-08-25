@@ -44,12 +44,12 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
         servicesProcess.stdout!.on('data', (data) => {
             if (data.includes("HC BOOTSTRAP - ADDR")) {
                 bootstrapUrl = data.split(" ")[5];
-                bootstrapUrl = bootstrapUrl!.substring(0, bootstrapUrl!.length - 3);
+                bootstrapUrl = bootstrapUrl!.substring(0, bootstrapUrl!.length - 2);
             }
 
             if (data.includes("HC SIGNAL - ADDR")) {
                 proxyUrl = data.split(" ")[5];
-                proxyUrl = proxyUrl!.substring(0, proxyUrl!.length - 3);
+                proxyUrl = proxyUrl!.substring(0, proxyUrl!.length - 2);
                 resolve();
             }
         });
