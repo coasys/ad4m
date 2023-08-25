@@ -198,7 +198,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     const aliceP1 = await alice.perspective.add("telepresence")
                     const linkLang = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood for Telepresence"}));
                     const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
-                    await sleep(1000)
+                    await sleep(5000)
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                     const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
                     await testContext.makeAllNodesKnown()
