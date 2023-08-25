@@ -24,6 +24,12 @@ jobs:
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: 1.71.1
+
+    - name: Install GO
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.18'
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
