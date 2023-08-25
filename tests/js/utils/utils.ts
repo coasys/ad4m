@@ -43,13 +43,15 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
     let servicesReady = new Promise<void>((resolve, reject) => {
         servicesProcess.stdout!.on('data', (data) => {
             if (data.includes("HC BOOTSTRAP - ADDR")) {
-                bootstrapUrl = data.split(" ")[5];
-                bootstrapUrl = bootstrapUrl!.substring(0, bootstrapUrl!.length - 2);
+                const regex = /(http:\/\/|ws:\/\/)[^\s]+/g;
+                const matches = data.match(regex);
+                bootstrapUrl = matches![0];
             }
 
             if (data.includes("HC SIGNAL - ADDR")) {
-                proxyUrl = data.split(" ")[5];
-                proxyUrl = proxyUrl!.substring(0, proxyUrl!.length - 2);
+                const regex = /(http:\/\/|ws:\/\/)[^\s]+/g;
+                const matches = data.match(regex);
+                proxyUrl = matches![0];
                 resolve();
             }
         });
