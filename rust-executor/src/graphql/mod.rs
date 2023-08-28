@@ -70,7 +70,10 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(),
                         if let Some(headers) = val.get("headers") {
                             let headers = headers.to_object_value().unwrap();
                             if let Some(auth) = headers.get("authorization") {
-                                auth_header = auth.as_string_value().unwrap().to_string();
+                                auth_header = match auth.as_string_value() {
+                                    Some(s) => s.to_string(),
+                                    None => String::from(""),
+                                };
                             }
                         };
 
