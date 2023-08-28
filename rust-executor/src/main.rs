@@ -14,6 +14,8 @@ use tracing::{error, info};
 use rust_executor::Ad4mConfig;
 use std::env;
 
+use prolog_service::init_prolog_service;
+
 use js_core::JsCore;
 
 #[tokio::main(flavor = "multi_thread")]
