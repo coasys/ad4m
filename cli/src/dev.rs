@@ -11,7 +11,6 @@ pub enum DevFunctions {
     GenerateBootstrap {
         agent_path: String,
         passphrase: String,
-        ad4m_host_path: String,
         seed_proto: String,
     },
 }
@@ -21,12 +20,10 @@ pub async fn run(command: DevFunctions) -> Result<()> {
         DevFunctions::GenerateBootstrap {
             agent_path,
             passphrase,
-            ad4m_host_path,
             seed_proto,
         } => {
             green_ln!(
-                "Attempting to generate a new bootstrap seed using ad4m-host path: {:?} and agent path: {:?}\n",
-                ad4m_host_path,
+                "Attempting to generate a new bootstrap seed using agent path: {:?}\n",
                 agent_path
             );
 
@@ -69,6 +66,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 neighbourhood_language: String::from(""),
             };
             let temp_publish_bootstrap_path = data_path.join("publishing_bootstrap.json");
+            green_ln!("Writting temp publish boostrap at path: {:?}\n", temp_publish_bootstrap_path.to_str());
             fs::write(
                 &temp_publish_bootstrap_path,
                 serde_json::to_string(&temp_bootstrap_seed)?,
@@ -97,7 +95,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                         temp_publish_bootstrap_path.to_str().unwrap().to_string(),
                     ),
                     language_language_only: Some(true),
-                    run_dapp_server: None,
+                    run_dapp_server: Some(false),
                     gql_port: None,
                     hc_admin_port: None,
                     hc_app_port: None,
