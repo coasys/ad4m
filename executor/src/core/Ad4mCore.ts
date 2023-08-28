@@ -13,7 +13,6 @@ import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import EntanglementProofController from './EntanglementProof'
-import runDAppServer from "./DAppServer"
 import fs from 'fs'
 import { AgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
