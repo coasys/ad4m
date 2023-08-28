@@ -42,7 +42,7 @@ impl PubSub {
             for tx in subscribers {
                 let send_res = tx.send(message.to_owned());
                 if send_res.is_err() {
-                    error!("Failed to send message to subscriber: {:?}", send_res);
+                    error!("Failed to send message to subscriber: {:?} on topic: {:?}, with subscribers: {:?}", send_res, topic, subscribers);
                 }
             }
         }
