@@ -44,7 +44,7 @@ pub async fn run(mut config: Ad4mConfig) {
 
     info!("Starting GraphQL...");
 
-    if (config.run_dapp_server.unwrap()) {
+    if config.run_dapp_server.unwrap() {
         tokio::task::spawn_blocking(move || {
             let result = serve_dapp(4200);
             tokio::runtime::Handle::current().block_on(async {
@@ -95,7 +95,7 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
 
     info!("Starting GraphQL...");
 
-    if (config.run_dapp_server.unwrap()) {
+    if config.run_dapp_server.unwrap() {
         tokio::task::spawn_blocking(move || {
             let result = serve_dapp(4200);
             tokio::runtime::Handle::current().block_on(async {

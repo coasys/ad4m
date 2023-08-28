@@ -394,11 +394,14 @@ export default class AgentService {
   }
 
   async signMessage(msg: string) {
-    const key = this.getSigningKey();
-    const msgHash = await secp.utils.sha256(new TextEncoder().encode(msg));
-    const signature = await secp.sign(msgHash, key.privateKey);
-    const sigHex = Buffer.from(signature).toString("hex");
-    return new AgentSignature(sigHex, key.publicKey);
+    this.signingChecks()
+
+    const payloadBytes = Signatures.buildMessageRaw(msg)
+    const signature = WALLET.sign(payloadBytes);
+    const sigBuffer = Buffer.from(signature);
+    const sigHex = sigBuffer.toString("hex");
+
+    return new AgentSignature(sigHex, WALLET.getMainKey().publicKey);
   }
 }
 
