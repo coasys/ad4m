@@ -49,10 +49,6 @@ pub fn handle_system_tray_event(app: &AppHandle<Wry>, event_id: String) {
             }
         }
         "quit" => {
-            find_and_kill_processes("ad4m-host");
-
-            find_and_kill_processes("holochain");
-
             let _ = remove_file(executor_port_path());
 
             app.exit(0);
