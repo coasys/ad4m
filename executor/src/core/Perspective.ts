@@ -203,6 +203,7 @@ export default class Perspective {
     updateFromId(id: PerspectiveHandle) {
         this.name = id.name
         this.uuid = id.uuid
+        if(id.state) this.state = id.state
         if(id.sharedUrl) this.sharedUrl = id.sharedUrl
         if(id.neighbourhood) this.neighbourhood = id.neighbourhood
     }
