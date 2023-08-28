@@ -5,7 +5,6 @@ let setup = ({onResolve, onLoad}) => {
 }
 
 let resolveFile = ({path}) => {
-  console.log('wow', path)
   return {
     path: path,
     namespace: 'http-fetch'

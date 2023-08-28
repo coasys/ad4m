@@ -11,7 +11,8 @@
     "bootstrap-languages/*",
     "tests/js",
     "rust-executor",
-    "cli"
+    "cli",
+    "dapp"
   ],
   "private": true,
   "scripts": {

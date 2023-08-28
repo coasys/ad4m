@@ -175,8 +175,6 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
 
     core.resolvers = createResolvers(core, config)
 
-    if (runDappServer) { core.startDAppServer(dAppPort) };
-
     return core
 }
 
