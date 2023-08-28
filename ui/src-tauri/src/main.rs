@@ -81,18 +81,6 @@ fn main() {
     if log_path().exists() {
         let _ = fs::remove_file(log_path());
     }
-  
-    let mut waited_seconds = 0;
-    while data_path().join("ipfs").join("repo.lock").exists() {
-        println!("IPFS repo.lock exists, waiting...");
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        waited_seconds = waited_seconds + 1;
-        if waited_seconds > 10 {
-            println!("Waited long enough, removing lock...");
-            let _ = remove_dir_all(data_path().join("ipfs").join("repo.lock"));
-            let _ = remove_dir_all(data_path().join("ipfs").join("datastore").join("LOCK"));
-        }
-    }
 
     let file = File::create(log_path()).unwrap();
     let file = Arc::new(Mutex::new(file));
@@ -123,10 +111,6 @@ fn main() {
     info!("Free port: {:?}", free_port);
 
     save_executor_port(free_port);
-
-    find_and_kill_processes("ad4m-host");
-
-    find_and_kill_processes("holochain");
 
     match rust_executor::init::init(
         Some(String::from(data_path().to_str().unwrap())),
@@ -186,6 +170,10 @@ fn main() {
             config.app_data_path = Some(String::from(data_path().to_str().unwrap()));
             config.gql_port = Some(free_port);
             config.network_bootstrap_seed = None;
+            config.run_dapp_server = Some(false);
+            config.hc_use_bootstrap = Some(true);
+            config.hc_use_mdns = Some(false);
+            config.hc_use_proxy = Some(true);
 
             let handle = app.handle();
 
