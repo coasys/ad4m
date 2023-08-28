@@ -64,6 +64,9 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
     let _ = env_logger::try_init();
     config.prepare();
 
+    info!("Initializing Prolog service...");
+    init_prolog_service().await;
+
     info!("Starting js_core...");
     let mut js_core_handle = JsCore::start(config.clone()).await;
     js_core_handle.initialized().await;

@@ -24,6 +24,10 @@ async fn main() {
 
     let mut config = Ad4mConfig::default();
     config.prepare();
+
+    info!("Initializing Prolog service...");
+    init_prolog_service().await;
+
     info!("Starting js_core... with config: {:#?}", config);
 
     let mut js_core_handle = JsCore::start(config.clone()).await;
