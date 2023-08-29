@@ -9,6 +9,7 @@ on:
       - main
       - staging
       - bootstrap-languages
+      - rust-holochain-0.3.0
 
 jobs:
   unit:
