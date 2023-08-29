@@ -47,6 +47,11 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
 
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
     - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
