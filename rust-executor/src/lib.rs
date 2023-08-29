@@ -1,6 +1,4 @@
-#[cfg(test)]
-
-mod config;
+pub mod config;
 mod globals;
 pub mod graphql;
 mod holochain_service;
@@ -14,8 +12,6 @@ use tokio;
 pub mod init;
 mod pubsub;
 mod dapp_server;
-#[macro_use]
-extern crate rust_embed;
 
 use std::env;
 use tracing::{info, error};

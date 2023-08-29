@@ -10229,6 +10229,7 @@ dependencies = [
  "semver 1.0.18",
  "serde",
  "serde_json",
+ "tauri",
  "tokio",
  "tokio-stream",
  "tracing",
