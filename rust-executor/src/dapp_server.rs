@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use http_body_util::Full;
-use hyper::body::{Bytes, Body};
+use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
@@ -22,7 +22,7 @@ async fn serve_file(req: Request<hyper::body::Incoming>) -> Result<Response<Full
     let path_clone = path.clone().replace("/", "");
     let mut base = path_clone.as_str();
 
-    if (base == "") {
+    if base == "" {
         base = "index.html";
     }
 
