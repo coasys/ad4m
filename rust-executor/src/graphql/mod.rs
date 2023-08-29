@@ -8,6 +8,7 @@ use graphql_types::RequestContext;
 use mutation_resolvers::*;
 use query_resolvers::*;
 use subscription_resolvers::*;
+use tauri::api::path::home_dir;
 
 use crate::js_core::JsCoreHandle;
 
@@ -33,9 +34,11 @@ fn schema() -> Schema {
 pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(), AnyError> {
     let log = warp::log("warp::server");
 
-    let mut file = std::fs::File::create("schema.gql").unwrap();
-    file.write_all(schema().as_schema_language().as_bytes())
-        .unwrap();
+    let mut file = std::fs::File::create(
+        home_dir().unwrap().join(".ad4m").join("schema.gql")
+    ).unwrap();
+
+    file.write_all(schema().as_schema_language().as_bytes()).unwrap();
 
     let homepage = warp::path::end().map(|| {
         Response::builder()
