@@ -840,8 +840,8 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             perspectiveRemove: async (args, context) => {
                 const { uuid } = args
                 checkCapability(context.capabilities, Auth.perspectiveDeleteCapability([uuid]))
-                await core.perspectivesController.remove(uuid)
-                return true
+                let removeStatus = await core.perspectivesController.remove(uuid)
+                return removeStatus
             },
             //@ts-ignore
             perspectiveRemoveLink: async (args, context) => {

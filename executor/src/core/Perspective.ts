@@ -35,7 +35,9 @@ export default class Perspective {
     #prologEngine: PrologInstance|null
     #prologNeedsRebuild: boolean
     #pollingInterval: any;
+    #pendingDiffPollingInterval: any
     #prologMutex: Mutex
+    #isTeardown: boolean = false;
 
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState) {
         this.updateFromId(id)
@@ -61,11 +63,12 @@ export default class Perspective {
 
         process.on("SIGINT", () => {
             clearInterval(this.#pollingInterval);
+            clearInterval(this.#pendingDiffPollingInterval);
         });
 
         if (this.neighbourhood) {
             // setup polling loop for Perspectives with a linkLanguage
-            this.setupSyncSignals(3000);
+            this.#pollingInterval = this.setupSyncSignals(3000);
 
             // Handle join differently so we wait before publishing diffs until we have seen
             // a first foreign revision. Otherwise we will never use snaphshots and make the
@@ -77,7 +80,7 @@ export default class Perspective {
                         // Set the state to LinkLanguageInstalledButNotSynced so we will keep
                         // link additions as pending until we are synced
                         if(!revision) {
-                            this.setupPendingDiffsPublishing(5000);
+                            this.#pendingDiffPollingInterval = this.setupPendingDiffsPublishing(5000);
                         }
                     })
                 } catch (e) {
@@ -112,6 +115,8 @@ export default class Perspective {
 
     async setupSyncSignals(intervalMs: number) {
         return setInterval(async () => {
+            console.log("Calling sync");
+            if (this.#isTeardown) return;
             try {
                 await this.callLinksAdapter("sync");
             } catch(e) {
@@ -124,6 +129,8 @@ export default class Perspective {
         let pendingGotPublished = false;
 
         let pendingDiffsInterval = setInterval(async () => {
+            console.log("calling pending diff");
+            if (this.#isTeardown) return;
             if(this.state == PerspectiveState.LinkLanguageFailedToInstall) {
                 try {
                     await this.getLinksAdapter()
@@ -155,41 +162,7 @@ export default class Perspective {
                 clearInterval(pendingDiffsInterval);
             }
         }, intervalMs);
-    }
-
-
-    setupPolling(intervalMs: number) {
-        return setInterval(
-            async () => {
-                try {
-                    let madeSync = false;
-                    // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
-                    const currentRevision = await this.getCurrentRevision();
-                    if (currentRevision) {
-                        madeSync = true;
-                        //Let's check if we have unpublished diffs:
-                        const mutations = await this.#db.getPendingDiffs(this.uuid!);
-                        if (mutations.additions.length > 0 || mutations.removals.length > 0) {                        
-                            // ...publish them...
-                            await this.callLinksAdapter('commit', mutations);
-                            // ...and clear the temporary storage
-                            await this.#db.clearPendingDiffs(this.uuid!);
-                        }
-                        
-                        //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                        if(this.isFastPolling && madeSync) {
-                            this.isFastPolling = false;
-                            clearInterval(this.#pollingInterval);
-                            this.#pollingInterval = this.setupPolling(30000);
-                        }
-                    }
-
-                } catch (e) {
-                    console.warn(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to check sync on linksAdapter. Error: ${e}`, e);
-                }
-            },
-            intervalMs
-        );
+        return pendingDiffsInterval;
     }
 
 
@@ -921,7 +894,9 @@ export default class Perspective {
     }
 
     clearPolling() {
+        this.#isTeardown = true;
         clearInterval(this.#pollingInterval);
+        clearInterval(this.#pendingDiffPollingInterval);
     }
 }
 

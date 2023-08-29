@@ -441,15 +441,15 @@ export default class LanguageController {
             language.teardown();
         }
 
-        this.#holochainService.removeDnaForLang(hash as string);
+        //Remove language from memory
+        this.#languages.delete(hash as string);
+        this.#languageConstructors.delete(hash as string);
+
+        await this.#holochainService.removeDnaForLang(hash as string);
 
         //Remove language files
         const languagePath = path.join(this.#config.languagesPath, hash as string);
         fs.rmdirSync(languagePath, {recursive: true});
-
-        //Remove language from memory
-        this.#languages.delete(hash as string);
-        this.#languageConstructors.delete(hash as string);
     }
 
     languageForExpression(e: ExpressionRef): Language {
