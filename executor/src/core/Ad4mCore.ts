@@ -180,10 +180,6 @@ export default class Ad4mCore {
         console.log("Done.")
     }
 
-    startDAppServer(port: number) {
-        runDAppServer(port)
-    }
-
     async initIPFS(params: InitIPFSParams) {
         console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
 
