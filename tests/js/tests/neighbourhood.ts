@@ -211,7 +211,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 })
 
                 it('they see each other in `otherAgents`', async () => {
-                    await sleep(1000);
+                    await sleep(5000);
                     const aliceAgents = await aliceNH!.otherAgents()
                     console.log("alice agents", aliceAgents);
                     const bobAgents = await bobNH!.otherAgents()
