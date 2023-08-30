@@ -56,6 +56,7 @@ hyper = { version = "1.0.0-rc.4", features = ["full"] }
 http-body-util = "0.1.0-rc.3"
 hyper-util = { git = "https://github.com/hyperium/hyper-util.git" }
 rust-embed="8.0.0"
+dirs = "5.0.1"
 
 juniper = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol", features = ["chrono"] }
 juniper_subscriptions = { git = "https://github.com/graphql-rust/juniper", branch = "graphql-transport-ws-protocol" }
