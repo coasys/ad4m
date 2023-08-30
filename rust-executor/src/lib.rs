@@ -60,6 +60,7 @@ pub async fn run(mut config: Ad4mConfig) {
     match graphql::start_server(
         js_core_handle,
         config.gql_port.expect("Did not get gql port"),
+        config.app_data_path.expect("Did not get app data path")
     )
     .await
     {
@@ -112,6 +113,7 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
         let result = graphql::start_server(
             js_core_handle,
             config.gql_port.expect("Did not get gql port"),
+            config.app_data_path.expect("Did not get app data path")
         );
         tokio::runtime::Handle::current().block_on(async {
             match result.await {

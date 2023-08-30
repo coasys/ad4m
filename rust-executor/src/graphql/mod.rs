@@ -8,7 +8,6 @@ use graphql_types::RequestContext;
 use mutation_resolvers::*;
 use query_resolvers::*;
 use subscription_resolvers::*;
-use tauri::api::path::home_dir;
 
 use crate::js_core::JsCoreHandle;
 
@@ -22,6 +21,7 @@ use juniper::{InputValue, RootNode};
 use juniper_graphql_transport_ws::ConnectionConfig;
 use juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
+use std::path::Path;
 
 impl juniper::Context for RequestContext {}
 
@@ -31,11 +31,11 @@ fn schema() -> Schema {
     Schema::new(Query, Mutation, Subscription)
 }
 
-pub async fn start_server(js_core_handle: JsCoreHandle, port: u16) -> Result<(), AnyError> {
+pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path: String) -> Result<(), AnyError> {
     let log = warp::log("warp::server");
 
     let mut file = std::fs::File::create(
-        home_dir().unwrap().join(".ad4m").join("schema.gql")
+        Path::new(&app_data_path).join("schema.gql")
     ).unwrap();
 
     file.write_all(schema().as_schema_language().as_bytes()).unwrap();

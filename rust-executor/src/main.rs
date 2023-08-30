@@ -41,6 +41,7 @@ async fn main() {
     match graphql::start_server(
         js_core_handle,
         config.gql_port.expect("Did not get gql port"),
+        config.app_data_path.expect("Did not get app data path"),
     )
     .await
     {
