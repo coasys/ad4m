@@ -5,7 +5,7 @@ import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import type PerspectiveContext from './PerspectiveContext'
 import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
-import { getPubSub } from './utils';
+import { getPubSub, sleep } from './utils';
 
 export default class PerspectivesController {
     #perspectiveHandles: Map<string, PerspectiveHandle>
@@ -152,8 +152,16 @@ export default class PerspectivesController {
 
     async replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
         await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, perspectiveHandle);
+
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
-        this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
+        let existingPerspective = this.#perspectiveInstances.get(perspectiveHandle.uuid);
+
+        if (existingPerspective) {
+            existingPerspective.clearPolling();
+            this.#perspectiveInstances.delete(perspectiveHandle.uuid);
+            existingPerspective = undefined;
+        }
+        
         this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin, state));
         this.save()
     }
@@ -161,14 +169,20 @@ export default class PerspectivesController {
     async remove(uuid: string) {
         try {
             let perspective = this.#perspectiveInstances.get(uuid);
-            perspective?.clearPolling();
-            if (perspective?.neighbourhood) {
-                this.#context.languageController?.languageRemove(perspective.neighbourhood.linkLanguage);
+            if (perspective) {
+                perspective.clearPolling();
+                if (perspective.neighbourhood) {
+                    await this.#context.languageController?.languageRemove(perspective.neighbourhood.linkLanguage);
+                }
+                perspective = undefined;
+                this.#perspectiveHandles.delete(uuid)
+                this.#perspectiveInstances.delete(uuid)
+                this.save()
+                await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_REMOVED_TOPIC, uuid)
+                return true
+            } else {
+                return false
             }
-            this.#perspectiveHandles.delete(uuid)
-            this.#perspectiveInstances.delete(uuid)
-            this.save()
-            await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_REMOVED_TOPIC, uuid)
         } catch (e) {
             console.error("Error removing perspective:", e);
             throw new Error(`Error removing perspective: ${e}`);

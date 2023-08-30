@@ -27,7 +27,7 @@
     "test:linux": "turbo run test:linux --concurrency=1",
     "test:windows": "turbo run test:windows --concurrency=1",
     "package-ad4m": "turbo run package-ad4m",
-    "build-languages": "turbo run build-languages",
+    "build-languages": "turbo run build-languages --concurrency=1",
     "docs": "jsdoc -c jsdoc.json",
     "docs:api:jsdoc2md": "jsdoc2md --configure jsdoc.json --partial docs/header.hbs --global-index-format none --files src/**/* > docs-src/api.md",
     "docs:api:tsconcat": "concat-md --decrease-title-levels --dir-name-as-title docs-src/typedoc > docs-src/api.md",

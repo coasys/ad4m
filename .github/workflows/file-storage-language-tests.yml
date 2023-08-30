@@ -9,7 +9,6 @@ on:
       - main
       - staging
       - bootstrap-languages
-      - rust-holochain-0.3.0
 
 jobs:
   holochain:
@@ -46,6 +45,11 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
@@ -88,6 +92,11 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install

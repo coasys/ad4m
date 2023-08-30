@@ -75,5 +75,7 @@ scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-pro
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 tracing = "0.1"
 
+tauri = { version = "1.4.0", features = ["api-all", "system-tray"] }
+
 [dev-dependencies]
 maplit = "1.0.2"
