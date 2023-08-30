@@ -139,7 +139,6 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobDeleteNeighbourhood.perspectiveRemove).to.be.true;
 
                 const perspectives = await alice.perspective.all();
-                console.log("Alice has perspectives", perspectives);
             })
             
             // it('can get the correct state change signals', async () => {

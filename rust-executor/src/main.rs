@@ -23,7 +23,7 @@ use js_core::JsCore;
 async fn main() {
     prolog::run();
     env::set_var("RUST_LOG", "rust_executor=info");
-    env_logger::try_init();
+    env_logger::try_init().expect("could not logger");
 
     let mut config = Ad4mConfig::default();
     config.prepare();
