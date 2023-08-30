@@ -32,7 +32,7 @@ export default class PerspectivesController {
                 let perspectiveHandle = fileObject[k].perspectiveHandle;
                 let createdFromJoin = fileObject[k].createdFromJoin;
                 console.debug(`PerspectivesController: Found existing perspective "${k}":`, perspectiveHandle)
-                this.#perspectiveInstances.set(k, new Perspective(perspectiveHandle, this.#context, perspectiveHandle.neighbourhood as Neighbourhood, createdFromJoin))
+                this.#perspectiveInstances.set(k, new Perspective(perspectiveHandle, this.#context, perspectiveHandle.neighbourhood as Neighbourhood, createdFromJoin, perspectiveHandle.state))
                 this.#perspectiveHandles.set(k, perspectiveHandle)
             })
         }
@@ -120,7 +120,7 @@ export default class PerspectivesController {
         } else {
             const foundID = this.#perspectiveHandles.get(uuid)
             if(foundID) {
-                return new Perspective(foundID, this.#context)
+                return new Perspective(foundID, this.#context, foundID.neighbourhood as Neighbourhood, false, foundID.state)
             } else {
                 throw Error(`Perspective not found: ${uuid}`)
             }
@@ -154,8 +154,8 @@ export default class PerspectivesController {
         await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, perspectiveHandle);
 
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
-        let existingPerspective = this.#perspectiveInstances.get(perspectiveHandle.uuid);
 
+        let existingPerspective = this.#perspectiveInstances.get(perspectiveHandle.uuid);
         if (existingPerspective) {
             existingPerspective.clearPolling();
             this.#perspectiveInstances.delete(perspectiveHandle.uuid);

@@ -298,6 +298,7 @@ export default class Ad4mCore {
             state = PerspectiveState.LinkLanguageFailedToInstall;
         }
 
+        console.log("Core.installNeighbourhood(): Creating perspective", url, neighbourhood, state);
         return this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }
 
