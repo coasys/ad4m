@@ -13,7 +13,7 @@ export default function agentLanguageTests(testContext: TestContext) {
             const aliceHerself = await alice.agent.me()
             const bobHimself = await bob.agent.me()
 
-            await sleep(1000)
+            await sleep(5000)
 
             const bobSeenFromAlice = await alice.agent.byDID(didBob)
             expect(bobSeenFromAlice).not.to.be.undefined
