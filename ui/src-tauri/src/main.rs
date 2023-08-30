@@ -72,7 +72,7 @@ pub struct AppState {
 }
 
 fn main() {
-    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debugad4m-launcher=info,warn,error");
+    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debug,ad4m_launcher=info,warn,error");
 
     if !data_path().exists() {
         let _ = fs::create_dir_all(data_path());
