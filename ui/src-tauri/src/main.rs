@@ -14,6 +14,11 @@ use std::fs;
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::Mutex;
+use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
+use std::io;
+use std::io::Write;
+use tracing_subscriber::{fmt::format::FmtSpan, FmtSubscriber};
+
 extern crate remove_dir_all;
 use remove_dir_all::*;
 
@@ -48,8 +53,7 @@ use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
 use crate::util::has_processes_running;
 use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
-use std::io::{self, Write};
-use tracing_subscriber::{fmt::format::FmtSpan, FmtSubscriber};
+
 
 // the payload type must implement `Serialize` and `Clone`.
 #[derive(Clone, serde::Serialize)]
@@ -73,6 +77,36 @@ pub struct AppState {
 
 fn main() {
     env::set_var("RUST_LOG", "rust_executor=info,error,warn,debug,ad4m_launcher=info,warn,error");
+
+    let mut rlim: rlimit = rlimit { rlim_cur: 0, rlim_max: 0 };
+
+    // Get the current file limit
+    unsafe {
+        if libc::getrlimit(RLIMIT_NOFILE, &mut rlim) != 0 {
+            panic!("{}", io::Error::last_os_error());
+        }
+    }
+
+    let rlim_max = 1000 as u64;
+    println!("Current RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
+
+    // Attempt to increase the limit
+    rlim.rlim_cur = rlim_max;
+
+    unsafe {
+        if setrlimit(RLIMIT_NOFILE, &rlim) != 0 {
+            panic!("{}", io::Error::last_os_error());
+        }
+    }
+
+    // Check the updated limit
+    unsafe {
+        if libc::getrlimit(RLIMIT_NOFILE, &mut rlim) != 0 {
+            panic!("{}", io::Error::last_os_error());
+        }
+    }
+
+    println!("Updated RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
 
     if !data_path().exists() {
         let _ = fs::create_dir_all(data_path());
