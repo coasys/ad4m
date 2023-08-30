@@ -10204,6 +10204,7 @@ dependencies = [
  "deno_core",
  "deno_runtime",
  "did-key",
+ "dirs 5.0.1",
  "env_logger",
  "fs_extra",
  "futures",
