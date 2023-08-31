@@ -90,6 +90,7 @@ export default class Ad4mCore {
     }
 
     async callResolver (type: string, fnName: string, args: any, context: any) {
+        console.log("Calling resolvers with data", type, fnName, args, context);
       if(!this.resolvers[type]) throw new Error(`Could not find resolver for type ${type}`)
       if(!this.resolvers[type][fnName]) throw new Error(`Could not find resolver function ${fnName} for type ${type}`)
       try {
