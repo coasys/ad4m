@@ -5,6 +5,7 @@ mod subscription_resolvers;
 mod utils;
 
 use graphql_types::RequestContext;
+use hyper::body::Bytes;
 use mutation_resolvers::*;
 use query_resolvers::*;
 use subscription_resolvers::*;
@@ -48,11 +49,21 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path
 
     let qm_schema = schema();
     let js_core_handle_cloned1 = js_core_handle.clone();
+
+    let default_auth = warp::any().map(|| {
+        String::from("")
+    });
+
     let qm_state = warp::any()
         .and(warp::header::<String>("authorization"))
-        .map(move |header| RequestContext {
-            capability: header,
-            js_handle: js_core_handle_cloned1.clone(),
+        .or(default_auth)
+        .unify()
+        .map(move |header| {
+            //println!("Request body: {}", std::str::from_utf8(body_data::bytes()).expect("error converting bytes to &str"));
+            RequestContext {
+                capability: header,
+                js_handle: js_core_handle_cloned1.clone(),
+            }
         });
     let qm_graphql_filter = juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
 
