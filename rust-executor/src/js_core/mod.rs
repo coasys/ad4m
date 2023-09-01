@@ -3,10 +3,12 @@ use deno_core::error::AnyError;
 use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use ::futures::Future;
 use holochain::prelude::{ExternIO, Signal};
 use tracing::{error, info};
 use once_cell::sync::Lazy;
 use std::env::current_dir;
+use std::error::Error;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::runtime::Builder;
@@ -14,7 +16,7 @@ use tokio::sync::broadcast;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{
     broadcast::{Receiver, Sender},
-    mpsc::{self, UnboundedSender},
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
 use tokio::task::LocalSet;
 
@@ -134,6 +136,7 @@ struct JsCoreResponse {
     id: String,
 }
 
+#[derive(Clone)]
 pub struct JsCore {
     worker: Arc<Mutex<MainWorker>>,
 }
@@ -207,30 +210,60 @@ impl JsCore {
         ))
     }
 
-    fn execute_async(&self, script: String) -> Result<GlobalVariableFuture, AnyError> {
+    fn execute_async(&self, name: String, script: String) -> Result<GlobalVariableFuture, AnyError> {
         let mut worker = self
             .worker
             .lock()
             .expect("execute_async(): couldn't lock worker");
         let wrapped_script = format!(
             r#"
-        globalThis.asyncResult = undefined;
+        globalThis.{} = undefined;
         (async () => {{
-            globalThis.asyncResult = ({});
+            globalThis.{} = ({});
         }})();
         "#,
+            name, name,
             script
         );
         let _execute_async = worker.execute_script("js_core", wrapped_script.into())?;
         Ok(GlobalVariableFuture::new(
             self.worker.clone(),
-            "asyncResult".to_string(),
+            name,
         ))
+    }
+
+    fn generate_execution_slot(
+        name: String, 
+        rx: Arc::<Mutex::<UnboundedReceiver<JsCoreRequest>>>, 
+        tx: Sender<JsCoreResponse>,
+        js_core: JsCore
+    ) -> impl Future {
+        async move {
+            loop {
+                if let Ok(mut rx) = rx.lock() {
+                    if let Ok(request) = rx.try_recv() {
+                        let script = request.script;
+                        let id = request.id;
+                        //global_req_id = Some(id.clone());
+    
+                        let result = match js_core.execute_async(name.clone(), script) {
+                            Ok(execute_async_future) => execute_async_future.await.map_err(|e| e.to_string()),
+                            Err(err) => Err(err.to_string()),
+                        };
+    
+                        tx.send(JsCoreResponse { result, id })
+                            .expect("couldn't send on channel");
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        }
     }
 
     pub async fn start(config: Ad4mConfig) -> JsCoreHandle {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
+        let rx_inside = Arc::new(Mutex::new(rx_inside));
 
         let (tx_inside_loader, rx_outside_loader) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside_loader, mut rx_inside_loader) = mpsc::unbounded_channel::<JsCoreRequest>();
@@ -320,46 +353,10 @@ impl JsCore {
                     let mut global_req_id = None;
 
                     //Listener future for receiving script execution calls
-                    let receive_fut = async {
-                        loop {
-                            if let Ok(request) = rx_inside.try_recv() {
-                                let tx_cloned = tx_inside.clone();
-                                let script = request.script;
-                                let id = request.id;
-                                global_req_id = Some(id.clone());
-                                match js_core.execute_async(script) {
-                                    Ok(execute_async_future) => match execute_async_future.await {
-                                        Ok(result) => {
-                                            tx_inside
-                                                .send(JsCoreResponse {
-                                                    result: Ok(result),
-                                                    id: id,
-                                                })
-                                                .expect("couldn't send on channel");
-                                        }
-                                        Err(err) => {
-                                            tx_cloned
-                                                .send(JsCoreResponse {
-                                                    result: Err(err.to_string()),
-                                                    id,
-                                                })
-                                                .expect("couldn't send on channel");
-                                        }
-                                    },
-                                    Err(err) => {
-                                        tx_cloned
-                                            .send(JsCoreResponse {
-                                                result: Err(err.to_string()),
-                                                id,
-                                            })
-                                            .expect("couldn't send on channel");
-                                        continue;
-                                    }
-                                }
-                            }
-                            tokio::task::yield_now().await;
-                        }
-                    };
+                    let receive_fut_1 = Self::generate_execution_slot("async_1".to_string(), rx_inside.clone(), tx_inside.clone(), js_core.clone());
+                    let receive_fut_2 = Self::generate_execution_slot("async_2".to_string(), rx_inside.clone(), tx_inside.clone(), js_core.clone());
+                    let receive_fut_3 = Self::generate_execution_slot("async_3".to_string(), rx_inside.clone(), tx_inside.clone(), js_core.clone());
+                    let receive_fut_4 = Self::generate_execution_slot("async_4".to_string(), rx_inside.clone(), tx_inside.clone(), js_core.clone());
 
                     let holochain_signal_receiver_fut = async {
                         loop {
@@ -378,7 +375,7 @@ impl JsCore {
                                                     "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
                                                     cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
                                                 );
-                                                match js_core.execute_async(script) {
+                                                match js_core.execute_async("hc_signal_fut".to_string(), script) {
                                                     Ok(script_fut) => match script_fut.await {
                                                         Ok(_res) => {
                                                             info!(
@@ -429,10 +426,10 @@ impl JsCore {
                                 }
                             }
                         }
-                        _request = receive_fut => {
-                            info!("AD4M receive_fut completed");
-                            //break;
-                        }
+                        _request = receive_fut_1 => info!("AD4M receive_fut_1 completed"),
+                        _request = receive_fut_2 => info!("AD4M receive_fut_1 completed"),
+                        _request = receive_fut_3 => info!("AD4M receive_fut_1 completed"),
+                        _request = receive_fut_4 => info!("AD4M receive_fut_1 completed"),
                         _module_load = module_load_fut => {
                             info!("AD4M module load completed");
                             //break;
