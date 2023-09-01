@@ -1,11 +1,11 @@
+use ::futures::Future;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
-use ::futures::Future;
 use holochain::prelude::{ExternIO, Signal};
-use tracing::{error, info};
+use log::debug;
 use once_cell::sync::Lazy;
 use std::env::current_dir;
 use std::error::Error;
@@ -17,8 +17,11 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{
     broadcast::{Receiver, Sender},
     mpsc::{self, UnboundedReceiver, UnboundedSender},
+    oneshot
 };
 use tokio::task::LocalSet;
+use tracing::{error, info};
+use lazy_static::lazy_static;
 
 mod futures;
 mod jwt_extension;
@@ -35,6 +38,17 @@ use options::{main_module_url, main_worker_options};
 
 static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
     Lazy::new(|| Arc::new(TokioMutex::new(None)));
+
+fn uuid_to_valid_variable_name(uuid: &str) -> String {
+    let valid_chars: String = uuid.chars().filter(|c| c.is_alphabetic()).collect();
+    valid_chars
+}
+
+use std::collections::HashMap;
+
+lazy_static! {
+    static ref RESPONSES: TokioMutex<HashMap<String, JsCoreResponse>> = TokioMutex::new(HashMap::new());
+}
 
 pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,
@@ -65,40 +79,33 @@ impl JsCoreHandle {
 
     pub async fn execute(&mut self, script: String) -> Result<String, AnyError> {
         let id = uuid::Uuid::new_v4().to_string();
+        let (response_tx, response_rx) = oneshot::channel();
+
         self.tx
             .send(JsCoreRequest {
                 script,
                 id: id.clone(),
+                response_tx
             })
             .expect("couldn't send on channel... it is likely that the main worker thread has crashed...");
 
-        let mut response = None;
-        while response.is_none() {
-            match self.rx.recv().await {
-                Ok(r) => {
-                    if r.id == id {
-                        response = Some(r);
-                    }
-                }
-                Err(err) => {
-                    error!("Error receiving on channel");
-                    return Err(anyhow!(err));
-                }
-            }
-        }
+        let response = response_rx.await.unwrap();
+
+        info!("Got response: {:?}", response);
 
         response
-            .expect("none case handle above")
             .result
             .map_err(|err| anyhow!(err))
     }
 
     pub async fn load_module(&mut self, path: String) -> Result<String, AnyError> {
         let id = uuid::Uuid::new_v4().to_string();
+        let (response_tx, response_rx) = oneshot::channel();
         self.tx_module_load
             .send(JsCoreRequest {
                 script: path,
                 id: id.clone(),
+                response_tx
             })
             .expect("couldn't send on channel... it is likely that the main worker thread has crashed...");
 
@@ -124,10 +131,11 @@ impl JsCoreHandle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct JsCoreRequest {
     script: String,
     id: String,
+    response_tx: oneshot::Sender<JsCoreResponse>
 }
 
 #[derive(Debug, Clone)]
@@ -210,7 +218,11 @@ impl JsCore {
         ))
     }
 
-    fn execute_async(&self, name: String, script: String) -> Result<GlobalVariableFuture, AnyError> {
+    fn execute_async(
+        &self,
+        name: String,
+        script: String,
+    ) -> Result<GlobalVariableFuture, AnyError> {
         let mut worker = self
             .worker
             .lock()
@@ -219,54 +231,85 @@ impl JsCore {
             r#"
         globalThis.{} = undefined;
         (async () => {{
+            console.log("starting execution of script");
             globalThis.{} = ({});
+            console.log("finished execution of script");
         }})();
         "#,
-            name, name,
-            script
+            name, name, script
         );
         let _execute_async = worker.execute_script("js_core", wrapped_script.into())?;
-        Ok(GlobalVariableFuture::new(
-            self.worker.clone(),
-            name,
-        ))
+        Ok(GlobalVariableFuture::new(self.worker.clone(), name))
     }
 
     fn generate_execution_slot(
-        name: String, 
-        rx: Arc::<Mutex::<UnboundedReceiver<JsCoreRequest>>>, 
+        rx: Arc<TokioMutex<UnboundedReceiver<JsCoreRequest>>>,
         tx: Sender<JsCoreResponse>,
-        js_core: JsCore
+        js_core: JsCore,
     ) -> impl Future {
         async move {
             loop {
-                let maybe_request = rx.lock().as_mut().ok().map(|c| c.try_recv());
+                let mut maybe_request = rx.lock().await;
+                //let maybe_request = rx.lock().as_mut().ok().map(|c| c.try_recv());
+                if let Ok(request) = maybe_request.try_recv()  {
+                    info!("Got request: {:?}", request);
+                    let script = request.script.clone();
+                    let id = request.id.clone();
+                    let js_core_cloned = js_core.clone();
+                    let response_tx = request.response_tx;
+                    let tx_cloned = tx.clone();
 
+                    //global_req_id = Some(id.clone());
 
-                if let Ok(mut rx) = rx.lock() {
-                    if let Ok(request) = rx.try_recv() {
-                        let script = request.script;
-                        let id = request.id;
-                        //global_req_id = Some(id.clone());
-    
-                        let result = match js_core.execute_async(name.clone(), script) {
-                            Ok(execute_async_future) => execute_async_future.await.map_err(|e| e.to_string()),
-                            Err(err) => Err(err.to_string()),
-                        };
-    
-                        tx.send(JsCoreResponse { result, id })
-                            .expect("couldn't send on channel");
-                    }
+                    tokio::task::spawn_local(async move {
+                        info!("Spawn local driving: {}", id);
+                        let local_variable_name = uuid_to_valid_variable_name(&id);
+                        let script_fut =
+                            js_core_cloned.execute_async(local_variable_name, script);
+                        info!("Script fut created: {}", id);
+                        match script_fut {
+                            Ok(script_fut) => match script_fut.await {
+                                Ok(res) => {
+                                    info!("Script execution completed Succesfully: {}", id);
+                                    response_tx
+                                        .send(JsCoreResponse {
+                                            result: Ok(res),
+                                            id: id,
+                                        })
+                                        .expect("couldn't send on channel");
+                                }
+                                Err(err) => {
+                                    error!("Error executing script: {:?}", err);
+                                    response_tx
+                                        .send(JsCoreResponse {
+                                            result: Err(err.to_string()),
+                                            id: id,
+                                        })
+                                        .expect("couldn't send on channel");
+                                }
+                            },
+                            Err(err) => {
+                                error!("Error executing script: {:?}", err);
+                                response_tx
+                                    .send(JsCoreResponse {
+                                        result: Err(err.to_string()),
+                                        id: id,
+                                    })
+                                    .expect("couldn't send on channel");
+                            }
+                        }
+                    });
                 }
                 tokio::task::yield_now().await;
             }
+            info!("generate_execution_slot loop completed");
         }
     }
 
     pub async fn start(config: Ad4mConfig) -> JsCoreHandle {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
-        let rx_inside = Arc::new(Mutex::new(rx_inside));
+        let rx_inside = Arc::new(TokioMutex::new(rx_inside));
 
         let (tx_inside_loader, rx_outside_loader) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside_loader, mut rx_inside_loader) = mpsc::unbounded_channel::<JsCoreRequest>();
@@ -320,6 +363,7 @@ impl JsCore {
                 info!("AD4M init complete, starting await loop waiting for requests");
 
                 loop {
+                    info!("Main loop running");
                     //Listener future for loading JS modules into runtime
                     let module_load_fut = async {
                         loop {
@@ -355,11 +399,10 @@ impl JsCore {
 
                     let mut global_req_id = None;
 
+                    let local_set = tokio::task::LocalSet::new();
+
                     //Listener future for receiving script execution calls
-                    let receive_fut_1 = Self::generate_execution_slot("async_1".to_string(), rx_inside.clone(), tx_inside.clone(), js_core.clone());
-                    let receive_fut_2 = Self::generate_execution_slot("async_2".to_string(), rx_inside.clone(), tx_inside.clone(), js_core.clone());
-                    let receive_fut_3 = Self::generate_execution_slot("async_3".to_string(), rx_inside.clone(), tx_inside.clone(), js_core.clone());
-                    let receive_fut_4 = Self::generate_execution_slot("async_4".to_string(), rx_inside.clone(), tx_inside.clone(), js_core.clone());
+                    //let receive_fut_1 = Self::generate_execution_slot(rx_inside.clone(), tx_inside.clone(), js_core.clone());
 
                     let holochain_signal_receiver_fut = async {
                         loop {
@@ -429,16 +472,15 @@ impl JsCore {
                                 }
                             }
                         }
-                        _request = receive_fut_1 => info!("AD4M receive_fut_1 completed"),
-                        _request = receive_fut_2 => info!("AD4M receive_fut_1 completed"),
-                        _request = receive_fut_3 => info!("AD4M receive_fut_1 completed"),
-                        _request = receive_fut_4 => info!("AD4M receive_fut_1 completed"),
+                        _drive_local_set = local_set.run_until(Self::generate_execution_slot(rx_inside.clone(), tx_inside.clone(), js_core.clone())) => {
+                            info!("AD4M drive local set completed");
+                        }
                         _module_load = module_load_fut => {
                             info!("AD4M module load completed");
                             //break;
                         }
                         _holochain_signal_receivers = holochain_signal_receiver_fut => {
-                            //info!("AD4M holochain signal receiver completed");
+                            info!("AD4M holochain signal receiver completed");
                         }
                     }
                 }
