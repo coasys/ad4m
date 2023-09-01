@@ -138,7 +138,7 @@ export default class Perspective {
                     console.error(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to install link language: ${e}`);
                 }
             }
-            
+
             try {
                 // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
                 if (await this.getCurrentRevision()) {
@@ -146,7 +146,7 @@ export default class Perspective {
                     this.updatePerspectiveState(PerspectiveState.Synced);
                     //Let's check if we have unpublished diffs:
                     const mutations = await this.#db.getPendingDiffs(this.uuid!);
-                    if (mutations.additions.length > 0 || mutations.removals.length > 0) {                        
+                    if (mutations.additions.length > 0 || mutations.removals.length > 0) {
                         // ...publish them...
                         await this.callLinksAdapter('commit', mutations);
                         // ...and clear the temporary storage
@@ -417,7 +417,7 @@ export default class Perspective {
                 removals: []
             } as PerspectiveDiff
             const addLink = await this.commit(diff);
-    
+
             if (!addLink) {
                 this.#db.addPendingDiff(this.uuid!, diff);
             }
@@ -567,7 +567,7 @@ export default class Perspective {
             removals: [linkExpression]
         } as PerspectiveDiff
         const mutation = await this.commit(diff);
-        
+
         if (!mutation) {
             await this.#db.addPendingDiff(this.uuid!, diff);
         }
@@ -787,7 +787,7 @@ export default class Perspective {
         //-------------------
         lines.push(":- discontiguous(triple/3).")
         lines.push(":- discontiguous(link/5).")
-        
+
         const linksWithoutSDNA = allLinks.filter(l => !this.isSDNALink(l.data))
 
         for (const link of linksWithoutSDNA) {
@@ -797,10 +797,30 @@ export default class Perspective {
             lines.push(this.linkFact(link));
         };
 
+
+        lines.push("eq_member(X, [Y|_])  :- X == Y, !.")
+        lines.push("eq_member(X, [_|Ys]) :- eq_member(X, Ys).")
+
+        // lines.push('compare_links(Timestamp1, _, Timestamp2) :- Timestamp1 =< Timestamp2.')
+        // lines.push(`insert_sorted_link(Element, [], [Element]).
+        // insert_sorted_link(Element, [Head|Tail], [Element, Head|Tail]) :-
+        //     link(_, _, _, TimestampElement, _),
+        //     link(_, _, HeadBase, TimestampHead, _),
+        //     compare_links(TimestampElement, _, TimestampHead).
+        // insert_sorted_link(Element, [Head|Tail], [Head|SortedTail]) :-
+        //     link(_, _, _, TimestampElement, _),
+        //     link(_, _, HeadBase, TimestampHead, _),
+        //     compare_links(_, TimestampElement, TimestampHead),
+        //     insert_sorted_link(Element, Tail, SortedTail).`)
+        // lines.push(`sort_links([], []).
+        // sort_links([Head|Tail], SortedList) :-
+        //     sort_links(Tail, SortedTail),
+        //     insert_sorted_link(Head, SortedTail, SortedList).`)
+
         //-------------------
         // reachable/2
         //-------------------
-        lines.push(":- discontiguous(reachable/2).")  
+        lines.push(":- discontiguous(reachable/2).")
         lines.push("reachable(A,B) :- triple(A,_,B).")
         lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
 
@@ -834,7 +854,7 @@ export default class Perspective {
         lines.push(":- discontiguous(property_resolve/2).")
         lines.push(":- discontiguous(property_resolve_language/3).")
         lines.push(":- discontiguous(property_named_option/4).")
-        
+
         lines.push(":- discontiguous(collection/2).")
         lines.push(":- discontiguous(collection_getter/4).")
         lines.push(":- discontiguous(collection_setter/3).")
@@ -899,7 +919,7 @@ export default class Perspective {
                 await this.#prologEngine!.consult(facts)
             }
         })
-        
+
         return await this.#prologEngine!.query(query)
     }
 
