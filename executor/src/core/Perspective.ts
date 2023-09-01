@@ -845,12 +845,22 @@ export default class Perspective {
         lines.push(":- discontiguous(p3_class_color/2).")
         lines.push(":- discontiguous(p3_instance_color/3).")
 
+        let seenSubjectClasses = new Set()
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
             if(this.isSDNALink(link)) {
                 try {
                     let code = Literal.fromUrl(link.target).get()
-                    lines = lines.concat(code.split('\n'))
+                    let subjectClassMatch = code.match(/subject_class\("(.+?)",/);
+                    if (subjectClassMatch) {
+                        let subjectClassName = subjectClassMatch[1];
+                        if (!seenSubjectClasses.has(subjectClassName)) {
+                            seenSubjectClasses.add(subjectClassName);
+                            lines = lines.concat(code.split('\n'))
+                        }
+                    } else {
+                        lines = lines.concat(code.split('\n'))
+                    }
                 } catch {
                     console.error("Perspective.initEngineFacts: Error loading SocialDNA link target as literal... Ignoring SocialDNA link.");
                 }
