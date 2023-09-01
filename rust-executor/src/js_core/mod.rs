@@ -240,6 +240,9 @@ impl JsCore {
     ) -> impl Future {
         async move {
             loop {
+                let maybe_request = rx.lock().as_mut().ok().map(|c| c.try_recv());
+
+
                 if let Ok(mut rx) = rx.lock() {
                     if let Ok(request) = rx.try_recv() {
                         let script = request.script;
