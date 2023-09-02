@@ -39,10 +39,14 @@ impl GlobalVariableFuture {
 impl Future for GlobalVariableFuture {
     type Output = Result<String, AnyError>; // You can customize the output type.
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        println!("Trying to get the worker lock: {}", self.name);
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        //println!("Trying to get the worker lock: {}", self.name);
         let mut worker = self.worker.lock().unwrap();
-        println!("Got the lock: {}", self.name);
+        worker.poll_event_loop(cx, false);
+        worker.poll_event_loop(cx, false);
+        worker.poll_event_loop(cx, false);
+        worker.poll_event_loop(cx, false);
+        //println!("Got the lock: {}", self.name);
         if let Ok(global_value) = worker.execute_script("global_var_future", self.name.clone().into()) {
             let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
             let context = v8::Context::new(scope);
@@ -59,6 +63,7 @@ impl Future for GlobalVariableFuture {
                     return Poll::Ready(Ok(value));
                 }
             } else if value.is_undefined() {
+                cx.waker().wake_by_ref();
                 return Poll::Pending;
             } else {
                 let value = value.to_rust_string_lossy(scope);

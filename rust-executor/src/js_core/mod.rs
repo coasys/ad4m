@@ -91,7 +91,7 @@ impl JsCoreHandle {
 
         let response = response_rx.await.unwrap();
 
-        info!("Got response: {:?}", response);
+        //info!("Got response: {:?}", response);
 
         response
             .result
@@ -231,9 +231,7 @@ impl JsCore {
             r#"
         globalThis.{} = undefined;
         (async () => {{
-            console.log("starting execution of script");
             globalThis.{} = ({});
-            console.log("finished execution of script");
         }})();
         "#,
             name, name, script
@@ -252,7 +250,7 @@ impl JsCore {
                 let mut maybe_request = rx.lock().await;
                 //let maybe_request = rx.lock().as_mut().ok().map(|c| c.try_recv());
                 if let Ok(request) = maybe_request.try_recv()  {
-                    info!("Got request: {:?}", request);
+                    //info!("Got request: {:?}", request);
                     let script = request.script.clone();
                     let id = request.id.clone();
                     let js_core_cloned = js_core.clone();
@@ -262,15 +260,15 @@ impl JsCore {
                     //global_req_id = Some(id.clone());
 
                     tokio::task::spawn_local(async move {
-                        info!("Spawn local driving: {}", id);
+                        //info!("Spawn local driving: {}", id);
                         let local_variable_name = uuid_to_valid_variable_name(&id);
                         let script_fut =
                             js_core_cloned.execute_async(local_variable_name, script);
-                        info!("Script fut created: {}", id);
+                        //info!("Script fut created: {}", id);
                         match script_fut {
                             Ok(script_fut) => match script_fut.await {
                                 Ok(res) => {
-                                    info!("Script execution completed Succesfully: {}", id);
+                                    //info!("Script execution completed Succesfully: {}", id);
                                     response_tx
                                         .send(JsCoreResponse {
                                             result: Ok(res),
