@@ -5,13 +5,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-
+use tokio::sync::Mutex as TokioMutex;
 pub struct EventLoopFuture {
-    worker: Arc<Mutex<MainWorker>>,
+    worker: Arc<TokioMutex<MainWorker>>,
 }
 
 impl EventLoopFuture {
-    pub fn new(worker: Arc<Mutex<MainWorker>>) -> Self {
+    pub fn new(worker: Arc<TokioMutex<MainWorker>>) -> Self {
         EventLoopFuture { worker }
     }
 }
@@ -20,29 +20,38 @@ impl Future for EventLoopFuture {
     type Output = Result<(), AnyError>; // You can customize the output type.
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut worker = self.worker.lock().unwrap();
+        let mut worker = match self.worker.try_lock() {
+            Ok(worker) => worker,
+            Err(_) => return Poll::Pending,
+        };
         worker.poll_event_loop(cx, false)
     }
 }
 
 pub struct GlobalVariableFuture {
-    worker: Arc<Mutex<MainWorker>>,
+    worker: Arc<TokioMutex<MainWorker>>,
     name: String,
 }
 
 impl GlobalVariableFuture {
-    pub fn new(worker: Arc<Mutex<MainWorker>>, name: String) -> Self {
+    pub fn new(worker: Arc<TokioMutex<MainWorker>>, name: String) -> Self {
         GlobalVariableFuture { worker, name }
     }
 }
 
 impl Future for GlobalVariableFuture {
-    type Output = Result<String, AnyError>; // You can customize the output type.
+    type Output = Result<String, AnyError>;
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        println!("Trying to get the worker lock: {}", self.name);
-        let mut worker = self.worker.lock().unwrap();
-        println!("Got the lock: {}", self.name);
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        //println!("Trying to get the worker lock: {}", self.name);
+        let mut worker = match self.worker.try_lock() {
+            Ok(worker) => worker,
+            Err(_) => {
+                println!("Could not get the lock, returning pending: {}", self.name);
+                return Poll::Pending
+            }
+        };
+        //println!("Got the lock: {}", self.name);
         if let Ok(global_value) = worker.execute_script("global_var_future", self.name.clone().into()) {
             let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
             let context = v8::Context::new(scope);
@@ -52,6 +61,7 @@ impl Future for GlobalVariableFuture {
             if value.is_promise() {
                 let promise = v8::Local::<v8::Promise>::try_from(value).unwrap();
                 if promise.state() == v8::PromiseState::Pending {
+                    //cx.waker().wake_by_ref();
                     return Poll::Pending;
                 } else {
                     //let result = promise.result();
@@ -59,6 +69,7 @@ impl Future for GlobalVariableFuture {
                     return Poll::Ready(Ok(value));
                 }
             } else if value.is_undefined() {
+                cx.waker().wake_by_ref();
                 return Poll::Pending;
             } else {
                 let value = value.to_rust_string_lossy(scope);

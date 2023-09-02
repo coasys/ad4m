@@ -1,3 +1,4 @@
+use deno_core::v8::Global;
 use ::futures::Future;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -10,7 +11,6 @@ use once_cell::sync::Lazy;
 use std::env::current_dir;
 use std::error::Error;
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex as TokioMutex;
@@ -91,7 +91,8 @@ impl JsCoreHandle {
 
         let response = response_rx.await.unwrap();
 
-        info!("Got response: {:?}", response);
+        //info!("Got response: {:?}", response);
+        assert!(response.id == id);
 
         response
             .result
@@ -146,7 +147,7 @@ struct JsCoreResponse {
 
 #[derive(Clone)]
 pub struct JsCore {
-    worker: Arc<Mutex<MainWorker>>,
+    worker: Arc<TokioMutex<MainWorker>>,
 }
 
 pub struct ExternWrapper(ExternIO);
@@ -171,7 +172,7 @@ impl std::fmt::Display for ExternWrapper {
 impl JsCore {
     pub fn new() -> Self {
         JsCore {
-            worker: Arc::new(Mutex::new(MainWorker::from_options(
+            worker: Arc::new(TokioMutex::new(MainWorker::from_options(
                 main_module_url(),
                 PermissionsContainer::allow_all(),
                 main_worker_options(),
@@ -180,7 +181,7 @@ impl JsCore {
     }
 
     async fn load_module(&self, file_path: String) -> Result<(), AnyError> {
-        let mut worker = self.worker.lock().unwrap();
+        let mut worker = self.worker.lock().await;
         let url = resolve_url_or_path(&file_path, current_dir()?.as_path())?;
         let _module_id = worker.js_runtime.load_side_module(&url, None).await?;
         //TODO; this likely needs to be run (although might be handled by the import in the js code when import() is called)
@@ -192,7 +193,7 @@ impl JsCore {
         let mut worker = self
             .worker
             .lock()
-            .expect("init_engine(): couldn't lock worker");
+            .await;
         worker.bootstrap(&BootstrapOptions::default());
         worker
             .execute_main_module(&main_module_url())
@@ -205,11 +206,11 @@ impl JsCore {
         event_loop
     }
 
-    fn init_core(&self, config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
+    async fn init_core(&self, config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
         let mut worker = self
             .worker
             .lock()
-            .expect("init_core(): couldn't lock worker");
+            .await;
         let _init_core =
             worker.execute_script("js_core", format!("initCore({})", config.get_json()).into())?;
         Ok(GlobalVariableFuture::new(
@@ -218,15 +219,15 @@ impl JsCore {
         ))
     }
 
-    fn execute_async(
+    async fn execute_async(
         &self,
         name: String,
         script: String,
-    ) -> Result<GlobalVariableFuture, AnyError> {
+    ) -> Result<Global<deno_core::v8::Value>, AnyError> {
         let mut worker = self
             .worker
             .lock()
-            .expect("execute_async(): couldn't lock worker");
+            .await;
         let wrapped_script = format!(
             r#"
         globalThis.{} = undefined;
@@ -238,8 +239,8 @@ impl JsCore {
         "#,
             name, name, script
         );
-        let _execute_async = worker.execute_script("js_core", wrapped_script.into())?;
-        Ok(GlobalVariableFuture::new(self.worker.clone(), name))
+        let value = worker.execute_script("js_core", wrapped_script.into())?;
+        Ok(value)
     }
 
     fn generate_execution_slot(
@@ -252,7 +253,7 @@ impl JsCore {
                 let mut maybe_request = rx.lock().await;
                 //let maybe_request = rx.lock().as_mut().ok().map(|c| c.try_recv());
                 if let Ok(request) = maybe_request.try_recv()  {
-                    info!("Got request: {:?}", request);
+                    //info!("Got request: {:?}", request);
                     let script = request.script.clone();
                     let id = request.id.clone();
                     let js_core_cloned = js_core.clone();
@@ -265,28 +266,40 @@ impl JsCore {
                         info!("Spawn local driving: {}", id);
                         let local_variable_name = uuid_to_valid_variable_name(&id);
                         let script_fut =
-                            js_core_cloned.execute_async(local_variable_name, script);
+                            js_core_cloned.execute_async(local_variable_name.clone(), script).await;
                         info!("Script fut created: {}", id);
                         match script_fut {
-                            Ok(script_fut) => match script_fut.await {
-                                Ok(res) => {
-                                    info!("Script execution completed Succesfully: {}", id);
-                                    response_tx
-                                        .send(JsCoreResponse {
-                                            result: Ok(res),
-                                            id: id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                }
-                                Err(err) => {
-                                    error!("Error executing script: {:?}", err);
-                                    response_tx
-                                        .send(JsCoreResponse {
-                                            result: Err(err.to_string()),
-                                            id: id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                }
+                            Ok(value) => {
+                                let mut worker = js_core_cloned.worker.lock().await;
+
+                                let resolved_value = loop {
+                                    match worker.js_runtime.resolve_value(value.clone()).await {
+                                        Ok(value) => {
+                                            let new_value = worker.execute_script("global_var_future", local_variable_name.clone().into()).unwrap();
+                                                let scope = &mut deno_core::v8::HandleScope::new(worker.js_runtime.v8_isolate());
+                                                if !new_value.open(scope).is_promise() {
+                                                let context = deno_core::v8::Context::new(scope);
+                                                let scope = &mut deno_core::v8::ContextScope::new(scope, context);
+                                                let value = deno_core::v8::Local::new(scope, new_value.clone());
+                                                let value = value.to_rust_string_lossy(scope);
+                                                break value;
+                                            } else {
+                                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                                continue;
+                                            }
+                                        },
+                                        Err(err) => {
+                                            error!("Error resolving value: {:?}", err);
+                                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                        }
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                };
+                                info!("Resolved value");
+                                response_tx.send(JsCoreResponse {
+                                    result: Ok(resolved_value),
+                                    id: id,
+                                }).expect("couldn't send on channel");
                             },
                             Err(err) => {
                                 error!("Error executing script: {:?}", err);
@@ -298,9 +311,41 @@ impl JsCore {
                                     .expect("couldn't send on channel");
                             }
                         }
+                        // match script_fut {
+                        //     Ok(script_fut) => match script_fut.await {
+                        //         Ok(res) => {
+                        //             info!("Script execution completed Succesfully: {}", id);
+                        //             response_tx
+                        //                 .send(JsCoreResponse {
+                        //                     result: Ok(res),
+                        //                     id: id,
+                        //                 })
+                        //                 .expect("couldn't send on channel");
+                        //         }
+                        //         Err(err) => {
+                        //             error!("Error executing script: {:?}", err);
+                        //             response_tx
+                        //                 .send(JsCoreResponse {
+                        //                     result: Err(err.to_string()),
+                        //                     id: id,
+                        //                 })
+                        //                 .expect("couldn't send on channel");
+                        //         }
+                        //     },
+                        //     Err(err) => {
+                        //         error!("Error executing script: {:?}", err);
+                        //         response_tx
+                        //             .send(JsCoreResponse {
+                        //                 result: Err(err.to_string()),
+                        //                 id: id,
+                        //             })
+                        //             .expect("couldn't send on channel");
+                        //     }
+                        // }
                     });
                 }
                 tokio::task::yield_now().await;
+                //tokio::time::sleep(std::time::Duration::from_millis(10)).await
             }
             info!("generate_execution_slot loop completed");
         }
@@ -333,6 +378,7 @@ impl JsCore {
                 let tx_cloned = tx_inside.clone();
                 let init_core_future = js_core
                     .init_core(config)
+                    .await
                     .expect("couldn't spawn JS initCore()");
 
                 // Run the local task set.
@@ -394,6 +440,7 @@ impl JsCore {
                                 }
                             }
                             tokio::task::yield_now().await;
+                            //tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         }
                     };
 
@@ -421,17 +468,12 @@ impl JsCore {
                                                     "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
                                                     cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
                                                 );
-                                                match js_core.execute_async("hc_signal_fut".to_string(), script) {
-                                                    Ok(script_fut) => match script_fut.await {
-                                                        Ok(_res) => {
-                                                            info!(
-                                                                "Holochain Handle Callback Completed Succesfully",
-                                                            );
-                                                        }
-                                                        Err(err) => {
-                                                            error!("Error executing callback: {:?}", err);
-                                                        }
-                                                    },
+                                                match js_core.execute_async("hc_signal_fut".to_string(), script).await {
+                                                    Ok(_res) => {
+                                                        info!(
+                                                            "Holochain Handle Callback Completed Succesfully",
+                                                        );
+                                                    }
                                                     Err(err) => {
                                                         error!("Error executing callback: {:?}", err);
                                                     }
@@ -446,6 +488,7 @@ impl JsCore {
                                 }
                             }
                             tokio::task::yield_now().await;
+                            //tokio::time::sleep(std::time::Duration::from_millis(10)).await
                         }
                     };
 
