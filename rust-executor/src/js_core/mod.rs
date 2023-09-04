@@ -76,7 +76,7 @@ impl JsCoreHandle {
 
         let response = response_rx.await.unwrap();
 
-        info!("Got response: {:?}", response);
+        info!("Got response: {:?}", response.id);
 
         response
             .result
@@ -215,7 +215,7 @@ impl JsCore {
             }})();
             "#, script
         );
-        info!("Sending script: {}", wrapped_script);
+        //info!("Sending script: {}", wrapped_script);
         let execute_async = worker.execute_script("js_core", wrapped_script.into())?;
         Ok(SmartGlobalVariableFuture::new(self.worker.clone(), execute_async))
     }
@@ -245,10 +245,10 @@ impl JsCore {
                         //let local_variable_name = uuid_to_valid_variable_name(&id);
                         let script_fut =
                             js_core_cloned.execute_async_smart(script).await.unwrap();
-                        info!("Script fut created: {}", id);
+                        //info!("Script fut created: {}", id);
                         match script_fut.await {
                             Ok(res) => {
-                                info!("Script execution completed Succesfully: {}", id);
+                                //info!("Script execution completed Succesfully: {}", id);
                                 response_tx
                                     .send(JsCoreResponse {
                                         result: Ok(res),
@@ -332,29 +332,31 @@ impl JsCore {
                                 let tx_loader_cloned = tx_inside_loader.clone();
                                 let script = request.script;
                                 let id = request.id;
+                                let js_core_cloned = js_core.clone();
 
-                                match js_core.load_module(script).await {
-                                    Ok(()) => {
-                                        info!("Module loaded!");
-                                        tx_inside_loader
-                                            .send(JsCoreResponse {
-                                                result: Ok(String::from("")),
-                                                id: id,
-                                            })
-                                            .expect("couldn't send on channel");
+                                tokio::task::spawn_local(async move {
+                                    match js_core_cloned.load_module(script).await {
+                                        Ok(()) => {
+                                            info!("Module loaded!");
+                                            tx_loader_cloned
+                                                .send(JsCoreResponse {
+                                                    result: Ok(String::from("")),
+                                                    id: id,
+                                                })
+                                                .expect("couldn't send on channel");
+                                        }
+                                        Err(err) => {
+                                            error!("Error loading module: {:?}", err);
+                                            tx_loader_cloned
+                                                .send(JsCoreResponse {
+                                                    result: Err(err.to_string()),
+                                                    id,
+                                                })
+                                                .expect("couldn't send on channel");
+                                        }
                                     }
-                                    Err(err) => {
-                                        error!("Error loading module: {:?}", err);
-                                        tx_loader_cloned
-                                            .send(JsCoreResponse {
-                                                result: Err(err.to_string()),
-                                                id,
-                                            })
-                                            .expect("couldn't send on channel");
-                                    }
-                                }
+                                });
                             }
-                            //sleep(std::time::Duration::from_millis(10)).await;
                             tokio::task::yield_now().await;
                         }
                     };
@@ -362,6 +364,8 @@ impl JsCore {
                     let mut global_req_id = None;
 
                     let local_set = tokio::task::LocalSet::new();
+                    let holochain_local_set = tokio::task::LocalSet::new();
+                    let module_load_local_set = tokio::task::LocalSet::new();
 
                     let holochain_signal_receiver_fut = async {
                         loop {
@@ -375,12 +379,14 @@ impl JsCore {
                                             zome_name,
                                             signal: payload,
                                         } => {
-                                            // Handle the received signal here
-                                            let script = format!(
-                                                "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
-                                                cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
-                                            );
-                                            match js_core.execute_async_smart(script).await {
+                                            let js_core_cloned = js_core.clone();
+                                            tokio::task::spawn_local(async move {
+                                                // Handle the received signal here
+                                                let script = format!(
+                                                    "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
+                                                    cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
+                                                );
+                                                match js_core_cloned.execute_async_smart(script).await {
                                                     Ok(_res) => {
                                                         info!(
                                                             "Holochain Handle Callback Completed Succesfully",
@@ -390,7 +396,8 @@ impl JsCore {
                                                         error!("Error executing callback: {:?}", err);
                                                     }
                                                 }
-                                            }
+                                            });
+                                        },
                                         Signal::System(_) => {
                                             // Handle the received signal here
                                             info!("Received system signal");
@@ -398,7 +405,6 @@ impl JsCore {
                                     }
                                 }
                             }
-                            //sleep(std::time::Duration::from_millis(10)).await;
                             tokio::task::yield_now().await;
                         }
                     };
@@ -429,11 +435,11 @@ impl JsCore {
                         _drive_local_set = local_set.run_until(Self::generate_execution_slot(rx_inside.clone(), tx_inside.clone(), js_core.clone())) => {
                             info!("AD4M drive local set completed");
                         }
-                        _module_load = module_load_fut => {
+                        _module_load = module_load_local_set.run_until(module_load_fut) => {
                             info!("AD4M module load completed");
                             //break;
                         }
-                        _holochain_signal_receivers = holochain_signal_receiver_fut => {
+                        _holochain_signal_receivers = holochain_local_set.run_until(holochain_signal_receiver_fut) => {
                             info!("AD4M holochain signal receiver completed");
                         }
                     }
