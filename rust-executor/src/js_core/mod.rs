@@ -5,12 +5,10 @@ use deno_core::resolve_url_or_path;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
-use log::debug;
 use once_cell::sync::Lazy;
+use tokio::time::sleep;
 use std::env::current_dir;
-use std::error::Error;
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex as TokioMutex;
@@ -19,9 +17,8 @@ use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     oneshot
 };
-use tokio::task::LocalSet;
 use tracing::{error, info};
-use lazy_static::lazy_static;
+use options::{main_module_url, main_worker_options};
 
 mod futures;
 mod jwt_extension;
@@ -31,24 +28,12 @@ mod string_module_loader;
 mod utils_extension;
 mod wallet_extension;
 
-use self::futures::{EventLoopFuture, GlobalVariableFuture};
-use crate::holochain_service::maybe_get_holochain_service;
+use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
+use crate::holochain_service::maybe_get_holochain_service_async;
 use crate::Ad4mConfig;
-use options::{main_module_url, main_worker_options};
 
 static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
     Lazy::new(|| Arc::new(TokioMutex::new(None)));
-
-fn uuid_to_valid_variable_name(uuid: &str) -> String {
-    let valid_chars: String = uuid.chars().filter(|c| c.is_alphabetic()).collect();
-    valid_chars
-}
-
-use std::collections::HashMap;
-
-lazy_static! {
-    static ref RESPONSES: TokioMutex<HashMap<String, JsCoreResponse>> = TokioMutex::new(HashMap::new());
-}
 
 pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,
@@ -91,7 +76,7 @@ impl JsCoreHandle {
 
         let response = response_rx.await.unwrap();
 
-        //info!("Got response: {:?}", response);
+        info!("Got response: {:?}", response);
 
         response
             .result
@@ -146,7 +131,7 @@ struct JsCoreResponse {
 
 #[derive(Clone)]
 pub struct JsCore {
-    worker: Arc<Mutex<MainWorker>>,
+    worker: Arc<TokioMutex<MainWorker>>,
 }
 
 pub struct ExternWrapper(ExternIO);
@@ -171,7 +156,7 @@ impl std::fmt::Display for ExternWrapper {
 impl JsCore {
     pub fn new() -> Self {
         JsCore {
-            worker: Arc::new(Mutex::new(MainWorker::from_options(
+            worker: Arc::new(TokioMutex::new(MainWorker::from_options(
                 main_module_url(),
                 PermissionsContainer::allow_all(),
                 main_worker_options(),
@@ -180,7 +165,7 @@ impl JsCore {
     }
 
     async fn load_module(&self, file_path: String) -> Result<(), AnyError> {
-        let mut worker = self.worker.lock().unwrap();
+        let mut worker = self.worker.lock().await;
         let url = resolve_url_or_path(&file_path, current_dir()?.as_path())?;
         let _module_id = worker.js_runtime.load_side_module(&url, None).await?;
         //TODO; this likely needs to be run (although might be handled by the import in the js code when import() is called)
@@ -192,7 +177,7 @@ impl JsCore {
         let mut worker = self
             .worker
             .lock()
-            .expect("init_engine(): couldn't lock worker");
+            .await;
         worker.bootstrap(&BootstrapOptions::default());
         worker
             .execute_main_module(&main_module_url())
@@ -205,39 +190,34 @@ impl JsCore {
         event_loop
     }
 
-    fn init_core(&self, config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
-        let mut worker = self
-            .worker
-            .lock()
-            .expect("init_core(): couldn't lock worker");
-        let _init_core =
-            worker.execute_script("js_core", format!("initCore({})", config.get_json()).into())?;
-        Ok(GlobalVariableFuture::new(
-            self.worker.clone(),
-            "core".to_string(),
-        ))
-    }
+    // async fn init_core(&self, config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
+    //     let mut worker = self
+    //         .worker
+    //         .lock()
+    //         .await;
+    //     let _init_core =
+    //         worker.execute_script("js_core", format!("initCore({})", config.get_json()).into())?;
+    //     Ok(GlobalVariableFuture::new(
+    //         self.worker.clone(),
+    //         "core".to_string(),
+    //     ))
+    // }
 
-    fn execute_async(
+    async fn execute_async_smart(
         &self,
-        name: String,
-        script: String,
-    ) -> Result<GlobalVariableFuture, AnyError> {
-        let mut worker = self
-            .worker
-            .lock()
-            .expect("execute_async(): couldn't lock worker");
+        script: String
+    ) -> Result<SmartGlobalVariableFuture, AnyError> {
+        let mut worker = self.worker.lock().await;
         let wrapped_script = format!(
             r#"
-        globalThis.{} = undefined;
-        (async () => {{
-            globalThis.{} = ({});
-        }})();
-        "#,
-            name, name, script
+            (async () => {{
+                return ({});
+            }})();
+            "#, script
         );
-        let _execute_async = worker.execute_script("js_core", wrapped_script.into())?;
-        Ok(GlobalVariableFuture::new(self.worker.clone(), name))
+        info!("Sending script: {}", wrapped_script);
+        let execute_async = worker.execute_script("js_core", wrapped_script.into())?;
+        Ok(SmartGlobalVariableFuture::new(self.worker.clone(), execute_async))
     }
 
     fn generate_execution_slot(
@@ -247,9 +227,10 @@ impl JsCore {
     ) -> impl Future {
         async move {
             loop {
+                //info!("Execution slot loop running");
                 let mut maybe_request = rx.lock().await;
                 //let maybe_request = rx.lock().as_mut().ok().map(|c| c.try_recv());
-                if let Ok(request) = maybe_request.try_recv()  {
+                if let Some(request) = maybe_request.recv().await  {
                     //info!("Got request: {:?}", request);
                     let script = request.script.clone();
                     let id = request.id.clone();
@@ -260,32 +241,21 @@ impl JsCore {
                     //global_req_id = Some(id.clone());
 
                     tokio::task::spawn_local(async move {
-                        //info!("Spawn local driving: {}", id);
-                        let local_variable_name = uuid_to_valid_variable_name(&id);
+                        info!("Spawn local driving: {}", id);
+                        //let local_variable_name = uuid_to_valid_variable_name(&id);
                         let script_fut =
-                            js_core_cloned.execute_async(local_variable_name, script);
-                        //info!("Script fut created: {}", id);
-                        match script_fut {
-                            Ok(script_fut) => match script_fut.await {
-                                Ok(res) => {
-                                    //info!("Script execution completed Succesfully: {}", id);
-                                    response_tx
-                                        .send(JsCoreResponse {
-                                            result: Ok(res),
-                                            id: id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                }
-                                Err(err) => {
-                                    error!("Error executing script: {:?}", err);
-                                    response_tx
-                                        .send(JsCoreResponse {
-                                            result: Err(err.to_string()),
-                                            id: id,
-                                        })
-                                        .expect("couldn't send on channel");
-                                }
-                            },
+                            js_core_cloned.execute_async_smart(script).await.unwrap();
+                        info!("Script fut created: {}", id);
+                        match script_fut.await {
+                            Ok(res) => {
+                                info!("Script execution completed Succesfully: {}", id);
+                                response_tx
+                                    .send(JsCoreResponse {
+                                        result: Ok(res),
+                                        id: id,
+                                    })
+                                    .expect("couldn't send on channel");
+                            }
                             Err(err) => {
                                 error!("Error executing script: {:?}", err);
                                 response_tx
@@ -298,9 +268,9 @@ impl JsCore {
                         }
                     });
                 }
+                //sleep(std::time::Duration::from_millis(10)).await;
                 tokio::task::yield_now().await;
             }
-            info!("generate_execution_slot loop completed");
         }
     }
 
@@ -323,49 +293,42 @@ impl JsCore {
 
             let js_core = JsCore::new();
 
-            rt.block_on(js_core.init_engine());
-            info!("AD4M JS engine init completed");
-
             rt.block_on(async {
-                let local = LocalSet::new();
-                let tx_cloned = tx_inside.clone();
-                let init_core_future = js_core
-                    .init_core(config)
-                    .expect("couldn't spawn JS initCore()");
+                let result = js_core.init_engine().await;
+                info!("AD4M JS engine init completed, with result: {:?}", result);
 
-                // Run the local task set.
-                let run_until = local.run_until(async move {
-                    match init_core_future.await {
-                        Ok(_) => {}
-                        Err(err) => error!("AD4M coreInit() failed with error: {}", err),
-                    };
-                    tx_cloned
-                        .send(JsCoreResponse {
-                            result: Ok(String::from("initialized")),
-                            id: String::from("initialized"),
-                        })
-                        .expect("couldn't send on channel");
-                });
-                tokio::select! {
-                    _init_core_result = run_until => {
-                        info!("AD4M initCore() finished");
+                let init_core_future = js_core
+                    .execute_async_smart(format!("initCore({})", config.get_json()).into());
+                let result = init_core_future.await.unwrap().await;
+
+                match result {
+                    Ok(res) => {
+                        info!("AD4M coreInit() completed Succesfully: {}", res);
+                        tx_inside
+                            .send(JsCoreResponse {
+                                result: Ok(String::from("initialized")),
+                                id: String::from("initialized"),
+                            })
+                            .expect("couldn't send on channel");
                     }
-                    event_loop_result = js_core.event_loop() => {
-                        match event_loop_result {
-                            Ok(_) => info!("AD4M event loop finished"),
-                            Err(err) => error!("AD4M event loop closed with error: {}", err)
-                        }
+                    Err(err) => {
+                        error!("Error executing coreInit(): {:?}", err);
+                        tx_inside
+                            .send(JsCoreResponse {
+                                result: Err(format!("Error executing coreInit(): {:?}", err)),
+                                id: String::from("initialized"),
+                            })
+                            .expect("couldn't send on channel");
                     }
                 }
-
-                info!("AD4M init complete, starting await loop waiting for requests");
 
                 loop {
                     info!("Main loop running");
                     //Listener future for loading JS modules into runtime
                     let module_load_fut = async {
                         loop {
-                            if let Ok(request) = rx_inside_loader.try_recv() {
+                            //info!("Module load loop running");
+                            if let Some(request) = rx_inside_loader.recv().await {
                                 let tx_loader_cloned = tx_inside_loader.clone();
                                 let script = request.script;
                                 let id = request.id;
@@ -391,6 +354,7 @@ impl JsCore {
                                     }
                                 }
                             }
+                            //sleep(std::time::Duration::from_millis(10)).await;
                             tokio::task::yield_now().await;
                         }
                     };
@@ -399,50 +363,42 @@ impl JsCore {
 
                     let local_set = tokio::task::LocalSet::new();
 
-                    //Listener future for receiving script execution calls
-                    //let receive_fut_1 = Self::generate_execution_slot(rx_inside.clone(), tx_inside.clone(), js_core.clone());
-
                     let holochain_signal_receiver_fut = async {
                         loop {
-                            if let Some(holochain_service) = maybe_get_holochain_service() {
-                                let stream_receiver = holochain_service.stream_receiver.try_lock();
-                                if let Ok(mut stream_receiver) = stream_receiver {
-                                    if let Ok(signal) = stream_receiver.try_recv() {
-                                        match signal.clone() {
-                                            Signal::App {
-                                                cell_id,
-                                                zome_name,
-                                                signal: payload,
-                                            } => {
-                                                // Handle the received signal here
-                                                let script = format!(
-                                                    "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
-                                                    cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
-                                                );
-                                                match js_core.execute_async("hc_signal_fut".to_string(), script) {
-                                                    Ok(script_fut) => match script_fut.await {
-                                                        Ok(_res) => {
-                                                            info!(
-                                                                "Holochain Handle Callback Completed Succesfully",
-                                                            );
-                                                        }
-                                                        Err(err) => {
-                                                            error!("Error executing callback: {:?}", err);
-                                                        }
-                                                    },
+                            //info!("Holochain service loop");
+                            if let Some(holochain_service) = maybe_get_holochain_service_async().await {
+                                let mut stream_receiver = holochain_service.stream_receiver.lock().await;
+                                if let Some(signal) = stream_receiver.recv().await {
+                                    match signal.clone() {
+                                        Signal::App {
+                                            cell_id,
+                                            zome_name,
+                                            signal: payload,
+                                        } => {
+                                            // Handle the received signal here
+                                            let script = format!(
+                                                "await core.holochainService.handleCallback({{cell_id: [{:?}, {:?}], zome_name: '{}', signal: {}}})",
+                                                cell_id.dna_hash().get_raw_39().to_vec(), cell_id.agent_pubkey().get_raw_39().to_vec(), zome_name, ExternWrapper(payload.into_inner())
+                                            );
+                                            match js_core.execute_async_smart(script).await {
+                                                    Ok(_res) => {
+                                                        info!(
+                                                            "Holochain Handle Callback Completed Succesfully",
+                                                        );
+                                                    }
                                                     Err(err) => {
                                                         error!("Error executing callback: {:?}", err);
                                                     }
                                                 }
                                             }
-                                            Signal::System(_) => {
-                                                // Handle the received signal here
-                                                info!("Received system signal");
-                                            }
+                                        Signal::System(_) => {
+                                            // Handle the received signal here
+                                            info!("Received system signal");
                                         }
                                     }
                                 }
                             }
+                            //sleep(std::time::Duration::from_millis(10)).await;
                             tokio::task::yield_now().await;
                         }
                     };

@@ -231,6 +231,11 @@ pub fn maybe_get_holochain_service() -> Option<HolochainServiceInterface> {
     }
 }
 
+pub async fn maybe_get_holochain_service_async() -> Option<HolochainServiceInterface> {
+    let lock = HOLOCHAIN_SERVICE.read().await;
+    lock.clone()
+}
+
 pub async fn set_holochain_service(service: HolochainServiceInterface) {
     let mut lock = HOLOCHAIN_SERVICE.write().await;
     *lock = Some(service);
