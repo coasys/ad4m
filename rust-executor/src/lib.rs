@@ -49,7 +49,7 @@ pub async fn run(mut config: Ad4mConfig) {
         });
     }
 
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -60,6 +60,7 @@ pub async fn run(mut config: Ad4mConfig) {
             config.app_data_path.expect("Did not get app data path")
         )).unwrap();
     });
+    handle.join().unwrap();
 }
 
 /// Runs the GraphQL server and the deno core runtime
@@ -99,4 +100,6 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
             config.app_data_path.expect("Did not get app data path")
         )).unwrap();
     });
+
+    //TODO; we need someway to know that the graphql server is running before we allow this function to return
 }
