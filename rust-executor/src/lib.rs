@@ -40,39 +40,26 @@ pub async fn run(mut config: Ad4mConfig) {
     info!("Starting GraphQL...");
 
     if config.run_dapp_server.unwrap() {
-        tokio::task::spawn_blocking(move || {
-            let result = serve_dapp(4200);
-            tokio::runtime::Handle::current().block_on(async {
-                match result.await {
-                    Ok(_) => {
-                        info!("GraphQL server stopped.");
-                        std::process::exit(0);
-                    }
-                    Err(err) => {
-                        error!("GraphQL server stopped with error: {}", err);
-                        std::process::exit(1);
-                    }
-                }
-            });
+        std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(serve_dapp(8080)).unwrap();
         });
     }
 
-    match graphql::start_server(
-        js_core_handle,
-        config.gql_port.expect("Did not get gql port"),
-        config.app_data_path.expect("Did not get app data path")
-    )
-    .await
-    {
-        Ok(_) => {
-            info!("GraphQL server stopped.");
-            std::process::exit(0);
-        }
-        Err(err) => {
-            error!("GraphQL server stopped with error: {}", err);
-            std::process::exit(1);
-        }
-    };
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(graphql::start_server(
+            js_core_handle,
+            config.gql_port.expect("Did not get gql port"),
+            config.app_data_path.expect("Did not get app data path")
+        )).unwrap();
+    });
 }
 
 /// Runs the GraphQL server and the deno core runtime
@@ -92,40 +79,24 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
     info!("Starting GraphQL...");
 
     if config.run_dapp_server.unwrap() {
-        tokio::task::spawn_blocking(move || {
-            let result = serve_dapp(4200);
-            tokio::runtime::Handle::current().block_on(async {
-                match result.await {
-                    Ok(_) => {
-                        info!("GraphQL server stopped.");
-                        std::process::exit(0);
-                    }
-                    Err(err) => {
-                        error!("GraphQL server stopped with error: {}", err);
-                        std::process::exit(1);
-                    }
-                }
-            });
+        std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(serve_dapp(8080)).unwrap();
         });
-    }
+    };
 
-    tokio::task::spawn_blocking(move || {
-        let result = graphql::start_server(
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(graphql::start_server(
             js_core_handle,
             config.gql_port.expect("Did not get gql port"),
             config.app_data_path.expect("Did not get app data path")
-        );
-        tokio::runtime::Handle::current().block_on(async {
-            match result.await {
-                Ok(_) => {
-                    info!("GraphQL server stopped.");
-                    std::process::exit(0);
-                }
-                Err(err) => {
-                    error!("GraphQL server stopped with error: {}", err);
-                    std::process::exit(1);
-                }
-            }
-        });
+        )).unwrap();
     });
 }
