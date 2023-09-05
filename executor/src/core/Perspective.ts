@@ -589,6 +589,7 @@ export default class Perspective {
                 await this.#db.removeLink(this.uuid!, link);
             }))
         }
+        this.#prologNeedsRebuild = true;
     }
 
     private async getLinksLocal(query: LinkQuery): Promise<LinkExpression[]> {
