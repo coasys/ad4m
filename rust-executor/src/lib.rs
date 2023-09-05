@@ -14,7 +14,7 @@ mod pubsub;
 mod dapp_server;
 
 use std::env;
-use tracing::{info, error};
+use tracing::info;
 
 use js_core::JsCore;
 

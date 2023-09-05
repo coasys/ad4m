@@ -28,8 +28,8 @@ pub(crate) mod holochain_service_extension;
 pub(crate) mod interface;
 
 pub(crate) use interface::{
-    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
-    HolochainServiceRequest, HolochainServiceResponse, maybe_get_holochain_service_async
+    get_holochain_service, HolochainServiceInterface,
+    HolochainServiceRequest, HolochainServiceResponse, maybe_get_holochain_service
 };
 
 use self::interface::set_holochain_service;

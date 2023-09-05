@@ -6,7 +6,6 @@ use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
 use once_cell::sync::Lazy;
-use tokio::time::sleep;
 use std::env::current_dir;
 use std::sync::Arc;
 use tokio::runtime::Builder;
@@ -29,7 +28,7 @@ mod utils_extension;
 mod wallet_extension;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
-use crate::holochain_service::maybe_get_holochain_service_async;
+use crate::holochain_service::maybe_get_holochain_service;
 use crate::Ad4mConfig;
 
 static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
@@ -37,7 +36,6 @@ static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
 
 pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,
-    rx_module_load: Receiver<JsCoreResponse>,
     tx: UnboundedSender<JsCoreRequest>,
     tx_module_load: UnboundedSender<JsCoreRequest>,
     broadcast_tx: Sender<JsCoreResponse>,
@@ -48,7 +46,6 @@ impl Clone for JsCoreHandle {
     fn clone(&self) -> Self {
         JsCoreHandle {
             rx: self.broadcast_tx.subscribe(),
-            rx_module_load: self.broadcast_loader_tx.subscribe(),
             tx: self.tx.clone(),
             tx_module_load: self.tx_module_load.clone(),
             broadcast_tx: self.broadcast_tx.clone(),
@@ -74,9 +71,9 @@ impl JsCoreHandle {
             })
             .expect("couldn't send on channel... it is likely that the main worker thread has crashed...");
 
-        let response = response_rx.await.unwrap();
+        let response = response_rx.await?;
 
-        info!("Got response: {:?}", response.id);
+        //info!("Got response: {:?}", response.id);
 
         response
             .result
@@ -94,23 +91,9 @@ impl JsCoreHandle {
             })
             .expect("couldn't send on channel... it is likely that the main worker thread has crashed...");
 
-        let mut response = None;
-        while response.is_none() {
-            match self.rx_module_load.recv().await {
-                Ok(r) => {
-                    if r.id == id {
-                        response = Some(r);
-                    }
-                }
-                Err(err) => {
-                    error!("Error receiving on channel");
-                    return Err(anyhow!(err));
-                }
-            }
-        }
+        let response = response_rx.await?;
 
         response
-            .expect("none case handle above")
             .result
             .map_err(|err| anyhow!(err))
     }
@@ -190,19 +173,6 @@ impl JsCore {
         event_loop
     }
 
-    // async fn init_core(&self, config: Ad4mConfig) -> Result<GlobalVariableFuture, AnyError> {
-    //     let mut worker = self
-    //         .worker
-    //         .lock()
-    //         .await;
-    //     let _init_core =
-    //         worker.execute_script("js_core", format!("initCore({})", config.get_json()).into())?;
-    //     Ok(GlobalVariableFuture::new(
-    //         self.worker.clone(),
-    //         "core".to_string(),
-    //     ))
-    // }
-
     async fn execute_async_smart(
         &self,
         script: String
@@ -222,26 +192,23 @@ impl JsCore {
 
     fn generate_execution_slot(
         rx: Arc<TokioMutex<UnboundedReceiver<JsCoreRequest>>>,
-        tx: Sender<JsCoreResponse>,
         js_core: JsCore,
     ) -> impl Future {
         async move {
             loop {
                 //info!("Execution slot loop running");
                 let mut maybe_request = rx.lock().await;
-                //let maybe_request = rx.lock().as_mut().ok().map(|c| c.try_recv());
                 if let Some(request) = maybe_request.recv().await  {
                     //info!("Got request: {:?}", request);
                     let script = request.script.clone();
                     let id = request.id.clone();
                     let js_core_cloned = js_core.clone();
                     let response_tx = request.response_tx;
-                    let tx_cloned = tx.clone();
 
                     //global_req_id = Some(id.clone());
 
                     tokio::task::spawn_local(async move {
-                        info!("Spawn local driving: {}", id);
+                        // info!("Spawn local driving: {}", id);
                         //let local_variable_name = uuid_to_valid_variable_name(&id);
                         let script_fut =
                             js_core_cloned.execute_async_smart(script).await.unwrap();
@@ -276,10 +243,10 @@ impl JsCore {
 
     pub async fn start(config: Ad4mConfig) -> JsCoreHandle {
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
-        let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
+        let (tx_outside, rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
         let rx_inside = Arc::new(TokioMutex::new(rx_inside));
 
-        let (tx_inside_loader, rx_outside_loader) = broadcast::channel::<JsCoreResponse>(50);
+        let (tx_inside_loader, _rx_outside_loader) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside_loader, mut rx_inside_loader) = mpsc::unbounded_channel::<JsCoreRequest>();
 
         let tx_inside_clone = tx_inside.clone();
@@ -361,7 +328,7 @@ impl JsCore {
                         }
                     };
 
-                    let mut global_req_id = None;
+                    let global_req_id = None;
 
                     let local_set = tokio::task::LocalSet::new();
                     let holochain_local_set = tokio::task::LocalSet::new();
@@ -370,7 +337,7 @@ impl JsCore {
                     let holochain_signal_receiver_fut = async {
                         loop {
                             //info!("Holochain service loop");
-                            if let Some(holochain_service) = maybe_get_holochain_service_async().await {
+                            if let Some(holochain_service) = maybe_get_holochain_service().await {
                                 let mut stream_receiver = holochain_service.stream_receiver.lock().await;
                                 if let Some(signal) = stream_receiver.recv().await {
                                     match signal.clone() {
@@ -432,7 +399,7 @@ impl JsCore {
                                 }
                             }
                         }
-                        _drive_local_set = local_set.run_until(Self::generate_execution_slot(rx_inside.clone(), tx_inside.clone(), js_core.clone())) => {
+                        _drive_local_set = local_set.run_until(Self::generate_execution_slot(rx_inside.clone(), js_core.clone())) => {
                             info!("AD4M drive local set completed");
                         }
                         _module_load = module_load_local_set.run_until(module_load_fut) => {
@@ -450,7 +417,6 @@ impl JsCore {
         let handle = JsCoreHandle {
             rx: rx_outside,
             tx: tx_outside,
-            rx_module_load: rx_outside_loader,
             tx_module_load: tx_outside_loader,
             broadcast_tx: tx_inside_clone,
             broadcast_loader_tx: tx_inside_loader_clone,

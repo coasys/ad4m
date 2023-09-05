@@ -5,7 +5,6 @@ mod subscription_resolvers;
 mod utils;
 
 use graphql_types::RequestContext;
-use hyper::body::Bytes;
 use mutation_resolvers::*;
 use query_resolvers::*;
 use subscription_resolvers::*;

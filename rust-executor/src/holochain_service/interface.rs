@@ -223,15 +223,7 @@ pub async fn get_holochain_service() -> HolochainServiceInterface {
     lock.clone().expect("Holochain Conductor not started")
 }
 
-pub fn maybe_get_holochain_service() -> Option<HolochainServiceInterface> {
-    let lock = HOLOCHAIN_SERVICE.try_read();
-    match lock {
-        Ok(guard) => guard.clone(),
-        Err(_) => None,
-    }
-}
-
-pub async fn maybe_get_holochain_service_async() -> Option<HolochainServiceInterface> {
+pub async fn maybe_get_holochain_service() -> Option<HolochainServiceInterface> {
     let lock = HOLOCHAIN_SERVICE.read().await;
     lock.clone()
 }
