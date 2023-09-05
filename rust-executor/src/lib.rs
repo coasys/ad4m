@@ -42,7 +42,7 @@ pub async fn run(mut config: Ad4mConfig) {
 
     if config.run_dapp_server.unwrap() {
         std::thread::spawn(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
+            let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .unwrap();
@@ -51,7 +51,7 @@ pub async fn run(mut config: Ad4mConfig) {
     }
 
     let handle = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
@@ -82,7 +82,7 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
 
     if config.run_dapp_server.unwrap() {
         std::thread::spawn(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
+            let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .unwrap();
@@ -91,7 +91,7 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
     };
 
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
