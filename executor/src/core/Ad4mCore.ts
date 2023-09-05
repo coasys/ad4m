@@ -300,7 +300,7 @@ export default class Ad4mCore {
         }
 
         console.log("Core.installNeighbourhood(): Creating perspective", url, neighbourhood, state);
-        return this.#perspectivesController!.add("", url, neighbourhood, true, state);
+        return await this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {

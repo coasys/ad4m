@@ -112,13 +112,15 @@ export class LinkAdapter implements LinkSyncAdapter {
         });
       }
 
-      function checkSyncState(callback: SyncStateChangeObserver) {
+      async function checkSyncState(callback: SyncStateChangeObserver) {
         if (sameRevisions.length > 0 || differentRevisions.length > 0) {
           if (sameRevisions.length <= differentRevisions.length) {
-            callback(PerspectiveState.LinkLanguageInstalledButNotSynced);
+            await callback(PerspectiveState.LinkLanguageInstalledButNotSynced);
           } else {
-            callback(PerspectiveState.Synced);
+            await callback(PerspectiveState.Synced);
           };
+        } else if (differentRevisions == 0) {
+          await callback(PerspectiveState.Synced);
         }
       }
 
@@ -126,7 +128,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       generateRevisionStates(this.myCurrentRevision);
 
       //@ts-ignore
-      checkSyncState(this.syncStateChangeCallback);
+      await checkSyncState(this.syncStateChangeCallback);
 
       for (const hash of Array.from(revisions)) {
         if(!hash) continue
@@ -143,7 +145,7 @@ export class LinkAdapter implements LinkSyncAdapter {
             //@ts-ignore
             generateRevisionStates(this.myCurrentRevision);
             //@ts-ignore
-            checkSyncState(this.syncStateChangeCallback);
+            await checkSyncState(this.syncStateChangeCallback);
           }
         }
       }

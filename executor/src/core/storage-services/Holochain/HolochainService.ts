@@ -70,7 +70,8 @@ export default class HolochainService {
     }
 
     async handleCallback(signal: EncodedAppSignal) {
-        //console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
+        //console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
+        //console.dir(signal);
         //@ts-ignore
         let payload = decode(signal.signal);
         var TypedArray = Object.getPrototypeOf(Uint8Array);
