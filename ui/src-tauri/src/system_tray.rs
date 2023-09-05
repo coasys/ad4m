@@ -1,6 +1,5 @@
 use crate::config::executor_port_path;
 use crate::create_main_window;
-use crate::util::find_and_kill_processes;
 use crate::Payload;
 use std::env;
 use std::fs::remove_file;
