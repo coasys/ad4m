@@ -285,7 +285,7 @@ impl JsCore {
         let tx_inside_clone = tx_inside.clone();
         let tx_inside_loader_clone = tx_inside_loader.clone();
         std::thread::spawn(move || {
-            let rt = Builder::new_multi_thread()
+            let rt = Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to create Tokio runtime");
