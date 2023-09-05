@@ -38,8 +38,7 @@ pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,
     tx: UnboundedSender<JsCoreRequest>,
     tx_module_load: UnboundedSender<JsCoreRequest>,
-    broadcast_tx: Sender<JsCoreResponse>,
-    broadcast_loader_tx: Sender<JsCoreResponse>,
+    broadcast_tx: Sender<JsCoreResponse>
 }
 
 impl Clone for JsCoreHandle {
@@ -48,8 +47,7 @@ impl Clone for JsCoreHandle {
             rx: self.broadcast_tx.subscribe(),
             tx: self.tx.clone(),
             tx_module_load: self.tx_module_load.clone(),
-            broadcast_tx: self.broadcast_tx.clone(),
-            broadcast_loader_tx: self.broadcast_loader_tx.clone(),
+            broadcast_tx: self.broadcast_tx.clone()
         }
     }
 }
@@ -246,11 +244,9 @@ impl JsCore {
         let (tx_outside, rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
         let rx_inside = Arc::new(TokioMutex::new(rx_inside));
 
-        let (tx_inside_loader, _rx_outside_loader) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside_loader, mut rx_inside_loader) = mpsc::unbounded_channel::<JsCoreRequest>();
 
         let tx_inside_clone = tx_inside.clone();
-        let tx_inside_loader_clone = tx_inside_loader.clone();
         std::thread::spawn(move || {
             let rt = Builder::new_current_thread()
                 .enable_all()
@@ -296,16 +292,16 @@ impl JsCore {
                         loop {
                             //info!("Module load loop running");
                             if let Some(request) = rx_inside_loader.recv().await {
-                                let tx_loader_cloned = tx_inside_loader.clone();
                                 let script = request.script;
                                 let id = request.id;
                                 let js_core_cloned = js_core.clone();
+                                let ts_response = request.response_tx;
 
                                 tokio::task::spawn_local(async move {
                                     match js_core_cloned.load_module(script).await {
                                         Ok(()) => {
                                             info!("Module loaded!");
-                                            tx_loader_cloned
+                                            ts_response
                                                 .send(JsCoreResponse {
                                                     result: Ok(String::from("")),
                                                     id: id,
@@ -314,7 +310,7 @@ impl JsCore {
                                         }
                                         Err(err) => {
                                             error!("Error loading module: {:?}", err);
-                                            tx_loader_cloned
+                                            ts_response
                                                 .send(JsCoreResponse {
                                                     result: Err(err.to_string()),
                                                     id,
@@ -418,8 +414,7 @@ impl JsCore {
             rx: rx_outside,
             tx: tx_outside,
             tx_module_load: tx_outside_loader,
-            broadcast_tx: tx_inside_clone,
-            broadcast_loader_tx: tx_inside_loader_clone,
+            broadcast_tx: tx_inside_clone
         };
 
         //Set the JsCoreHandle to a global object so we can use it inside of deno op calls
