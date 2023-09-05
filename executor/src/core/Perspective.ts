@@ -845,6 +845,8 @@ export default class Perspective {
         lines.push(":- discontiguous(p3_class_color/2).")
         lines.push(":- discontiguous(p3_instance_color/3).")
 
+        lines.push(":- use_module(library(lists)).");
+
         let seenSubjectClasses = new Set()
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
