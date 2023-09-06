@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-connect",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Lib for handling everything needed to setup a connection to a local or remote ad4m-executor",
   "license": "CAL-1.0",
   "main": "dist/web.js",
