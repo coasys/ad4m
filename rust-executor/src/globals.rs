@@ -14,7 +14,7 @@ pub struct OldestVersion {
 lazy_static! {
     /// The oldest version of the AD4M protocol that this executor supports
     pub static ref OLDEST_VERSION: OldestVersion = OldestVersion {
-        version: String::from("0.4.0"),
+        version: String::from("0.6.0"),
         clear_state: true,
     };
 }
