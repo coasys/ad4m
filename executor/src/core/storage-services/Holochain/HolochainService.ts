@@ -2,7 +2,6 @@ import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallApp
 import path from 'path'
 import fs from 'fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
-import { unpackDna, packDna } from "./HcExecution"
 import type { Dna } from '@perspect3vism/ad4m'
 import { AsyncQueue } from './Queue'
 import { decode, encode } from "@msgpack/msgpack"
@@ -11,13 +10,12 @@ import { HolochainUnlockConfiguration } from '../../Ad4mCore'
 import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
 
-export const bootstrapUrl = "https://bootstrap.holo.host"
-export const kitsuneProxy = "kitsune-proxy://f3gH2VMkJ4qvZJOXx0ccL_Zo5n-s_CnBjSzAsEHHDCA/kitsune-quic/h/137.184.142.208/p/5788/--"
-
 export interface HolochainConfiguration {
     conductorPath?: string, 
     dataPath: string, 
     resourcePath: string
+    hcProxyUrl: string,
+    hcBootstrapUrl: string,
     adminPort?: number;
     appPort?: number;
     useBootstrap?: boolean,
@@ -72,7 +70,8 @@ export default class HolochainService {
     }
 
     async handleCallback(signal: EncodedAppSignal) {
-        //console.debug(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
+        //console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
+        //console.dir(signal);
         //@ts-ignore
         let payload = decode(signal.signal);
         var TypedArray = Object.getPrototypeOf(Uint8Array);
@@ -116,9 +115,9 @@ export default class HolochainService {
             useProxy: config.useProxy!,
             useLocalProxy: config.useLocalProxy!,
             useMdns: config.useMdns!,
-            proxyUrl: kitsuneProxy,
-            bootstrapUrl,
-            adminPort: config.adminPort!
+            proxyUrl: config.hcProxyUrl,
+            bootstrapUrl: config.hcBootstrapUrl,
+            appPort: config.appPort!
         } as ConductorConfig);
 
         console.log("Holochain run complete");
@@ -132,8 +131,8 @@ export default class HolochainService {
         await HOLOCHAIN_SERVICE.shutdown();
     }
 
-    unpackDna(dnaPath: string): string {
-        let result = unpackDna(`${this.#resourcePath}/hc`, dnaPath);
+    async unpackDna(dnaPath: string): Promise<String> {
+        let result = await HOLOCHAIN_SERVICE.unPackDna(dnaPath);
         let splitResult = result.split("Unpacked to directory ");
         if (splitResult.length == 2) {
             return splitResult[1]
@@ -142,8 +141,8 @@ export default class HolochainService {
         }
     }
 
-    packDna(workdirPath: string): string {
-        let result = packDna(`${this.#resourcePath}/hc`, workdirPath);
+    async packDna(workdirPath: string): Promise<String> {
+        let result = await HOLOCHAIN_SERVICE.packDna(workdirPath);
         let splitResult = result.split("Wrote bundle ");
         if (splitResult.length == 2) {
             return splitResult[1]
@@ -203,7 +202,9 @@ export default class HolochainService {
 
                 appInfo = installAppResult
                 
-                console.warn("HolochainService: Installed DNA's:", roles, " with result:", installAppResult);
+                console.log("HolochainService: Installed DNA's:", roles)
+                console.log(" with result:");
+                console.dir(installAppResult);
             } catch(e) {
                 console.error("HolochainService: InstallApp, got error: ", e);
                 return [];

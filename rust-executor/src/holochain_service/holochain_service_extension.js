@@ -34,6 +34,12 @@
         },
         getAgentKey: async () => {
             return core.opAsync("get_agent_key")
+        },
+        packDna: async (path) => {
+            return core.opAsync("pack_dna", path)
+        },
+        unPackDna: async (path) => {
+            return core.opAsync("unpack_dna", path)
         }
     };
   })(globalThis);

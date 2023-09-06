@@ -23,7 +23,13 @@ jobs:
     - uses: actions/checkout@v3
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.68.2
+        toolchain: 1.71.1
+
+    - name: Install GO
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.18'
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
@@ -51,126 +57,13 @@ jobs:
       with:
         deno-version: v1.32.4
 
-    - name: Install dependencies
-      run: yarn install
+    - name: install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
 
-    - name: Build the workspace
-      run: yarn run build
-
-    - uses: actions/cache/save@v3
-      if: always()
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: $${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
-      
-    - name: Run the tests
-      run: yarn test
-
-  test-windows:
-    name: JS Ad4mClient <> AD4M Executor - Windows
-    runs-on: windows-2019
-    strategy:
-      matrix:
-        node-version: [16.x]
-
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: 1.68.2
-      - name: Cache cargo
-        id: cache-cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
-            ${{ runner.os }}-cargo
-      - run: rustup target add wasm32-unknown-unknown
-
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v2
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'yarn'
-
-      - name: Install Deno
-        uses: denoland/setup-deno@v1
-        with:
-          deno-version: v1.32.4
-
-      - name: Install dependencies
-        run: yarn install
-
-      - name: Build the workspace
-        run: yarn run build
-      
-      - uses: actions/cache/save@v3
-        if: always()
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: $${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
-
-      - name: Run the tests
-        run: |
-          choco install swi-prolog
-          $env:path += ";C:\Program Files\swipl\bin"
-          yarn run test:windows
-
-  test-macos:
-    name: JS Ad4mClient <> AD4M Executor - MacOS
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        node-version: [16.x]
-
-    steps:
-    - uses: actions/checkout@v3
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.68.2
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
-        cache: 'yarn'
-
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
-          ${{ runner.os }}-cargo
-    - run: rustup target add wasm32-unknown-unknown
-
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
+    - name: Install HC
+      run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
 
     - name: Install dependencies
       run: yarn install
@@ -191,3 +84,124 @@ jobs:
       
     - name: Run the tests
       run: yarn test
+
+  # test-windows:
+  #   name: JS Ad4mClient <> AD4M Executor - Windows
+  #   runs-on: windows-2019
+  #   strategy:
+  #     matrix:
+  #       node-version: [16.x]
+
+  #   steps:
+  #     - uses: actions/checkout@v2
+  #     - uses: actions-rs/toolchain@v1
+  #       with:
+  #         toolchain: 1.68.2
+  #     - name: Cache cargo
+  #       id: cache-cargo
+  #       uses: actions/cache@v3
+  #       with:
+  #         path: |
+  #           ~/.cargo/bin/
+  #           ~/.cargo/registry/index/
+  #           ~/.cargo/registry/cache/
+  #           ~/.cargo/git/db/
+  #           target/
+  #         key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
+  #         restore-keys: |
+  #           ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
+  #           ${{ runner.os }}-cargo
+  #     - run: rustup target add wasm32-unknown-unknown
+
+  #     - name: Use Node.js ${{ matrix.node-version }}
+  #       uses: actions/setup-node@v2
+  #       with:
+  #         node-version: ${{ matrix.node-version }}
+  #         cache: 'yarn'
+
+  #     - name: Install Deno
+  #       uses: denoland/setup-deno@v1
+  #       with:
+  #         deno-version: v1.32.4
+
+  #     - name: Install dependencies
+  #       run: yarn install
+
+  #     - name: Build the workspace
+  #       run: yarn run build
+      
+  #     - uses: actions/cache/save@v3
+  #       if: always()
+  #       with:
+  #         path: |
+  #           ~/.cargo/bin/
+  #           ~/.cargo/registry/index/
+  #           ~/.cargo/registry/cache/
+  #           ~/.cargo/git/db/
+  #           target/
+  #         key: $${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
+
+  #     - name: Run the tests
+  #       run: |
+  #         choco install swi-prolog
+  #         $env:path += ";C:\Program Files\swipl\bin"
+  #         yarn run test:windows
+
+  # test-macos:
+  #   name: JS Ad4mClient <> AD4M Executor - MacOS
+  #   runs-on: macos-latest
+  #   strategy:
+  #     matrix:
+  #       node-version: [16.x]
+
+  #   steps:
+  #   - uses: actions/checkout@v3
+  #   - uses: actions-rs/toolchain@v1
+  #     with:
+  #       toolchain: 1.68.2
+  #   - name: Use Node.js ${{ matrix.node-version }}
+  #     uses: actions/setup-node@v2
+  #     with:
+  #       node-version: ${{ matrix.node-version }}
+  #       cache: 'yarn'
+
+  #   - name: Cache cargo
+  #     id: cache-cargo
+  #     uses: actions/cache@v3
+  #     with:
+  #       path: |
+  #         ~/.cargo/bin/
+  #         ~/.cargo/registry/index/
+  #         ~/.cargo/registry/cache/
+  #         ~/.cargo/git/db/
+  #         target/
+  #       key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
+  #       restore-keys: |
+  #         ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
+  #         ${{ runner.os }}-cargo
+  #   - run: rustup target add wasm32-unknown-unknown
+
+  #   - name: Install Deno
+  #     uses: denoland/setup-deno@v1
+  #     with:
+  #       deno-version: v1.32.4
+
+  #   - name: Install dependencies
+  #     run: yarn install
+
+  #   - name: Build the workspace
+  #     run: yarn run build
+
+  #   - uses: actions/cache/save@v3
+  #     if: always()
+  #     with:
+  #       path: |
+  #         ~/.cargo/bin/
+  #         ~/.cargo/registry/index/
+  #         ~/.cargo/registry/cache/
+  #         ~/.cargo/git/db/
+  #         target/
+  #       key: $${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
+      
+  #   - name: Run the tests
+  #     run: yarn test

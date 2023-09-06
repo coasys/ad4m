@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
-import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy, 
-    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE, 
+import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
+    SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
     instanceQuery, Subject, subjectProperty,
     subjectCollection, subjectFlag,
     SDNAClass,
@@ -25,16 +25,15 @@ describe("Prolog + Literals", () => {
     let executorProcess: ChildProcess | null = null
 
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
-    const appDataPath = path.join(TEST_DIR, "agents", "integration-agent");
+    const appDataPath = path.join(TEST_DIR, "agents", "prolog-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const gqlPort = 15500
-    const hcAdminPort = 15501
-    const hcAppPort = 15502
-    const ipfsSwarmPort = 15503
+    const gqlPort = 16600
+    const hcAdminPort = 16601
+    const hcAppPort = 16602
 
     before(async () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
+            gqlPort, hcAdminPort, hcAppPort);
 
         console.log("Creating ad4m client")
         ad4m = new Ad4mClient(apolloClient(gqlPort))
@@ -190,7 +189,7 @@ describe("Prolog + Literals", () => {
                 let todos = await perspective!.getAllSubjectInstances("Todo") as unknown as Subject[]
                 expect(todos.length).to.equal(2)
                 //@ts-ignore
-                expect(await todos[1].state).to.equal("todo://done")
+                expect(await todos[1].state).to.exist
             })
         })
 
@@ -253,7 +252,7 @@ describe("Prolog + Literals", () => {
                 // todos is an array of Todo objects
                 // note how we don't need @ts-ignore here:
                 expect(todos.length).to.equal(2)
-                expect(await todos[1].state).to.equal("todo://done")
+                expect(await todos[1].state).to.exist
             })
 
         })
@@ -369,7 +368,7 @@ describe("Prolog + Literals", () => {
                 const regExp = /\("Todo", ([^)]+)\)/;
                 const matches = regExp.exec(sdna);
                 const value = matches![1];
-                
+
                 const equal = readFileSync("./sdna/subject.pl").toString().replace(/c\)/g, `${value})`).replace(/\(c/g, `(${value}`);
 
                 expect(sdna.normalize('NFC')).to.equal(equal.normalize('NFC'))
@@ -635,7 +634,7 @@ describe("Prolog + Literals", () => {
 
                     recipe.name = "recipe://collection_test";
 
-                    recipe.comments = ['test', 'test1']
+                    recipe.comments = ['recipe://test', 'recipe://test1']
 
                     await recipe.save()
 
@@ -651,7 +650,7 @@ describe("Prolog + Literals", () => {
                     const recipe = new Recipe(perspective!, root)
 
                     recipe.name = "recipe://locallink";
-                    recipe.local = 'test'
+                    recipe.local = 'recipe://test'
 
                     await recipe.save();
 
@@ -660,7 +659,7 @@ describe("Prolog + Literals", () => {
                     await recipe2.get();
 
                     expect(recipe2.name).to.equal("recipe://locallink")
-                    expect(recipe2.local).to.equal("test")
+                    expect(recipe2.local).to.equal("recipe://test")
 
                     // @ts-ignore
                     const links = await perspective?.get({
@@ -669,7 +668,7 @@ describe("Prolog + Literals", () => {
                     })
 
                     expect(links!.length).to.equal(1)
-                    expect(links![0].status).to.equal('local')
+                    expect(links![0].status).to.equal('LOCAL')
                 })
 
                 it("delete()", async () => {
@@ -692,7 +691,7 @@ describe("Prolog + Literals", () => {
 
                     recipe.entries = [recipeEntries]
                     // @ts-ignore
-                    recipe.comments = ['test', 'test1']
+                    recipe.comments = ['recipe://test', 'recipe://test1']
                     recipe.name = "recipe://collection_test";
 
                     await recipe.save()

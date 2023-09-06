@@ -73,7 +73,7 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 const links = await create.get({} as LinkQuery);
                 expect(links.length).to.equal(1);
-                expect(links[0].status).to.equal('local')
+                expect(links[0].status).to.equal('LOCAL')
 
                 await create.remove(linkAdd);
 

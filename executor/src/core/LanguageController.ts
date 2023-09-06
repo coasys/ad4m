@@ -49,7 +49,7 @@ const loadModule = async (modulePath: string) => {
     } catch (err) {
         //@ts-ignore
         if (err instanceof Deno.errors.NotFound) {
-        throw new Error(`File not found: ${modulePath}`);
+            throw new Error(`File not found: ${modulePath}`);
         }
         throw err;
     }
@@ -84,6 +84,10 @@ export default class LanguageController {
         this.#signatures = services.signatures
         this.#db = services.db
         this.#languages = new Map()
+        this.#languages.set("literal", {
+            name: "literal",
+            interactions() { return [] },
+        } as Language)
         this.#languageConstructors = new Map()
         this.#linkObservers = []
         this.#telepresenceSignalObservers = []
@@ -211,21 +215,21 @@ export default class LanguageController {
         const hash = await this.ipfsHash(bundleBytes)
         console.debug("LanguageController.loadLanguage: loading language at path", sourceFilePath, "with hash", hash);
         let languageSource;
-        //try {
-        languageSource = await loadModule(sourceFilePath);
-        // } catch (e) {
-        //     const errMsg = `Could not load language ${e}`;
-        //     console.error(errMsg);
-        //     await this.#pubSub.publish(
-        //         PubSub.EXCEPTION_OCCURRED_TOPIC,
-        //         {
-        //             title: "Failed to load installed language",
-        //             message: errMsg,
-        //             type: ExceptionType.LanguageIsNotLoaded
-        //         } as ExceptionInfo
-        //     );
-        //     throw new Error(errMsg);
-        // }
+        try {
+            languageSource = await loadModule(sourceFilePath);
+        } catch (e) {
+            const errMsg = `Could not load language ${e}`;
+            console.error(errMsg);
+            await this.#pubSub.publish(
+                PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
+                {
+                    title: "Failed to load installed language",
+                    message: errMsg,
+                    type: ExceptionType.LanguageIsNotLoaded
+                } as ExceptionInfo
+            );
+            throw new Error(errMsg);
+        }
         console.warn("LanguageController.loadLanguage: language loaded!");
         let create;
         if (!languageSource.default) {
@@ -252,6 +256,7 @@ export default class LanguageController {
 
             if (language.linksAdapter.addSyncStateChangeCallback) {
                 language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    console.log("LanguageController.loadLanguage: sync state change", state);
                     this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
                 })
             }
@@ -437,15 +442,15 @@ export default class LanguageController {
             language.teardown();
         }
 
-        this.#holochainService.removeDnaForLang(hash as string);
+        //Remove language from memory
+        this.#languages.delete(hash as string);
+        this.#languageConstructors.delete(hash as string);
+
+        await this.#holochainService.removeDnaForLang(hash as string);
 
         //Remove language files
         const languagePath = path.join(this.#config.languagesPath, hash as string);
         fs.rmdirSync(languagePath, {recursive: true});
-
-        //Remove language from memory
-        this.#languages.delete(hash as string);
-        this.#languageConstructors.delete(hash as string);
     }
 
     languageForExpression(e: ExpressionRef): Language {
@@ -582,7 +587,8 @@ export default class LanguageController {
 
             //Unpack the DNA
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
-            let unpackPath = this.#holochainService.unpackDna(tempDnaPath).replace(/(\r\n|\n|\r)/gm, "");
+            console.log("LanguageController.readAndTemplateHolochainDNA: unpacking DNA");
+            let unpackPath = (await this.#holochainService.unpackDna(tempDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
             fs.unlinkSync(tempDnaPath);
             //TODO: are all dna's using the same dna.yaml?
             const dnaYamlPath = path.join(unpackPath, "dna.yaml");
@@ -617,7 +623,8 @@ export default class LanguageController {
             fs.writeFileSync(dnaYamlPath, dnaYamlDump);
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
-            let packPath = this.#holochainService.packDna(unpackPath).replace(/(\r\n|\n|\r)/gm, "");
+            console.log("LanguageController.readAndTemplateHolochainDNA: packing DNA");
+            let packPath = (await this.#holochainService.packDna(unpackPath)).replace(/(\r\n|\n|\r)/gm, "");
             const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
 
             //Cleanup temp directory

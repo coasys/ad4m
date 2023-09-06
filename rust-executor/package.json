@@ -8,7 +8,7 @@
   "types": "",
   "scripts": {
     "build": "cargo build --release",
-    "test": "cargo test"
+    "test": "cargo test --release"
   },
   "repository": {
     "type": "git",

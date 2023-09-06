@@ -35,7 +35,7 @@ export function Connect() {
         setURLError("Invalid websocket URL");
       } else {
         try {
-          const client = await buildAd4mClient(url!);
+          const client = await buildAd4mClient(url!, false);
 
           const id = setTimeout(() => {
             resolve(true);
@@ -45,7 +45,8 @@ export function Connect() {
             setLoading(false);
           }, 2000);
 
-          await client.runtime.hcAgentInfos();
+          let ad4mInfo = await client.runtime.info();
+          console.log("AD4M JS Client built, got info: ", ad4mInfo);
 
           clearTimeout(id);
 

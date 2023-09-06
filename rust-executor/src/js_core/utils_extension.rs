@@ -1,5 +1,7 @@
+use std::borrow::Cow;
+
 use cid::Cid;
-use deno_core::{error::AnyError, include_js_files, op, Extension};
+use deno_core::{error::AnyError, include_js_files, op, Extension, Op};
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
 use tracing::{error, info, debug, warn};
@@ -63,16 +65,17 @@ async fn load_module(path: String) -> Result<String, AnyError> {
 }
 
 pub fn build() -> Extension {
-    Extension::builder("utils")
-        .js(include_js_files!(utils "utils_extension.js",))
-        .ops(vec![
-                hash::decl(),
-                load_module::decl(),
-                console_log::decl(),
-                console_debug::decl(),
-                console_error::decl(),
-                console_warn::decl(),
-            ])
-        .force_op_registration()
-        .build()
+    Extension {
+        name: "utils",
+        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/utils_extension.js",)),
+        ops: Cow::Borrowed(&[
+            hash::DECL,
+            load_module::DECL,
+            console_log::DECL,
+            console_debug::DECL,
+            console_error::DECL,
+            console_warn::DECL,
+        ]),
+        ..Default::default()
+    }
 }

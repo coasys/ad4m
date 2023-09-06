@@ -121,8 +121,6 @@ enum Domain {
         #[arg(short, long, action)]
         app_data_path: Option<String>,
         #[arg(short, long, action)]
-        resource_path: Option<String>,
-        #[arg(short, long, action)]
         network_bootstrap_seed: Option<String>,
         #[arg(short, long, action)]
         language_language_only: Option<bool>,
@@ -142,17 +140,16 @@ enum Domain {
         hc_use_mdns: Option<bool>,
         #[arg(long, action)]
         hc_use_proxy: Option<bool>,
-        #[arg(short, long, action)]
-        ipfs_swarm_port: Option<u16>,
+        #[arg(long, action)]
+        hc_proxy_url: Option<String>,
+        #[arg(long, action)]
+        hc_bootstrap_url: Option<String>,
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
         #[arg(long, action)]
-        admin_credential: Option<String>,
-        #[arg(long, action)]
-        swipl_path: Option<String>,
-        #[arg(long, action)]
-        swipl_home_path: Option<String>,
+        admin_credential: Option<String>
     },
+    RunLocalHcServices {}
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -182,7 +179,7 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
     Ok(ad4m_client)
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
@@ -208,7 +205,6 @@ async fn main() -> Result<()> {
 
     if let Domain::Run {
         app_data_path,
-        resource_path,
         network_bootstrap_seed,
         language_language_only,
         run_dapp_server,
@@ -219,16 +215,14 @@ async fn main() -> Result<()> {
         hc_use_local_proxy,
         hc_use_mdns,
         hc_use_proxy,
-        ipfs_swarm_port,
+        hc_proxy_url,
+        hc_bootstrap_url,
         connect_holochain,
-        admin_credential,
-        swipl_path,
-        swipl_home_path,
+        admin_credential
     } = args.domain
     {
         rust_executor::run(Ad4mConfig {
             app_data_path,
-            resource_path,
             network_bootstrap_seed,
             language_language_only,
             run_dapp_server,
@@ -239,15 +233,19 @@ async fn main() -> Result<()> {
             hc_use_local_proxy,
             hc_use_mdns,
             hc_use_proxy,
-            ipfs_swarm_port,
+            hc_proxy_url,
+            hc_bootstrap_url,
             connect_holochain,
-            admin_credential,
-            swipl_path,
-            swipl_home_path,
+            admin_credential
         })
         .await;
         return Ok(());
     };
+
+    if let Domain::RunLocalHcServices {} = args.domain {
+        rust_executor::run_local_hc_services().await?;
+        return Ok(());
+    }
 
     let ad4m_client = get_ad4m_client(&args).await?;
 
@@ -275,7 +273,6 @@ async fn main() -> Result<()> {
         } => unreachable!(),
         Domain::Run {
             app_data_path: _,
-            resource_path: _,
             network_bootstrap_seed: _,
             language_language_only: _,
             run_dapp_server: _,
@@ -286,12 +283,12 @@ async fn main() -> Result<()> {
             hc_use_local_proxy: _,
             hc_use_mdns: _,
             hc_use_proxy: _,
-            ipfs_swarm_port: _,
+            hc_proxy_url: _,
+            hc_bootstrap_url: _,
             connect_holochain: _,
-            admin_credential: _,
-            swipl_path: _,
-            swipl_home_path: _,
+            admin_credential: _
         } => unreachable!(),
+        Domain::RunLocalHcServices {} => unreachable!(),
     }
 
     Ok(())

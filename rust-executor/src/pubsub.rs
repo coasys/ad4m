@@ -3,7 +3,7 @@ use crate::graphql::graphql_types::GetValue;
 use futures::Stream;
 use futures::StreamExt;
 use juniper::{graphql_value, FieldError, FieldResult};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -42,7 +42,7 @@ impl PubSub {
             for tx in subscribers {
                 let send_res = tx.send(message.to_owned());
                 if send_res.is_err() {
-                    error!("Failed to send message to subscriber: {:?}", send_res);
+                    warn!("Failed to send message to subscriber: {:?} on topic: {:?}, with subscribers, len: {:?}", send_res, topic, subscribers.len());
                 }
             }
         }

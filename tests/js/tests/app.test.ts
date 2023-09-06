@@ -24,7 +24,6 @@ describe("Apps integration tests", () => {
   const gqlPort = 15000
   const hcAdminPort = 15001
   const hcAppPort = 15002
-  const ipfsSwarmPort = 15003
 
   let adminAd4mClient: Ad4mClient | null = null
   let unAuthenticatedAppAd4mClient: Ad4mClient | null = null
@@ -42,7 +41,7 @@ describe("Apps integration tests", () => {
         fs.mkdirSync(appDataPath)
 
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-      gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort , false, "123");
+      gqlPort, hcAdminPort, hcAppPort , false, "123");
 
     adminAd4mClient = new Ad4mClient(apolloClient(gqlPort, "123"), false)
     await adminAd4mClient.agent.generate("passphrase")

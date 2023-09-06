@@ -4,8 +4,8 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::utils::{ad4m_data_directory, set_permissions};
-use crate::globals::{AD4M_VERSION, HC_BIN, MAINNET_JSON, OLDEST_VERSION};
+use super::utils::ad4m_data_directory;
+use crate::globals::{AD4M_VERSION, MAINNET_JSON, OLDEST_VERSION};
 
 /// Sets up the ad4m data directory and config files ready for the executor to consume
 pub fn init(
@@ -13,7 +13,7 @@ pub fn init(
     network_bootstrap_seed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     std::env::set_var("RUST_LOG", "info");
-    env_logger::try_init();
+    let _ = env_logger::try_init();
 
     //Get the default data path if none is provided
     let app_data_path = match data_path {
@@ -55,26 +55,6 @@ pub fn init(
 
     //Write the mainnet seed to the data directory
     write_seed_config(&app_data_path, network_bootstrap_seed)?;
-
-    //Create the path for binaries if it doesn't already exist
-    let binary_path = Path::new(&app_data_path).join("binary");
-    if !Path::new(&binary_path).exists() {
-        info!("Creating binary path");
-        fs::create_dir_all(&binary_path)?;
-    }
-
-    let platform = os_info::get().os_type();
-    let hc = match platform {
-        os_info::Type::Windows => "hc.exe",
-        _ => "hc",
-    };
-
-    let hc_data = &HC_BIN;
-    let hc_target = binary_path.join(hc);
-    info!("write hc target");
-    fs::write(&hc_target, hc_data.as_ref())?;
-
-    set_permissions(hc_target)?;
 
     Ok(())
 }

@@ -11,7 +11,7 @@ declare global {
         useMdns: bool,
         proxyUrl: String,
         bootstrapUrl: String,
-        adminPort: Number
+        appPort: Number
     }
 
     interface HolochainService {
@@ -26,6 +26,8 @@ declare global {
         async signString: (string: String) => Signature;
         async shutdown: () => void;
         async getAgentKey: () => AgentPubKey;
+        async packDna: (path: String) => String;
+        async unPackDna: (path: String) => String;
     }
 
     const HOLOCHAIN_SERVICE: HolochainService;

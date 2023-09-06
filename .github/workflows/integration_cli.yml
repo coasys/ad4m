@@ -26,7 +26,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         override: true
-        toolchain: 1.68.2
+        toolchain: 1.71.1
 
     - name: Cache cargo
       id: cache-cargo
@@ -50,6 +50,14 @@ jobs:
       uses: denoland/setup-deno@v1
       with:
         deno-version: v1.32.4
+
+    - name: Install GO
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.18'
+
+    - name: Install HC
+      run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
 
     - name: Yarn Install
       run: yarn install

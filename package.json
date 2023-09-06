@@ -11,7 +11,8 @@
     "bootstrap-languages/*",
     "tests/js",
     "rust-executor",
-    "cli"
+    "cli",
+    "dapp"
   ],
   "private": true,
   "scripts": {
@@ -25,12 +26,8 @@
     "test:macos": "turbo run test:macos --concurrency=1",
     "test:linux": "turbo run test:linux --concurrency=1",
     "test:windows": "turbo run test:windows --concurrency=1",
-    "fetch-binaries": "run-script-os",
-    "fetch-binaries:macos": "./download-binaries-macos.sh",
-    "fetch-binaries:windows": "powershell.exe -ExecutionPolicy Bypass -File download-binaries-windows.ps1",
-    "fetch-binaries:linux": "./download-binaries-linux.sh",
     "package-ad4m": "turbo run package-ad4m",
-    "build-languages": "turbo run build-languages",
+    "build-languages": "turbo run build-languages --concurrency=1",
     "docs": "jsdoc -c jsdoc.json",
     "docs:api:jsdoc2md": "jsdoc2md --configure jsdoc.json --partial docs/header.hbs --global-index-format none --files src/**/* > docs-src/api.md",
     "docs:api:tsconcat": "concat-md --decrease-title-levels --dir-name-as-title docs-src/typedoc > docs-src/api.md",
@@ -46,8 +43,7 @@
     "build-all-windows": "turbo run build-all-windows",
     "patchpackage": "patch-package",
     "set-version": "node setVersion.js",
-    "patch-package": "^6.5.0",
-    "postinstall": "yarn run fetch-binaries"
+    "patch-package": "^6.5.0"
   },
   "devDependencies": {
     "@changesets/cli": "^2.25.2",

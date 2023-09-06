@@ -4,7 +4,7 @@ import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, apolloClient } from "../utils/utils";
+import { startExecutor, apolloClient, runHcLocalServices } from "../utils/utils";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
@@ -79,13 +79,15 @@ describe("Integration tests", function () {
     this.timeout(200000)
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice')
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    const ipfsRepoPath = path.join(appDataPath)
     const gqlPort = 15300
     const hcAdminPort = 15301
     const hcAppPort = 15302
-    const ipfsSwarmPort = 15303
 
     let executorProcess: ChildProcess | null = null
+
+    let proxyUrl: string | null = null;
+    let bootstrapUrl: string | null = null;
+    let localServicesProcess: ChildProcess | null = null;
 
     before(async () => {    
         if(!fs.existsSync(TEST_DIR)) {
@@ -96,8 +98,13 @@ describe("Integration tests", function () {
         if(!fs.existsSync(appDataPath))
             fs.mkdirSync(appDataPath)
 
+        let localServices = await runHcLocalServices();
+        proxyUrl = localServices.proxyUrl;
+        bootstrapUrl = localServices.bootstrapUrl;
+        localServicesProcess = localServices.process;
+
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-          gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
+          gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
 
         testContext.alice = new Ad4mClient(apolloClient(gqlPort))
         testContext.aliceCore = executorProcess
@@ -111,13 +118,20 @@ describe("Integration tests", function () {
           await sleep(500);
         }
       }
+      if (localServicesProcess) {
+        while (!localServicesProcess?.killed) {
+          let status  = localServicesProcess?.kill();
+          console.log("killed local services with", status);
+          await sleep(500);
+        }
+      }
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
     describe('Runtime', runtimeTests(testContext))
     describe('Expression', expressionTests(testContext))
-    //describe('Perspective', perspectiveTests(testContext))
-    //describe('Social DNA', socialDNATests(testContext))
+    describe('Perspective', perspectiveTests(testContext))
+    describe('Social DNA', socialDNATests(testContext))
 
     describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
@@ -127,7 +141,6 @@ describe("Integration tests", function () {
           const bobGqlPort = 15400
           const bobHcAdminPort = 15401
           const bobHcAppPort = 15402
-          const bobIpfsSwarmPort = 15403
 
           if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
             fs.mkdirSync(path.join(TEST_DIR, 'agents'))
@@ -135,7 +148,7 @@ describe("Integration tests", function () {
             fs.mkdirSync(bobAppDataPath)
 
           bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
-            bobGqlPort, bobHcAdminPort, bobHcAppPort, bobIpfsSwarmPort);
+            bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
 
           testContext.bob = new Ad4mClient(apolloClient(bobGqlPort))
           testContext.bobCore = bobExecutorProcess

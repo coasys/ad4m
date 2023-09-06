@@ -7,6 +7,7 @@ use super::{
     wallet_extension,
 };
 use crate::holochain_service::holochain_service_extension;
+use crate::prolog_service::prolog_service_extension;
 
 pub fn main_module_url() -> Url {
     Url::parse("https://ad4m.runtime/main").unwrap()
@@ -36,9 +37,17 @@ pub fn main_worker_options() -> WorkerOptions {
     let sub_ext = pubsub_extension::build();
     let holochain_ext = holochain_service_extension::build();
     let jwt_ext = jwt_extension::build();
+    let prolog_ext = prolog_service_extension::build();
 
     WorkerOptions {
-        extensions: vec![wallet_ext, utils_ext, sub_ext, holochain_ext, jwt_ext],
+        extensions: vec![
+            wallet_ext,
+            utils_ext,
+            sub_ext,
+            holochain_ext,
+            jwt_ext,
+            prolog_ext,
+        ],
         module_loader: Rc::new(loader),
         ..Default::default()
     }

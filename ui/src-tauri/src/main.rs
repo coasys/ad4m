@@ -14,15 +14,17 @@ use std::fs;
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::Mutex;
+use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
+use std::io;
+use std::io::Write;
+
 extern crate remove_dir_all;
-use remove_dir_all::*;
 
 use config::app_url;
 use menu::build_menu;
 use system_tray::{ build_system_tray, handle_system_tray_event };
 use tauri::{
     AppHandle,
-    api::process::{Command, CommandEvent},
     RunEvent, SystemTrayEvent,
     Window
 };
@@ -36,7 +38,6 @@ mod system_tray;
 mod menu;
 mod commands;
 
-use tauri::api::dialog;
 use tauri::Manager;
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
@@ -47,9 +48,8 @@ use crate::util::create_tray_message_windows;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
 use crate::util::has_processes_running;
-use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
-use std::io::{self, Write};
-use tracing_subscriber::{fmt::format::FmtSpan, FmtSubscriber};
+use crate::util::{create_main_window, save_executor_port};
+
 
 // the payload type must implement `Serialize` and `Clone`.
 #[derive(Clone, serde::Serialize)]
@@ -72,7 +72,37 @@ pub struct AppState {
 }
 
 fn main() {
-    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debugad4m-launcher=info,warn,error");
+    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debug,ad4m_launcher=info,warn,error");
+
+    let mut rlim: rlimit = rlimit { rlim_cur: 0, rlim_max: 0 };
+
+    // Get the current file limit
+    unsafe {
+        if libc::getrlimit(RLIMIT_NOFILE, &mut rlim) != 0 {
+            panic!("{}", io::Error::last_os_error());
+        }
+    }
+
+    let rlim_max = 1000 as u64;
+    println!("Current RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
+
+    // Attempt to increase the limit
+    rlim.rlim_cur = rlim_max;
+
+    unsafe {
+        if setrlimit(RLIMIT_NOFILE, &rlim) != 0 {
+            panic!("{}", io::Error::last_os_error());
+        }
+    }
+
+    // Check the updated limit
+    unsafe {
+        if libc::getrlimit(RLIMIT_NOFILE, &mut rlim) != 0 {
+            panic!("{}", io::Error::last_os_error());
+        }
+    }
+
+    println!("Updated RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
 
     if !data_path().exists() {
         let _ = fs::create_dir_all(data_path());
@@ -80,18 +110,6 @@ fn main() {
 
     if log_path().exists() {
         let _ = fs::remove_file(log_path());
-    }
-  
-    let mut waited_seconds = 0;
-    while data_path().join("ipfs").join("repo.lock").exists() {
-        println!("IPFS repo.lock exists, waiting...");
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        waited_seconds = waited_seconds + 1;
-        if waited_seconds > 10 {
-            println!("Waited long enough, removing lock...");
-            let _ = remove_dir_all(data_path().join("ipfs").join("repo.lock"));
-            let _ = remove_dir_all(data_path().join("ipfs").join("datastore").join("LOCK"));
-        }
     }
 
     let file = File::create(log_path()).unwrap();
@@ -123,10 +141,6 @@ fn main() {
     info!("Free port: {:?}", free_port);
 
     save_executor_port(free_port);
-
-    find_and_kill_processes("ad4m-host");
-
-    find_and_kill_processes("holochain");
 
     match rust_executor::init::init(
         Some(String::from(data_path().to_str().unwrap())),
@@ -186,6 +200,10 @@ fn main() {
             config.app_data_path = Some(String::from(data_path().to_str().unwrap()));
             config.gql_port = Some(free_port);
             config.network_bootstrap_seed = None;
+            config.run_dapp_server = Some(false);
+            config.hc_use_bootstrap = Some(true);
+            config.hc_use_mdns = Some(false);
+            config.hc_use_proxy = Some(true);
 
             let handle = app.handle();
 
@@ -260,12 +278,4 @@ fn get_main_window(handle: &AppHandle) -> Window {
         let main = handle.get_window("AD4M");
         main.expect("Couldn't get main window right after creating it")
     }
-}
-
-fn log_error(window: &Window, message: &str) {
-    dialog::message(
-        Some(window),
-        "Error",
-        message
-    );
 }

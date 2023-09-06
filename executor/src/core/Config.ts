@@ -35,8 +35,7 @@ export class MainConfig {
     swiplPath: string | undefined = undefined;
     swiplHomePath: string | undefined = undefined;
 
-    constructor(resourcePath = '', appDataPath = '') {
-        this.resourcePath = resourcePath;
+    constructor(appDataPath = '') {
         this.rootConfigPath = path.join(appDataPath, 'ad4m');
         this.dataPath = path.join(this.rootConfigPath, 'data')
         this.languagesPath = path.join(this.rootConfigPath, 'languages')
@@ -53,7 +52,6 @@ export type LanguageAlias = {
 
 export interface CoreConfig {
     appDataPath: string
-    appResourcePath: string
     languageLanguageBundle: string
     systemLanguages: string[]
     preloadLanguages: string[]
@@ -69,13 +67,11 @@ export interface CoreConfig {
     neighbourhoodLanguageSettings?: object
     languageLanguageSettings?: object
     adminCredential?: string
-    swiplPath?: string,
-    swiplHomePath?: string,
 }
 
 
 export function init(c: CoreConfig): MainConfig {
-    const mainConfig = new MainConfig(c.appResourcePath, c.appDataPath);
+    const mainConfig = new MainConfig(c.appDataPath);
 
     if(c.adminCredential) {
         mainConfig.adminCredential = c.adminCredential
@@ -119,8 +115,6 @@ export function init(c: CoreConfig): MainConfig {
     if (c.languageLanguageSettings) {
         mainConfig.languageLanguageSettings = c.languageLanguageSettings
     }
-    mainConfig.swiplPath = c.swiplPath
-    mainConfig.swiplHomePath = c.swiplHomePath
 
     return mainConfig;
 }

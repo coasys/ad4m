@@ -8,6 +8,7 @@ use deno_core::ModuleType;
 use deno_core::ResolutionKind;
 use deno_runtime::deno_core::error::AnyError;
 use tracing::info;
+use url::Url;
 use std::collections::HashMap;
 use std::pin::Pin;
 
@@ -41,7 +42,7 @@ impl ModuleLoader for StringModuleLoader {
     fn load(
         &self,
         module_specifier: &ModuleSpecifier,
-        _maybe_referrer: Option<ModuleSpecifier>,
+        _maybe_referrer: std::option::Option<&Url>,
         _is_dyn_import: bool,
     ) -> Pin<Box<ModuleSourceFuture>> {
         let path = module_specifier.to_file_path().map_err(|_| {
@@ -66,12 +67,7 @@ impl ModuleLoader for StringModuleLoader {
                     std::fs::read_to_string(path).expect("Could not read file path to string");
                 let module_specifier = module_specifier.clone();
                 let fut = async move {
-                    Ok(ModuleSource {
-                        code: code.into(),
-                        module_type: module_type,
-                        module_url_specified: module_specifier.to_string(),
-                        module_url_found: module_specifier.to_string(),
-                    })
+                    Ok(ModuleSource::new(module_type, code.into(), &module_specifier))
                 };
                 Box::pin(fut)
             }
@@ -81,12 +77,7 @@ impl ModuleLoader for StringModuleLoader {
                 let module_specifier = module_specifier.clone();
                 let fut = async move {
                     match module_code {
-                        Some(code) => Ok(ModuleSource {
-                            code: code.into(),
-                            module_type: deno_core::ModuleType::JavaScript,
-                            module_url_specified: module_specifier.clone().to_string(),
-                            module_url_found: module_specifier.clone().to_string(),
-                        }),
+                        Some(code) => Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, code.into(), &module_specifier)),
                         None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
                     }
                 };

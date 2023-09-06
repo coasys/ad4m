@@ -29,13 +29,16 @@ export default class Perspective {
     #db: Ad4mDb;
     #agent: AgentService;
     #languageController?: LanguageController
+    #updateControllersHandleSyncStatus?: (uuid: string, status: PerspectiveState) => void
     #config?: MainConfig;
     #pubSub: PubSub;
 
     #prologEngine: PrologInstance|null
     #prologNeedsRebuild: boolean
     #pollingInterval: any;
+    #pendingDiffPollingInterval: any
     #prologMutex: Mutex
+    #isTeardown: boolean = false;
 
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState) {
         this.updateFromId(id)
@@ -54,21 +57,20 @@ export default class Perspective {
         this.#agent = context.agentService!
         this.#languageController = context.languageController!
         this.#config = context.config;
+        this.#updateControllersHandleSyncStatus = context.updateControllersHandleSyncStatus;
         this.#pubSub = getPubSub();
 
         this.#prologEngine = null
         this.#prologNeedsRebuild = true
 
-        const that = this
-
         process.on("SIGINT", () => {
-            that.#prologEngine?.close()
             clearInterval(this.#pollingInterval);
+            clearInterval(this.#pendingDiffPollingInterval);
         });
 
         if (this.neighbourhood) {
             // setup polling loop for Perspectives with a linkLanguage
-            this.setupSyncSignals(3000);
+            this.#pollingInterval = this.setupSyncSignals(3000);
 
             // Handle join differently so we wait before publishing diffs until we have seen
             // a first foreign revision. Otherwise we will never use snaphshots and make the
@@ -80,7 +82,7 @@ export default class Perspective {
                         // Set the state to LinkLanguageInstalledButNotSynced so we will keep
                         // link additions as pending until we are synced
                         if(!revision) {
-                            this.setupPendingDiffsPublishing(5000);
+                            this.#pendingDiffPollingInterval = this.setupPendingDiffsPublishing(5000);
                         }
                     })
                 } catch (e) {
@@ -93,9 +95,13 @@ export default class Perspective {
     }
 
     async updatePerspectiveState(state: PerspectiveState) {
-        if (this.state != state) {
+        if (this.state !== state) {
+            if (this.#updateControllersHandleSyncStatus) {
+                this.#updateControllersHandleSyncStatus(this.uuid!, state);
+            };
+            this.state = state;
             await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_SYNC_STATE_CHANGE, {state, uuid: this.uuid})
-            this.state = state
+            await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, this.plain());
         }
     }
 
@@ -115,6 +121,8 @@ export default class Perspective {
 
     async setupSyncSignals(intervalMs: number) {
         return setInterval(async () => {
+            console.log("Calling sync");
+            if (this.#isTeardown) return;
             try {
                 await this.callLinksAdapter("sync");
             } catch(e) {
@@ -127,6 +135,8 @@ export default class Perspective {
         let pendingGotPublished = false;
 
         let pendingDiffsInterval = setInterval(async () => {
+            console.log("calling pending diff");
+            if (this.#isTeardown) return;
             if(this.state == PerspectiveState.LinkLanguageFailedToInstall) {
                 try {
                     await this.getLinksAdapter()
@@ -139,7 +149,7 @@ export default class Perspective {
                 // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
                 if (await this.getCurrentRevision()) {
                     //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
-                    this.updatePerspectiveState(PerspectiveState.Synced);
+                    await this.updatePerspectiveState(PerspectiveState.Synced);
                     //Let's check if we have unpublished diffs:
                     const mutations = await this.#db.getPendingDiffs(this.uuid!);
                     if (mutations.additions.length > 0 || mutations.removals.length > 0) {                        
@@ -158,41 +168,7 @@ export default class Perspective {
                 clearInterval(pendingDiffsInterval);
             }
         }, intervalMs);
-    }
-
-
-    setupPolling(intervalMs: number) {
-        return setInterval(
-            async () => {
-                try {
-                    let madeSync = false;
-                    // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
-                    const currentRevision = await this.getCurrentRevision();
-                    if (currentRevision) {
-                        madeSync = true;
-                        //Let's check if we have unpublished diffs:
-                        const mutations = await this.#db.getPendingDiffs(this.uuid!);
-                        if (mutations.additions.length > 0 || mutations.removals.length > 0) {                        
-                            // ...publish them...
-                            await this.callLinksAdapter('commit', mutations);
-                            // ...and clear the temporary storage
-                            await this.#db.clearPendingDiffs(this.uuid!);
-                        }
-                        
-                        //If we are fast polling (since we have not seen any changes) and we see changes, we can slow down the polling
-                        if(this.isFastPolling && madeSync) {
-                            this.isFastPolling = false;
-                            clearInterval(this.#pollingInterval);
-                            this.#pollingInterval = this.setupPolling(30000);
-                        }
-                    }
-
-                } catch (e) {
-                    console.warn(`Perspective.constructor(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to check sync on linksAdapter. Error: ${e}`, e);
-                }
-            },
-            intervalMs
-        );
+        return pendingDiffsInterval;
     }
 
 
@@ -206,6 +182,7 @@ export default class Perspective {
     updateFromId(id: PerspectiveHandle) {
         this.name = id.name
         this.uuid = id.uuid
+        if(id.state) this.state = id.state
         if(id.sharedUrl) this.sharedUrl = id.sharedUrl
         if(id.neighbourhood) this.neighbourhood = id.neighbourhood
     }
@@ -249,7 +226,7 @@ export default class Perspective {
                 return undefined;
             }
         } catch (e) {
-            this.updatePerspectiveState(PerspectiveState.LinkLanguageFailedToInstall);
+            await this.updatePerspectiveState(PerspectiveState.LinkLanguageFailedToInstall);
             this.retries++;
             throw e;
         }
@@ -284,7 +261,7 @@ export default class Perspective {
     //@ts-ignore
     private callLinksAdapter(functionName: string, ...args): Promise<PerspectiveDiff> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
-            //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
+            console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve({
                 additions: [],
                 removals: []
@@ -456,13 +433,15 @@ export default class Perspective {
 
         this.#prologNeedsRebuild = true;
         let perspectivePlain = this.plain();
+
+        linkExpression.status = status;
+
         await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
             perspective: perspectivePlain,
             link: linkExpression
         })
         this.#prologNeedsRebuild = true
 
-        linkExpression.status = status;
 
         return linkExpression
     }
@@ -616,6 +595,7 @@ export default class Perspective {
                 await this.#db.removeLink(this.uuid!, link);
             }))
         }
+        this.#prologNeedsRebuild = true;
     }
 
     private async getLinksLocal(query: LinkQuery): Promise<LinkExpression[]> {
@@ -734,12 +714,9 @@ export default class Perspective {
             if(link.data.target) nodes.add(link.data.target)
         }
 
-        langAddrs.push(":- dynamic languageAddress/2.")
-        langAddrs.push(":- discontiguous languageAddress/2.")
-        langNames.push(":- dynamic languageName/2.")  
-        langNames.push(":- discontiguous languageName/2.")  
-        exprAddrs.push(":- dynamic expressionAddress/2.")  
-        exprAddrs.push(":- discontiguous expressionAddress/2.")  
+        langAddrs.push(":- discontiguous(languageAddress/2).")
+        langNames.push(":- discontiguous(languageName/2).")
+        exprAddrs.push(":- discontiguous(expressionAddress/2).")
 
         for(let node of nodes) {
             //node.replace('\n', '\n\c')
@@ -807,7 +784,7 @@ export default class Perspective {
         return link.source == 'ad4m://self' && link.predicate == 'ad4m://has_zome'
     }
 
-    async initEngineFacts(): Promise<string> {
+    async initEngineFacts(): Promise<string[]> {
         let lines = []
 
         const allLinks = await this.getLinks(new LinkQuery({}))
@@ -815,119 +792,103 @@ export default class Perspective {
         // triple/3
         // link/5
         //-------------------
-        lines.push(":- dynamic triple/3.")
-        lines.push(":- discontiguous triple/3.")
-        lines.push(":- dynamic link/5.")
-        lines.push(":- discontiguous link/5.")  
+        lines.push(":- discontiguous(triple/3).")
+        lines.push(":- discontiguous(link/5).")
+        
+        const linksWithoutSDNA = allLinks.filter(l => !this.isSDNALink(l.data))
 
-        for (const link of allLinks) {
+        for (const link of linksWithoutSDNA) {
             lines.push(this.tripleFact(link));
         }
-        for (const link of allLinks) {
+        for (const link of linksWithoutSDNA) {
             lines.push(this.linkFact(link));
         };
 
         //-------------------
         // reachable/2
         //-------------------
-        lines.push(":- dynamic reachable/2.")
-        lines.push(":- discontiguous reachable/2.")  
+        lines.push(":- discontiguous(reachable/2).")  
         lines.push("reachable(A,B) :- triple(A,_,B).")
         lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
 
         //-------------------
         // hiddenExpression/1
         //-------------------
-        lines.push(":- dynamic hiddenExpression/1.")
-        lines.push(":- discontiguous hiddenExpression/1.")
+        lines.push(":- discontiguous(hiddenExpression/1).")
 
 
 
-        lines = [...lines, ...await this.nodeFacts(allLinks)]
+        lines = [...lines, ...await this.nodeFacts(linksWithoutSDNA)]
 
         //-------------------
         // Social DNA zomes
         //-------------------
 
-        lines.push(":- dynamic register_sdna_flow/2.")
-        lines.push(":- dynamic flowable/2.")
-        lines.push(":- dynamic flow_state/3.")
-        lines.push(":- dynamic start_action/2.")
-        lines.push(":- dynamic action/4.")
+        lines.push(":- discontiguous(register_sdna_flow/2).")
+        lines.push(":- discontiguous(flowable/2).")
+        lines.push(":- discontiguous(flow_state/3).")
+        lines.push(":- discontiguous(start_action/2).")
+        lines.push(":- discontiguous(action/4).")
 
-        lines.push(":- discontiguous register_sdna_flow/2.")
-        lines.push(":- discontiguous flowable/2.")
-        lines.push(":- discontiguous flow_state/3.")
-        lines.push(":- discontiguous start_action/2.")
-        lines.push(":- discontiguous action/4.")
+        lines.push(":- discontiguous(subject_class/2).")
+        lines.push(":- discontiguous(constructor/2).")
+        lines.push(":- discontiguous(destructor/2).")
+        lines.push(":- discontiguous(instance/2).")
 
-        lines.push(":- dynamic subject_class/2.")
-        lines.push(":- dynamic constructor/2.")
-        lines.push(":- dynamic instance/2.")
-        lines.push(":- dynamic property/2.")
-        lines.push(":- dynamic property_getter/4.")
-        lines.push(":- dynamic property_setter/3.")
-        lines.push(":- dynamic property_resolve/2.")
-        lines.push(":- dynamic property_resolve_language/3.")
-        lines.push(":- dynamic property_named_option/4.")
-        lines.push(":- dynamic collection/2.")
-        lines.push(":- dynamic collection_getter/4.")
-        lines.push(":- dynamic collection_setter/3.")
-        lines.push(":- dynamic collection_remover/3.")
-        lines.push(":- dynamic collection_adder/3.")
-        lines.push(":- dynamic p3_class_icon/2.")
-        lines.push(":- dynamic p3_class_color/2.")
-        lines.push(":- dynamic p3_instance_color/3.")
+        lines.push(":- discontiguous(property/2).")
+        lines.push(":- discontiguous(property_getter/4).")
+        lines.push(":- discontiguous(property_setter/3).")
+        lines.push(":- discontiguous(property_resolve/2).")
+        lines.push(":- discontiguous(property_resolve_language/3).")
+        lines.push(":- discontiguous(property_named_option/4).")
+        
+        lines.push(":- discontiguous(collection/2).")
+        lines.push(":- discontiguous(collection_getter/4).")
+        lines.push(":- discontiguous(collection_setter/3).")
+        lines.push(":- discontiguous(collection_remover/3).")
+        lines.push(":- discontiguous(collection_adder/3).")
 
-        lines.push(":- discontiguous subject_class/2.")
-        lines.push(":- discontiguous constructor/2.")
-        lines.push(":- discontiguous instance/2.")
-        lines.push(":- discontiguous property/2.")
-        lines.push(":- discontiguous property_getter/4.")
-        lines.push(":- discontiguous property_setter/3.")
-        lines.push(":- discontiguous property_resolve/2.")
-        lines.push(":- discontiguous property_resolve_language/3.")
-        lines.push(":- discontiguous property_named_option/4.")
-        lines.push(":- discontiguous collection/2.")
-        lines.push(":- discontiguous collection_getter/4.")
-        lines.push(":- discontiguous collection_setter/3.")
-        lines.push(":- discontiguous collection_remover/3.")
-        lines.push(":- discontiguous collection_adder/3.")
-        lines.push(":- discontiguous p3_class_icon/2.")
-        lines.push(":- discontiguous p3_class_color/2.")
-        lines.push(":- discontiguous p3_instance_color/3.")
+        lines.push(":- discontiguous(p3_class_icon/2).")
+        lines.push(":- discontiguous(p3_class_color/2).")
+        lines.push(":- discontiguous(p3_instance_color/3).")
 
+        lines.push(":- use_module(library(lists)).");
+
+        let seenSubjectClasses = new Set()
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
             if(this.isSDNALink(link)) {
                 try {
                     let code = Literal.fromUrl(link.target).get()
-                    lines.push(code)
+                    let subjectClassMatch = code.match(/subject_class\("(.+?)",/);
+                    if (subjectClassMatch) {
+                        let subjectClassName = subjectClassMatch[1];
+                        if (!seenSubjectClasses.has(subjectClassName)) {
+                            seenSubjectClasses.add(subjectClassName);
+                            lines = lines.concat(code.split('\n'))
+                        }
+                    } else {
+                        lines = lines.concat(code.split('\n'))
+                    }
                 } catch {
                     console.error("Perspective.initEngineFacts: Error loading SocialDNA link target as literal... Ignoring SocialDNA link.");
                 }
             }
         }
 
-        const factsCode = lines.join('\n')
-        return factsCode
+        return lines
     }
 
     async spawnPrologEngine(): Promise<any> {
-        if(this.#prologEngine) {
-            await this.#prologEngine.close()
-            this.#prologEngine = null
-        }
-
         let error
-        const prolog = new PrologInstance(this.#config!)
+        const prolog = new PrologInstance(this)
+        await prolog.start();
 
         try {
             const facts = await this.initEngineFacts()
             await prolog.consult(facts)
         } catch(e) {
             error = e
-            prolog.close()
         }
 
         if(error) throw error
@@ -941,7 +902,7 @@ export default class Perspective {
                 this.#prologNeedsRebuild = false
             }
             if(this.#prologNeedsRebuild) {
-                console.log("Perspective.prologQuery: Making prolog query but first rebuilding facts");
+                //console.log("Perspective.prologQuery: Making prolog query but first rebuilding facts");
                 this.#prologNeedsRebuild = false
                 const facts = await this.initEngineFacts()
                 await this.#prologEngine!.consult(facts)
@@ -952,12 +913,9 @@ export default class Perspective {
     }
 
     clearPolling() {
+        this.#isTeardown = true;
         clearInterval(this.#pollingInterval);
-    }
-
-    closePrologEngine() {
-        if(this.#prologEngine)
-            this.#prologEngine.close()
+        clearInterval(this.#pendingDiffPollingInterval);
     }
 }
 

@@ -1,6 +1,6 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{time::{SystemTime, UNIX_EPOCH}, borrow::Cow};
 
-use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension};
+use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension, Op};
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
@@ -107,9 +107,13 @@ async fn verify_jwt(token: String) -> Result<Claims, AnyError> {
 }
 
 pub fn build() -> Extension {
-    Extension::builder("jwt")
-        .js(include_js_files!(jwt "jwt_extension.js",))
-        .ops(vec![generate_jwt::decl(), verify_jwt::decl()])
-        .force_op_registration()
-        .build()
+    Extension {
+        name: "jwt",
+        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/jwt_extension.js",)),
+        ops: Cow::Borrowed(&[
+            generate_jwt::DECL,
+            verify_jwt::DECL
+        ]),
+        ..Default::default()
+    }
 }
