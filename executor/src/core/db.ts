@@ -119,9 +119,6 @@ export class Ad4mDb {
         if (link.data.source == null) {
             delete link.data.source;
         };
-        if (link.data.predicate == null) {
-            delete link.data.predicate;
-        };
         if (link.data.target == null) {
             delete link.data.target;
         };

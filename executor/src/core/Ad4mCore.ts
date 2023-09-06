@@ -13,7 +13,6 @@ import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import EntanglementProofController from './EntanglementProof'
-import runDAppServer from "./DAppServer"
 import fs from 'fs'
 import { AgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
@@ -37,6 +36,8 @@ export interface InitHolochainParams {
     hcUseLocalProxy?: boolean,
     hcUseMdns?: boolean,
     passphrase?: string
+    hcProxyUrl: string,
+    hcBootstrapUrl: string,
 }
 
 export interface HolochainUnlockConfiguration extends HolochainConfiguration {
@@ -89,6 +90,7 @@ export default class Ad4mCore {
     }
 
     async callResolver (type: string, fnName: string, args: any, context: any) {
+        //console.log("Calling resolvers with data", type, fnName, args, context);
       if(!this.resolvers[type]) throw new Error(`Could not find resolver for type ${type}`)
       if(!this.resolvers[type][fnName]) throw new Error(`Could not find resolver function ${fnName} for type ${type}`)
       try {
@@ -179,10 +181,6 @@ export default class Ad4mCore {
         console.log("Done.")
     }
 
-    startDAppServer(port: number) {
-        runDAppServer(port)
-    }
-
     async initIPFS(params: InitIPFSParams) {
         console.log("Init IPFS service with port ", params.ipfsSwarmPort, " at path: ", params.ipfsRepoPath);
 
@@ -204,6 +202,8 @@ export default class Ad4mCore {
             useProxy: params.hcUseProxy,
             useLocalProxy: params.hcUseLocalProxy,
             useMdns: params.hcUseMdns,
+            hcProxyUrl: params.hcProxyUrl,
+            hcBootstrapUrl: params.hcBootstrapUrl,
         }
 
         this.#holochain = new HolochainService(holochainConfig, this.#agentService, this.entanglementProofController)
@@ -299,7 +299,8 @@ export default class Ad4mCore {
             state = PerspectiveState.LinkLanguageFailedToInstall;
         }
 
-        return this.#perspectivesController!.add("", url, neighbourhood, true, state);
+        console.log("Core.installNeighbourhood(): Creating perspective", url, neighbourhood, state);
+        return await this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
@@ -340,10 +341,6 @@ export default class Ad4mCore {
         }
     }
 
-    async pubKeyForLanguage(lang: string): Promise<Buffer> {
-        return Buffer.from(await HOLOCHAIN_SERVICE.getAgentKey());
-    }
-
     async holochainRequestAgentInfos(): Promise<AgentInfoResponse> {
         return await this.#holochain!.requestAgentInfos()
     }
@@ -359,11 +356,14 @@ export default class Ad4mCore {
     }
 
     async initializeAgentsDirectMessageLanguage() {
+        console.log("wait for languages");
         await this.waitForLanguages()
+        console.log("finished wait");
         const agent = this.#agentService.agent!
         if(agent.directMessageLanguage) return
         console.log("Agent doesn't have direct message language set yet. Creating from template...")
 
+        console.log("Cloning direct message language from template...");
         const templateParams = {
             uid: uuidv4(),
             recipient_did: this.#agentService.agent?.did,

@@ -1,4 +1,4 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput } from "@perspect3vism/ad4m";
+import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@perspect3vism/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
 import fs from "fs";
@@ -6,6 +6,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { expect } from "chai";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
+let aliceP1: null | PerspectiveProxy = null;
+let bobP1: null | PerspectiveHandle = null;
 
 export default function neighbourhoodTests(testContext: TestContext) {
     return () => {
@@ -76,16 +78,17 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 await testContext.makeAllNodesKnown()
                 expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
 
-                await sleep(5000)
+                await sleep(1000)
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
 
-                await sleep(5000)
+                await sleep(1000)
 
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                 let tries = 1
 
                 while(bobLinks.length < 1 && tries < 20) {
+                    console.log("Bob retrying getting links...");
                     await sleep(1000)
                     bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
@@ -98,30 +101,44 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const alice = testContext.alice
                 const bob = testContext.bob
 
-                const aliceP1 = await alice.perspective.add("friends")
+                aliceP1 = await alice.perspective.add("friends")
                 const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test local links"}));
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
-                let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+                bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
                 await testContext.makeAllNodesKnown()
 
-                await sleep(5000)
+                await sleep(1000)
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'}, 'local')
 
-                await sleep(5000)
+                await sleep(1000)
 
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                 let tries = 1
 
-                while(bobLinks.length < 1 && tries < 20) {
+                while(bobLinks.length < 1 && tries < 5) {
+                    console.log("Bob retrying getting NOT received links...");
                     await sleep(1000)
                     bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
                 }
                 
                 expect(bobLinks.length).to.be.equal(0)
+            })
+
+            it('can delete neighbourhood', async () => {
+                const alice = testContext.alice;
+                const bob = testContext.bob;
+
+                const deleteNeighbourhood = await alice.perspective.remove(aliceP1!.uuid);
+                expect(deleteNeighbourhood.perspectiveRemove).to.be.true;
+
+                const bobDeleteNeighbourhood = await bob.perspective.remove(bobP1!.uuid);
+                expect(bobDeleteNeighbourhood.perspectiveRemove).to.be.true;
+
+                const perspectives = await alice.perspective.all();
             })
             
             // it('can get the correct state change signals', async () => {
@@ -196,7 +213,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     const aliceP1 = await alice.perspective.add("telepresence")
                     const linkLang = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood for Telepresence"}));
                     const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
-                    await sleep(60000)
+                    await sleep(5000)
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                     const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
                     await testContext.makeAllNodesKnown()
@@ -205,11 +222,11 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     bobNH = bobP1!.getNeighbourhoodProxy()
                     aliceDID = (await alice.agent.me()).did
                     bobDID = (await bob.agent.me()).did
-                    await sleep(60000)
+                    await sleep(5000)
                 })
 
                 it('they see each other in `otherAgents`', async () => {
-                    await sleep(1000);
+                    await sleep(10000);
                     const aliceAgents = await aliceNH!.otherAgents()
                     console.log("alice agents", aliceAgents);
                     const bobAgents = await bobNH!.otherAgents()
@@ -290,7 +307,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await aliceNH!.sendSignal(bobDID!, aliceSignal)
 
-                    await sleep(2000)
+                    await sleep(1000)
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0)
@@ -306,7 +323,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await bobNH!.sendBroadcastU(bobSignal)
 
-                    await sleep(2000)
+                    await sleep(1000)
 
                     expect(aliceCalls).to.be.equal(1)
 

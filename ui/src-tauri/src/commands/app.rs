@@ -2,7 +2,7 @@ extern crate remove_dir_all;
 use std::time::{Duration, SystemTime};
 
 use crate::Payload;
-use crate::{config::data_path, get_main_window, util::find_and_kill_processes};
+use crate::{config::data_path, get_main_window};
 
 use remove_dir_all::*;
 

@@ -55,7 +55,7 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.68.2
+        toolchain: 1.71.1
     - name: Cache cargo
       id: cache-cargo
       uses: actions/cache@v3
@@ -67,15 +67,23 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-pull
 
   render:
@@ -93,7 +101,8 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.68.2
+        toolchain: 1.71.1
+
     - name: Cache cargo
       id: cache-cargo
       uses: actions/cache@v3
@@ -105,15 +114,23 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-render
 
   revisions:
@@ -131,7 +148,8 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.68.2
+        toolchain: 1.71.1
+
     - name: Cache cargo
       id: cache-cargo
       uses: actions/cache@v3
@@ -143,15 +161,23 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-revisions
 
   signals:
@@ -169,7 +195,8 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.68.2
+        toolchain: 1.71.1
+
     - name: Cache cargo
       id: cache-cargo
       uses: actions/cache@v3
@@ -181,15 +208,23 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-signals
 
 
@@ -208,7 +243,8 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.68.2
+        toolchain: 1.71.1
+
     - name: Cache cargo
       id: cache-cargo
       uses: actions/cache@v3
@@ -220,15 +256,23 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-stress
 
   telepresence:
@@ -246,7 +290,8 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.68.2
+        toolchain: 1.71.1
+
     - name: Cache cargo
       id: cache-cargo
       uses: actions/cache@v3
@@ -258,15 +303,23 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build-languages
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-telepresence
 
   integration:
@@ -284,7 +337,8 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.68.2
+        toolchain: 1.71.1
+
     - name: Cache cargo
       id: cache-cargo
       uses: actions/cache@v3
@@ -296,13 +350,21 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
+
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
+    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
+    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
     - run: yarn run build
-    - run: cargo install --version 0.2.3 lair_keystore || echo "lair already installed"
     - run: cd bootstrap-languages/p-diff-sync && yarn run integration-test

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::wallet::Wallet;
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct Key {
     pub public_key: String,
     pub private_key: String,

@@ -12,8 +12,6 @@ import { createResolvers } from "./core/graphQL-interface/GraphQL";
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 export interface OuterConfig {
-  //Path to resources used by ad4m-executor such as; hc, holochain, prolog
-  resourcePath: string
   //Path to be used for storing ad4m data
   appDataPath: string
   //Seed file used to load initial languages & agent configuration 
@@ -36,10 +34,6 @@ export interface OuterConfig {
   hcPortAdmin?: number,
   //Port for holochain application port
   hcPortApp?: number,
-  //Port for IPFS swarm
-  ipfsSwarmPort?: number,
-  //Port for IPFS repo
-  ipfsRepoPath?: string
   //Should holochain use a local proxy
   hcUseLocalProxy?: boolean,
   //Should holochain use Mdns
@@ -48,14 +42,12 @@ export interface OuterConfig {
   hcUseProxy?: boolean,
   //Should holochain use a bootstrap server
   hcUseBootstrap?: boolean,
+  hcProxyUrl: string,
+  hcBootstrapUrl: string,
   //Should ad4m-executor connect to an existing holochain instance, or spawn its own
   connectHolochain?: boolean,
   //The credential used by admin client to make request
-  adminCredential?: string,
-  //Path to swipl executable
-  swiplPath?: string,
-  //Path to swipl home directory
-  swiplHomePath?: string,
+  adminCredential?: string
 }
 
 export interface SeedFileSchema {
@@ -88,8 +80,8 @@ export interface SeedFileSchema {
 /// Main function which starts ad4m-executor
 export async function init(config: OuterConfig): Promise<Ad4mCore> {
     let { 
-      resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
-      mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, adminCredential, swiplPath, swiplHomePath,runDappServer,
+      appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
+      mocks, gqlPort, adminCredential, runDappServer,
       dAppPort
     } = config
     if(!gqlPort) gqlPort = 4000
@@ -158,23 +150,12 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
         preloadLanguages.push(address);
       })
     }
-    
 
-    console.log("\x1b[2m", 
-      "AD4M executor starting with version: ", ad4mExecutorVersion, "\n",
-      "Starting ad4m core with path:", appDataPath, "\n", 
-      "=> AD4M core language addresses: languageLanguage bundle (hidden) + ", systemLanguages.slice(1, systemLanguages.length), "\n",
-      "Languages to be preloaded, as supplied by appLangAliases", preloadLanguages, "\n",
-      "Language aliases:", languageAliases, "\n", 
-      "Bootstrap fixtures:", bootstrapFixtures, "\n",
-      "Resource path:", resourcePath, "\n", 
-      "Bootstrap seed:", networkBootstrapSeed, "\n",
-      "\x1b[0m"
-    );
+    console.log("AD4M executor starting with config:");
+    console.dir(config);
 
     const core = new create({
       appDataPath,
-      appResourcePath: resourcePath,
       systemLanguages,
       preloadLanguages,
       languageLanguageBundle: networkBootstrapSeedData.languageLanguageBundle,
@@ -189,14 +170,10 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
       languageAliases,
       bootstrapFixtures,
       languageLanguageOnly,
-      adminCredential,
-      swiplPath,
-      swiplHomePath
+      adminCredential
     } as CoreConfig);
 
     core.resolvers = createResolvers(core, config)
-
-    if (runDappServer) { core.startDAppServer(dAppPort) };
 
     return core
 }

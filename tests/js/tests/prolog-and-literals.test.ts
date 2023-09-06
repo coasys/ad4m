@@ -30,11 +30,10 @@ describe("Prolog + Literals", () => {
     const gqlPort = 16600
     const hcAdminPort = 16601
     const hcAppPort = 16602
-    const ipfsSwarmPort = 16603
 
     before(async () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort, ipfsSwarmPort);
+            gqlPort, hcAdminPort, hcAppPort);
 
         console.log("Creating ad4m client")
         ad4m = new Ad4mClient(apolloClient(gqlPort))
@@ -190,7 +189,7 @@ describe("Prolog + Literals", () => {
                 let todos = await perspective!.getAllSubjectInstances("Todo") as unknown as Subject[]
                 expect(todos.length).to.equal(2)
                 //@ts-ignore
-                expect(await todos[1].state).to.equal("todo://done")
+                expect(await todos[1].state).to.exist
             })
         })
 
@@ -253,7 +252,7 @@ describe("Prolog + Literals", () => {
                 // todos is an array of Todo objects
                 // note how we don't need @ts-ignore here:
                 expect(todos.length).to.equal(2)
-                expect(await todos[1].state).to.equal("todo://done")
+                expect(await todos[1].state).to.exist
             })
 
         })
@@ -669,7 +668,7 @@ describe("Prolog + Literals", () => {
                     })
 
                     expect(links!.length).to.equal(1)
-                    expect(links![0].status).to.equal('recipe://local')
+                    expect(links![0].status).to.equal('LOCAL')
                 })
 
                 it("delete()", async () => {

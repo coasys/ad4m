@@ -68,7 +68,7 @@ describe('Perspective', () => {
                 agentService,
                 db,
                 languageController,
-                config: new MainConfig(TEST_DIR, appDataPath)
+                config: new MainConfig(appDataPath)
             } as PerspectiveContext)
         allLinks = []
     })

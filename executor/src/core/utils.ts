@@ -3,7 +3,7 @@ export function sleep(ms: number) {
 }
 
 export function getPubSub(): PubSub {
-  console.log("Getting pubsub");
+  //console.log("Getting pubsub");
   if (typeof PUBSUB !== 'undefined') {
     return PUBSUB
   } else {

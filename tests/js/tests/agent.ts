@@ -157,6 +157,12 @@ export default function agentTests(testContext: TestContext) {
                 const getProofsPostDelete = await ad4mClient.agent.getEntanglementProofs();
                 expect(getProofsPostDelete.length).to.be.equal(0);
             })
+            it('can signMessage', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+
+                const signed = await ad4mClient.agent.signMessage("test");
+                expect(signed).to.not.be.null;
+            })
         })
     }
 }

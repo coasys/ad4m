@@ -45,8 +45,6 @@ describe('Ad4mDb', () => {
         delete link.data.predicate
         await db!.addLink(pUUID!, link);
 
-        link.data.predicate = null;
-
         const result = await db!.getLink(pUUID!, link);
         expect(result).to.be.deep.equal(link);
     })

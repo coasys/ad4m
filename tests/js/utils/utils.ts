@@ -30,17 +30,46 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
 
         resolve(stdout.toLowerCase().indexOf(processName.toLowerCase()) > -1)
       })
-    })
-  }
+    }) 
+}
+
+export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, process: ChildProcess}> {
+    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m');
+    let servicesProcess = exec(`${command} run-local-hc-services`);
+
+    let proxyUrl: string | null = null;
+    let bootstrapUrl: string | null = null;
+
+    let servicesReady = new Promise<void>((resolve, reject) => {
+        servicesProcess.stdout!.on('data', (data) => {
+            if (data.includes("HC BOOTSTRAP - ADDR")) {
+                const regex = /(http:\/\/|ws:\/\/)[^\s]+/g;
+                const matches = data.match(regex);
+                bootstrapUrl = matches![0];
+            }
+
+            if (data.includes("HC SIGNAL - ADDR")) {
+                const regex = /(http:\/\/|ws:\/\/)[^\s]+/g;
+                const matches = data.match(regex);
+                proxyUrl = matches![0];
+                resolve();
+            }
+        });
+    });
+
+    await servicesReady;
+    return {proxyUrl, bootstrapUrl, process: servicesProcess};
+}
 
 export async function startExecutor(dataPath: string, 
     bootstrapSeedPath: string, 
     gqlPort: number,
     hcAdminPort: number,
     hcAppPort: number,
-    ipfsSwarmPort: number,
     languageLanguageOnly: boolean = false,
-    adminCredential?: string
+    adminCredential?: string,
+    proxyUrl: string = "wss://signal.holotest.net",
+    bootstrapUrl: string = "https://bootstrap.holo.host",
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m');
 
@@ -51,16 +80,13 @@ export async function startExecutor(dataPath: string,
     execSync(`${command} init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
     
     console.log("Starting executor")
-    try {
-        execSync("killall holochain")
-    } catch (e) {
-        console.log("No holochain process running")
-    }
+
+    console.log("USING LOCAL BOOTSTRAP & PROXY URL: ", bootstrapUrl, proxyUrl);
     
     if (!adminCredential) {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
+        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap false --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
     } else {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --ipfs-swarm-port ${ipfsSwarmPort} --hc-use-bootstrap false --hc-use-proxy false --hc-use-local-proxy false --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
+        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap false --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
