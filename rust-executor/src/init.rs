@@ -48,7 +48,7 @@ pub fn init(
     if !compare.matches(&last_seen_version) {
         // Agents old ad4m version is too old, lets clean their state
         warn!("Agents old ad4m version is too old, lets clean their state");
-        clean_ad4m_data(&app_data_path, OLDEST_VERSION.clear_state)?;
+        clean_ad4m_data(&app_data_path, OLDEST_VERSION.clear_state, true)?;
         //Create the last seen version file
         fs::write(last_seen_file, AD4M_VERSION.to_string())?;
     }
@@ -80,6 +80,7 @@ fn write_seed_config(
 fn clean_ad4m_data(
     app_data_path: &PathBuf,
     should_clear_state: bool,
+    should_clear_everything: bool
 ) -> Result<(), Box<dyn Error>> {
     if app_data_path.exists() {
         let binary_path = app_data_path.join("binary");
@@ -128,6 +129,25 @@ fn clean_ad4m_data(
                 fs::remove_file(perspective_path)?;
             }
         };
+
+        if should_clear_everything {
+            let swipl_path = app_data_path.join("swipl");
+            if fs::metadata(&swipl_path).is_ok() {
+                fs::remove_dir_all(swipl_path)?;
+            };
+            let ipfs_path = app_data_path.join("ipfs");
+            if fs::metadata(&ipfs_path).is_ok() {
+                fs::remove_dir_all(ipfs_path)?;
+            };
+            let ad4m_path = app_data_path.join("ad4m");
+            if fs::metadata(&ad4m_path).is_ok() {
+                fs::remove_dir_all(ad4m_path)?;
+            };
+            let binary_path = app_data_path.join("binary");
+            if fs::metadata(&binary_path).is_ok() {
+                fs::remove_dir_all(binary_path)?;
+            };
+        }
     }
     Ok(())
 }
