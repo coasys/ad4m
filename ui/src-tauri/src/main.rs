@@ -17,17 +17,14 @@ use std::sync::Mutex;
 use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
 use std::io;
 use std::io::Write;
-use tracing_subscriber::{fmt::format::FmtSpan, FmtSubscriber};
 
 extern crate remove_dir_all;
-use remove_dir_all::*;
 
 use config::app_url;
 use menu::build_menu;
 use system_tray::{ build_system_tray, handle_system_tray_event };
 use tauri::{
     AppHandle,
-    api::process::{Command, CommandEvent},
     RunEvent, SystemTrayEvent,
     Window
 };
@@ -41,7 +38,6 @@ mod system_tray;
 mod menu;
 mod commands;
 
-use tauri::api::dialog;
 use tauri::Manager;
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
@@ -52,7 +48,7 @@ use crate::util::create_tray_message_windows;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
 use crate::util::has_processes_running;
-use crate::util::{find_and_kill_processes, create_main_window, save_executor_port};
+use crate::util::{create_main_window, save_executor_port};
 
 
 // the payload type must implement `Serialize` and `Clone`.
@@ -282,12 +278,4 @@ fn get_main_window(handle: &AppHandle) -> Window {
         let main = handle.get_window("AD4M");
         main.expect("Couldn't get main window right after creating it")
     }
-}
-
-fn log_error(window: &Window, message: &str) {
-    dialog::message(
-        Some(window),
-        "Error",
-        message
-    );
 }

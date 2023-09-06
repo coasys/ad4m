@@ -29,6 +29,7 @@ export default class Perspective {
     #db: Ad4mDb;
     #agent: AgentService;
     #languageController?: LanguageController
+    #updateControllersHandleSyncStatus?: (uuid: string, status: PerspectiveState) => void
     #config?: MainConfig;
     #pubSub: PubSub;
 
@@ -56,6 +57,7 @@ export default class Perspective {
         this.#agent = context.agentService!
         this.#languageController = context.languageController!
         this.#config = context.config;
+        this.#updateControllersHandleSyncStatus = context.updateControllersHandleSyncStatus;
         this.#pubSub = getPubSub();
 
         this.#prologEngine = null
@@ -93,9 +95,13 @@ export default class Perspective {
     }
 
     async updatePerspectiveState(state: PerspectiveState) {
-        if (this.state != state) {
+        if (this.state !== state) {
+            if (this.#updateControllersHandleSyncStatus) {
+                this.#updateControllersHandleSyncStatus(this.uuid!, state);
+            };
+            this.state = state;
             await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_SYNC_STATE_CHANGE, {state, uuid: this.uuid})
-            this.state = state
+            await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, this.plain());
         }
     }
 
@@ -143,7 +149,7 @@ export default class Perspective {
                 // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
                 if (await this.getCurrentRevision()) {
                     //TODO; once we have more data information coming from the link language, correctly determine when to mark perspective as synced
-                    this.updatePerspectiveState(PerspectiveState.Synced);
+                    await this.updatePerspectiveState(PerspectiveState.Synced);
                     //Let's check if we have unpublished diffs:
                     const mutations = await this.#db.getPendingDiffs(this.uuid!);
                     if (mutations.additions.length > 0 || mutations.removals.length > 0) {                        
@@ -220,7 +226,7 @@ export default class Perspective {
                 return undefined;
             }
         } catch (e) {
-            this.updatePerspectiveState(PerspectiveState.LinkLanguageFailedToInstall);
+            await this.updatePerspectiveState(PerspectiveState.LinkLanguageFailedToInstall);
             this.retries++;
             throw e;
         }
@@ -255,7 +261,7 @@ export default class Perspective {
     //@ts-ignore
     private callLinksAdapter(functionName: string, ...args): Promise<PerspectiveDiff> {
         if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
-            //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
+            console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve({
                 additions: [],
                 removals: []
@@ -589,6 +595,7 @@ export default class Perspective {
                 await this.#db.removeLink(this.uuid!, link);
             }))
         }
+        this.#prologNeedsRebuild = true;
     }
 
     private async getLinksLocal(query: LinkQuery): Promise<LinkExpression[]> {
@@ -844,6 +851,8 @@ export default class Perspective {
         lines.push(":- discontiguous(p3_class_icon/2).")
         lines.push(":- discontiguous(p3_class_color/2).")
         lines.push(":- discontiguous(p3_instance_color/3).")
+
+        lines.push(":- use_module(library(lists)).");
 
         let seenSubjectClasses = new Set()
         for(let linkExpression of allLinks) {

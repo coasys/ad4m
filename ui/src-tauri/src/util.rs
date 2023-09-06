@@ -6,7 +6,7 @@ use std::fs::remove_file;
 use std::fs::File;
 use std::io::prelude::*;
 use sysinfo::Process;
-use sysinfo::{ProcessExt, Signal, System, SystemExt};
+use sysinfo::{System, SystemExt};
 use tauri::{AppHandle, Manager, WindowBuilder, WindowEvent, WindowUrl, Wry};
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt;
@@ -22,18 +22,6 @@ pub fn find_port(start_port: u16, end_port: u16) -> u16 {
         "No open port found between: [{:?}, {:?}]",
         start_port, end_port
     );
-}
-
-pub fn find_and_kill_processes(name: &str) {
-    let processes = System::new_all();
-
-    for process in processes.processes_by_exact_name(name) {
-        log::info!("Prosses running: {} {}", process.pid(), process.name());
-
-        if process.kill_with(Signal::Term) == None {
-            log::error!("This signal isn't supported on this platform");
-        }
-    }
 }
 
 pub fn has_processes_running(name: &str) -> usize {

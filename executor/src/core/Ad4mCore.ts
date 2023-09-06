@@ -90,7 +90,7 @@ export default class Ad4mCore {
     }
 
     async callResolver (type: string, fnName: string, args: any, context: any) {
-        console.log("Calling resolvers with data", type, fnName, args, context);
+        //console.log("Calling resolvers with data", type, fnName, args, context);
       if(!this.resolvers[type]) throw new Error(`Could not find resolver for type ${type}`)
       if(!this.resolvers[type][fnName]) throw new Error(`Could not find resolver function ${fnName} for type ${type}`)
       try {
@@ -300,7 +300,7 @@ export default class Ad4mCore {
         }
 
         console.log("Core.installNeighbourhood(): Creating perspective", url, neighbourhood, state);
-        return this.#perspectivesController!.add("", url, neighbourhood, true, state);
+        return await this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
