@@ -49,13 +49,16 @@ export class SubjectEntity {
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, "${tempId}", "${p}", Value)`)
         if (results && results.length > 0) {
           let expressionURI = results[0].Value
-
           if (resolveExpressionURI) {
-            const expression = await this.#perspective.getExpression(expressionURI)
             try {
-              return JSON.parse(expression.data)
-            } catch (e) {
-              return expression.data
+              const expression = await this.#perspective.getExpression(expressionURI)
+              try {
+                return JSON.parse(expression.data)
+              } catch (e) {
+                return expression.data
+              }
+            } catch (err) {
+              return expressionURI
             }
           } else {
             return expressionURI
@@ -95,14 +98,13 @@ export class SubjectEntity {
   private async setProperty(key: string, value: any) {
     const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, "${key}", Setter)`)
     if (setters && setters.length > 0) {
-      const property = setters[0].Property
       const actions = eval(setters[0].Setter)
-      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${property}", Language)`)
+      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${key}", Language)`)
       let resolveLanguage
       if (resolveLanguageResults && resolveLanguageResults.length > 0) {
         resolveLanguage = resolveLanguageResults[0].Language
       }
-
+      
       if (resolveLanguage) {
         value = await this.#perspective.createExpression(value, resolveLanguage)
       }
@@ -161,7 +163,7 @@ export class SubjectEntity {
 
   async save() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
-    
+
     await this.#perspective.createSubject(this, this.#baseExpression);
 
     await this.update()
@@ -188,7 +190,7 @@ export class SubjectEntity {
               await this.setCollectionSetter(key, value.value)
               break;
           }
-        } else if (Array.isArray(value)) {
+        } else if (Array.isArray(value) && value.length > 0) {
           await this.setCollectionSetter(key, value)
         } else {
           await this.setProperty(key, value);
@@ -201,7 +203,7 @@ export class SubjectEntity {
 
   async get() {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
-    
+
     return await this.getData()
   }
 

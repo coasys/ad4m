@@ -539,7 +539,7 @@ export default class Perspective {
         return linkExpressions
     }
 
-    async linkMutations(mutations: LinkMutations): Promise<LinkExpressionMutations> {
+    async linkMutations(mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
         const diff = {
             additions: mutations.additions.map(l => this.ensureLinkExpression(l)),
             removals: mutations.removals.map(l => this.ensureLinkExpression(l))
@@ -550,7 +550,7 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         };
 
-        await this.#db.addManyLinks(this.uuid!, diff.additions);
+        await this.#db.addManyLinks(this.uuid!, diff.additions, status);
         await Promise.all(diff.removals.map(async l => await this.#db.removeLink(this.uuid!, l)));
         this.#prologNeedsRebuild = true;
         for (const link of diff.additions) {
@@ -882,8 +882,11 @@ export default class Perspective {
         lines.push(":- dynamic property_resolve/2.")
         lines.push(":- dynamic property_resolve_language/3.")
         lines.push(":- dynamic property_named_option/4.")
+        lines.push(":- dynamic collection/2.")
         lines.push(":- dynamic collection_getter/4.")
         lines.push(":- dynamic collection_setter/3.")
+        lines.push(":- dynamic collection_remover/3.")
+        lines.push(":- dynamic collection_adder/3.")
         lines.push(":- dynamic p3_class_icon/2.")
         lines.push(":- dynamic p3_class_color/2.")
         lines.push(":- dynamic p3_instance_color/3.")
@@ -897,8 +900,11 @@ export default class Perspective {
         lines.push(":- discontiguous property_resolve/2.")
         lines.push(":- discontiguous property_resolve_language/3.")
         lines.push(":- discontiguous property_named_option/4.")
+        lines.push(":- discontiguous collection/2.")
         lines.push(":- discontiguous collection_getter/4.")
         lines.push(":- discontiguous collection_setter/3.")
+        lines.push(":- discontiguous collection_remover/3.")
+        lines.push(":- discontiguous collection_adder/3.")
         lines.push(":- discontiguous p3_class_icon/2.")
         lines.push(":- discontiguous p3_class_color/2.")
         lines.push(":- discontiguous p3_instance_color/3.")

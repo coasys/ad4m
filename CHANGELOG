@@ -6,10 +6,26 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+
+### Changed
+ 
+### Deprecated
+
+### Removed
+
+### Fixed
+- Fixed resolveLanguage not working for properties [PR#402](https://github.com/coasys/ad4m/pull/402)
+- Fixed destructor not working because it would not remove all intial value [PR#402](https://github.com/coasys/ad4m/pull/402)
+- Handle not being able to parse expression URL if the language didn't exists [PR#402](https://github.com/coasys/ad4m/pull/402)
+
+## [0.5.0] - 10/07/2023
+
+### Added
  - bootstrap languages to mono repo [PR#328](https://github.com/perspect3vism/ad4m/pull/328)
  - Added a apps changes listener so the launcher app can updated the apps list without having to switch tabs to trigger update [PR#354](https://github.com/perspect3vism/ad4m/pull/354)
  - Support for new UI oriented Subject class predicates (property_named_option, p3_class_icon, etc). [PR#353](https://github.com/perspect3vism/ad4m/pull/353)
  - Adds a new status property to Link expression to indicate if the link is shared or local. [PR#130](https://github.com/perspect3vism/ad4m/pull/130)
+ - Added local links support to SDNA. [PR#370](https://github.com/perspect3vism/ad4m/pull/370)
 
 ### Changed
  
@@ -22,6 +38,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Fixed launcher breaking on windows if a new app instance is created. [PR#362](https://github.com/perspect3vism/ad4m/pull/362)
  - Fixed SDNA decorator readyonly properties in ts5 & fixed collection not working if not initalized. [PR#369](https://github.com/perspect3vism/ad4m/pull/369)
  - Fixed Perspective handle's state was not updated when the instance state got updated which caused the issue. [PR#368](https://github.com/perspect3vism/ad4m/pull/368)
+
 ## [0.3.4] - 27/03/2023
 
 ### Added

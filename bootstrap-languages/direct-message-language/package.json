@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/direct-message-language",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "A templateable AD4M Language for personal, per-agent direct message Languages",
   "main": "index.js",
   "scripts": {
