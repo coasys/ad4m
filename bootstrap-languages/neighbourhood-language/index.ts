@@ -1,6 +1,5 @@
-import type { Address, Language, LanguageContext, ExpressionUI, Interaction, HolochainLanguageDelegate } from "@perspect3vism/ad4m";
-import Adapter from "./adapter";
-import { DNA, DNA_NICK } from "./dna";
+import type { Address, Language, LanguageContext, ExpressionUI, Interaction } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import Adapter from "./adapter.ts";
 
 function interactions(expression: Address): Interaction[] {
   return [];

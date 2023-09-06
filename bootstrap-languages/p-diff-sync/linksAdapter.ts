@@ -1,10 +1,12 @@
 import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
-  LinkExpression, DID, Perspective, PerspectiveState } from "@perspect3vism/ad4m";
-import type { SyncStateChangeObserver } from "@perspect3vism/ad4m";
-import { DNA_NICK, ZOME_NAME } from "./dna";
+  LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";;
+import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";;
+import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
 
 class PeerInfo {
+  //@ts-ignore
   currentRevision: Buffer;
+  //@ts-ignore
   lastSeen: Date;
 };
 
@@ -34,10 +36,12 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async others(): Promise<DID[]> {
+    //@ts-ignore
     return await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_others", null);
   }
 
   async currentRevision(): Promise<string> {
+    //@ts-ignore
     let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "current_revision", null);
     return res as string;
   }
@@ -45,6 +49,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   async sync(): Promise<PerspectiveDiff> {
     try {
       await this.currentRevisionMutex.lock();
+      //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
       if (current_revision && Buffer.isBuffer(current_revision)) {
         this.myCurrentRevision = current_revision; 
@@ -107,19 +112,23 @@ export class LinkAdapter implements LinkSyncAdapter {
         });
       }
 
-      function checkSyncState(callback: SyncStateChangeObserver) {
+      async function checkSyncState(callback: SyncStateChangeObserver) {
         if (sameRevisions.length > 0 || differentRevisions.length > 0) {
           if (sameRevisions.length <= differentRevisions.length) {
-            callback(PerspectiveState.LinkLanguageInstalledButNotSynced);
+            await callback(PerspectiveState.LinkLanguageInstalledButNotSynced);
           } else {
-            callback(PerspectiveState.Synced);
+            await callback(PerspectiveState.Synced);
           };
+        } else if (differentRevisions == 0) {
+          await callback(PerspectiveState.Synced);
         }
       }
 
+      //@ts-ignore
       generateRevisionStates(this.myCurrentRevision);
 
-      checkSyncState(this.syncStateChangeCallback);
+      //@ts-ignore
+      await checkSyncState(this.syncStateChangeCallback);
 
       for (const hash of Array.from(revisions)) {
         if(!hash) continue
@@ -133,8 +142,10 @@ export class LinkAdapter implements LinkSyncAdapter {
             let myRevision = pullResult.current_revision;
             this.myCurrentRevision = myRevision;
 
+            //@ts-ignore
             generateRevisionStates(this.myCurrentRevision);
-            checkSyncState(this.syncStateChangeCallback);
+            //@ts-ignore
+            await checkSyncState(this.syncStateChangeCallback);
           }
         }
       }
@@ -167,6 +178,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async render(): Promise<Perspective> {
+    //@ts-ignore
     let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "render", null);
     return new Perspective(res.links);
   }
@@ -222,7 +234,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       //console.log("PerspectiveDiffSync.handleHolochainSignal: received a signals from ourselves in fast_forward_signal or in a pull: ", signal.payload);
       //This signal only contains link data and no reference, and therefore came from us in a pull in fast_forward_signal
       if (this.linkCallback) {
-        this.linkCallback(signal.payload);
+        await this.linkCallback(signal.payload);
       }
     }
   }
@@ -235,6 +247,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         DNA_NICK,
         ZOME_NAME,
         "add_active_agent_link",
+        //@ts-ignore
         null
       );
     }

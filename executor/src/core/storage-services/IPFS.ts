@@ -1,3 +1,4 @@
+/*
 import * as IPFS from 'ipfs-core'
 
 const _appendBuffer = (buffer1: Uint8Array, buffer2: Uint8Array) => {
@@ -44,3 +45,4 @@ export async function init (swarmPort?: number, repo?: string) {
 
     return node
 }
+*/

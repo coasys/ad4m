@@ -1,5 +1,5 @@
-import type { Address, Agent, Expression, PublicSharing, LanguageContext, HolochainLanguageDelegate, ExpressionAdapter, AgentService } from "@perspect3vism/ad4m";
-import { DNA_NICK } from "./dna";
+import type { Address, Agent, Expression, PublicSharing, LanguageContext, HolochainLanguageDelegate, ExpressionAdapter, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import { DNA_NICK } from "./build/dna.js";
 
 export default class ExpressionAdapterImpl implements ExpressionAdapter {
   #DNA: HolochainLanguageDelegate;
@@ -34,7 +34,7 @@ class Sharing implements PublicSharing {
     this.#agent = context.agent; 
   }
 
-  async createPublic(content: object): Promise<Address> {
+  async createPublic(content: Agent): Promise<Address> {
 
     if(!content['did'] || !content['perspective'] || !content['perspective'].links)
       throw "Content must be an Agent object"
@@ -44,9 +44,9 @@ class Sharing implements PublicSharing {
       throw "Can't set Agent Expression for foreign DID - only for self"
 
     if(!agent.directMessageLanguage)
-      agent.directMessageLanguage = null
+      agent.directMessageLanguage = undefined
 
-    agent.perspective.links.forEach(link => {
+    agent.perspective!.links.forEach(link => {
       delete link.proof.valid
       delete link.proof.invalid
     })

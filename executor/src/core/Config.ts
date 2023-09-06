@@ -18,7 +18,7 @@ export class MainConfig {
     holochainConductorPath: string;
     resourcePath: string = '';
     languageLanguageOnly: boolean = false;
-    reqCredential: string = '';
+    adminCredential: string = '';
     knownLinkLanguages: string[] = [];
     trustedAgents: string[] =  [];
     systemLanguages: string[] = [];
@@ -35,8 +35,7 @@ export class MainConfig {
     swiplPath: string | undefined = undefined;
     swiplHomePath: string | undefined = undefined;
 
-    constructor(resourcePath = '', appDataPath = '') {
-        this.resourcePath = resourcePath;
+    constructor(appDataPath = '') {
         this.rootConfigPath = path.join(appDataPath, 'ad4m');
         this.dataPath = path.join(this.rootConfigPath, 'data')
         this.languagesPath = path.join(this.rootConfigPath, 'languages')
@@ -53,7 +52,6 @@ export type LanguageAlias = {
 
 export interface CoreConfig {
     appDataPath: string
-    appResourcePath: string
     languageLanguageBundle: string
     systemLanguages: string[]
     preloadLanguages: string[]
@@ -68,17 +66,15 @@ export interface CoreConfig {
     perspectiveLanguageSettings?: object
     neighbourhoodLanguageSettings?: object
     languageLanguageSettings?: object
-    reqCredential?: string
-    swiplPath?: string,
-    swiplHomePath?: string,
+    adminCredential?: string
 }
 
 
 export function init(c: CoreConfig): MainConfig {
-    const mainConfig = new MainConfig(c.appResourcePath, c.appDataPath);
+    const mainConfig = new MainConfig(c.appDataPath);
 
-    if(c.reqCredential) {
-        mainConfig.reqCredential = c.reqCredential
+    if(c.adminCredential) {
+        mainConfig.adminCredential = c.adminCredential
     }
 
     //Create paths if they do not exist
@@ -119,8 +115,6 @@ export function init(c: CoreConfig): MainConfig {
     if (c.languageLanguageSettings) {
         mainConfig.languageLanguageSettings = c.languageLanguageSettings
     }
-    mainConfig.swiplPath = c.swiplPath
-    mainConfig.swiplHomePath = c.swiplHomePath
 
     return mainConfig;
 }

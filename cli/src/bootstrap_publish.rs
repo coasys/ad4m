@@ -1,12 +1,8 @@
 use ad4m_client::Ad4mClient;
-use anyhow::Result;
-use colour::{blue_ln, green_ln};
+use colour::green_ln;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::fs;
 use std::process::exit;
-use std::sync::mpsc::Sender;
-use std::{fs, process::Stdio};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SeedProto {
@@ -60,55 +56,6 @@ pub struct BootstrapSeed {
     pub language_language_bundle: String,
 }
 
-pub fn serve_ad4m_host(
-    ad4m_host_path: String,
-    data_path: PathBuf,
-    sender: Sender<String>,
-) -> Result<()> {
-    let mut ad4m_host_publish = std::process::Command::new(ad4m_host_path)
-        .arg("serve")
-        .arg("--languageLanguageOnly")
-        .arg("true")
-        .arg("--dataPath")
-        .arg(data_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    blue_ln!("ad4m-host serve started");
-    blue_ln!("Listening for stdout...");
-
-    let stdout = ad4m_host_publish.stdout.take().unwrap();
-    let stderr = ad4m_host_publish.stderr.take().unwrap();
-    let mut f = BufReader::new(stdout);
-    let mut f_e = BufReader::new(stderr);
-    std::thread::spawn(move || loop {
-        let mut buf = String::new();
-
-        match f.read_line(&mut buf) {
-            Ok(_) => {
-                if !buf.is_empty() {
-                    sender.send(buf).unwrap();
-                }
-            }
-            Err(e) => println!("an error!: {:?}", e),
-        }
-    });
-
-    std::thread::spawn(move || loop {
-        let mut buf_e = String::new();
-        match f_e.read_line(&mut buf_e) {
-            Ok(_) => {
-                if !buf_e.is_empty() {
-                    println!("{}", buf_e);
-                }
-            }
-            Err(e) => println!("an error!: {:?}", e),
-        }
-    });
-
-    Ok(())
-}
-
 //Generates an ad4m client, unlocks the agent and then publishes the languages found in the seed proto.
 //After that it will generate a new bootstrap seed and save to the current directory
 pub async fn start_publishing(
@@ -116,10 +63,7 @@ pub async fn start_publishing(
     seed_proto: SeedProto,
     language_language_bundle: String,
 ) {
-    let ad4m_client = Ad4mClient::new(
-        "http://localhost:4000/graphql".to_string(),
-        "".to_string()
-    );
+    let ad4m_client = Ad4mClient::new("http://localhost:4000/graphql".to_string(), "".to_string());
 
     let agent = ad4m_client
         .agent
@@ -131,7 +75,7 @@ pub async fn start_publishing(
         println!("Error unlocking agent: {}", error);
         exit(1);
     }
-    
+
     green_ln!("Unlocked agent\n");
 
     let mut languages = vec![];

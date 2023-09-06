@@ -1,5 +1,5 @@
-import type { Address, Language, LanguageContext, Interaction } from "@perspect3vism/ad4m";
-import DMAdapter from "./adapter";
+import type { Address, Language, LanguageContext, Interaction } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import DMAdapter from "./adapter.ts";
 
 export const name = "direct-message-language";
 

@@ -1,7 +1,6 @@
-import type { Address, Language, HolochainLanguageDelegate, LanguageContext, Interaction, ExpressionUI } from "@perspect3vism/ad4m";
-import LangAdapter from "./languageAdapter";
-import Adapter from "./adapter";
-import { DNA, DNA_NICK } from "./dna";
+import type { Address, Language, LanguageContext, Interaction } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import LangAdapter from "./languageAdapter.ts";
+import Adapter from "./adapter.ts";
 
 export const name = "languages";
 

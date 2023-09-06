@@ -3,5 +3,11 @@
 members = [
     "cli",
     "rust-client",
+    "rust-executor",
     "ui/src-tauri"
 ]
+
+
+[patch.crates-io]
+sodiumoxide = { git = "https://github.com/fayeed/sodiumoxide" }
+serde = { git = "https://github.com/fayeed/serde.git", branch = "ad4m-compatible" }

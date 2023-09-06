@@ -10,18 +10,6 @@ pub fn log_path() -> PathBuf {
     data_path().join("ad4m.log")
 }
 
-pub fn binary_path() -> PathBuf {
-    data_path().join("binary")
-}
-
-pub fn holochain_binary_path() -> PathBuf {
-    if cfg!(windows) {
-        binary_path().join("holochain.exe")
-    } else {
-        binary_path().join("holochain")
-    }
-}
-
 #[cfg(feature = "custom-protocol")]
 pub fn app_url() -> String {
     "index.html".to_string()

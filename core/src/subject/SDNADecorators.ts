@@ -312,9 +312,11 @@ export function SDNAClass(opts: SDNAClassOptions) {
 
             let subjectContructorJSONString = stringifyObjectLiteral(constructorActions)
             sdna += `constructor(${uuid}, '${subjectContructorJSONString}').\n`
-            let instanceConditionProlog = instanceConditions.join(", ")
-            sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
-            sdna += "\n"
+            if(instanceConditions.length > 0) {
+                let instanceConditionProlog = instanceConditions.join(", ")
+                sdna += `instance(${uuid}, Base) :- ${instanceConditionProlog}.\n`
+                sdna += "\n"
+            }
             sdna += `destructor(${uuid}, '${stringifyObjectLiteral(classRemoverActions)}').\n`
             sdna += "\n"
             sdna += propertiesCode.join("\n")

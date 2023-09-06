@@ -1,9 +1,10 @@
-import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "@perspect3vism/ad4m";
-import { DNA, DNA_NICK } from "./dna";
+import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import { DNA, DNA_NICK } from "./build/dna.js";
 
-//@ad4m-template-variable
+//!@ad4m-template-variable
 const recipient_did = "<not templated yet>"
 
+//@ts-ignore
 export const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 export default class DMAdapter implements DirectMessageAdapter {
@@ -36,7 +37,7 @@ export default class DMAdapter implements DirectMessageAdapter {
             ["direct-message", "inbox"],
           ] 
         }
-      ], (signal) => {
+      ], async (signal) => {
         console.debug("DM Language got HC signal:", signal)
         //@ts-ignore
         let payload = signal.payload
@@ -49,7 +50,9 @@ export default class DMAdapter implements DirectMessageAdapter {
         } catch(e) {
           console.error(e)
         }
-        that.#messageCallbacks.forEach(cb => cb(payload))
+        for (const cb of that.#messageCallbacks) {
+          await cb(payload)
+        }
       });
   }
 
@@ -60,6 +63,7 @@ export default class DMAdapter implements DirectMessageAdapter {
   async status(): Promise<PerspectiveExpression | void> {
     let status = null
     try {
+      //@ts-ignore
       status = await this.#holochain.call(DNA_NICK, "direct-message", "get_status", null)  
     } catch(e) {
       console.debug("DirectMessage Language couldn't get status:", e)
@@ -88,6 +92,7 @@ export default class DMAdapter implements DirectMessageAdapter {
   }
 
   onlyRecipient() {
+    console.log(recipient_did, this.#context.agent.did);
     if(recipient_did !== this.#context.agent.did) throw new Error("Only recipient can call this function!")
   }
 
@@ -99,11 +104,14 @@ export default class DMAdapter implements DirectMessageAdapter {
 
   async inbox(filter?: string): Promise<PerspectiveExpression[]> {
     this.onlyRecipient()
+    //@ts-ignore
     await this.#holochain.call(DNA_NICK, "direct-message", "fetch_inbox", null)
+    //@ts-ignore
     return await this.#holochain.call(DNA_NICK, "direct-message", "inbox", filter)
   }
 
   addMessageCallback(callback: MessageCallback) {
+    console.log("adding callback on dm language");
     this.onlyRecipient()
     this.#messageCallbacks.push(callback)
   }
