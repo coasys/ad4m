@@ -28,24 +28,15 @@ class NeighbourhoodPutAdapter implements PublicSharing {
       console.error("Upload neighbourhood data gets error: ", neighbourhoodPostResult);
     }
 
-    //Store the FileMetadataExpression
-    await storage.storeNeighbourhoodExpression({
-      neighbourhood: expression,
-      address: hash
-    })
-
-    //@ts-ignore
-    return hash
+    return hash as Address;
   }
 }
 
 export default class Adapter implements ExpressionAdapter {
   putAdapter: PublicSharing;
-  #DNA: HolochainLanguageDelegate;
 
   constructor(context: LanguageContext) {
     this.putAdapter = new NeighbourhoodPutAdapter(context);
-    this.#DNA = context.Holochain as HolochainLanguageDelegate;
   }
 
   async get(address: Address): Promise<Expression> {
@@ -67,11 +58,6 @@ export default class Adapter implements ExpressionAdapter {
       console.error("Get meta information failed at getting meta information", e);
     }
 
-    const expression = (await storage.getNeighbourhoodExpression(address)) as NeighbourhoodExpression
-    if (!expression) {
-      return null;
-    };
-
-    return expression
+    return neighbourhoodObject;
   }
 }

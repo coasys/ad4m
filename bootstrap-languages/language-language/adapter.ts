@@ -6,11 +6,9 @@ import { PROXY_URL } from "./index.ts";
 
 export default class Adapter implements ExpressionAdapter {
   putAdapter: PublicSharing;
-  #DNA: HolochainLanguageDelegate;
 
   constructor(context: LanguageContext) {
-    this.putAdapter = new LanguageStoragePutAdapter(context);
-    this.#DNA = context.Holochain as HolochainLanguageDelegate;
+    this.putAdapter = new CloudflarePutAdapter(context);
   }
 
   async get(address: Address): Promise<Expression | null> {
@@ -39,12 +37,6 @@ export default class Adapter implements ExpressionAdapter {
       return null;
     }
 
-    const expression = (await storage.getLanguageExpression(address)) as LanguageExpression
-
-    if (!expression) {
-      return null;
-    };
-
-    return expression
+    return metaObject;
   }
 }

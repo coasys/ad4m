@@ -5,9 +5,8 @@ import { PROXY_URL } from "./index.ts";
 
 export default class LangAdapter implements LanguageAdapter {
   constructor(context: LanguageContext) {
-    this.putAdapter = new LanguageStoragePutAdapter(context);
-    this.#DNA = context.Holochain as HolochainLanguageDelegate;
   }
+
   async getLanguageSource(address: Address): Promise<string> {
     //Check the first two characters of address are equal to Qm
     if (address.substring(0, 2) != "Qm") {
@@ -34,24 +33,6 @@ export default class LangAdapter implements LanguageAdapter {
       throw (e)
     }
 
-    const expression = (await storage.getLanguageExpression(address)) as LanguageExpression
-
-    if (!expression) {
-      console.error("LanguageLanguage.get(): Failed to fetch language");
-      return null;
-    };
-    
-    if (expression.data.chunks_hashes === 0 || expression.data.chunks_hashes === undefined) {
-        console.error("LanguageLanguage.get(): Failed to fetch language");
-        return null;
-    };
-
-    const data_compressed = await storage.download(expression.data.chunks_hashes);
-    let data_stream = await data_compressed.arrayBuffer();
-
-    const data_uncompressed = pako.inflate(data_stream);
-    const buffer = Buffer.from(data_uncompressed)
-
-    return buffer.toString("utf-8")
+    return languageSource;
   }
 }
