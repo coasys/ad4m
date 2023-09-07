@@ -54,6 +54,8 @@ export class LinkAdapter implements LinkSyncAdapter {
       if (current_revision && Buffer.isBuffer(current_revision)) {
         this.myCurrentRevision = current_revision; 
       }
+    } catch {
+      console.error("PerspectiveDiffSync.sync(); got error", e);
     } finally {
       this.currentRevisionMutex.unlock();
     }
@@ -171,6 +173,8 @@ export class LinkAdapter implements LinkSyncAdapter {
         `);
         this.gossipLogCount = 0;
       }
+    } catch (e) {
+      console.error("PerspectiveDiffSync.gossip(); got error", e);
     } finally {
       this.peersMutex.unlock();
       this.currentRevisionMutex.unlock();
@@ -195,6 +199,8 @@ export class LinkAdapter implements LinkSyncAdapter {
         this.myCurrentRevision = res;
       }
       return res as string;
+    } catch (e) {
+      console.error("PerspectiveDiffSync.commit(); got error", e);
     } finally {
       this.currentRevisionMutex.unlock();
     }
@@ -227,6 +233,8 @@ export class LinkAdapter implements LinkSyncAdapter {
       try {
         await this.peersMutex.lock();
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
+      } catch (e) {
+        console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
       } finally {
         this.peersMutex.unlock();
       }
