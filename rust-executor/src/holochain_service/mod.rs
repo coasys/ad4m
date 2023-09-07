@@ -192,18 +192,18 @@ impl HolochainService {
             config.admin_interfaces = None;
 
             let mut kitsune_config = KitsuneP2pConfig::default();
-            let mut tuning_params = KitsuneP2pTuningParams::default();
+            // let mut tuning_params = KitsuneP2pTuningParams::default();
 
-            // How long should we hold off talking to a peer
-            // we've previously gotten errors speaking to.
-            // [Default: 5 minute; now updated to 2 minutes]
-            tuning_params.gossip_peer_on_error_next_gossip_delay_ms = 1000 * 60 * 2;
+            // // How long should we hold off talking to a peer
+            // // we've previously gotten errors speaking to.
+            // // [Default: 5 minute; now updated to 2 minutes]
+            // tuning_params.gossip_peer_on_error_next_gossip_delay_ms = 1000 * 60 * 2;
             
-            // How often should we update and publish our agent info?
-            // [Default: 5 minutes; now updated to 2 minutes]
-            tuning_params.gossip_agent_info_update_interval_ms = 1000 * 60 * 2;
+            // // How often should we update and publish our agent info?
+            // // [Default: 5 minutes; now updated to 2 minutes]
+            // tuning_params.gossip_agent_info_update_interval_ms = 1000 * 60 * 2;
 
-            kitsune_config.tuning_params = Arc::new(tuning_params);
+            // kitsune_config.tuning_params = Arc::new(tuning_params);
 
             if local_config.use_bootstrap {
                 kitsune_config.bootstrap_service = Some(Url2::parse(local_config.bootstrap_url));
