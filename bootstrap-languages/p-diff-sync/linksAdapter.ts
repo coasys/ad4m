@@ -48,13 +48,15 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async sync(): Promise<PerspectiveDiff> {
     try {
+      console.log("PerspectiveDiffSync.sync(); Getting currentRevision lock");
       await this.currentRevisionMutex.lock();
+      console.log("PerspectiveDiffSync.sync(); Got currentRevision lock");
       //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
       if (current_revision && Buffer.isBuffer(current_revision)) {
         this.myCurrentRevision = current_revision; 
       }
-    } catch {
+    } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);
     } finally {
       this.currentRevisionMutex.unlock();
@@ -68,8 +70,11 @@ export class LinkAdapter implements LinkSyncAdapter {
     let lostPeers: DID[] = [];
 
     try {
+      console.log("PerspectiveDiffSync.gossip(); Getting peers lock");
       await this.peersMutex.lock();
+      console.log("PerspectiveDiffSync.gossip(); Got peers lock");
       await this.currentRevisionMutex.lock();
+      console.log("PerspectiveDiffSync.gossip(); Got currentRevision lock");
       this.peers.forEach( (peerInfo, peer) => {
         if (peerInfo.lastSeen.getTime() + 10000 < new Date().getTime()) {
           lostPeers.push(peer);
@@ -189,7 +194,9 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async commit(diff: PerspectiveDiff): Promise<string> {
     try {
+      console.log("PerspectiveDiffSync.commit(); Getting currentRevision lock");
       await this.currentRevisionMutex.lock();
+      console.log("PerspectiveDiffSync.commit(); Got currentRevision lock");
       let prep_diff = {
         additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
         removals: diff.removals.map((diff) => prepareLinkExpression(diff))
@@ -231,7 +238,9 @@ export class LinkAdapter implements LinkSyncAdapter {
       //       broadcast_author: ${broadcast_author}
       //       `)
       try {
+        console.log("PerspectiveDiffSync.handleHolochainSignal: Getting peers lock");
         await this.peersMutex.lock();
+        console.log("PerspectiveDiffSync.handleHolochainSignal: Got peers lock");
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
       } catch (e) {
         console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
@@ -292,6 +301,7 @@ class Mutex {
 
   async lock(): Promise<void> {
     if (this.locked) {
+      console.log("Was not able to get lock on mutex adding to waitingResolvers");
       return new Promise((resolve) => {
         this.waitingResolvers.push(resolve);
       });
@@ -302,6 +312,7 @@ class Mutex {
   unlock(): void {
     if (!this.locked) return;
     if (this.waitingResolvers.length > 0) {
+      console.log("Called unlock and got some waitingResolvers to finish");
       const resolve = this.waitingResolvers.shift();
       if (resolve) resolve();
     } else {
