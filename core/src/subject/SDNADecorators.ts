@@ -235,12 +235,12 @@ export function SDNAClass(opts: SDNAClassOptions) {
                         target: initial,
                     })
 
-                    classRemoverActions = [{
+                    classRemoverActions.push({
                         action: "removeLink",
                         source: "this",
                         predicate: through,
                         target: initial,
-                    }]
+                    })
                 }
             }
 

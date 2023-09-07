@@ -365,25 +365,32 @@ export default class LanguageController {
         const language = this.#languages.get(address)
         if (language) return language
 
-        //Check that the metafile already exists with language with this address to avoid refetch
-        const metaFile = path.join(path.join(this.#config.languagesPath, address), "meta.json");
-        if(!fs.existsSync(metaFile)) {
-            //Get language meta information
-            console.log(new Date(), "installLanguage: installing language with address", address);
-            if(!languageMeta) {
-                try {
-                    languageMeta = await this.getLanguageExpression(address)
-                } catch (e) {
-                    throw Error(`Error getting language meta from language language: ${e}`)
+        if(!languageMeta) { 
+            //Check that the metafile already exists with language with this address to avoid refetch
+            const metaFile = path.join(path.join(this.#config.languagesPath, address), "meta.json");
+
+            if(fs.existsSync(metaFile)) {
+                languageMeta = JSON.parse(fs.readFileSync(metaFile).toString());
+            } else {
+                // We need to get the meta from the language language
+                // Retry 10 times with increasing delay to account for Holochain sync
+                let retries = 0;
+                while (!languageMeta && retries < 10) {
+                    try {
+                        languageMeta = await this.getLanguageExpression(address)
+                    } catch (e) {
+                        console.error(`Error getting language meta from language language: ${e}\nRetrying...`)
+                    }
+                    retries++;
+                    await new Promise(r => setTimeout(r, 5000 * retries));
                 }
             }
-        } else {
-            languageMeta = JSON.parse(fs.readFileSync(metaFile).toString());
-        };
-        if (languageMeta == null) {
-            //@ts-ignore
-            languageMeta = {data: {}};
+            if (languageMeta == null) {
+                //@ts-ignore
+                languageMeta = {data: {}};
+            }
         }
+       
 
         console.log("LanguageController.installLanguage: INSTALLING LANGUAGE:", languageMeta.data)
         let bundlePath = path.join(path.join(this.#config.languagesPath, address), "bundle.js");

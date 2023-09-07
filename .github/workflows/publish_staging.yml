@@ -50,10 +50,8 @@ jobs:
 
     needs: 
       - create-release
-      - npm-publish
 
     runs-on: ${{ matrix.platform }}
-
     steps:
     - name: Fetch source code
       uses: actions/checkout@v2
@@ -95,7 +93,7 @@ jobs:
         go-version: '1.18'
 
     - name: Yarn Install
-      run: yarn install
+      run: yarn install --no-cache
 
     - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
       if: matrix.platform != 'windows-latest'
@@ -179,15 +177,15 @@ jobs:
         asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
         asset_content_type: application/octet-stream
 
-    # - name: "Upload built AD4MIN"
-    #   uses: tauri-apps/tauri-action@v0.3
-    #   env:
-    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #   with:
-    #     tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
-    #     releaseName: "Ad4min v__VERSION__"
-    #     releaseBody: "See the assets to download this version and install."
-    #     projectPath: "./ui"
+    - name: "Upload built AD4MIN"
+      uses: tauri-apps/tauri-action@v0.3
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
+        releaseName: "Ad4min v__VERSION__"
+        releaseBody: "See the assets to download this version and install."
+        projectPath: "./ui"
   
   npm-publish:
     runs-on: GH-hosted-ubuntu
