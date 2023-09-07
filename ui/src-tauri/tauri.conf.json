@@ -1,6 +1,6 @@
 {
   "package": {
-    "productName": "AD4M",
+    "productName": "ADAM Launcher",
     "version": "0.6.0"
   },
   "build": {
@@ -62,7 +62,7 @@
     "windows": [
       {
         "label": "splashscreen",
-        "title": "AD4M Launcher",
+        "title": "ADAM Launcher",
         "width": 1000,
         "height": 700,
         "resizable": true,
