@@ -88,7 +88,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 temp_publish_bootstrap_path.to_str().unwrap()
             );
 
-            let run_fut = async move {
+            tokio::task::spawn(async move {
                 rust_executor::run(rust_executor::Ad4mConfig {
                     app_data_path: Some(data_path.to_str().unwrap().to_string()),
                     network_bootstrap_seed: Some(
@@ -109,10 +109,11 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_bootstrap_url: None,
                 })
                 .await;
-            };
+            });
 
             //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
-            let publish_fut = async move {
+            tokio::task::spawn(async move {
+                green_ln!("Runing publish fut");
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 green_ln!("AD4M ready for publishing\n");
                 start_publishing(
@@ -121,16 +122,18 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     lang_lang_source.clone(),
                 )
                 .await;
-            };
+            }).await;
 
-            tokio::select! {
-                _ = run_fut => {
-                    green_ln!("AD4M finished running\n");
-                }
-                _ = publish_fut => {
-                    green_ln!("AD4M finished publishing\n");
-                }
-            }
+            // tokio::select! {
+            //     biased;
+
+            //     _ = run_fut => {
+            //         green_ln!("AD4M finished running\n");
+            //     }
+            //     _ = publish_fut => {
+            //         green_ln!("AD4M finished publishing\n");
+            //     }
+            // }
         }
     };
     Ok(())
