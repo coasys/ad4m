@@ -72,7 +72,7 @@ pub struct AppState {
 }
 
 fn main() {
-    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debug,ad4m_launcher=info,warn,error");
+    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
 
     let mut rlim: rlimit = rlimit { rlim_cur: 0, rlim_max: 0 };
 

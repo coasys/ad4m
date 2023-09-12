@@ -22,7 +22,7 @@ use js_core::JsCore;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     prolog::run();
-    env::set_var("RUST_LOG", "rust_executor=info");
+    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
     env_logger::try_init().expect("could not logger");
 
     let mut config = Ad4mConfig::default();

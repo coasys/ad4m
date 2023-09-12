@@ -25,7 +25,7 @@ use crate::{prolog_service::init_prolog_service, dapp_server::serve_dapp};
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) {
-    env::set_var("RUST_LOG", "rust_executor=info,warp::server");
+    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
     let _ = env_logger::try_init();
     config.prepare();
 
@@ -66,7 +66,7 @@ pub async fn run(mut config: Ad4mConfig) {
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run_with_tokio(mut config: Ad4mConfig) {
-    env::set_var("RUST_LOG", "rust_executor=info,warp::server");
+    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
     let _ = env_logger::try_init();
     config.prepare();
 

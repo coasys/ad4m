@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colour::{self, green_ln};
-use std::fs;
+use std::{fs, str::FromStr};
 
 use crate::bootstrap_publish::*;
 
@@ -13,10 +13,79 @@ pub enum DevFunctions {
         passphrase: String,
         seed_proto: String,
     },
+    PublishAndTestExpressionLanguage {
+        language_path: String,
+        data: String
+    }
 }
 
 pub async fn run(command: DevFunctions) -> Result<()> {
     match command {
+        DevFunctions::PublishAndTestExpressionLanguage { language_path , data } => {
+            let ad4m_test_dir = dirs::home_dir()
+                .expect("Could not get home directory")
+                .join(".ad4m-test");
+            let ad4m_test_dir: String = ad4m_test_dir.to_string_lossy().to_string();
+            let ad4m_test_dir_clone = ad4m_test_dir.clone();
+
+            let _init = rust_executor::init::init(Some(ad4m_test_dir.clone()), None)
+                .map_err(|err| anyhow::anyhow!("Error in init: {:?}", err))?;
+
+            let run_handle = tokio::task::spawn(async move {
+                rust_executor::run(rust_executor::Ad4mConfig {
+                    app_data_path: Some(ad4m_test_dir_clone),
+                    network_bootstrap_seed: None,
+                    language_language_only: Some(false),
+                    run_dapp_server: Some(false),
+                    gql_port: None,
+                    hc_admin_port: None,
+                    hc_app_port: None,
+                    hc_use_bootstrap: None,
+                    hc_use_local_proxy: None,
+                    hc_use_mdns: None,
+                    hc_use_proxy: None,
+                    connect_holochain: None,
+                    admin_credential: Some(String::from("*")),
+                    hc_proxy_url: None,
+                    hc_bootstrap_url: None,
+                })
+                .await;
+            });
+
+            let test_res = tokio::task::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+                let client = ad4m_client::Ad4mClient::new(String::from("http://127.0.0.1:4000/graphql"), String::from("*"));
+                let me = client.agent.me().await;
+                println!("Me: {:?}", me);
+                let agent_generate = client.agent.generate(String::from("test")).await;
+                println!("Agent generate: {:?}", agent_generate);
+                let publish_language = client.languages.publish(
+                    language_path, 
+                    String::from("some-test-lang"), 
+                    Some(String::from("some-desc")), 
+                    None, 
+                    None
+                ).await;
+                println!("Publish language: {:?}", publish_language);
+                let language_info = publish_language.unwrap();
+                let language = client.languages.by_address(language_info.address.clone()).await;
+                println!("Language: {:?}", language);
+                let expression = client.expressions.expression_create(
+                    language_info.address, 
+                    serde_json::Value::from_str(&data).expect("could not cast input data to serde_json::Value"), 
+                ).await;
+                println!("Expression create: {:?}", expression);
+                let expression = client.expressions.expression(expression.unwrap()).await;
+                println!("Expression get: {:?}", expression);
+            }).await;
+            green_ln!("Test future finished with: {:?}", test_res);
+
+            run_handle.abort();
+            //Cleanup test agent
+            let _ = fs::remove_dir_all(std::path::Path::new(&ad4m_test_dir));
+            green_ln!("Test agent cleaned up\n");
+            std::process::exit(0);
+        },
         DevFunctions::GenerateBootstrap {
             agent_path,
             passphrase,
@@ -112,7 +181,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             });
 
             //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
-            tokio::task::spawn(async move {
+            let publish_fut = tokio::task::spawn(async move {
                 green_ln!("Runing publish fut");
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 green_ln!("AD4M ready for publishing\n");
@@ -123,6 +192,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 )
                 .await;
             }).await;
+            green_ln!("Publish future finished with: {:?}", publish_fut);
 
             // tokio::select! {
             //     biased;
