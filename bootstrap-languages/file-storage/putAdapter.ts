@@ -53,9 +53,10 @@ export class FileStoragePutAdapter implements PublicSharing {
         delete expression.data.data_base64;
 
         //Store the FileMetadataExpression
-        const address = await storage.storeFileExpression(expression)
+        let address = await storage.storeFileExpression(expression)
         if (!Buffer.isBuffer(address)) {
-            throw new Error("Could not create FileExpression data")
+            address = Buffer.from(address)
+            //throw new Error("Could not create FileExpression data")
         };
         //@ts-ignore
         return address.toString("hex")
