@@ -59,7 +59,7 @@
         "https://launcher-update-worker.perspect3vism.workers.dev/update/{{target}}/{{current_version}}"
       ],
       "dialog": false,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBODdBOEY3OUM3QjRCOTQKUldTVVMzdWM5NmlIK3VGNFp3SllyZWhSK0pZaWZyd0ZQUFNmUnpZZDAyNTVQaGRBWUdXQU9aWHQK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1OTBGNDkzMkI2MTczMEMKUldRTWMyRXJrL1NReGFTUVBTMjRhQWlEVTFuOHBkcEZwbmEwSG9DdWczeDdtRUdNK3hMMm1GUnoK"
     },
     "allowlist": {
       "all": true
