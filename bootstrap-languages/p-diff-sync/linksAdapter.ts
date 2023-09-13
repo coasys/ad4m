@@ -47,7 +47,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async sync(): Promise<PerspectiveDiff> {
     try {
-      console.log("PerspectiveDiffSync.sync(); Getting lock");
+      //console.log("PerspectiveDiffSync.sync(); Getting lock");
 
       const success = await this.generalMutex.lock();
       if (!success) {
@@ -55,7 +55,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         return new PerspectiveDiff()
       }
 
-      console.log("PerspectiveDiffSync.sync(); Got lock");
+      //console.log("PerspectiveDiffSync.sync(); Got lock");
 
       //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
@@ -76,7 +76,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     let lostPeers: DID[] = [];
 
     try {
-      console.log("PerspectiveDiffSync.gossip(); Getting peers lock");
+      //console.log("PerspectiveDiffSync.gossip(); Getting peers lock");
       // Trying to lock with a timeout
       const success = await this.generalMutex.lock();
 
@@ -85,7 +85,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         return;
       }
 
-      console.log("PerspectiveDiffSync.gossip(); Got lock");
+      //console.log("PerspectiveDiffSync.gossip(); Got lock");
 
       this.peers.forEach( (peerInfo, peer) => {
         if (peerInfo.lastSeen.getTime() + 10000 < new Date().getTime()) {
@@ -205,7 +205,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async commit(diff: PerspectiveDiff): Promise<string> {
     try {
-      console.log("PerspectiveDiffSync.commit(); Getting lock");
+      //console.log("PerspectiveDiffSync.commit(); Getting lock");
       const success = await this.generalMutex.lock();
 
       if (!success) {
@@ -213,7 +213,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         return "";
       }
 
-      console.log("PerspectiveDiffSync.commit(); Got lock");
+      //console.log("PerspectiveDiffSync.commit(); Got lock");
       let prep_diff = {
         additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
         removals: diff.removals.map((diff) => prepareLinkExpression(diff))
@@ -255,7 +255,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       //       broadcast_author: ${broadcast_author}
       //       `)
       try {
-        console.log("PerspectiveDiffSync.handleHolochainSignal: Getting lock");
+        //console.log("PerspectiveDiffSync.handleHolochainSignal: Getting lock");
         const success = await this.generalMutex.lock();
 
         if (!success) {
@@ -263,7 +263,7 @@ export class LinkAdapter implements LinkSyncAdapter {
           return;
         }
 
-        console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
+        //console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
       } catch (e) {
         console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
