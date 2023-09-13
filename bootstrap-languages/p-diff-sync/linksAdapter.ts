@@ -15,8 +15,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   linkCallback?: PerspectiveDiffObserver
   syncStateChangeCallback?: SyncStateChangeObserver
   peers: Map<DID, PeerInfo> = new Map();
-  peersMutex: Mutex = new Mutex();
-  currentRevisionMutex: Mutex = new Mutex();
+  generalMutex: Mutex = new Mutex();
   me: DID
   gossipLogCount: number = 0;
   myCurrentRevision: Buffer | null = null;
@@ -48,9 +47,16 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async sync(): Promise<PerspectiveDiff> {
     try {
-      console.log("PerspectiveDiffSync.sync(); Getting currentRevision lock");
-      await this.currentRevisionMutex.lock();
-      console.log("PerspectiveDiffSync.sync(); Got currentRevision lock");
+      console.log("PerspectiveDiffSync.sync(); Getting lock");
+
+      const success = await this.generalMutex.lock();
+      if (!success) {
+        console.log("Failed to get lock due to timeout");
+        return new PerspectiveDiff()
+      }
+
+      console.log("PerspectiveDiffSync.sync(); Got lock");
+
       //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
       if (current_revision && Buffer.isBuffer(current_revision)) {
@@ -59,7 +65,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);
     } finally {
-      this.currentRevisionMutex.unlock();
+      this.generalMutex.unlock();
     }
     await this.gossip();
     return new PerspectiveDiff()
@@ -71,10 +77,16 @@ export class LinkAdapter implements LinkSyncAdapter {
 
     try {
       console.log("PerspectiveDiffSync.gossip(); Getting peers lock");
-      await this.peersMutex.lock();
-      console.log("PerspectiveDiffSync.gossip(); Got peers lock");
-      await this.currentRevisionMutex.lock();
-      console.log("PerspectiveDiffSync.gossip(); Got currentRevision lock");
+      // Trying to lock with a timeout
+      const success = await this.generalMutex.lock();
+
+      if (!success) {
+        console.log("Failed to get lock due to timeout");
+        return;
+      }
+
+      console.log("PerspectiveDiffSync.gossip(); Got lock");
+
       this.peers.forEach( (peerInfo, peer) => {
         if (peerInfo.lastSeen.getTime() + 10000 < new Date().getTime()) {
           lostPeers.push(peer);
@@ -181,8 +193,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     } catch (e) {
       console.error("PerspectiveDiffSync.gossip(); got error", e);
     } finally {
-      this.peersMutex.unlock();
-      this.currentRevisionMutex.unlock();
+      this.generalMutex.unlock();
     }
   }
 
@@ -194,9 +205,15 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async commit(diff: PerspectiveDiff): Promise<string> {
     try {
-      console.log("PerspectiveDiffSync.commit(); Getting currentRevision lock");
-      await this.currentRevisionMutex.lock();
-      console.log("PerspectiveDiffSync.commit(); Got currentRevision lock");
+      console.log("PerspectiveDiffSync.commit(); Getting lock");
+      const success = await this.generalMutex.lock();
+
+      if (!success) {
+        console.log("Failed to get lock due to timeout");
+        return "";
+      }
+
+      console.log("PerspectiveDiffSync.commit(); Got lock");
       let prep_diff = {
         additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
         removals: diff.removals.map((diff) => prepareLinkExpression(diff))
@@ -209,7 +226,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     } catch (e) {
       console.error("PerspectiveDiffSync.commit(); got error", e);
     } finally {
-      this.currentRevisionMutex.unlock();
+      this.generalMutex.unlock();
     }
   }
 
@@ -238,14 +255,20 @@ export class LinkAdapter implements LinkSyncAdapter {
       //       broadcast_author: ${broadcast_author}
       //       `)
       try {
-        console.log("PerspectiveDiffSync.handleHolochainSignal: Getting peers lock");
-        await this.peersMutex.lock();
-        console.log("PerspectiveDiffSync.handleHolochainSignal: Got peers lock");
+        console.log("PerspectiveDiffSync.handleHolochainSignal: Getting lock");
+        const success = await this.generalMutex.lock();
+
+        if (!success) {
+          console.log("Failed to get lock due to timeout");
+          return;
+        }
+
+        console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
       } catch (e) {
         console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
       } finally {
-        this.peersMutex.unlock();
+        this.generalMutex.unlock();
       }
     } else {
       //console.log("PerspectiveDiffSync.handleHolochainSignal: received a signals from ourselves in fast_forward_signal or in a pull: ", signal.payload);
@@ -297,16 +320,32 @@ function prepareLinkExpression(link: LinkExpression): object {
 
 class Mutex {
   private locked = false;
-  private waitingResolvers: (() => void)[] = [];
+  private waitingResolvers: ((success: boolean) => void)[] = [];
 
-  async lock(): Promise<void> {
-    if (this.locked) {
-      console.log("Was not able to get lock on mutex adding to waitingResolvers");
-      return new Promise((resolve) => {
-        this.waitingResolvers.push(resolve);
-      });
-    }
-    this.locked = true;
+  async lock(timeout = 10000): Promise<boolean> {  // default timeout of 10 seconds
+    const promise = new Promise<boolean>((resolve) => {
+      if (this.locked) {
+        console.log("Was not able to get lock on mutex adding to waitingResolvers");
+        const timer = setTimeout(() => {
+          const index = this.waitingResolvers.indexOf(resolve);
+          if (index > -1) {
+            this.waitingResolvers.splice(index, 1);
+            resolve(false);  // Timeout occurred
+          }
+        }, timeout);
+        
+        this.waitingResolvers.push((success: boolean) => {
+          clearTimeout(timer);
+          resolve(success);
+        });
+      } else {
+        resolve(true);
+      }
+    });
+    
+    const success = await promise;
+    if (success) this.locked = true;
+    return success;
   }
 
   unlock(): void {
@@ -314,7 +353,7 @@ class Mutex {
     if (this.waitingResolvers.length > 0) {
       console.log("Called unlock and got some waitingResolvers to finish");
       const resolve = this.waitingResolvers.shift();
-      if (resolve) resolve();
+      if (resolve) resolve(true);  // Successfully acquired lock
     } else {
       this.locked = false;
     }
