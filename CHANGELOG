@@ -6,6 +6,18 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+
+### Changed
+ 
+### Deprecated
+
+### Removed
+
+### Fixed
+
+## [0.5.1] - 25/07/2023
+
+### Added
  - After login / registration the launcher will now open by default [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - If the user has no installed applications, we now show some info about connecting apps to AD4M and a link to Flux [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - Holochain DHT status logs every 60 seconds [PR#277](https://github.com/perspect3vism/ad4m/pull/277)
