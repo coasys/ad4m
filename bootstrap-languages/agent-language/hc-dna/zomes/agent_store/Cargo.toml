@@ -1,0 +1,19 @@
+[package]
+authors = ["josh@junto.foundation"]
+edition = "2018"
+name = "agent_store"
+version = "0.0.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "agent_store"
+
+[dependencies]
+derive_more = "0"
+serde = "1"
+chrono = { version = "0.4.22", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+thiserror = "1.0.20"
+
+hdk = "0.3.0-beta-dev.12"
+holo_hash = "0.3.0-beta-dev.6"
+agent_store_integrity = { path = "../agent_store_integrity" }

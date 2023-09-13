@@ -1,6 +1,7 @@
 import { 
-    Address, Expression, Language, LanguageContext, 
-    LinkSyncAdapter, InteractionCall, InteractionMeta, PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, parseExprUrl, Perspective, Literal, TelepresenceAdapter 
+    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta, 
+    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, 
+    parseExprUrl, Literal, TelepresenceAdapter, PerspectiveState
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
@@ -9,24 +10,25 @@ import path from 'path'
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
-import * as PubSub from './graphQL-interface/PubSub'
+import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
 import Signatures from './agent/Signatures';
-import { PerspectivismDb } from './db';
+import { Ad4mDb } from './db';
 import stringify from 'json-stable-stringify'
+import { getPubSub } from './utils';
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
+type SyncStateChangeObserver = (state: PerspectiveState, lang: LanguageRef)=>void;
+
 interface Services {
     holochainService: HolochainService,
     runtimeService: RuntimeService,
     signatures: Signatures,
-    db: PerspectivismDb
+    db: Ad4mDb
 }
-
-class ImportError extends Error {}
 
 const importModule = async (modulePath: string) => {
     // To deal with ESM on windows requires absolute path and file protocol
@@ -36,24 +38,24 @@ const importModule = async (modulePath: string) => {
         return await import(path)
     }
 
-    return await import(modulePath)
-}
-
-const requireModule = async (modulePath: string) => {
-    return await require(modulePath)
+    return await import(`file://${modulePath}`)
 }
 
 const loadModule = async (modulePath: string) => {
-  try {
-    return await importModule(modulePath)
-  } catch (e1) {
+    // Check if the file exists
     try {
-        return await requireModule(modulePath)
-    } catch (e2) {
-        throw new ImportError(`Unable to import module ${modulePath}. Got error ${e1} when trying to import as es module\n 
-            and error when trying to import as commonjs ${e2}`)
+        //@ts-ignore
+        await Deno.stat(modulePath);
+    } catch (err) {
+        //@ts-ignore
+        if (err instanceof Deno.errors.NotFound) {
+            throw new Error(`File not found: ${modulePath}`);
+        }
+        throw err;
     }
-  }
+    const res  = await UTILS.loadModule(`file://${modulePath}`);
+
+    return await importModule(modulePath)
 }
 
 export default class LanguageController {
@@ -62,17 +64,18 @@ export default class LanguageController {
     #context: object;
     #linkObservers: LinkObservers[];
     #telepresenceSignalObservers: TelepresenceSignalObserver[];
+    #syncStateChangeObservers: SyncStateChangeObserver[];
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
     #signatures: Signatures;
-    #db: PerspectivismDb;
+    #db: Ad4mDb;
     #config: Config.MainConfig;
+    #pubSub: PubSub;
 
     #agentLanguage?: Language
     #languageLanguage?: Language
     #neighbourhoodLanguage?: Language
     #perspectiveLanguage?: Language
-    pubSub
 
     constructor(context: object, services: Services) {
         this.#context = context
@@ -81,20 +84,21 @@ export default class LanguageController {
         this.#signatures = services.signatures
         this.#db = services.db
         this.#languages = new Map()
+        this.#languages.set("literal", {
+            name: "literal",
+            interactions() { return [] },
+        } as Language)
         this.#languageConstructors = new Map()
         this.#linkObservers = []
         this.#telepresenceSignalObservers = []
-        this.pubSub = PubSub.get()
+        this.#syncStateChangeObservers = []
         this.#config = (context as any).config;
+        this.#pubSub = getPubSub();
     }
 
     async loadLanguages() {
-        try {
-            await this.loadSystemLanguages()
-            if (!this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
-        } catch (e) {
-            throw new Error(`LanguageController.loadLanguages: Error loading languages ${e}`);
-        }
+        await this.loadSystemLanguages()
+        if (!this.#config.languageLanguageOnly) await this.loadInstalledLanguages()
     }
 
     async loadSystemLanguages() {
@@ -164,8 +168,8 @@ export default class LanguageController {
                         let errMsg = `LanguageController.loadInstalledLanguages(): COULDN'T LOAD LANGUAGE: ${bundlePath}`
                         console.error(errMsg)
                         console.error(e)
-                        this.pubSub.publish(
-                            PubSub.EXCEPTION_OCCURRED_TOPIC,
+                        await this.#pubSub.publish(
+                            PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
                             {
                                 title: "Failed to load installed language",
                                 message: errMsg,
@@ -184,6 +188,12 @@ export default class LanguageController {
         })
     }
 
+    callSyncStateChangeObservers(syncState: PerspectiveState, ref: LanguageRef) {
+        this.#syncStateChangeObservers.forEach(o => {
+            o(syncState, ref)
+        })
+    }
+
     callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
         this.#telepresenceSignalObservers.forEach(o => {
             o(signal, ref)
@@ -198,6 +208,9 @@ export default class LanguageController {
             sourceFilePath = path.join(process.env.PWD!, sourceFilePath)
 
         const bundleBytes = fs.readFileSync(sourceFilePath)
+        if (bundleBytes.length === 0) {
+            throw new Error("Language to be loaded does not contain any data")
+        }
         // @ts-ignore
         const hash = await this.ipfsHash(bundleBytes)
         console.debug("LanguageController.loadLanguage: loading language at path", sourceFilePath, "with hash", hash);
@@ -205,23 +218,17 @@ export default class LanguageController {
         try {
             languageSource = await loadModule(sourceFilePath);
         } catch (e) {
-            const cjsPath = sourceFilePath.replace(".js", ".cjs");
-            fs.copyFileSync(sourceFilePath, cjsPath);
-            try {
-                languageSource = await loadModule(cjsPath);
-            } catch (e) {
-                const errMsg = `Could not load language ${e}`;
-                console.error(errMsg);
-                this.pubSub.publish(
-                    PubSub.EXCEPTION_OCCURRED_TOPIC,
-                    {
-                        title: "Failed to load installed language",
-                        message: errMsg,
-                        type: ExceptionType.LanguageIsNotLoaded
-                    } as ExceptionInfo
-                );
-                throw new Error(errMsg);
-            }
+            const errMsg = `Could not load language ${e}`;
+            console.error(errMsg);
+            await this.#pubSub.publish(
+                PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
+                {
+                    title: "Failed to load installed language",
+                    message: errMsg,
+                    type: ExceptionType.LanguageIsNotLoaded
+                } as ExceptionInfo
+            );
+            throw new Error(errMsg);
         }
         console.warn("LanguageController.loadLanguage: language loaded!");
         let create;
@@ -239,25 +246,33 @@ export default class LanguageController {
         const storageDirectory = this.getLanguageStoragePath(hash)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.pubSub});
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.#pubSub});
         const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
+
+            if (language.linksAdapter.addSyncStateChangeCallback) {
+                language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    console.log("LanguageController.loadLanguage: sync state change", state);
+                    this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+                })
+            }
         }
 
         if(language.telepresenceAdapter) {
-            language.telepresenceAdapter.registerSignalCallback((payload: PerspectiveExpression) => {
+            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression) => {
+                await this.tagPerspectiveExpressionSignatureStatus(payload)
                 this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
             })
         }
 
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
-            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
-                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+            language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
+                await this.#pubSub.publish(PubSubDefinitions.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
         }
 
@@ -280,7 +295,7 @@ export default class LanguageController {
         const storageDirectory = this.getLanguageStoragePath(hash)
         const Holochain = this.#holochainService.getDelegateForLanguage(hash)
         //@ts-ignore
-        const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: this.pubSub});
+        const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: this.#pubSub});
         //@ts-ignore
         const language = await create!({...this.#context, storageDirectory, Holochain, ad4mSignal, customSettings})
 
@@ -288,6 +303,12 @@ export default class LanguageController {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
                 this.callLinkObservers(diff, {address: hash, name: language.name});
             })
+
+            if (language.linksAdapter.addSyncStateChangeCallback) {
+                language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
+                    this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
+                })
+            }
         }
 
         if(language.telepresenceAdapter) {
@@ -299,8 +320,8 @@ export default class LanguageController {
 
         //@ts-ignore
         if(language.directMessageAdapter && language.directMessageAdapter.recipient() == this.#context.agent.did) {
-            language.directMessageAdapter.addMessageCallback((message: PerspectiveExpression) => {
-                this.pubSub.publish(PubSub.DIRECT_MESSAGE_RECEIVED, message)
+            language.directMessageAdapter.addMessageCallback(async (message: PerspectiveExpression) => {
+                await this.#pubSub.publish(PubSubDefinitions.RUNTIME_MESSAGED_RECEIVED_TOPIC, message)
             })
         }
 
@@ -333,34 +354,43 @@ export default class LanguageController {
     }
 
     async ipfsHash(data: Buffer|string): Promise<string> {
-        // @ts-ignore
-        const ipfsAddress = await this.#context.IPFS.add({content: data.toString()}, {onlyHash: true})
-        return ipfsAddress.cid.toString()
+        if (typeof data != "string") {
+            data = data.toString();
+        }
+        const hash = UTILS.hash(data);
+        return hash;
     }
 
     async installLanguage(address: Address, languageMeta: null|Expression): Promise<Language | undefined> {
         const language = this.#languages.get(address)
         if (language) return language
 
-        //Check that the metafile already exists with language with this address to avoid refetch
-        const metaFile = path.join(path.join(this.#config.languagesPath, address), "meta.json");
-        if(!fs.existsSync(metaFile)) {
-            //Get language meta information
-            console.log(new Date(), "installLanguage: installing language with address", address);
-            if(!languageMeta) {
-                try {
-                    languageMeta = await this.getLanguageExpression(address)
-                } catch (e) {
-                    throw Error(`Error getting language meta from language language: ${e}`)
+        if(!languageMeta) { 
+            //Check that the metafile already exists with language with this address to avoid refetch
+            const metaFile = path.join(path.join(this.#config.languagesPath, address), "meta.json");
+
+            if(fs.existsSync(metaFile)) {
+                languageMeta = JSON.parse(fs.readFileSync(metaFile).toString());
+            } else {
+                // We need to get the meta from the language language
+                // Retry 10 times with increasing delay to account for Holochain sync
+                let retries = 0;
+                while (!languageMeta && retries < 10) {
+                    try {
+                        languageMeta = await this.getLanguageExpression(address)
+                    } catch (e) {
+                        console.error(`Error getting language meta from language language: ${e}\nRetrying...`)
+                    }
+                    retries++;
+                    await new Promise(r => setTimeout(r, 5000 * retries));
                 }
             }
-        } else {
-            languageMeta = JSON.parse(fs.readFileSync(metaFile).toString());
-        };
-        if (languageMeta == null) {
-            //@ts-ignore
-            languageMeta = {data: {}};
+            if (languageMeta == null) {
+                //@ts-ignore
+                languageMeta = {data: {}};
+            }
         }
+       
 
         console.log("LanguageController.installLanguage: INSTALLING LANGUAGE:", languageMeta.data)
         let bundlePath = path.join(path.join(this.#config.languagesPath, address), "bundle.js");
@@ -406,7 +436,7 @@ export default class LanguageController {
             console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
             console.error("LanguageController.installLanguage: ======================================")
             console.error(e)
-            fs.rmdirSync(languagePath, {recursive: true})
+            //fs.rmdirSync(languagePath, {recursive: true})
             //@ts-ignore
             throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
         }
@@ -419,15 +449,15 @@ export default class LanguageController {
             language.teardown();
         }
 
-        this.#holochainService.removeDnaForLang(hash as string);
+        //Remove language from memory
+        this.#languages.delete(hash as string);
+        this.#languageConstructors.delete(hash as string);
+
+        await this.#holochainService.removeDnaForLang(hash as string);
 
         //Remove language files
         const languagePath = path.join(this.#config.languagesPath, hash as string);
         fs.rmdirSync(languagePath, {recursive: true});
-
-        //Remove language from memory
-        this.#languages.delete(hash as string);
-        this.#languageConstructors.delete(hash as string);
     }
 
     languageForExpression(e: ExpressionRef): Language {
@@ -487,8 +517,8 @@ export default class LanguageController {
                 ) {
                     let errMsg = `Language not created by trusted agent: ${languageAuthor} and is not templated... aborting language install. Language metadata: ${stringify(languageMetaData)}`
                     console.error(errMsg)
-                    this.pubSub.publish(
-                        PubSub.EXCEPTION_OCCURRED_TOPIC,
+                    await this.#pubSub.publish(
+                        PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
                         {
                             title: "Failed to install language",
                             message: errMsg,
@@ -526,8 +556,8 @@ export default class LanguageController {
                     }
                 } else {
                     let errMsg = "Agent which created source language for language trying to be installed is not a trustedAgent... aborting language install";
-                    this.pubSub.publish(
-                        PubSub.EXCEPTION_OCCURRED_TOPIC,
+                    await this.#pubSub.publish(
+                        PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
                         {
                             title: "Failed to install language",
                             message: errMsg,
@@ -564,7 +594,8 @@ export default class LanguageController {
 
             //Unpack the DNA
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
-            let unpackPath = this.#holochainService.unpackDna(tempDnaPath).replace(/(\r\n|\n|\r)/gm, "");
+            console.log("LanguageController.readAndTemplateHolochainDNA: unpacking DNA");
+            let unpackPath = (await this.#holochainService.unpackDna(tempDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
             fs.unlinkSync(tempDnaPath);
             //TODO: are all dna's using the same dna.yaml?
             const dnaYamlPath = path.join(unpackPath, "dna.yaml");
@@ -599,7 +630,8 @@ export default class LanguageController {
             fs.writeFileSync(dnaYamlPath, dnaYamlDump);
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
-            let packPath = this.#holochainService.packDna(unpackPath).replace(/(\r\n|\n|\r)/gm, "");
+            console.log("LanguageController.readAndTemplateHolochainDNA: packing DNA");
+            let packPath = (await this.#holochainService.packDna(unpackPath)).replace(/(\r\n|\n|\r)/gm, "");
             const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
 
             //Cleanup temp directory
@@ -624,7 +656,7 @@ export default class LanguageController {
 
     applyTemplateData(sourceLanguageLines: string[], templateData: object) {
         //Get lines in sourceLanguageLines which have ad4m-template-variable declared
-        const ad4mTemplatePattern = "//@ad4m-template-variable";
+        const ad4mTemplatePattern = "//!@ad4m-template-variable";
         var indexes = [];
         for(let i = 0; i < sourceLanguageLines.length; i++) {
             if (sourceLanguageLines[i].includes(ad4mTemplatePattern)) {
@@ -984,6 +1016,14 @@ export default class LanguageController {
         try {
             if(ref.language.address == "literal" || ref.language.name == 'literal') {
                 expr = Literal.fromUrl(`literal://${ref.expression}`).get()
+                if(! (typeof expr === 'object')) {
+                    expr = {
+                        author: '<unknown>',
+                        timestamp: '<unknown>',
+                        data: expr,
+                        proof: {}
+                    }
+                }
             } else {
                 const lang = this.languageForExpression(ref);
                 if (!lang.expressionAdapter) {
@@ -993,14 +1033,14 @@ export default class LanguageController {
                 const langIsImmutable = await this.isImmutableExpression(ref);
                 if (langIsImmutable) {
                     console.log("Calling cache for expression...");
-                    const cachedExpression = this.#db.getExpression(ref.expression);
+                    const cachedExpression = await this.#db.getExpression(ref.expression);
                     if (cachedExpression) {
                         console.log("Cache hit...");
-                        expr = JSON.parse(cachedExpression) as Expression
+                        expr = cachedExpression;
                     } else {
                         console.log("Cache miss...");
                         expr = await lang.expressionAdapter.get(ref.expression);
-                        if (expr) { this.#db.addExpression(ref.expression, JSON.stringify(expr)) };
+                        if (expr) { await this.#db.addExpression(ref.expression, expr) };
                     };
                 } else {
                     expr = await lang.expressionAdapter.get(ref.expression);
@@ -1021,8 +1061,10 @@ export default class LanguageController {
     async tagExpressionSignatureStatus(expression: Expression) {
         if(expression) {
             try{
-                if(! await this.#signatures.verify(expression)) {
-                    console.error(new Date().toISOString(), "BROKEN SIGNATURE FOR EXPRESSION:", expression)
+                if(!await this.#signatures.verify(expression)) {
+                    let expressionString = JSON.stringify(expression);
+                    let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
+                    console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)
                     expression.proof.invalid = true
                     expression.proof.valid = false
                 } else {
@@ -1030,11 +1072,20 @@ export default class LanguageController {
                     expression.proof.invalid = false
                 }
             } catch(e) {
-                let errMsg = `Error trying to verify signature for expression: ${expression}`
+                let expressionFormatted;
+                if (typeof expression === "string") {
+                    expressionFormatted = expression.substring(0, 50);
+                } else if (typeof expression === "object") {
+                    let expressionString = JSON.stringify(expression);
+                    expressionFormatted =  expressionString.substring(0, 50)
+                } else {
+                    expressionFormatted = expression;
+                }
+                let errMsg = `Error trying to verify signature for expression: ${expressionFormatted}`
                 console.error(errMsg)
                 console.error(e)
-                this.pubSub.publish(
-                    PubSub.EXCEPTION_OCCURRED_TOPIC,
+                await this.#pubSub.publish(
+                    PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
                     {
                         title: "Failed to get expression",
                         message: errMsg,
@@ -1086,6 +1137,10 @@ export default class LanguageController {
 
     addTelepresenceSignalObserver(observer: TelepresenceSignalObserver) {
         this.#telepresenceSignalObservers.push(observer)
+    }
+
+    addSyncStateChangeObserver(listener: SyncStateChangeObserver) {
+        this.#syncStateChangeObservers.push(listener)
     }
 
     async isImmutableExpression(ref: ExpressionRef): Promise<boolean> {

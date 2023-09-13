@@ -1,33 +1,13 @@
-import {
-  ActionIcon,
-  Button,
-  createStyles,
-  Group,
-  Space,
-  Text,
-} from "@mantine/core";
-import { showNotification } from "@mantine/notifications";
 import { useCallback, useContext, useEffect, useState } from "react";
-import { Copy, Qrcode as QRCodeIcon } from "tabler-icons-react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
 import { invoke } from "@tauri-apps/api";
-import QRCode from "react-qr-code";
 import { buildAd4mClient } from "../util";
 import { fetchProfile } from "./Settings";
-import CardItems from "./CardItems";
 import { checkUpdate, installUpdate } from '@tauri-apps/api/updater'
 import { relaunch } from '@tauri-apps/api/process'
 
-const useStyles = createStyles((theme) => ({
-  label: {
-    color: theme.colors.dark[1],
-  },
-}));
-
 function Profile() {
-  const { classes } = useStyles();
-
   const {
     state: { loading },
     methods: { lockAgent },
@@ -50,7 +30,7 @@ function Profile() {
 
   const fetchCurrentAgentProfile = useCallback(async () => {
     if (url) {
-      const client = await buildAd4mClient(url);
+      const client = await buildAd4mClient(url, false);
       const agent = await client!.agent.me();
 
       const profile = await fetchProfile(agent);
@@ -101,7 +81,7 @@ function Profile() {
 
   return (
     <div>
-      <j-popover placement="top">
+      <j-popover placement="bottom">
         <j-button slot="trigger" variant="ghost" size="sm">
           <j-flex a="center">
             {profile.username}
@@ -186,32 +166,23 @@ function Profile() {
                 Profile details
               </j-text>
             </j-box>
-            <div style={{ padding: "24px" }}>
-              <CardItems
-                title="Agent ID"
-                value={did as string}
-                titleUnderline
-              />
-              <j-box p="200" />
-              <CardItems
-                title="Username"
-                value={profile?.username}
-                titleUnderline
-              />
-              <j-box p="200" />
-              <CardItems
-                title="Name"
-                value={`${profile.firstName} ${profile.lastName}`}
-                titleUnderline
-              />
-              <j-box p="200" />
-            </div>
-            <j-box p="200"></j-box>
-            <j-flex>
-              <j-button onClick={() => setShowProfileInfo(false)}>
-                Close
-              </j-button>
-            </j-flex>
+
+            <j-box>
+              <j-text variant="label">Agent DID</j-text>
+              <j-text wrap>{did}</j-text>
+            </j-box>
+
+            <j-box>
+              <j-text variant="label">Username</j-text>
+              <j-text>{profile?.username || "No username"}</j-text>
+            </j-box>
+
+            <j-box>
+              <j-text variant="label">Name</j-text>
+              <j-text>{`${profile.firstName} ${profile.lastName}`}</j-text>
+            </j-box>
+
+            <j-button onClick={() => setShowProfileInfo(false)}>Close</j-button>
           </j-box>
         </j-modal>
       )}

@@ -1,0 +1,97 @@
+import { Callout } from "nextra-theme-docs";
+import { Tab, Tabs } from "nextra-theme-docs";
+
+# Introduction
+
+## What is ADAM?
+
+The internet has evolved from creating and sharing simple documents to highly social digital experiences.
+Yet, there is still no social infrastructure baked into the fabric of the web.
+
+The lack of a social protocol has resulted in companies taking the role of building out these social networks
+in silos, harvesting and profiting on the content created within these social spaces.
+
+ADAM tries to solve this problem, by putting agents and their social spaces
+at the core of our digital communication.
+
+<Tabs items={["Current state of the web", "New paradigm"]}>
+  <Tab>
+    <img src="/images/web-a.png" />A person has several user accounts on several
+    social media networks, creating silos between data, and ownership at the app
+    level.
+  </Tab>
+  <Tab>
+    <img src="/images/web-b.png" />
+    An agent participate in several social spaces, and apps ask for permission to
+    access these spaces – giving ownership to agents and their social spaces.
+  </Tab>
+</Tabs>
+
+## Why should I build on ADAM?
+
+ADAM solves a lot of common challenges when developing social applications:
+
+- **Cold Start**: When a new social platform has limited content and a small user base, it is challenging to attract users and engagement. By interacting with already existing agents and their social groups, you don't need to onboard users.
+- **Authentication**: Authentication is already taken care of, reducing the overload of having to implement authentication flows and user management.
+- **Privacy by default**: Each social group in ADAM is it's own private network, making communication private by default.
+- **Database management**: ADAM is completely decentralized, hence there is no database to manage, and no infrastructure you need to scale.
+- **Interoperability**: You are not locked into using one kind of storage technology,
+  and you can switch out your tech stack incrementally. With ADAMs Language implementation, you are able to interact with any existing centralized or decentralized system.
+- **Smart Contracts without fees**: With ADAMs Social DNA, social spaces can easily add their own small programs (smart contracts) using prolog.
+
+## How does it work?
+
+ADAM defines a minimal set of assumptions of what is needed to create **any** type of social application.
+
+| Definition                               | Description                                                        |
+| ---------------------------------------- | ------------------------------------------------------------------ |
+| [Agents](/essentials/agents)             | The agents (users) in the network.                                 |
+| [Languages](/essentials/languages)       | The different ways agents can express ideas.                       |
+| [Perspectives](/essentials/perspectives) | The collection of these expressions organized in a meaningful way. |
+
+Through a combination of these basic principles, two important concepts are constructed:
+
+| Definition                                | Description                                     |
+| ----------------------------------------- | ----------------------------------------------- |
+| [Neighbourhoods](/essentials/agents)      | Shared Perspectives.                            |
+| [Social Organisms](/essentials/languages) | A Neighbourhood acting like a collective Agent. |
+
+Here is a visualization of how these concepts interact with each other:
+
+![Spanning Layer](/images/spanning-layer.png)
+
+You can read more about these concepts in the "Essentials" section.
+
+## How does this differ from Nostr / Bluesky / Mastadon / etc?
+
+There are many similarities between ADAM and Nostr, Bluesky, and other social protocols,
+but there are also some key differences:
+
+- **Agent-Centric**: Nostr, Mastadon and Bluesky all are federated systems. In
+  federated systems, there are still servers that control the users access to their data.
+  In contrast, ADAM is a true P2P network.
+
+- **Capability grants**: ADAM implements a capability token system. Every app needs to be granted access
+  to an Agents data, by obtaining a temporary token. At any
+  time the agent can revoke these tokens in their ADAM instance. On the other hand,
+  each Nostr app needs to keep the secret key locally. This makes the attack vectors
+  greater. If an attacker steals the secret key, all the users data could be leaked.
+
+- **Interoperability**: Languages in ADAM is a powerful concept that makes any Expression an Agent creates resolvable by
+  another Agent through the URL of that Expression. Having a generic way of resolving data independent of the underlying
+  protocol makes ADAM interoparable with any kind of centralized, or decentralized system.
+
+- **Validation rules**: More info coming.
+
+## Why?
+
+The goal is to arrive at scalable and interoparable communication infrastructure
+that enables **group agency without imposing a bias on how a group manages itself**.
+
+_This is the real problem we're facing when trying to provide a
+technological solution to the web's fractured sense-making._
+
+AD4M is a sense-making network disguised as an app development framework.
+AD4M apps don't have to leak any of the AD4M concepts at all,
+and they would still be interoperable with each other to the degree
+of just being different views over the same agent-centric semantic web.

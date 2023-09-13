@@ -9,7 +9,7 @@ on:
 
 jobs:
   test:
-    name: AD4M cli <> AD4M host
+    name: AD4M cli
     runs-on: macos-latest
     strategy:
       matrix:
@@ -26,7 +26,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         override: true
-        toolchain: 1.63.0
+        toolchain: 1.71.1
 
     - name: Cache cargo
       id: cache-cargo
@@ -39,23 +39,31 @@ jobs:
           ~/.cargo/git/db/
           target/
         key: ${{ runner.os }}-cargo
+    - run: rustup target add wasm32-unknown-unknown
 
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v1
       with:
         node-version: ${{ matrix.node-version }}
 
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+
+    - name: Install GO
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.18'
+
+    - name: Install HC
+      run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+
     - name: Yarn Install
       run: yarn install
 
-    - name: Yarn Build
+    - name: Yarn Build (builds entire workspace)
       run: yarn build
-
-    - name: Build AD4M-Host
-      run: yarn run package-macos
-
-    - name: Build AD4M cli
-      run: cd cli && cargo build --release
 
     - name: Run binaries test script
       run: ./tests/bats/bin/bats tests/binaries.bats || cat ~/Library/Logs/DiagnosticReports/*

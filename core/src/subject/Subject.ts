@@ -1,5 +1,5 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { collectionSetterToName, collectionToAdderName, collectionToSetterName, propertyNameToSetterName } from "./util";
+import { collectionSetterToName, collectionToAdderName, collectionToRemoverName, collectionToSetterName, propertyNameToSetterName } from "./util";
 
 export class Subject {
     #baseExpression: string;
@@ -36,15 +36,21 @@ export class Subject {
                     if(results && results.length > 0) {
                         let expressionURI = results[0].Value
                         if(resolveExpressionURI) {
-                            const expression = await this.#perspective.getExpression(expressionURI)
                             try {
-                                return JSON.parse(expression.data)
-                            } catch(e) {
-                                return expression.data
+                                const expression = await this.#perspective.getExpression(expressionURI)
+                                try {
+                                    return JSON.parse(expression.data)
+                                } catch(e) {
+                                    return expression.data
+                                }
+                            } catch (err) {
+                                return expressionURI
                             }
                         } else {
                             return expressionURI
                         }
+                    } else if(results) {
+                        return results
                     } else {
                         return undefined
                     }
@@ -74,16 +80,6 @@ export class Subject {
             }
         }
         
-
-        const flattenPrologList = (list: object): any[] =>{
-            let result = []
-            while(list && list["head"]) {
-                result.push(list["head"])
-                list = list["tail"]
-            }
-            return result
-        }
-
         let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection(C, Collection)`)
         if(!results2) results2 = []
         let collections = results2.map(result => result.Collection)
@@ -94,7 +90,8 @@ export class Subject {
                 get: async () => {
                     let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
                     if(results && results.length > 0 && results[0].Value) {
-                        return flattenPrologList(eval(results[0].Value))
+                        let collectionContent = results[0].Value.filter((v: any) => v !== "" && v !== '')
+                        return collectionContent
                     } else {
                         return []
                     }
@@ -110,6 +107,23 @@ export class Subject {
                 const collection = adder.Collection
                 const actions = eval(adder.Adder)
                 this[collectionToAdderName(collection)] = async (value: any) => {
+                    if (Array.isArray(value)) {
+                        await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value: v}])))
+                    } else {
+                        await this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value}])
+                    }
+                }
+            }
+        }
+
+        let removers = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_remover(C, Collection, Remover)`)
+        if(!removers) removers = []
+
+        for(let remover of removers) {
+            if(remover) {
+                const collection = remover.Collection
+                const actions = eval(remover.Remover)
+                this[collectionToRemoverName(collection)] = async (value: any) => {
                     if (Array.isArray(value)) {
                         await Promise.all(value.map(v => this.#perspective.executeAction(actions, this.#baseExpression, [{name: "value", value: v}])))
                     } else {

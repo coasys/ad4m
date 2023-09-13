@@ -35,6 +35,7 @@ query Me {
           predicate
           target
         }
+        status
       }
     }
   }
@@ -136,6 +137,7 @@ query ByDID($did: String!) {
           predicate
           target
         }
+        status
       }
     }
   }
@@ -155,5 +157,54 @@ mutation SignMessage($message: String!) {
   agentSignMessage(message: $message) {
     signature
     publicKey
+  }
+}
+
+mutation AddEntanglementProofs($proofs: [EntanglementProofInput!]!) {
+  agentAddEntanglementProofs(proofs: $proofs) {
+    did
+    didSigningKeyId
+    deviceKeyType
+    deviceKey
+    deviceKeySignedByDid
+    didSignedByDeviceKey
+  }
+}
+
+mutation DeleteEntanglementProofs($proofs: [EntanglementProofInput!]!) {
+  agentDeleteEntanglementProofs(proofs: $proofs) {
+    did
+    didSigningKeyId
+    deviceKeyType
+    deviceKey
+    deviceKeySignedByDid
+    didSignedByDeviceKey
+  }
+}
+
+mutation EntanglementProofPreFlight(
+  $deviceKey: String!
+  $deviceKeyType: String!
+) {
+  agentEntanglementProofPreFlight(
+    deviceKey: $deviceKey
+    deviceKeyType: $deviceKeyType
+  ) {
+    did
+    didSigningKeyId
+    deviceKeyType
+    deviceKey
+    deviceKeySignedByDid
+    didSignedByDeviceKey
+  }
+}
+
+subscription SubscriptionAgentStatusChanged {
+  agentStatusChanged {
+    did
+    didDocument
+    error
+    isInitialized
+    isUnlocked
   }
 }

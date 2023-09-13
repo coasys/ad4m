@@ -1,41 +1,11 @@
-import { createStyles, Image } from "@mantine/core";
 import { appWindow } from "@tauri-apps/api/window";
 import { useState } from "react";
 import { useEffect } from "react";
 
 import Logo from "./Logo";
-
-const useStyles = createStyles((theme, _params, getRef) => {
-  return {
-    container: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      flexDirection: "column",
-      height: "100vh",
-      width: "100vw",
-      color: "white",
-      fontFamily: "comfortaa",
-    },
-    error: {
-      padding: "40px 80px",
-      visibility: "collapse",
-      opacity: 0,
-      transition: "visibility 0s, opacity 0.5s linear, height 1s",
-      height: 0,
-      fontFamily: "comfortaa",
-    },
-    errorFlex: {
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
-      fontFamily: "comfortaa",
-    },
-  };
-});
+import { splashscreenContainer, splashscreenError, splashscreenErrorFlex } from "./styles";
 
 export default function Splashscreen() {
-  const { classes } = useStyles();
   const [copied, setCopied] = useState(false);
 
   function copyFile() {
@@ -59,14 +29,14 @@ export default function Splashscreen() {
         error.style.opacity = "1";
         error.style.height = "160px";
       }
-    }, 10000);
+    }, 30000);
   }, []);
 
   return (
-    <div className={classes.container}>
+    <div style={splashscreenContainer}>
       <Logo gradient style={{ width: "100px", height: "100px" }}></Logo>
-      <div id="error" className={classes.error}>
-        <div className={classes.errorFlex}>
+      <div id="error" style={splashscreenError}>
+        <div style={splashscreenErrorFlex}>
           <j-text variant="heading-lg">Whoops, something broke! 😅</j-text>
           <j-text variant="ingress">
             To help us fix this, please click the button below to open your AD4M

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "moduleResolution": "node",
+    "target": "es2017",
+    "isolatedModules": true,
+    "types": ["node"],
+    "strict": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["*.ts"],
+  "exclude": ["node_modules/*", "__sapper__/*", "public/*"]
+}

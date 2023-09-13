@@ -1,6 +1,6 @@
 import * as path from "path";
 import * as fs from "fs";
-import didWallet from "@transmute/did-wallet";
+import { Key } from "../../wallet_extension";
 import {
   Language,
   Expression,
@@ -8,12 +8,9 @@ import {
   ReadOnlyLanguage,
   ExceptionType,
 } from "@perspect3vism/ad4m";
-import { Agent, ExpressionProof, AgentSignature } from "@perspect3vism/ad4m";
-import secp256k1 from "secp256k1";
-import * as secp256k1DIDKey from "@transmute/did-key-secp256k1";
+import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@perspect3vism/ad4m";
 import Signatures from "./Signatures";
-import * as PubSubInstance from "../graphQL-interface/PubSub";
-import type { PubSub } from "graphql-subscriptions";
+import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
 import { v4 as uuidv4 } from "uuid";
 import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
@@ -27,16 +24,14 @@ import {
   AGENT_AUTH_CAPABILITY,
   Capability,
 } from "./Auth";
-import * as jose from "jose";
-import * as crypto from "crypto";
-import KeyEncoder from "key-encoder";
 import * as secp from "@noble/secp256k1";
+import { getPubSub } from "../utils";
+
 
 export default class AgentService {
   #did?: string;
   #didDocument?: string;
   #signingKeyId?: string;
-  #wallet?: object;
   #file: string;
   #appsFile: string;
   #apps: AuthInfoExtended[];
@@ -44,7 +39,7 @@ export default class AgentService {
   #fileProfile: string;
   #agent?: Agent;
   #agentLanguage?: Language;
-  #pubsub: PubSub;
+  #pubSub: PubSub;
   #requests: Map<string, AuthInfo>;
   #tokenValidPeriod: number;
   #adminCredential: string;
@@ -52,7 +47,7 @@ export default class AgentService {
   #readyPromise: Promise<void>;
   #readyPromiseResolve?: (value: void | PromiseLike<void>) => void;
 
-  constructor(rootConfigPath: string, reqCredential?: string) {
+  constructor(rootConfigPath: string, adminCredential?: string) {
     this.#file = path.join(rootConfigPath, "agent.json");
     this.#fileProfile = path.join(rootConfigPath, "agentProfile.json");
     this.#appsFile = path.join(rootConfigPath, "apps.json");
@@ -61,17 +56,17 @@ export default class AgentService {
     } catch (e) {
       this.#apps = [];
     }
-    this.#pubsub = PubSubInstance.get();
+    this.#pubSub = getPubSub();
     this.#readyPromise = new Promise((resolve) => {
       this.#readyPromiseResolve = resolve;
     });
     this.#requests = new Map();
     this.#tokenValidPeriod = DefaultTokenValidPeriod;
-    if (reqCredential) {
-      this.#adminCredential = reqCredential;
+    if (adminCredential) {
+      this.#adminCredential = adminCredential;
     } else {
       console.warn(
-        "reqCredential is not set or empty, empty token will possess admin capabililities."
+        "adminCredential is not set or empty, empty token will possess admin capabililities."
       );
       this.#adminCredential = "";
     }
@@ -89,7 +84,14 @@ export default class AgentService {
     return this.#readyPromise;
   }
 
-  createSignedExpression(data: any): Expression {
+  get signingKeyId(): string {
+    if (!this.#signingKeyId) {
+        throw new Error("No signing key id on AgentService")
+    }
+    return this.#signingKeyId!
+  }
+
+  signingChecks() {
     if (!this.isInitialized) {
       throw new Error("Can't sign without keystore");
     }
@@ -99,17 +101,19 @@ export default class AgentService {
     if (!this.#signingKeyId) {
       throw new Error("Can't sign without signingKeyId");
     }
+  }
+
+  createSignedExpression(data: any): Expression {
+    this.signingChecks()
 
     const timestamp = new Date().toISOString();
     const payloadBytes = Signatures.buildMessage(data, timestamp);
 
-    const key = this.getSigningKey();
-    const privKey = Uint8Array.from(Buffer.from(key.privateKey, key.encoding));
-
-    const sigObj = secp256k1.ecdsaSign(payloadBytes, privKey);
-    const sigBuffer = Buffer.from(sigObj.signature);
+    const signature = WALLET.sign(payloadBytes);
+    const sigBuffer = Buffer.from(signature);
     const sigHex = sigBuffer.toString("hex");
-    let proof = new ExpressionProof(sigHex, this.#signingKeyId);
+
+    let proof = new ExpressionProof(sigHex.toString(), this.#signingKeyId!);
     proof.valid = true;
     proof.invalid = false;
 
@@ -123,10 +127,20 @@ export default class AgentService {
     return signedExpresssion;
   }
 
+  signString(data: string): string {
+    this.signingChecks()
+
+    const payloadBytes = Signatures.buildMessageRaw(data)
+    const signature = WALLET.sign(payloadBytes);
+    const sigBuffer = Buffer.from(signature);
+    const sigHex = sigBuffer.toString("hex");
+    return sigHex
+  }
+
   async updateAgent(a: Agent) {
     this.#agent = a;
     await this.storeAgentProfile();
-    this.#pubsub.publish(PubSubInstance.AGENT_UPDATED, a);
+    await this.#pubSub.publish(PubSubDefinitions.AGENT_UPDATED, a);
   }
 
   setAgentLanguage(lang: Language) {
@@ -190,94 +204,19 @@ export default class AgentService {
     }
   }
 
-  private getSigningKey() {
-    // @ts-ignore
-    const keys = this.#wallet.extractByTags([this.#signingKeyId]);
-    if (keys.length === 0) {
-      throw new Error(
-        `Signing key '${
-          this.#signingKeyId
-        }' key found in keystore. Abort signing.`
-      );
-    }
-    if (keys.length > 1) {
-      throw new Error(
-        `Multiple '${
-          this.#signingKeyId
-        }' keys found in keystore. Abort signing.`
-      );
-    }
-
-    const key = keys[0];
-    //console.log(key)
-    return key;
+  private getSigningKey(): Key {
+    return WALLET.getMainKey();
   }
 
   async createNewKeys() {
-    const key = await secp256k1DIDKey.Secp256k1KeyPair.generate({
-      // @ts-ignore
-      secureRandom: () => crypto.randomBytes(32),
-    });
-
-    if (!key.privateKeyBuffer) {
-      throw Error("Cannot create keys without privateKeyBuffer");
-    }
-
+    WALLET.createMainKey()
+    const didDocument = WALLET.getMainKeyDocument()
+    const key = didDocument.verificationMethod[0]
+    
     this.#did = key.controller;
     this.#didDocument = JSON.stringify(await resolver.resolve(this.#did));
     this.#agent = new Agent(this.#did);
     this.#signingKeyId = key.id;
-
-    const keys = [
-      {
-        type: "assymetric",
-        encoding: "hex",
-        publicKey: key.publicKeyBuffer.toString("hex"),
-        privateKey: key.privateKeyBuffer.toString("hex"),
-        tags: [key.type, key.id],
-      },
-    ];
-
-    this.#wallet = didWallet.create({ keys });
-
-    console.debug(key);
-    console.debug(JSON.stringify(key));
-  }
-
-  async initialize(
-    did: string,
-    didDocument: string,
-    keystore: string,
-    password: string
-  ) {
-    this.#did = did;
-    this.#didDocument = didDocument;
-    this.#agent = new Agent(did);
-    this.#signingKeyId = did + "#primary";
-
-    console.debug("Creating wallet...");
-    this.#wallet = didWallet.create(keystore);
-    console.debug("done.");
-
-    console.debug("Unlocking wallet...");
-    try {
-      // @ts-ignore
-      this.#wallet.unlock(password);
-    } catch (e) {
-      console.error(e);
-      return;
-    }
-
-    console.debug("done.");
-
-    console.debug("Saving wallet...");
-    this.save(password);
-    console.debug("done.");
-
-    console.debug("Registering new DID with agent language...");
-    this.storeAgentProfile();
-    this.#pubsub.publish(PubSubInstance.AGENT_UPDATED, this.#agent);
-    this.#readyPromiseResolve!();
   }
 
   isInitialized() {
@@ -285,15 +224,13 @@ export default class AgentService {
   }
 
   isUnlocked() {
-    // @ts-ignore
-    const keys = this.#wallet.keys ? true : false;
-    return keys;
+    return WALLET.isUnlocked()
   }
 
   async unlock(password: string) {
     // @ts-ignore
-    this.#wallet.unlock(password);
-    this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
+    WALLET.unlock(password);
+    await this.#pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, this.dump());
     this.#readyPromiseResolve!();
     try {
       await this.storeAgentProfile();
@@ -306,29 +243,23 @@ export default class AgentService {
     }
   }
 
-  lock(password: string) {
+  async lock(password: string) {
     // @ts-ignore
-    this.#wallet.lock(password);
-    this.#pubsub.publish(PubSubInstance.AGENT_STATUS_CHANGED, this.dump());
+    WALLET.lock(password);
+    await this.#pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, this.dump());
   }
 
   async save(password: string) {
-    // @ts-ignore
-    this.#wallet.lock(password);
-
     const dump = {
       did: this.#did,
       didDocument: this.#didDocument,
       signingKeyId: this.#signingKeyId,
       // @ts-ignore
-      keystore: this.#wallet.export(),
+      keystore: WALLET.export(password),
       agent: this.#agent,
     };
 
     fs.writeFileSync(this.#file, JSON.stringify(dump));
-
-    // @ts-ignore
-    await this.#wallet.unlock(password);
     this.#readyPromiseResolve!();
   }
 
@@ -340,7 +271,7 @@ export default class AgentService {
     this.#did = dump.did;
     this.#didDocument = dump.didDocument;
     this.#signingKeyId = dump.signingKeyId;
-    this.#wallet = didWallet.create(dump.keystore);
+    WALLET.load(dump.keystore);
     if (fs.existsSync(this.#fileProfile))
       this.#agent = JSON.parse(fs.readFileSync(this.#fileProfile).toString());
     else {
@@ -349,21 +280,13 @@ export default class AgentService {
   }
 
   dump() {
-    const isInitialized = this.isInitialized();
-    let isUnlocked = false;
-    if (isInitialized) {
-      // @ts-ignore
-      isUnlocked = this.#wallet.keys ? true : false;
-    }
-
-    const dump = {
+    return {
       agent: this.#agent,
-      isInitialized,
-      isUnlocked,
+      isInitialized: this.isInitialized(),
+      isUnlocked: WALLET.isUnlocked(),
       did: this.#did,
       didDocument: this.#didDocument,
     };
-    return dump;
   }
 
   async getCapabilities(token: string) {
@@ -375,29 +298,24 @@ export default class AgentService {
       return [AGENT_AUTH_CAPABILITY];
     }
 
-    const key = this.getSigningKey();
-    // @ts-ignore
-    let keyEncoder = new KeyEncoder.default("secp256k1");
-    const pemPublicKey = keyEncoder.encodePublic(key.publicKey, "raw", "pem");
-    const pubKeyObj = crypto.createPublicKey(pemPublicKey);
+    const payload = await JWT.verifyJwt(token);
 
-    const { payload } = await jose.jwtVerify(token, pubKeyObj);
-
-    return payload.capabilities;
+    //@ts-ignore
+    return payload.capabilities.capabilities;
   }
 
   isAdminCredential(token: string) {
     return token == this.#adminCredential;
   }
 
-  requestCapability(authInfo: AuthInfo) {
+  async requestCapability(authInfo: AuthInfo) {
     let requestId = uuidv4();
     let authExtended = {
       requestId,
       auth: authInfo,
     } as AuthInfoExtended;
 
-    this.#pubsub.publish(PubSubInstance.EXCEPTION_OCCURRED_TOPIC, {
+    await this.#pubSub.publish(PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC, {
       title: "Request to authenticate application",
       message: `${authInfo.appName} is waiting for authentication, go to ad4m launcher for more information.`,
       type: ExceptionType.CapabilityRequested,
@@ -410,8 +328,8 @@ export default class AgentService {
   // TODO, we may want to change the capability request workflow.
   // https://github.com/perspect3vism/ad4m-executor/issues/73
   permitCapability(authExt: string, capabilities: Capability[]) {
-    console.log("admin user capabilities: ", capabilities);
-    console.log("auth info: ", authExt);
+    console.log("AgentService.permitCapability(): admin user capabilities: ", capabilities);
+    console.log("AgentService.permitCapability(): auth info: ", authExt);
 
     let { requestId, auth }: AuthInfoExtended = JSON.parse(authExt);
     let rand = genRandomDigits();
@@ -424,30 +342,13 @@ export default class AgentService {
 
   async generateJwt(requestId: string, rand: string) {
     const authKey = genRequestKey(requestId, rand);
-    console.log("rand number with requestId: ", authKey);
     const auth = this.#requests.get(authKey);
 
     if (!auth) {
       throw new Error("Can't find permitted request");
     }
 
-    const key = this.getSigningKey();
-    // @ts-ignore
-    let keyEncoder = new KeyEncoder.default("secp256k1");
-    const pemPrivateKey = keyEncoder.encodePrivate(
-      key.privateKey,
-      "raw",
-      "pem"
-    );
-    const keyObj = crypto.createPrivateKey(pemPrivateKey);
-
-    const jwt = await new jose.SignJWT({ ...auth })
-      .setProtectedHeader({ alg: "ES256K" })
-      .setIssuedAt()
-      .setIssuer(this.did || "")
-      .setAudience(`${auth.appName}:${this.did || ""}`)
-      .setExpirationTime(`${this.#tokenValidPeriod}s`)
-      .sign(keyObj);
+    const jwt = await JWT.generateJwt(this.did || "", `${auth.appName}:${this.did || ""}`, this.#tokenValidPeriod, auth);
 
     this.#requests.delete(authKey);
 
@@ -455,6 +356,8 @@ export default class AgentService {
       const apps = [...this.#apps, { ...this.#requestingAuthInfo, token: jwt }];
       this.#apps = apps;
       fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
+
+      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);      
     }
 
     return jwt;
@@ -464,42 +367,49 @@ export default class AgentService {
     return this.#apps;
   }
 
-  removeApp(requestId: string) {
+  async removeApp(requestId: string) {
     try {
       this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId);
 
       fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
+
+      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
     } catch (e) {
       console.error("Error while removing app", e);
     }
   }
 
-  revokeAppToken(requestId: string) {
+  async revokeAppToken(requestId: string) {
     try {
       this.#apps = this.#apps.map((app: any) =>
         app.requestId === requestId ? { ...app, revoked: true } : app
       );
 
       fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
+
+      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
     } catch (e) {
       console.error("Error while revoking token", e);
     }
   }
 
   async signMessage(msg: string) {
-    const key = this.getSigningKey();
-    const msgHash = await secp.utils.sha256(new TextEncoder().encode(msg));
-    const signature = await secp.sign(msgHash, key.privateKey);
-    const sigHex = Buffer.from(signature).toString("hex");
-    return new AgentSignature(sigHex, key.publicKey);
+    this.signingChecks()
+
+    const payloadBytes = Signatures.buildMessageRaw(msg)
+    const signature = WALLET.sign(payloadBytes);
+    const sigBuffer = Buffer.from(signature);
+    const sigHex = sigBuffer.toString("hex");
+
+    return new AgentSignature(sigHex, WALLET.getMainKey().publicKey);
   }
 }
 
 export function init(
   rootConfigPath: string,
-  reqCredential?: string
+  adminCredential?: string
 ): AgentService {
-  const agent = new AgentService(rootConfigPath, reqCredential);
+  const agent = new AgentService(rootConfigPath, adminCredential);
   agent.load();
   return agent;
 }

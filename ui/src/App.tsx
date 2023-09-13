@@ -1,7 +1,6 @@
 import Login from "./components/Login";
 import "./App.css";
 import { useContext, useEffect, useState } from "react";
-import { Global, Stack } from "@mantine/core";
 import TrustAgent from "./components/TrustAgent";
 import Navigation from "./components/Navigation";
 import Auth from "./components/Auth";
@@ -15,6 +14,7 @@ import Settings from "./components/Settings";
 import { appWindow } from "@tauri-apps/api/window";
 import { Connect } from "./components/Connect";
 import Apps from "./components/Apps";
+import TrayMessage from "./components/TrayMessage";
 
 const App = () => {
   const [opened, setOpened] = useState(false);
@@ -44,31 +44,15 @@ const App = () => {
 
   return (
     <div className="App">
-      <Global
-        styles={(theme) => ({
-          "*": {
-            fontFamily: `"DM Sans", Helvetica, Arial, sans-serif`,
-          },
-          ".mantine-AppShell-main": {
-            width: "100%",
-          },
-          ".mantine-Stack-root": {
-            display: "block",
-            minHeight: "100%",
-            width: "100%",
-          },
-        })}
-      />
       <Routes>
         <Route path="/splashscreen" element={<Splashscreen />} />
+        <Route path="/tray_message" element={<TrayMessage />} />
         <Route
           path="/login"
           element={
-            <Stack align="center" spacing="xl" style={{ margin: "auto" }}>
-              <AgentProvider>
-                <Login />
-              </AgentProvider>
-            </Stack>
+            <AgentProvider>
+              <Login />
+            </AgentProvider>
           }
         />
         <Route

@@ -28,6 +28,7 @@ use crate::{
 use ad4m_client::*;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use rust_executor::Ad4mConfig;
 use startup::executor_data_path;
 
 /// AD4M command line interface.
@@ -110,6 +111,45 @@ enum Domain {
         #[command(subcommand)]
         command: DevFunctions,
     },
+    Init {
+        #[arg(short, long, action)]
+        data_path: Option<String>,
+        #[arg(short, long, action)]
+        network_bootstrap_seed: Option<String>,
+    },
+    Run {
+        #[arg(short, long, action)]
+        app_data_path: Option<String>,
+        #[arg(short, long, action)]
+        network_bootstrap_seed: Option<String>,
+        #[arg(short, long, action)]
+        language_language_only: Option<bool>,
+        #[arg(long, action)]
+        run_dapp_server: Option<bool>,
+        #[arg(short, long, action)]
+        gql_port: Option<u16>,
+        #[arg(long, action)]
+        hc_admin_port: Option<u16>,
+        #[arg(long, action)]
+        hc_app_port: Option<u16>,
+        #[arg(long, action)]
+        hc_use_bootstrap: Option<bool>,
+        #[arg(long, action)]
+        hc_use_local_proxy: Option<bool>,
+        #[arg(long, action)]
+        hc_use_mdns: Option<bool>,
+        #[arg(long, action)]
+        hc_use_proxy: Option<bool>,
+        #[arg(long, action)]
+        hc_proxy_url: Option<String>,
+        #[arg(long, action)]
+        hc_bootstrap_url: Option<String>,
+        #[arg(short, long, action)]
+        connect_holochain: Option<bool>,
+        #[arg(long, action)]
+        admin_credential: Option<String>
+    },
+    RunLocalHcServices {}
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -139,12 +179,71 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
     Ok(ad4m_client)
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
     if let Domain::Dev { command } = args.domain {
         dev::run(command).await?;
+        return Ok(());
+    };
+
+    if let Domain::Init {
+        data_path,
+        network_bootstrap_seed,
+    } = args.domain
+    {
+        match rust_executor::init::init(data_path, network_bootstrap_seed) {
+            Ok(()) => println!("Successfully initialized AD4M executor!"),
+            Err(e) => {
+                println!("Failed to initialize AD4M executor: {}", e);
+                std::process::exit(1);
+            }
+        };
+        return Ok(());
+    };
+
+    if let Domain::Run {
+        app_data_path,
+        network_bootstrap_seed,
+        language_language_only,
+        run_dapp_server,
+        gql_port,
+        hc_admin_port,
+        hc_app_port,
+        hc_use_bootstrap,
+        hc_use_local_proxy,
+        hc_use_mdns,
+        hc_use_proxy,
+        hc_proxy_url,
+        hc_bootstrap_url,
+        connect_holochain,
+        admin_credential
+    } = args.domain
+    {
+        rust_executor::run(Ad4mConfig {
+            app_data_path,
+            network_bootstrap_seed,
+            language_language_only,
+            run_dapp_server,
+            gql_port,
+            hc_admin_port,
+            hc_app_port,
+            hc_use_bootstrap,
+            hc_use_local_proxy,
+            hc_use_mdns,
+            hc_use_proxy,
+            hc_proxy_url,
+            hc_bootstrap_url,
+            connect_holochain,
+            admin_credential
+        })
+        .await;
+        return Ok(());
+    };
+
+    if let Domain::RunLocalHcServices {} = args.domain {
+        rust_executor::run_local_hc_services().await?;
         return Ok(());
     }
 
@@ -167,7 +266,29 @@ async fn main() -> Result<()> {
             })?;
             println!("{}", log);
         }
-        Domain::Dev{ command: _ } => unreachable!(),
+        Domain::Dev { command: _ } => unreachable!(),
+        Domain::Init {
+            data_path: _,
+            network_bootstrap_seed: _,
+        } => unreachable!(),
+        Domain::Run {
+            app_data_path: _,
+            network_bootstrap_seed: _,
+            language_language_only: _,
+            run_dapp_server: _,
+            gql_port: _,
+            hc_admin_port: _,
+            hc_app_port: _,
+            hc_use_bootstrap: _,
+            hc_use_local_proxy: _,
+            hc_use_mdns: _,
+            hc_use_proxy: _,
+            hc_proxy_url: _,
+            hc_bootstrap_url: _,
+            connect_holochain: _,
+            admin_credential: _
+        } => unreachable!(),
+        Domain::RunLocalHcServices {} => unreachable!(),
     }
 
     Ok(())

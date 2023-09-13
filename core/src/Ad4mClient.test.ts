@@ -24,6 +24,7 @@ import ExpressionResolver from "./expression/ExpressionResolver";
 import { AuthInfoInput, EntanglementProofInput, CapabilityInput, ResourceInput } from "./agent/Agent";
 import { LanguageMetaInput } from "./language/LanguageMeta";
 import { InteractionCall } from "./language/Language";
+import { PerspectiveState } from "./perspectives/PerspectiveHandle";
 
 jest.setTimeout(15000)
 
@@ -610,6 +611,16 @@ describe('Ad4mClient', () => {
             expect(link.data.source).toBe('root')
             expect(link.data.predicate).toBe('p')
             expect(link.data.target).toBe('lang://Qm123')
+            expect(link.status).toBe('shared')
+        })
+
+        it('addLocalLink() smoke test', async () => {
+            const link = await ad4mClient.perspective.addLink('00001', {source: 'root', target: 'lang://Qm123', predicate: 'p'}, 'local')
+            expect(link.author).toBe('did:ad4m:test')
+            expect(link.data.source).toBe('root')
+            expect(link.data.predicate).toBe('p')
+            expect(link.data.target).toBe('lang://Qm123')
+            expect(link.status).toBe('local')
         })
 
         it('addLinks() smoke test', async () => {
@@ -737,6 +748,18 @@ describe('Ad4mClient', () => {
             await perspective.add({source: 'root', target: 'neighbourhood://Qm123456'})  
 
             expect(linkAdded).toBeCalledTimes(1)
+        })
+
+        it('addSyncStateChangeListener() smoke test', async () => {
+            let perspective = await ad4mClient.perspective.byUUID('00004')
+
+            const syncState = jest.fn()
+
+            await perspective.addSyncStateChangeListener(syncState)
+            await perspective.add({source: 'root', target: 'neighbourhood://Qm12345'})
+
+            expect(syncState).toBeCalledTimes(1)
+            expect(syncState).toBeCalledWith(PerspectiveState.Synced)
         })
 
         it('updateLink() smoke test', async () => {
@@ -919,6 +942,18 @@ describe('Ad4mClient', () => {
                 await ad4mClientWithoutSubscription.agent.unlock("test");
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
             })
+
+            it('agent subscribeAppsChanged smoke test', async () => {
+                const appsChangedCallback = jest.fn()
+                ad4mClientWithoutSubscription.agent.addAppChangedListener(appsChangedCallback)
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                expect(appsChangedCallback).toBeCalledTimes(0)
+    
+                ad4mClientWithoutSubscription.agent.subscribeAppsChanged()
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                await ad4mClientWithoutSubscription.agent.removeApp("test");
+                expect(appsChangedCallback).toBeCalledTimes(1)
+            })
     
             it('perspective subscribePerspectiveAdded smoke test', async () => {
                 const perspectiveAddedCallback = jest.fn()
@@ -987,6 +1022,17 @@ describe('Ad4mClient', () => {
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithSubscription.agent.unlock("test");
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
+            })
+
+            it('agent subscribeAppsChanged smoke test', async () => {
+                const appsChangedCallback = jest.fn()
+                ad4mClientWithSubscription.agent.addAppChangedListener(appsChangedCallback)
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                expect(appsChangedCallback).toBeCalledTimes(0)
+    
+                await new Promise<void>(resolve => setTimeout(resolve, 100))
+                await ad4mClientWithSubscription.agent.removeApp("test");
+                expect(appsChangedCallback).toBeCalledTimes(1)
             })
     
             it('perspective subscribePerspectiveAdded smoke test', async () => {

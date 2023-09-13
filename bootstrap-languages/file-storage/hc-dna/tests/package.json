@@ -1,0 +1,26 @@
+{
+  "name": "file-storage-test",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "@holochain/client": "0.16.0",
+    "@holochain/tryorama": "^0.11.1",
+    "tape-promise": "^4.0.0",
+    "ts-node": "^10.8.0",
+    "@types/node": "^14.0.14",
+    "typescript": "^4.2.4"
+  },
+  "devDependencies": {
+    "@types/faker": "^5.5.3",
+    "@types/tape-promise": "^4.0.1",
+    "tape": "^5.5.3",
+    "blob-compare": "^1.1.0"
+  },
+  "scripts": {
+    "build": "cd .. && ./build.sh",
+    "build-ci": "cd ../ && CARGO_TARGET_DIR=target cargo build --release --target wasm32-unknown-unknown && ./tests/hc dna pack workdir && cd ./tests",
+    "test": "TRYORAMA_LOG_LEVEL=debug WASM_LOG=debug,wasmer_compiler_cranelift=error,holochain::conductor::manager=warn,holochain::core::workflow::publish_dht_ops_workflow::publish_query=warn,publish_dht_ops_workflow=error,kitsune_p2p_types::metrics=error,kitsune_p2p::gossip::sharded_gossip=error,wasm_trace=debug,app_validation_workflow=error RUST_BACKTRACE=1 node --loader ts-node/esm --experimental-specifier-resolution=node index.ts"
+  }
+}

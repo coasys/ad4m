@@ -1,0 +1,5 @@
+.next
+node_modules
+pages/jsdoc
+!next.config.js
+/out/**/*

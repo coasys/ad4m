@@ -1,0 +1,302 @@
+name: Publish Staging AD4M
+
+on:
+  push:
+    branches:
+      - staging
+
+jobs:
+  create-release:
+    runs-on: GH-hosted-ubuntu
+    outputs:
+      upload_url: ${{ steps.create-release.outputs.upload_url }}
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: setup node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16
+
+      - name: Install Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.32.4
+
+      - name: Install HC
+        run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+
+      - name: Create Tags From
+        id: create_tag
+        uses: jaywcjlove/create-tag-action@v1.3.14
+      - name: create release ad4m launcher
+        id: create-release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+        with:
+          tag_name: ${{ steps.create_tag.outputs.version }}
+          release_name: AD4M Launcher & CLI ${{ steps.create_tag.outputs.version }} Prerelease
+          body: See the assets to download this version and install.
+          draft: true
+          prerelease: true
+
+  build-launcher-binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
+        node-version: [18.17.0]
+
+    needs: 
+      - create-release
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v2
+
+    - name: Install Rust stable
+      uses: actions-rs/toolchain@v1
+      with:
+        override: true
+        toolchain: 1.71.1
+    - name: Install Deno
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.32.4
+    - run: rustup target add wasm32-unknown-unknown
+
+    - name: install dependencies (ubuntu only)
+      if: matrix.platform == 'GH-hosted-ubuntu'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
+
+    - name: get version
+      run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
+
+    - name: Extract version
+      id: extract_version
+      uses: Saionaro/extract-package-version@v1.1.1
+      with:
+        path: ui
+
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
+
+    - name: Install GO
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.18'
+
+    - name: Yarn Install
+      run: yarn install --no-cache
+
+    - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
+      if: matrix.platform != 'windows-latest'
+      run: yarn run package-ad4m
+
+    - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
+      if: matrix.platform == 'windows-latest'
+      run: |
+          choco install curl cygwin gnuwin32-m4 libgcc make mingw
+          yarn run package-ad4m
+
+    - name: Upload Release Deb Asset
+      id: upload-release-deb-asset
+      if: matrix.platform == 'GH-hosted-ubuntu'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/ADAM\ Launcher${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_name: ad4m_${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI Linux Binary
+      id: upload-release-linux-ad4m-cli-binary
+      if: matrix.platform == 'GH-hosted-ubuntu'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m
+        asset_name: ad4m-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release Macos Asset
+      id: upload-release-macos-asset
+      if: matrix.platform == 'macos-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path:  /Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM\ Launcher${{ steps.extract_version.outputs.version }}_x64.dmg
+        asset_name: AD4M_${{ steps.extract_version.outputs.version }}_x64.dmg
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI Macos Binary
+      id: upload-release-macos-ad4m-cli-binary
+      if: matrix.platform == 'macos-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m
+        asset_name: ad4m-macos-${{ steps.extract_version.outputs.version }}-x64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release MSI Asset
+      id: upload-release-msi-asset
+      if: matrix.platform == 'windows-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: D:\a\ad4m\ad4m\target\release\bundle\msi\AD4M_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
+        asset_name: AD4M_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI Windows Binary
+      id: upload-release-windows-ad4m-cli-binary
+      if: matrix.platform == 'windows-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: D:\a\ad4m\ad4m\target\release\ad4m.exe
+        asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
+        asset_content_type: application/octet-stream
+
+    - name: "Upload built AD4MIN"
+      uses: tauri-apps/tauri-action@v0.3
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
+        releaseName: "Ad4min v__VERSION__"
+        releaseBody: "See the assets to download this version and install."
+        projectPath: "./ui"
+  
+  npm-publish:
+    runs-on: GH-hosted-ubuntu
+    steps:
+      - uses: actions/checkout@v3
+      # Setup .npmrc file to publish to npm
+      - name: Use Node.js 16.x
+        uses: actions/setup-node@v1
+        with:
+          node-version: 16.x
+
+      - name: Extract version
+        id: extract_version
+        uses: Saionaro/extract-package-version@v1.1.1
+        with:
+          path: ui
+
+      - name: Check if string contains prerelease
+        run: |
+          STRING="${{ steps.extract_version.outputs.version }}"
+          if [[ $STRING == *"prerelease"* ]]; then
+            echo "CONTAINS_PRERELEASE=true" >> $GITHUB_ENV
+          else
+            echo "CONTAINS_PRERELEASE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Install GO
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.18'
+
+      - name: Install deps
+        run: yarn install
+
+      - name: Install Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.32.4
+
+      - name: Build modules
+        run: yarn run build-libs
+
+      - name: Set NPM tag
+        run: |
+          if [ "$CONTAINS_PRERELEASE" = "true" ]; then
+            echo "NPM_TAG=next" >> $GITHUB_ENV
+          else
+            echo "NPM_TAG=latest" >> $GITHUB_ENV
+          fi
+        
+      - name: Publish core
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: core/package.json
+          tag: ${{ env.NPM_TAG }}
+
+      - name: Publish connect
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: connect/package.json
+          tag: ${{ env.NPM_TAG }}
+
+      - name: Publish executor
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: executor/package.json
+          tag: ${{ env.NPM_TAG }}
+
+      - name: Publish Test runner
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          package: test-runner/package.json
+          tag: ${{ env.NPM_TAG }}
+      
+  
+  crates-publish:
+    runs-on: GH-hosted-ubuntu
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.71.1
+          override: true
+
+      - name: Install GO
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.18'
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '16.x'
+          cache: 'yarn'
+
+      - name: Cache cargo
+        id: cache-cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo
+          restore-keys: ${{ runner.os }}-cargo
+      - run: rustup target add wasm32-unknown-unknown
+      - run: cd core && yarn install && yarn build && cd ..
+      - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
+      - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo workspaces publish --from-git

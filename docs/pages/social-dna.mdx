@@ -1,0 +1,128 @@
+import { Tab, Tabs } from "nextra-theme-docs";
+import { Callout } from "nextra/components";
+
+# Social DNA
+
+ADAMs goal is to create a communication infrastructure that enables
+**group agency without imposing a bias on how a group manages itself**.
+
+In a social group this could mean many different things like:
+
+- **Rating systems**: Deciding how a Post or a Comment's rating is calculated.
+- **Access rights**: Allowing certain Agents to do certain actions when certain conditions in the graph are met.
+- **Shared definitions**: Defining data structures in the graph that have a certain meaning.
+
+Social DNA enable Neigbourhoods to add shared computer programs that run on the Agents device,
+based on the structure of the graph data. Using [Prolog](https://en.wikipedia.org/wiki/Prolog), a
+turing complete logical programming language, any kind of alorithm can be run based on the
+state of the graph.
+
+<details>
+<summary>
+Quick Intro to Prolog
+</summary>
+
+Prolog is a declarative programming language commonly used for logic programming.
+It revolves around defining logical facts and rules to solve problems through logical inference.
+Here's a super quick introduction to the basics of Prolog with code examples:
+
+**Facts**: Facts are statements that define relationships or properties.
+
+```prolog
+likes(john, pizza).
+```
+
+**Rules**: Rules define logical implications or conditions using predicates and logical operators.
+
+```prolog
+likes(john, X) :- pizza(X).
+```
+
+Variables are denoted with uppercase letters or by starting with an underscore (\_).
+
+**Queries**: You can ask Prolog queries to find solutions that satisfy a
+specific condition or to retrieve information.
+
+```prolog
+?- likes(john, pizza).
+```
+
+Will return `true`
+
+</details>
+
+## Creating Social DNA
+
+Let's say we want to define `top_posts` as any post in the Perspective with **more than 5 likes**.
+
+First let's create an Perspective, and add a post:
+
+```js
+const myPosts = await ad4m.perspective.add("My Posts");
+const expressionURL = await ad4m.expression.create("My first Post", "literal");
+
+myPosts.add({
+  source: "ad4m://self",
+  predicate: "sioc://has_post",
+  target: expressionURL,
+});
+```
+
+Then let's use our Agent's DID to say that we like our own post 10 times:
+
+```js
+const { did } = await ad4m.agent.me();
+
+for (let i = 0; i < 10; i++) {
+  myPosts.add({
+    source: did,
+    predicate: "sioc://likes",
+    target: expressionURL,
+  });
+}
+```
+
+Great! Now we have one post with 10 likes in our Perspective. Now let's define what `top_comments` mean
+to use in this Perspective:
+
+<Callout type="info" emoji="ℹ️">
+  Don't worry if this looks very unfamiliar for now. You will normally either
+  use AI to write it for you, or you will use some of our abstraction layers to
+  avoid writing Prolog code yourself. (Think of ORMs vs raw SQL).
+</Callout>
+
+```prolog filename="top_posts.pl"
+top_posts(Post) :-
+    triple(Source, "sioc://has_post", Post),
+    link(Source, "sioc://likes", Post, Author, Timestamp),
+    count_likes(Post, Count),
+    Count > 5.
+
+count_likes(Post, Count) :-
+    findall(_, link(_, "sioc://likes", Post, _, _), Likes),
+    length(Likes, Count).
+```
+
+After writing the Prolog definition, you can add the definition as Social DNA to any Perspective:
+
+```js
+perspective.addSDNA(prologCode);
+```
+
+## Querying the Social DNA
+
+The Social DNA is now added to the Perspective, and we can easily ask the Perspective
+to give us the top comments:
+
+```js
+const res = await perspective.infer(
+  `top_comments(Source, Target, Author, Timestamp)`
+);
+```
+
+What is interesting here is that the `top_comments` definition could have a different
+algorithm in a different Perspective, but the developer wanting to display these comments, would not
+need to worry about the actually reasoning behind what `top_comments` actually mean for this
+specific Perspective.
+
+This gives us **complete group agency**!

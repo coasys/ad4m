@@ -1,5 +1,3 @@
-import Header from "./Header";
-import { showNotification } from "@mantine/notifications";
 import { useContext, useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Ad4minContext } from "../context/Ad4minContext";
@@ -37,20 +35,18 @@ export function Connect() {
         setURLError("Invalid websocket URL");
       } else {
         try {
-          const client = await buildAd4mClient(url!);
+          const client = await buildAd4mClient(url!, false);
 
           const id = setTimeout(() => {
             resolve(true);
 
-            showNotification({
-              color: "red",
-              message: "Failed to connect to the endpoint provided",
-            });
+            // TODO: Add notification that we failed to connect to the endpoint
 
             setLoading(false);
           }, 2000);
 
-          await client.runtime.hcAgentInfos();
+          let ad4mInfo = await client.runtime.info();
+          console.log("AD4M JS Client built, got info: ", ad4mInfo);
 
           clearTimeout(id);
 
@@ -58,10 +54,7 @@ export function Connect() {
 
           resolve(true);
         } catch (e) {
-          showNotification({
-            color: "red",
-            message: "Failed to connect to the endpoint provided",
-          });
+          // TODO: Add notification that we failed to connect to the endpoint
 
           reject();
         } finally {
@@ -81,7 +74,6 @@ export function Connect() {
 
   return (
     <j-flex direction="column" a="center" gap="500" style={{ margin: "auto" }}>
-      <Header />
       {connectedLaoding ? (
         <j-spinner size="lg"></j-spinner>
       ) : (

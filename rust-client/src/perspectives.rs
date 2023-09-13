@@ -6,6 +6,7 @@ use crate::util::{create_websocket_client, query, query_raw};
 use crate::ClientInfo;
 use anyhow::{anyhow, Context, Result};
 use chrono::naive::NaiveDateTime;
+use futures::StreamExt;
 use graphql_client::{GraphQLQuery, Response};
 use graphql_ws_client::graphql::StreamingOperation;
 use serde_json::Value;
@@ -88,6 +89,7 @@ pub async fn add_link(
     source: String,
     target: String,
     predicate: Option<String>,
+    status: Option<String>
 ) -> Result<AddLinkPerspectiveAddLink> {
     let response_data: add_link::ResponseData = query(
         executor_url,
@@ -99,6 +101,7 @@ pub async fn add_link(
                 target,
                 predicate,
             },
+            status
         }),
     )
     .await
@@ -140,6 +143,7 @@ pub async fn remove_link(
                     invalid: link.proof.invalid,
                     valid: link.proof.valid,
                 },
+                status: link.status
             },
         }),
     )
@@ -181,8 +185,8 @@ pub async fn query_links(
                 source,
                 target,
                 predicate,
-                fromDate: from_date,
-                untilDate: until_date,
+                from_date: from_date,
+                until_date: until_date,
                 limit,
             },
         }),
@@ -260,8 +264,6 @@ pub async fn watch(
     id: String,
     link_callback: Box<dyn Fn(LinkExpression)>,
 ) -> Result<()> {
-    use futures::StreamExt;
-
     let mut client = create_websocket_client(executor_url, cap_token)
         .await
         .with_context(|| "Failed to create websocket client")?;
@@ -361,6 +363,7 @@ impl PerspectivesClient {
         source: String,
         target: String,
         predicate: Option<String>,
+        status: Option<String>
     ) -> Result<AddLinkPerspectiveAddLink> {
         add_link(
             self.info.executor_url.clone(),
@@ -369,6 +372,7 @@ impl PerspectivesClient {
             source,
             target,
             predicate,
+            status
         )
         .await
     }

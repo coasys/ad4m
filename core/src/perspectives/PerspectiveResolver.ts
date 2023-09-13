@@ -3,8 +3,9 @@ import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkExpre
 import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
+import { LinkStatus } from "./PerspectiveProxy";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
-import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC } from '../PubSub'
+import { LINK_ADDED_TOPIC, LINK_REMOVED_TOPIC, LINK_UDATED_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE } from '../PubSub'
 
 export const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -20,7 +21,7 @@ testLink.proof = {
 }
 
 /**
- * Resolver classes are used here to define the GraphQL schema 
+ * Resolver classes are used here to define the GraphQL schema
  * (through the type-graphql annotations)
  * and are spawned in the client tests in Ad4mClient.test.ts.
  * For the latter, they return test fixtures.
@@ -88,19 +89,21 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => LinkExpression)
-    perspectiveAddLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @PubSub() pubSub: any): LinkExpression {
+    perspectiveAddLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @Arg('status', { nullable: true, defaultValue: 'shared'}) status: LinkStatus, @PubSub() pubSub: any): LinkExpression {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
         l.proof = testLink.proof
         l.data = link
+        l.status = status
 
         pubSub.publish(LINK_ADDED_TOPIC, { link: l })
+        pubSub.publish(PERSPECTIVE_SYNC_STATE_CHANGE, PerspectiveState.LinkLanguageInstalledButNotSynced)
         return l
     }
 
     @Mutation(returns => [LinkExpression])
-    perspectiveAddLinks(@Arg('uuid') uuid: string, @Arg('links', type => [LinkInput]) links: LinkInput[], @PubSub() pubSub: any): LinkExpression[] {
+    perspectiveAddLinks(@Arg('uuid') uuid: string, @Arg('links', type => [LinkInput]) links: LinkInput[], @Arg('status', { nullable: true}) status: string, @PubSub() pubSub: any): LinkExpression[] {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
@@ -125,7 +128,7 @@ export default class PerspectiveResolver {
         l.timestamp = Date.now()
         l.proof = testLink.proof
         l.data = links[0].data
-        
+
         const l2 = new LinkExpression()
         l2.author = 'did:ad4m:test'
         l2.timestamp = Date.now()
@@ -138,18 +141,19 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => LinkExpressionMutations)
-    perspectiveLinkMutations(@Arg('uuid') uuid: string, @Arg('mutations') mutations: LinkMutations, @PubSub() pubSub: any): LinkExpressionMutations {
-        const perspectiveAddLinks = this.perspectiveAddLinks(uuid, mutations.additions, pubSub);
+    perspectiveLinkMutations(@Arg('uuid') uuid: string, @Arg('mutations') mutations: LinkMutations, @Arg('status', { nullable: true}) status: LinkStatus, @PubSub() pubSub: any): LinkExpressionMutations {
+        const perspectiveAddLinks = this.perspectiveAddLinks(uuid, mutations.additions, status, pubSub);
         const perspectiveRemoveLinks = this.perspectiveRemoveLinks(uuid, mutations.removals, pubSub);
         return new LinkExpressionMutations(perspectiveAddLinks, perspectiveRemoveLinks)
     }
 
     @Mutation(returns => LinkExpression)
-    perspectiveAddLinkExpression(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @PubSub() pubSub: any): LinkExpression {
+    perspectiveAddLinkExpression(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @Arg('status', { nullable: true}) status: LinkStatus, @PubSub() pubSub: any): LinkExpression {
         pubSub.publish(LINK_ADDED_TOPIC, { link })
+        link.status = status;
         return link as LinkExpression
     }
- 
+
     @Mutation(returns => LinkExpression)
     perspectiveUpdateLink(@Arg('uuid') uuid: string, @Arg('oldLink') oldlink: LinkExpressionInput, @Arg('newLink') newlink: LinkInput, @PubSub() pubSub: any): LinkExpression {
         const l = new LinkExpression()
@@ -160,7 +164,7 @@ export default class PerspectiveResolver {
 
         pubSub.publish(LINK_REMOVED_TOPIC, { link: l })
 
-        return l    
+        return l
     }
 
     @Mutation(returns => Boolean)
@@ -198,5 +202,10 @@ export default class PerspectiveResolver {
     @Subscription({topics: LINK_UDATED_TOPIC, nullable: true})
     perspectiveLinkUpdated(@Arg('uuid') uuid: string): LinkExpressionUpdated {
         return {oldLink: testLink, newLink: testLink}
+    }
+
+    @Subscription({topics: PERSPECTIVE_SYNC_STATE_CHANGE, nullable: false})
+    perspectiveSyncStateChange(@Arg('uuid') uuid: string): PerspectiveState {
+        return PerspectiveState.Synced
     }
 }

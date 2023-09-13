@@ -1,0 +1,79 @@
+# Expressions
+
+In any social network, people need to be able to communicate.
+In ADAM, Agents communicate by creating Expressions using [Languages](concepts/#languages):
+
+```js
+const url = await ad4m.expression.create(content, language);
+```
+
+The resulting URL are identified like this: `<language>://<expression>`.
+
+To ensure authenticity Expressions will be signed by the Agent that created it. Any Agent can then retrieve
+the expression, get the data and validate the signature:
+
+```js
+const expression = await ad4m.expression.get(url);
+```
+
+The content of the `expression` result will look something like this:
+
+```js
+{
+    author: "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+    timestamp: "2023-06-21T14:47:48.935Z",
+    data: "Hello World!",
+    language: {
+        "address": "literal"
+    },
+    proof: {
+        "valid": true,
+        "invalid": false
+    }
+}
+```
+
+## Creating an Expression
+
+We will go into depth on how to use other languages or how to create your own, but for now let's
+use the simplest language that is included in ADAM – the `Literal` language. The `Literal` Language is an AD4M Language without back-end.
+It stores JavaScript literals (i.e. strings, numbers and objects) by encoding them into the Expression URLs.
+
+```ts
+const url = await ad4m.expression.create("Hello World!", "literal");
+```
+
+When running `create` the data will be created using the language, and automatically signed
+by your agent. The result when creating an expression will be a URL formatted like this `<language>://<expression>`.
+
+## Retrieving an Expression
+
+By using the URL of the expression, you can retrieve it's data:
+
+```ts
+const expression = await ad4m.expression.get(expressionUrl);
+```
+
+The result will look something like this:
+
+```json
+{
+  "author": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+  "timestamp": "2023-06-21T14:47:48.935Z",
+  "data": "Hello World!",
+  "language": {
+    "address": "literal"
+  },
+  "proof": {
+    "valid": true,
+    "invalid": false
+  }
+}
+```
+
+For now we have only created something we could call **objective** data. What we mean with this is that
+any agent with the URL of the Expression will be able to resolve it.
+
+In the next chapter we will learn how to organize these expression in something
+called [Perspectives](/concepts/#perspectives). These are essentially local graph databases that in
+turn can be turned into [Neighbourhoods](/essentials/neighbourhoods) (Shared social spaces).

@@ -1,4 +1,3 @@
-import { Image } from "@mantine/core";
 import { useContext, useEffect, useState } from "react";
 import { AgentContext } from "../context/AgentContext";
 import { Ad4minContext } from "../context/Ad4minContext";
@@ -398,6 +397,8 @@ const Login = (props: any) => {
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
                 onKeyDown={onKeyDown}
+                errortext={passwordError}
+                error={passwordError}
               >
                 <j-button
                   onClick={() => setShowPassword(!showPassword)}
