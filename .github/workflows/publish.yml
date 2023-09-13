@@ -100,10 +100,16 @@ jobs:
 
     - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
       if: matrix.platform != 'windows-latest'
+      env:
+        TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+        TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
       run: yarn run package-ad4m
 
     - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
       if: matrix.platform == 'windows-latest'
+      env:
+        TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+        TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
       run: |
           choco install curl cygwin gnuwin32-m4 libgcc make mingw
           yarn run package-ad4m
@@ -251,16 +257,6 @@ jobs:
         asset_path: D:\a\ad4m\ad4m\target\release\ad4m-x64.exe
         asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
         asset_content_type: application/octet-stream
-
-    # - name: "Upload built AD4MIN"
-    #   uses: tauri-apps/tauri-action@v0.3
-    #   env:
-    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #   with:
-    #     tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
-    #     releaseName: "Ad4min v__VERSION__"
-    #     releaseBody: "See the assets to download this version and install."
-    #     projectPath: "./ui"
   
   npm-publish:
     runs-on: GH-hosted-ubuntu
