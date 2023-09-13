@@ -256,19 +256,11 @@ export class LinkAdapter implements LinkSyncAdapter {
       //       `)
       try {
         //console.log("PerspectiveDiffSync.handleHolochainSignal: Getting lock");
-        const success = await this.generalMutex.lock();
-
-        if (!success) {
-          console.log("Failed to get lock due to timeout");
-          return;
-        }
 
         //console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
       } catch (e) {
         console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
-      } finally {
-        this.generalMutex.unlock();
       }
     } else {
       //console.log("PerspectiveDiffSync.handleHolochainSignal: received a signals from ourselves in fast_forward_signal or in a pull: ", signal.payload);
