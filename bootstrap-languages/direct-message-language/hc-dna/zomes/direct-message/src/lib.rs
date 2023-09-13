@@ -209,15 +209,15 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
     if Recipient(agent_info()?.agent_latest_pubkey) == recipient()? {
         //debug!("fetch_inbox agent");
         //debug!("agent_address: {}", agent_address);
-        let input = GetLinksInputBuilder::try_new(
-            agent_address,
-            LinkTypes::Message
-        )
-        .unwrap()
-        .tag_prefix(LinkTag::new("message"))
-        .build();
+        // let input = GetLinksInputBuilder::try_new(
+        //     agent_address,
+        //     LinkTypes::Message
+        // )
+        // .unwrap()
+        // .tag_prefix(LinkTag::new("message"))
+        // .build();
 
-        for link in get_links(input)? {
+        for link in get_links(agent_address, LinkTypes::Message, Some(LinkTag::new("message")))? {
             //debug!("fetch_inbox link");
             if let Some(message_entry) = get(
                 link.target

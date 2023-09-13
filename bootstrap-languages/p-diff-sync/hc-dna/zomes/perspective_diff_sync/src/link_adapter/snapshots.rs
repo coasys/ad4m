@@ -41,14 +41,14 @@ pub fn generate_snapshot(
             ))?;
         if diff.diffs_since_snapshot == 0 && search_position.hash != latest {
             let now = get_now()?.time();
-            let input = GetLinksInputBuilder::try_new(
-                hash_entry(&diff)?,
-                LinkTypes::Snapshot
-            )
-            .unwrap()
-            .tag_prefix(LinkTag::new("snapshot"))
-            .build();
-            let mut snapshot_links = get_links(input)?;
+            // let input = GetLinksInputBuilder::try_new(
+            //     hash_entry(&diff)?,
+            //     LinkTypes::Snapshot
+            // )
+            // .unwrap()
+            // .tag_prefix(LinkTag::new("snapshot"))
+            // .build();
+            let mut snapshot_links = get_links(hash_entry(&diff)?, LinkTypes::Snapshot, Some(LinkTag::new("snapshot")))?;
             let after = get_now()?.time();
             debug!("===PerspectiveDiffSync.generate_snapshot() - Profiling: Took {} to get the snapshot links", (after - now).num_milliseconds());
             if snapshot_links.len() == 0 {
