@@ -21,7 +21,9 @@
         "deb",
         "msi",
         "dmg",
-        "updater"
+        "updater",
+        "app",
+        "appimage"
       ],
       "identifier": "dev.ad4m.ad4min",
       "icon": [
