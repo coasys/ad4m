@@ -34,7 +34,7 @@ export default {
 			const octokit = new Octokit();
 
 			const { data } = await octokit.rest.repos.getLatestRelease({
-				owner: 'perspect3vism',
+				owner: 'coasys',
 				repo: 'ad4m',
 			});
 
