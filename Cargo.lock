@@ -3664,6 +3664,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0206175f82b8d6bf6652ff7d71a1e27fd2e4efde587fd368662814d6ec1d9ce0"
 
 [[package]]
+name = "failure"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d32e9bd16cc02eae7db7ef620b392808b89f6a5e16bb3497d159c6b92a0f4f86"
+dependencies = [
+ "backtrace",
+ "failure_derive",
+]
+
+[[package]]
+name = "failure_derive"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa4da3c766cd7a0db8242e326e9e4e081edd567072893ed320008189715366a4"
+dependencies = [
+ "proc-macro2 1.0.66",
+ "quote 1.0.33",
+ "syn 1.0.109",
+ "synstructure",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3778,8 +3800,9 @@ dependencies = [
 
 [[package]]
 name = "fixt"
-version = "0.2.0"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bbd3dde3f166a47832a20fa1d0c61d5b68a79bedf370782441709d82f6ae69e"
 dependencies = [
  "holochain_serialized_bytes",
  "lazy_static",
@@ -4722,8 +4745,9 @@ dependencies = [
 
 [[package]]
 name = "hdi"
-version = "0.4.0-beta-dev.9"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b12f620a0d22b7dcd534a849f0024b0b47c4343b15f1c0ec02e37f4990f6f16"
 dependencies = [
  "hdk_derive",
  "holo_hash",
@@ -4738,8 +4762,9 @@ dependencies = [
 
 [[package]]
 name = "hdk"
-version = "0.3.0-beta-dev.13"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d50da8f292a1b819ae6a7651e9c3cb2ec97f00729125ad9ec3d31df8154eef7"
 dependencies = [
  "getrandom 0.2.10",
  "hdi",
@@ -4757,8 +4782,9 @@ dependencies = [
 
 [[package]]
 name = "hdk_derive"
-version = "0.3.0-beta-dev.9"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc855dc170fec9ca44d2b21cba90fb961ef92acadaae0f0c7d090312a6212552"
 dependencies = [
  "darling 0.14.4",
  "heck 0.4.1",
@@ -4845,12 +4871,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hex-literal"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
-
-[[package]]
 name = "hkdf"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4911,8 +4931,9 @@ dependencies = [
 
 [[package]]
 name = "holo_hash"
-version = "0.3.0-beta-dev.6"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a5aa5c7b7c2d99ba6769e58ead10d5d4ead9036724a54a7fcea1c0203aac00e"
 dependencies = [
  "arbitrary",
  "base64 0.13.1",
@@ -4921,6 +4942,7 @@ dependencies = [
  "fixt",
  "futures",
  "holochain_serialized_bytes",
+ "holochain_util",
  "holochain_wasmer_common",
  "kitsune_p2p_dht_arc",
  "must_future",
@@ -4933,8 +4955,9 @@ dependencies = [
 
 [[package]]
 name = "holochain"
-version = "0.3.0-beta-dev.15"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7557f2e6d4e64912264b16befa6144da01c2484459492d8a71560d20024178d8"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -4960,7 +4983,6 @@ dependencies = [
  "holochain_cascade",
  "holochain_conductor_api",
  "holochain_keystore",
- "holochain_metrics",
  "holochain_p2p",
  "holochain_serialized_bytes",
  "holochain_sqlite",
@@ -5026,8 +5048,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_cascade"
-version = "0.3.0-beta-dev.15"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8611a6406313dd46692c97cbf0025dc4ad77a27ac4da622441dec69408054a0"
 dependencies = [
  "async-trait",
  "derive_more",
@@ -5045,11 +5068,12 @@ dependencies = [
  "holochain_state",
  "holochain_trace",
  "holochain_types",
+ "holochain_util",
  "holochain_zome_types",
  "kitsune_p2p",
  "mockall",
  "serde",
- "serde_derive 1.0.188",
+ "serde_derive",
  "thiserror",
  "tokio",
  "tracing",
@@ -5058,8 +5082,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_cli_bundle"
-version = "0.3.0-beta-dev.13"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dc3f982c88b2a3be6121505770cbad741394bdc59b36276fe1f5f664ddadc29"
 dependencies = [
  "anyhow",
  "clap 4.4.1",
@@ -5079,8 +5104,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_cli_run_local_services"
-version = "0.3.0-beta-dev.7"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53b502a8499f2f68b612cd65c5036922ea3354e91f842a7ff505ce0e28376e6e"
 dependencies = [
  "clap 4.4.1",
  "futures",
@@ -5094,8 +5120,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_conductor_api"
-version = "0.3.0-beta-dev.15"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4696d86bc639c07469f95d369d1e93d5a50f9afd782ed14fa74e7040293a133a"
 dependencies = [
  "derive_more",
  "directories 2.0.2",
@@ -5108,7 +5135,7 @@ dependencies = [
  "holochain_zome_types",
  "kitsune_p2p",
  "serde",
- "serde_derive 1.0.188",
+ "serde_derive",
  "serde_yaml 0.9.25",
  "structopt",
  "thiserror",
@@ -5118,13 +5145,16 @@ dependencies = [
 
 [[package]]
 name = "holochain_integrity_types"
-version = "0.3.0-beta-dev.9"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdfffeca0c6dea328a1ff7097946a951035dd137f4b9ad0db00f5377cd6c9326"
 dependencies = [
  "arbitrary",
  "derive_builder",
  "holo_hash",
  "holochain_serialized_bytes",
+ "holochain_util",
+ "kitsune_p2p_dht",
  "kitsune_p2p_timestamp",
  "paste",
  "serde",
@@ -5136,8 +5166,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_keystore"
-version = "0.3.0-beta-dev.11"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f03dedeb6f3e244558f491356c4a00da9c5a44a05ca683e460c6e5434ed2e149"
 dependencies = [
  "base64 0.13.1",
  "futures",
@@ -5159,19 +5190,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "holochain_metrics"
-version = "0.3.0-beta-dev.3"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
-dependencies = [
- "influxive",
- "tracing",
- "ts_opentelemetry_api",
-]
-
-[[package]]
 name = "holochain_p2p"
-version = "0.3.0-beta-dev.14"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "191b0cb1239fe04754ae08f67e2608d385e05dae065c80617c75f9ec2e15e75c"
 dependencies = [
  "async-trait",
  "derive_more",
@@ -5225,36 +5247,45 @@ dependencies = [
 
 [[package]]
 name = "holochain_sqlite"
-version = "0.3.0-beta-dev.13"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5164e2866480b8103b255cf2b0581dbdd3371da9efe5e86704975294af20e4f"
 dependencies = [
  "anyhow",
  "async-trait",
+ "byteorder",
+ "cfg-if 0.1.10",
  "chashmap",
+ "chrono",
  "derive_more",
+ "either",
+ "failure",
  "fallible-iterator",
+ "fixt",
  "futures",
  "getrandom 0.2.10",
  "holo_hash",
  "holochain_serialized_bytes",
  "holochain_util",
  "holochain_zome_types",
- "kitsune_p2p_bin_data",
- "kitsune_p2p_dht",
- "kitsune_p2p_dht_arc",
- "kitsune_p2p_timestamp",
- "kitsune_p2p_types",
+ "kitsune_p2p",
+ "lazy_static",
+ "must_future",
+ "nanoid 0.3.0",
+ "num-traits",
  "num_cpus",
  "once_cell",
+ "page_size",
  "parking_lot 0.10.2",
  "pretty_assertions 0.7.2",
  "r2d2",
  "r2d2_sqlite_neonphog",
+ "rand 0.8.5",
  "rmp-serde 0.15.5",
  "rusqlite",
  "scheduled-thread-pool",
  "serde",
- "serde_derive 1.0.188",
+ "serde_derive",
  "serde_json",
  "shrinkwraprs",
  "sqlformat 0.1.8",
@@ -5262,12 +5293,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-futures",
 ]
 
 [[package]]
 name = "holochain_state"
-version = "0.3.0-beta-dev.14"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d2a4dee4a5f1ef7b350f078965fe01afd54e3a89167c6d4fc991ae9f2a20141"
 dependencies = [
  "async-recursion",
  "base64 0.13.1",
@@ -5307,8 +5340,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_test_wasm_common"
-version = "0.3.0-beta-dev.13"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a1a19d8dca8938fcb55e4ae43bb57887f2887155677e7906a1e0bc3160a2124"
 dependencies = [
  "hdk",
  "serde",
@@ -5316,8 +5350,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_trace"
-version = "0.3.0-beta-dev.1"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83611dcbb9be2afd7a4416793dc75f5d5d1f2975d4c0898162a3b680ecf1935c"
 dependencies = [
  "chrono",
  "derive_more",
@@ -5333,8 +5368,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_types"
-version = "0.3.0-beta-dev.13"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f4f7e4ecd2eeeae836ec487b3213c7498ed339a3d88e7ec649aa9d3ad6a8c55"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -5375,7 +5411,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_bytes",
- "serde_derive 1.0.188",
+ "serde_derive",
  "serde_json",
  "serde_with 1.14.0",
  "serde_yaml 0.9.25",
@@ -5391,8 +5427,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_util"
-version = "0.2.0"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c507f39c150414b64bb2fe8da311dc4e925435be887f8dfc3a97f8183d829878"
 dependencies = [
  "backtrace",
  "cfg-if 0.1.10",
@@ -5408,8 +5445,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_wasm_test_utils"
-version = "0.3.0-beta-dev.13"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "222fa67d927a0c1cd0288ea1763dd2d36d66bf4c280147561011a2321d0b6908"
 dependencies = [
  "holochain_types",
  "holochain_util",
@@ -5467,8 +5505,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_websocket"
-version = "0.3.0-beta-dev.3"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2975619b1a263030e02766e4440bd3a4d69457ea2588a68c9c68d884ad1fbb98"
 dependencies = [
  "futures",
  "ghost_actor 0.4.0-alpha.5",
@@ -5491,8 +5530,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_zome_types"
-version = "0.3.0-beta-dev.10"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b77f5caa760c7b34019739fb3b0a986a235fa0a09086b8eaff8cf7a72a2a6ce"
 dependencies = [
  "arbitrary",
  "contrafact",
@@ -5645,7 +5685,7 @@ dependencies = [
  "backtrace",
  "os_info",
  "serde",
- "serde_derive 1.0.188",
+ "serde_derive",
  "toml 0.7.6",
  "uuid 1.4.1",
 ]
@@ -5954,106 +5994,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "influxdb"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f79168e8b5047761c3e027438d6a46150380b2d78b15b723da04beefde29832"
-dependencies = [
- "chrono",
- "futures-util",
- "http",
- "lazy_static",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "influxive"
-version = "0.0.1-alpha.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e751ac3b2c3a7943237d176f43d051e81611ab60927ee0de778eef8eb8a9946"
-dependencies = [
- "influxive-child-svc",
- "influxive-otel",
- "influxive-writer",
-]
-
-[[package]]
-name = "influxive-child-svc"
-version = "0.0.1-alpha.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3304096e465620b1e8b8f126e385050d8a0071f20ad09d1dae240474fde52bb9"
-dependencies = [
- "hex-literal",
- "influxive-core",
- "influxive-downloader",
- "influxive-writer",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "influxive-core"
-version = "0.0.1-alpha.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "361ab244896d34c02cdfb4fb90a0cf11d1db7e140f6d0f9eb872c335e3f7f602"
-
-[[package]]
-name = "influxive-downloader"
-version = "0.0.1-alpha.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc2575384f9b4e5f94f316c69844f0a31e139694a530ffcc9cea6c98ce81627f"
-dependencies = [
- "base64 0.21.3",
- "digest 0.10.7",
- "dirs 5.0.1",
- "flate2",
- "futures",
- "hex",
- "hex-literal",
- "influxive-core",
- "reqwest",
- "sha2 0.10.7",
- "tar",
- "tempfile",
- "tokio",
- "zip",
-]
-
-[[package]]
-name = "influxive-otel"
-version = "0.0.1-alpha.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a29ee9911b66e6f433734c900ed1d95b3cffeab1ea7dace3ecd3a3dd224e8be"
-dependencies = [
- "influxive-core",
- "tokio",
- "ts_opentelemetry_api",
-]
-
-[[package]]
 name = "influxive-otel-atomic-obs"
 version = "0.0.1-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b07bcce79167d27b8b2d639cf026029506ed3dfa7bf7ee402c29cab03a7afd16"
 dependencies = [
  "ts_opentelemetry_api",
-]
-
-[[package]]
-name = "influxive-writer"
-version = "0.0.1-alpha.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee73e5486492eafd6c50790545df7b73c81edf69b299f96183bdcb9371619951"
-dependencies = [
- "influxdb",
- "influxive-core",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -6402,8 +6348,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p"
-version = "0.3.0-beta-dev.12"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "999ed18511743698999bdfddeb90c3c814bc2d32acf7c8a5bce883f2c1e97d67"
 dependencies = [
  "arbitrary",
  "arrayref",
@@ -6442,19 +6389,20 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "ts_opentelemetry_api",
  "tx5",
  "url2",
 ]
 
 [[package]]
 name = "kitsune_p2p_bin_data"
-version = "0.3.0-beta-dev.4"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb0b2032c0ee5683bc4d4c7c705f545992655bd5dc6235e62d0f916197a5c0af"
 dependencies = [
  "arbitrary",
  "base64 0.13.1",
  "derive_more",
+ "holochain_util",
  "kitsune_p2p_dht_arc",
  "serde",
  "serde_bytes",
@@ -6463,8 +6411,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_block"
-version = "0.3.0-beta-dev.5"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e15586a9b4f1ec2190d1b92b706995f15a871003955548e6be434cadd75413dd"
 dependencies = [
  "kitsune_p2p_bin_data",
  "kitsune_p2p_timestamp",
@@ -6474,8 +6423,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_bootstrap"
-version = "0.2.0-beta-dev.7"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "831f6acbe8deee4ee85153b1055a6be4635658273f51df248084f4504e869755"
 dependencies = [
  "clap 3.2.25",
  "futures",
@@ -6493,8 +6443,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_dht"
-version = "0.3.0-beta-dev.4"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf6ff683970365a1c3b71192a116abeb986512ced906e4e25cc7ad40bf65b1b3"
 dependencies = [
  "colored",
  "derivative",
@@ -6516,8 +6467,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_dht_arc"
-version = "0.3.0-beta-dev.3"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f71f358459319708884f9295f122cb7b69a8589300fb232b573a36af04d0a7bc"
 dependencies = [
  "derive_more",
  "gcollections",
@@ -6529,8 +6481,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_fetch"
-version = "0.3.0-beta-dev.8"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6317d77bc3ffa8c36e5351bad1552320690edb8ebb27d3ca1b8f44ad4d0759a5"
 dependencies = [
  "derive_more",
  "futures",
@@ -6542,14 +6495,16 @@ dependencies = [
  "num-traits",
  "serde",
  "serde_bytes",
+ "thiserror",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "kitsune_p2p_mdns"
-version = "0.2.0"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b16b6a872bf984119c80c26cc92488763e96c396b5c091b28d5b66aad030bd61"
 dependencies = [
  "async-stream",
  "base64 0.13.1",
@@ -6564,8 +6519,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_proxy"
-version = "0.3.0-beta-dev.7"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dabca0ae25126cf5cc64dda4ed0db3c80640020036d5e16300e0212266da430"
 dependencies = [
  "base64 0.13.1",
  "blake2b_simd 0.5.11",
@@ -6588,8 +6544,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_timestamp"
-version = "0.3.0-beta-dev.0"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e173408aabd1fccedec2ba096b8feac7ef769c435294607f4ae5bc5b83ebc9e"
 dependencies = [
  "arbitrary",
  "chrono",
@@ -6600,8 +6557,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_transport_quic"
-version = "0.3.0-beta-dev.7"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "720caff39a7d58c8543726159facb41aac16645158460ed74fb0a5ca747ef64c"
 dependencies = [
  "blake2b_simd 1.0.1",
  "futures",
@@ -6619,8 +6577,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_types"
-version = "0.3.0-beta-dev.7"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00adde41d1b8f9f5c40fd6281662b3030f5a6ea21ddff081c8dd346e18f6eab5"
 dependencies = [
  "arbitrary",
  "base64 0.13.1",
@@ -6632,7 +6591,6 @@ dependencies = [
  "kitsune_p2p_block",
  "kitsune_p2p_dht",
  "kitsune_p2p_dht_arc",
- "kitsune_p2p_timestamp",
  "lair_keystore_api",
  "lru 0.8.1",
  "mockall",
@@ -6649,6 +6607,7 @@ dependencies = [
  "sysinfo 0.27.8",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "url 2.4.1",
  "url2",
  "webpki 0.22.0",
@@ -7614,8 +7573,9 @@ checksum = "7843ec2de400bcbc6a6328c958dc38e5359da6e93e72e37bc5246bf1ae776389"
 
 [[package]]
 name = "mr_bundle"
-version = "0.2.0"
-source = "git+https://github.com/coasys/holochain?branch=pack-unpack-dna-exports#7d73635fcd3e7bba4f7998cadbc79b35002df933"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b07707c320cdf007f36f450de93074425885fad116d55bda2b87e96bd216d6a0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -7628,7 +7588,7 @@ dependencies = [
  "rmp-serde 0.15.5",
  "serde",
  "serde_bytes",
- "serde_derive 1.0.188",
+ "serde_derive",
  "serde_yaml 0.9.25",
  "thiserror",
 ]
@@ -8498,6 +8458,16 @@ dependencies = [
  "elliptic-curve 0.13.5",
  "primeorder",
  "sha2 0.10.7",
+]
+
+[[package]]
+name = "page_size"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebde548fbbf1ea81a99b128872779c437752fb99f217c45245e1a61dcd9edcd"
+dependencies = [
+ "libc",
+ "winapi 0.3.9",
 ]
 
 [[package]]
@@ -10712,10 +10682,11 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "1.0.183"
-source = "git+https://github.com/fayeed/serde.git?branch=ad4m-compatible#a81bd97dcd5254e28104146d45b62b8f91f0e192"
+version = "1.0.166"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d01b7404f9d441d3ad40e6a636a7782c377d2abdbe4fa2440e2edcc2f4f10db8"
 dependencies = [
- "serde_derive 1.0.183",
+ "serde_derive",
 ]
 
 [[package]]
@@ -10748,19 +10719,9 @@ dependencies = [
 
 [[package]]
 name = "serde_derive"
-version = "1.0.183"
-source = "git+https://github.com/fayeed/serde.git?branch=ad4m-compatible#a81bd97dcd5254e28104146d45b62b8f91f0e192"
-dependencies = [
- "proc-macro2 1.0.66",
- "quote 1.0.33",
- "syn 2.0.29",
-]
-
-[[package]]
-name = "serde_derive"
-version = "1.0.188"
+version = "1.0.166"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4eca7ac642d82aa35b60049a6eccb4be6be75e599bd2e9adb5f875a737654af2"
+checksum = "5dd83d6dde2b6b2d466e14d9d1acce8816dedee94f735eac6395808b3483c6d6"
 dependencies = [
  "proc-macro2 1.0.66",
  "quote 1.0.33",
@@ -14975,3 +14936,8 @@ dependencies = [
  "libc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "serde"
+version = "1.0.183"
+source = "git+https://github.com/fayeed/serde.git?branch=ad4m-compatible#a81bd97dcd5254e28104146d45b62b8f91f0e192"

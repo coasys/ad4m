@@ -66,10 +66,10 @@ warp = "0.3.4"
 
 jsonwebtoken = "8.3.0"
 
-holochain = { git = "https://github.com/coasys/holochain", branch = "pack-unpack-dna-exports", features = ["test_utils", "default"] }
-holochain_cli_bundle = { git = "https://github.com/coasys/holochain", branch = "pack-unpack-dna-exports" }
-holochain_types = { git = "https://github.com/coasys/holochain", branch = "pack-unpack-dna-exports" }
-holochain_cli_run_local_services = { git = "https://github.com/coasys/holochain", branch = "pack-unpack-dna-exports" }
+holochain = { version = "0.2.2", features = ["test_utils", "default"] }
+holochain_cli_bundle = { version = "0.2.2" }
+holochain_types = { version = "0.2.2" }
+holochain_cli_run_local_services = { version = "0.2.2" }
 
 scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m-compatible", features = ["multi_thread"] }
 # scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", rev = "ce1c8aac4ccc0a49ce4816c0870634a703b1fc1f" }

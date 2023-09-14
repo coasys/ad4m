@@ -17,5 +17,5 @@ chrono = { version = "0.4.22", default-features = false, features = ["clock", "s
 thiserror = "1.0.20"
 integrity = { path = "../integrity" }
 sha2 = "0.10.5"
-hdk = "0.3.0-beta-dev.12"
-holo_hash = "0.3.0-beta-dev.6"
+hdk = "0.2.2"
+holo_hash = "0.2.2"
