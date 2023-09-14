@@ -250,7 +250,7 @@ impl HolochainService {
 
         let interface = conductor
             .clone()
-            .add_app_interface(Either::Left(0))
+            .add_app_interface(Either::Left(local_config.app_port))
             .await;
 
         info!("Added app interface: {:?}", interface);
