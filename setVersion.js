@@ -89,6 +89,19 @@ const rustClient = replaceVersionLine(fs.readFileSync('rust-client/Cargo.toml', 
 console.log("rust-client version: " + rustClient.oldVersion + " -> " + VERSION)
 fs.writeFileSync('rust-client/Cargo.toml', rustClient.newContent)
 
+const rustExecutorCargo = replaceVersionLine(fs.readFileSync('rust-executor/Cargo.toml', 'utf8'), VERSION)
+console.log("rust-executor version: " + rustExecutorCargo.oldVersion + " -> " + VERSION)
+fs.writeFileSync('rust-executor/Cargo.toml', rustExecutorCargo.newContent)
+
+const globalsRs = replaceVersionLine(
+    fs.readFileSync('rust-executor/src/globals.rs', 'utf8'), 
+    VERSION,
+    `    pub static ref AD4M_VERSION: String = String::from(`,
+    `);`
+    )
+console.log("globals.rs version: " + globalsRs.oldVersion + " -> " + VERSION)
+fs.writeFileSync('rust-executor/src/globals.rs', globalsRs.newContent)
+
 const uiPackage = JSON.parse(fs.readFileSync('ui/package.json', 'utf8'))
 if (isPreRelease) {
     console.log("UI version: " + uiPackage.version + " -> " + VERSION)
