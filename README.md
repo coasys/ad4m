@@ -26,6 +26,7 @@ This is a mono-repository with all components making up a whole ADAM Layer imple
 - `bootstrap-languages`: Holds all the core Languages used to make the ADAM Layer operate. These languages can be thought of as the mainnet configuration for the ADAM Layer.
 - `executor`: Holds the core JS code, which manages an Agents ADAM Layer state. Their Perspectives, Languages and Expressions.
 - `rust-executor`: Rust binary & library which facilitates the running of a GraphQL server, spawning of Deno runtime to execute the `executor` JS code. Running and communication with in built holochain conductor. Running and communication with Scryer Prolog engine to facilitate Prolog queries over Perspective data.
+- `dapp`: UI which provides a connection to MetaMask allowing AD4M Layer to create a connection to blockchain systems. UI server by the `rust-executor` on `http://127.0.0.1:<configured_port>`
 - `rust-client`: Rust based `Ad4mClient`. Wraps GraphQL and provides the same high-level interface to AD4M as the TypeScript based version in core. Published to Crates.io as `ad4m-client`: https://crates.io/crates/ad4m-client.
 - `tests`: JS testing suit integration testing a built `rust-executor`. Contains 50+ integration tests covering most function calls to an Adam Layer GraphQL server.
 - `cli`: Rust based CLI for either init'ing `ad4m init`, running `ad4m run` or communciating with a running AD4M GraphQL server. See [it's readme](cli/README.md) for more details. Published to Crates.io as `ad4m`: https://crates.io/crates/ad4m
