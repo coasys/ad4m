@@ -11,6 +11,16 @@ of AD4M and all it's features.
 cargo build
 ```
 
+## Start & Run AD4M Agent
+
+```
+ad4m init
+```
+
+```
+ad4m run
+```
+
 ## Usage
 
 Show all perspectives:
