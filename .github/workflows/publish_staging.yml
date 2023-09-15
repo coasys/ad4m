@@ -48,7 +48,7 @@ jobs:
         platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
         node-version: [18.17.0]
 
-    needs: 
+    needs:
       - create-release
 
     runs-on: ${{ matrix.platform }}
@@ -119,32 +119,44 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher${{ steps.extract_version.outputs.version }}_amd64.deb
-        asset_name: adam-launcher${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
         asset_content_type: application/octet-stream
 
-    - name: Upload Release Deb Update Asset
-      id: upload-release-deb-asset-update
+    - name: Upload Release AppImage Asset
+      id: upload-release-appimage-asset
+      if: matrix.platform == 'GH-hosted-ubuntu'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AppImage Update Asset
+      id: upload-release-appimage-asset-update
       if: matrix.platform == 'ubuntu-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz
-        asset_name: adam-launcher${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz
+        asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz
         asset_content_type: application/octet-stream
 
-    - name: Upload Release Deb update sig Asset
-      id: upload-release-deb-asset-update-sig
+    - name: Upload Release AppImage update sig Asset
+      id: upload-release-appimage-asset-update-sig
       if: matrix.platform == 'ubuntu-latest'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
-        asset_name: adam-launcher${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz.sig
+        asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI Linux Binary
@@ -230,7 +242,7 @@ jobs:
         asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi.zip'
         asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi.zip
         asset_content_type: application/octet-stream
-    
+
     - name: Upload Release MSI update sig Asset
       id: upload-release-msi-asset-update-sig
       if: matrix.platform == 'windows-latest'
@@ -254,7 +266,7 @@ jobs:
         asset_path: D:\a\ad4m\ad4m\target\release\ad4m-x64.exe
         asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
         asset_content_type: application/octet-stream
-  
+
   npm-publish:
     runs-on: GH-hosted-ubuntu
     steps:
@@ -303,7 +315,7 @@ jobs:
           else
             echo "NPM_TAG=latest" >> $GITHUB_ENV
           fi
-        
+
       - name: Publish core
         uses: JS-DevTools/npm-publish@v1
         with:
@@ -331,8 +343,8 @@ jobs:
           token: ${{ secrets.NPM_TOKEN }}
           package: test-runner/package.json
           tag: ${{ env.NPM_TAG }}
-      
-  
+
+
   crates-publish:
     runs-on: GH-hosted-ubuntu
     steps:
