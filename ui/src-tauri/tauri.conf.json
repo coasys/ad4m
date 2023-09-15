@@ -18,12 +18,11 @@
     "bundle": {
       "active": true,
       "targets": [
+        "appimage",
         "deb",
         "msi",
         "dmg",
-        "updater",
-        "app",
-        "appimage"
+        "updater"
       ],
       "identifier": "dev.ad4m.ad4min",
       "icon": [
@@ -40,6 +39,9 @@
       "longDescription": "",
       "deb": {
         "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": true
       },
       "macOS": {
         "frameworks": [],
