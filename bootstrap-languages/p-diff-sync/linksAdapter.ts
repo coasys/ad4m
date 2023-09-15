@@ -16,7 +16,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   linkCallback?: PerspectiveDiffObserver
   syncStateChangeCallback?: SyncStateChangeObserver
   peers: Map<DID, PeerInfo> = new Map();
-  generalMutex: Mutex = withTimeout(new Mutex(), 10000, new Error('new fancy error'));;
+  generalMutex: Mutex = withTimeout(new Mutex(), 10000, new Error('PerspectiveDiffSync: generalMutex timeout'));
   me: DID
   gossipLogCount: number = 0;
   myCurrentRevision: Buffer | null = null;
