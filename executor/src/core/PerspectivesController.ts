@@ -126,12 +126,7 @@ export default class PerspectivesController {
         if(foundInstance) {
             return foundInstance
         } else {
-            const foundID = this.#perspectiveHandles.get(uuid)
-            if(foundID) {
-                return new Perspective(foundID, this.#context, foundID.neighbourhood as Neighbourhood, false, foundID.state)
-            } else {
-                throw Error(`Perspective not found: ${uuid}`)
-            }
+            throw Error(`Perspective not found: ${uuid}`)
         }
     }
 
