@@ -57,7 +57,7 @@ jobs:
         go-version: '1.18'
 
     - name: Install HC
-      run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+      run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
 
     - name: Yarn Install
       run: yarn install

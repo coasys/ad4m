@@ -81,8 +81,7 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
-    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
-    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
     - run: yarn run build-languages
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-pull
 
@@ -128,8 +127,7 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
-    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
-    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
     - run: yarn run build-languages
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-render
 
@@ -175,8 +173,7 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
-    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
-    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
     - run: yarn run build-languages
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-revisions
 
@@ -222,8 +219,7 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
-    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
-    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
     - run: yarn run build-languages
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-signals
 
@@ -270,8 +266,7 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
-    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
-    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
     - run: yarn run build-languages
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-stress
 
@@ -317,8 +312,7 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
-    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
-    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
     - run: yarn run build-languages
     - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && yarn install && yarn run test-telepresence
 
@@ -364,7 +358,6 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: yarn install
-    - run: cargo install --git https://github.com/coasys/holochain lair_keystore || echo "lair already installed"
-    - run: cargo install --git https://github.com/coasys/holochain holochain_cli || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
     - run: yarn run build
     - run: cd bootstrap-languages/p-diff-sync && yarn run integration-test

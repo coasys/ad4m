@@ -174,7 +174,9 @@ export async function stressTest(t) {
         }
     );
     const alicePeersList: Map<DID, PeerInfo> = new Map();
-    aliceHapps.conductor.appWs().on("signal", async (signal) => {
+    const portAlice = await aliceHapps.conductor.attachAppInterface();
+    const appWs = await aliceHapps.conductor.connectAppWs(portAlice);
+    appWs.on("signal", (signal) => {
         //console.log("Alice Received Signal:",signal);
         const { diff, reference_hash, reference, broadcast_author } = signal.payload;
         if (diff && reference_hash && reference && broadcast_author) {
@@ -212,7 +214,9 @@ export async function stressTest(t) {
         }
     );
     const bobPeersList: Map<DID, PeerInfo> = new Map();
-    bobHapps.conductor.appWs().on("signal", async (signal) => {
+    const portBob = await bobHapps.conductor.attachAppInterface();
+    const appWsBob = await bobHapps.conductor.connectAppWs(portBob);
+    appWsBob.on("signal", (signal) => {
         console.log("Bob Received Signal:",signal)
         const { diff, reference_hash, reference, broadcast_author } = signal.payload;
         if (diff && reference_hash && reference && broadcast_author) {
@@ -347,4 +351,5 @@ export async function stressTest(t) {
 test("stress", async (t) => {
     await stressTest(t);
     t.end()
+    process.exit(0)
 })

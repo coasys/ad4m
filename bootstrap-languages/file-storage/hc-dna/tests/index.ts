@@ -3,7 +3,7 @@ import test from "tape-promise/tape.js";
 import path from "path";
 import { resolve } from "path";
 import { FileStorage } from "../../file-storage";
-import { Blob } from "node:buffer";
+import { Blob } from "buffer";
 
 const dnas = [{ source: {path: path.join("../workdir/file-storage.dna") } }];
 
@@ -63,6 +63,7 @@ test("Share 1MB between Alice and Bob", async (t) => {
         const blobUp = new Blob([buf])
 
         console.log("Uploading file...")
+        //@ts-ignore
         const hashes = await aliceClient.upload(blobUp);
         console.log("Done")
         console.log("Got hashes", hashes)
@@ -80,6 +81,7 @@ test("Share 1MB between Alice and Bob", async (t) => {
         t.assert(bufUp.compare(bufDown) == 0)
 
         await scenario.shutDown()
+        t.end()
     })
 })
 
@@ -135,6 +137,7 @@ test("Share full FileExpression between Alice and Bob", async (t) => {
         const buf = Buffer.from(randomNumbers);
         const blobUp = new Blob([buf])
 
+        //@ts-ignore
         const hashes = await aliceClient.upload(blobUp);
         const fileMetadata = {
             name: "test.txt",
@@ -170,8 +173,8 @@ test("Share full FileExpression between Alice and Bob", async (t) => {
         const bufUp = Buffer.from(await blobUp.arrayBuffer());
         t.assert(bufUp.compare(bufDown) == 0)
 
-        await scenario.shutDown();
-  
+        await scenario.shutDown();  
+        t.end();
       })
   })
   

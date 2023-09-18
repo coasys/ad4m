@@ -1,4 +1,4 @@
-import { AgentApp, CallableCell, Conductor } from "@holochain/tryorama";
+import { AgentApp, CallableCell, Conductor, NetworkType, enableAndGetAgentApp, runLocalServices } from "@holochain/tryorama";
 import faker from "faker";
 import { dnas } from './common';
 import { createConductor } from "@holochain/tryorama";
@@ -38,8 +38,13 @@ export function sleep(ms: number) {
 
 export async function createConductors(num: number): Promise<{agent_happ: AgentApp, conductor: Conductor}[]> {
     let out = [] as {agent_happ: AgentApp, conductor: Conductor}[];
+
+    const localServices = await runLocalServices();
+
     for (let n of Array(num).keys()) {
-        let conductor = await createConductor();
+        let conductor = await createConductor(localServices.signalingServerUrl, {networkType: NetworkType.WebRtc, bootstrapServerUrl: localServices.bootstrapServerUrl});
+        let port = await conductor.attachAppInterface();
+        let appWs = await conductor.connectAppWs(port);
         try {
             let app = await conductor.installApp({
                 bundle: {
@@ -57,9 +62,9 @@ export async function createConductors(num: number): Promise<{agent_happ: AgentA
                     resources: {}
                 }
             });
-            await conductor.adminWs().enableApp({installed_app_id: app.appId})
+            const agentApp = await enableAndGetAgentApp(conductor.adminWs(), appWs, app);
             out.push({
-                agent_happ: app,
+                agent_happ: agentApp,
                 conductor
             })
         } catch (e) {

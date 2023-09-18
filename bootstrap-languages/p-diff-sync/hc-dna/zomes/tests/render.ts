@@ -266,4 +266,5 @@ test("render", async (t) => {
     await render(t)
     await renderMerges(t)
     t.end()
+    process.exit(0);
 })

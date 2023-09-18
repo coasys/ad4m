@@ -5,8 +5,8 @@
   "type": "module",
   "license": "MIT",
   "dependencies": {
-    "@holochain/client": "0.16.0",
-    "@holochain/tryorama": "^0.11.1",
+    "@holochain/client": "0.16.1",
+    "@holochain/tryorama": "0.15.0",
     "tape-promise": "^4.0.0",
     "ts-node": "^10.8.0",
     "@types/node": "^14.0.14",
