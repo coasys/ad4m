@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use base64::{engine::general_purpose as base64engine, Engine as _};
 use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension, Op};
 use did_key::{CoreSign, PatchedKeyPair};
-use tracing::error;
+use log::error;
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;

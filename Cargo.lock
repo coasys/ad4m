@@ -10183,7 +10183,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
- "tracing",
  "url 2.4.1",
  "uuid 1.4.1",
  "warp",

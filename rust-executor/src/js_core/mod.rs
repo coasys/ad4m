@@ -16,7 +16,7 @@ use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     oneshot
 };
-use tracing::{error, info};
+use log::{error, info};
 use options::{main_module_url, main_worker_options};
 
 mod futures;

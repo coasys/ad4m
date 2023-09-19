@@ -11,7 +11,7 @@ mod config;
 pub mod init;
 mod pubsub;
 
-use tracing::{error, info};
+use log::{error, info};
 use rust_executor::Ad4mConfig;
 use std::env;
 

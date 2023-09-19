@@ -14,7 +14,7 @@ mod pubsub;
 mod dapp_server;
 
 use std::env;
-use tracing::info;
+use log::info;
 
 use js_core::JsCore;
 
@@ -66,7 +66,7 @@ pub async fn run(mut config: Ad4mConfig) {
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run_with_tokio(mut config: Ad4mConfig) {
-    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
+    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server");
     let _ = env_logger::try_init();
     config.prepare();
 

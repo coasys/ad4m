@@ -74,7 +74,6 @@ holochain_cli_run_local_services = { version = "0.2.2" }
 scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m-compatible", features = ["multi_thread"] }
 # scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", rev = "ce1c8aac4ccc0a49ce4816c0870634a703b1fc1f" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
-tracing = "0.1"
 
 [dev-dependencies]
 maplit = "1.0.2"
