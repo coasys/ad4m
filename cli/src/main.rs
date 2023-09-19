@@ -221,24 +221,39 @@ async fn main() -> Result<()> {
         admin_credential
     } = args.domain
     {
-        rust_executor::run(Ad4mConfig {
-            app_data_path,
-            network_bootstrap_seed,
-            language_language_only,
-            run_dapp_server,
-            gql_port,
-            hc_admin_port,
-            hc_app_port,
-            hc_use_bootstrap,
-            hc_use_local_proxy,
-            hc_use_mdns,
-            hc_use_proxy,
-            hc_proxy_url,
-            hc_bootstrap_url,
-            connect_holochain,
-            admin_credential
-        })
-        .await;
+        tokio::spawn(async move {
+            rust_executor::run_with_tokio(Ad4mConfig {
+                app_data_path,
+                network_bootstrap_seed,
+                language_language_only,
+                run_dapp_server,
+                gql_port,
+                hc_admin_port,
+                hc_app_port,
+                hc_use_bootstrap,
+                hc_use_local_proxy,
+                hc_use_mdns,
+                hc_use_proxy,
+                hc_proxy_url,
+                hc_bootstrap_url,
+                connect_holochain,
+                admin_credential
+            }).await;
+        }).await;
+        
+        let _ = ctrlc::set_handler(move || {
+            println!("Received CTRL-C! Exiting...");
+            exit(0);
+        });
+
+        use tokio::time::sleep;
+        use std::time::Duration;
+        use std::process::exit;
+        use ctrlc;
+
+        loop {
+            sleep(Duration::from_secs(2)).await;
+        }
         return Ok(());
     };
 
