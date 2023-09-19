@@ -62,6 +62,15 @@ impl Ad4mConfig {
         if self.hc_bootstrap_url.is_none() {
             self.hc_bootstrap_url = Some("https://bootstrap.holo.host".to_string());
         }
+        if self.hc_use_bootstrap.is_none() {
+            self.hc_use_bootstrap = Some(true);
+        }
+        if self.hc_use_mdns.is_none() {
+            self.hc_use_mdns = Some(false);
+        }
+        if self.hc_use_proxy.is_none() {
+            self.hc_use_proxy = Some(true)
+        }
     }
 
     pub fn get_json(&self) -> String {
