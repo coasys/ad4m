@@ -107,7 +107,6 @@ struct JsCoreRequest {
 #[derive(Debug, Clone)]
 struct JsCoreResponse {
     result: Result<String, String>,
-    id: String,
 }
 
 #[derive(Clone)]
@@ -199,7 +198,6 @@ impl JsCore {
                 if let Some(request) = maybe_request.recv().await  {
                     //info!("Got request: {:?}", request);
                     let script = request.script.clone();
-                    let id = request.id.clone();
                     let js_core_cloned = js_core.clone();
                     let response_tx = request.response_tx;
 
@@ -217,7 +215,6 @@ impl JsCore {
                                 response_tx
                                     .send(JsCoreResponse {
                                         result: Ok(res),
-                                        id: id,
                                     })
                                     .expect("couldn't send on channel");
                             }
@@ -226,7 +223,6 @@ impl JsCore {
                                 response_tx
                                     .send(JsCoreResponse {
                                         result: Err(err.to_string()),
-                                        id: id,
                                     })
                                     .expect("couldn't send on channel");
                             }
@@ -270,7 +266,6 @@ impl JsCore {
                         tx_inside
                             .send(JsCoreResponse {
                                 result: Ok(String::from("initialized")),
-                                id: String::from("initialized"),
                             })
                             .expect("couldn't send on channel");
                     }
@@ -279,7 +274,6 @@ impl JsCore {
                         tx_inside
                             .send(JsCoreResponse {
                                 result: Err(format!("Error executing coreInit(): {:?}", err)),
-                                id: String::from("initialized"),
                             })
                             .expect("couldn't send on channel");
                     }
@@ -293,7 +287,6 @@ impl JsCore {
                             //info!("Module load loop running");
                             if let Some(request) = rx_inside_loader.recv().await {
                                 let script = request.script;
-                                let id = request.id;
                                 let js_core_cloned = js_core.clone();
                                 let ts_response = request.response_tx;
 
@@ -304,7 +297,6 @@ impl JsCore {
                                             ts_response
                                                 .send(JsCoreResponse {
                                                     result: Ok(String::from("")),
-                                                    id: id,
                                                 })
                                                 .expect("couldn't send on channel");
                                         }
@@ -313,7 +305,6 @@ impl JsCore {
                                             ts_response
                                                 .send(JsCoreResponse {
                                                     result: Err(err.to_string()),
-                                                    id,
                                                 })
                                                 .expect("couldn't send on channel");
                                         }
@@ -323,8 +314,6 @@ impl JsCore {
                             tokio::task::yield_now().await;
                         }
                     };
-
-                    let global_req_id = None;
 
                     let local_set = tokio::task::LocalSet::new();
                     let holochain_local_set = tokio::task::LocalSet::new();
@@ -379,18 +368,7 @@ impl JsCore {
                             match event_loop_result {
                                 Ok(_) => info!("AD4M event loop finished"),
                                 Err(err) => {
-                                    let tx_cloned = tx_inside.clone();
                                     error!("AD4M event loop closed with error: {}", err);
-                                    if global_req_id.is_some() {
-                                        //TODO: this error should also cause the graphql server to error since right now we are just killing
-                                        //the event loop completely and this should be reflected in the main thread
-                                        tx_cloned
-                                            .send(JsCoreResponse {
-                                                result: Err(err.to_string()),
-                                                id: global_req_id.unwrap(),
-                                            })
-                                            .expect("couldn't send on channel");
-                                    }
                                     break;
                                 }
                             }

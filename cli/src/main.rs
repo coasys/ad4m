@@ -221,7 +221,7 @@ async fn main() -> Result<()> {
         admin_credential
     } = args.domain
     {
-        tokio::spawn(async move {
+        let _ = tokio::spawn(async move {
             rust_executor::run_with_tokio(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
@@ -254,7 +254,6 @@ async fn main() -> Result<()> {
         loop {
             sleep(Duration::from_secs(2)).await;
         }
-        return Ok(());
     };
 
     if let Domain::RunLocalHcServices {} = args.domain {
