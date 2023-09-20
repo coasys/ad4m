@@ -65,7 +65,10 @@ name = "ad4m-launcher"
 version = "0.6.0"
 dependencies = [
  "ad4m-client",
+ "chrono",
+ "colored 2.0.4",
  "directories 4.0.1",
+ "env_logger",
  "libc",
  "localtunnel-client",
  "log",
@@ -1525,6 +1528,17 @@ dependencies = [
  "is-terminal",
  "lazy_static",
  "winapi 0.3.9",
+]
+
+[[package]]
+name = "colored"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2674ec482fbc38012cf31e6c42ba0177b431a0cb6f15fe40efa5aab1bda516f6"
+dependencies = [
+ "is-terminal",
+ "lazy_static",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -6448,7 +6462,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf6ff683970365a1c3b71192a116abeb986512ced906e4e25cc7ad40bf65b1b3"
 dependencies = [
- "colored",
+ "colored 1.9.4",
  "derivative",
  "derive_more",
  "futures",
@@ -12378,9 +12392,9 @@ dependencies = [
 
 [[package]]
 name = "termcolor"
-version = "1.2.0"
+version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be55cf8942feac5c765c2c993422806843c9a9a45d4d5c407ad6dd2ea95eb9b6"
+checksum = "bab24d30b911b2376f3a13cc2cd443142f0c81dda04c118693e35b3835757755"
 dependencies = [
  "winapi-util",
 ]

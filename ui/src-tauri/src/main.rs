@@ -3,20 +3,25 @@
     windows_subsystem = "windows"
 )]
 
-use tracing::{info, error};
+extern crate env_logger;
+use chrono::Local;
+use log::LevelFilter;
+use log::{info, error, debug};
 use rust_executor::Ad4mConfig;
 use tauri::LogicalSize;
 use tauri::Size;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::format;
 use std::env;
 use std::fs;
 use std::fs::File;
-use std::sync::Arc;
 use std::sync::Mutex;
 use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
 use std::io;
 use std::io::Write;
+use colored::Colorize;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format;
+
+
 
 extern crate remove_dir_all;
 
@@ -111,30 +116,49 @@ fn main() {
     if log_path().exists() {
         let _ = fs::remove_file(log_path());
     }
+    
+    let target = Box::new(File::create(log_path()).expect("Can't create file"));
 
-    let file = File::create(log_path()).unwrap();
-    let file = Arc::new(Mutex::new(file));
-
+    env_logger::Builder::new()
+        .target(env_logger::Target::Pipe(target))
+        .filter(Some("holochain"), LevelFilter::Warn)
+        .filter(Some("wasmer_compiler_cranelift"), LevelFilter::Warn)
+        .filter(Some("rust_executor"), LevelFilter::Debug)
+        .filter(Some("warp::server"), LevelFilter::Debug)
+        .format(|buf, record| {
+            let level = match record.level() {
+                log::Level::Error => record.level().as_str().red(),
+                log::Level::Warn => record.level().as_str().yellow(),
+                log::Level::Info => record.level().as_str().green(),
+                log::Level::Debug => record.level().as_str().blue(),
+                log::Level::Trace => record.level().as_str().purple(),
+            };
+            writeln!(
+                buf,
+                "[{} {} {}:{}] {}",
+                Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string().as_str().dimmed(),
+                level,
+                record.file().unwrap_or("unknown").to_string().as_str().dimmed(),
+                record.line().unwrap_or(0).to_string().as_str().dimmed(),
+                record.args().to_string().as_str().bold(),
+            )
+        })
+        .init();
+ 
     let format = format::debug_fn(move |writer, _field, value| {
-        let _ = writeln!(file.lock().unwrap(), "{:?}", value);
-        write!(writer, "{:?}", value)
-    });
-
+            debug!("TRACE: {:?}", value);
+            write!(writer, "{:?}", value)
+        });
+    
     let filter = EnvFilter::from_default_env();
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .fmt_fields(format)
         .finish();
-
+    
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set tracing subscriber");
-
-    let app_name = if std::env::consts::OS == "windows" { "AD4M.exe" } else { "AD4M" };
-    if has_processes_running(app_name) > 1 {
-        println!("AD4M is already running");
-        return;
-    }
 
     let free_port = find_port(12000, 13000);
 
