@@ -66,6 +66,7 @@ version = "0.6.0"
 dependencies = [
  "ad4m-client",
  "chrono",
+ "colored 2.0.4",
  "directories 4.0.1",
  "env_logger",
  "libc",
@@ -86,6 +87,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-positioner",
  "tokio",
+ "tracing",
+ "tracing-subscriber 0.2.25",
  "uuid 0.8.2",
 ]
 
@@ -1525,6 +1528,17 @@ dependencies = [
  "is-terminal",
  "lazy_static",
  "winapi 0.3.9",
+]
+
+[[package]]
+name = "colored"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2674ec482fbc38012cf31e6c42ba0177b431a0cb6f15fe40efa5aab1bda516f6"
+dependencies = [
+ "is-terminal",
+ "lazy_static",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -5036,7 +5050,7 @@ dependencies = [
  "toml 0.5.11",
  "tracing",
  "tracing-futures",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.17",
  "tx5-go-pion-turn",
  "tx5-signal-srv",
  "unwrap_to",
@@ -5364,7 +5378,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-serde",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.17",
 ]
 
 [[package]]
@@ -6448,7 +6462,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf6ff683970365a1c3b71192a116abeb986512ced906e4e25cc7ad40bf65b1b3"
 dependencies = [
- "colored",
+ "colored 1.9.4",
  "derivative",
  "derive_more",
  "futures",
@@ -6539,7 +6553,7 @@ dependencies = [
  "serde_bytes",
  "structopt",
  "tokio",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.17",
  "webpki 0.21.4",
 ]
 
@@ -6668,7 +6682,7 @@ dependencies = [
  "sqlformat 0.2.1",
  "structopt",
  "sysinfo 0.28.4",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.17",
 ]
 
 [[package]]
@@ -7178,7 +7192,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.17",
 ]
 
 [[package]]
@@ -7317,6 +7331,15 @@ name = "match_cfg"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ffbee8634e0d45d258acb448e7eaab3fce7a0a467395d4d9f228e3c1f01fb2e4"
+
+[[package]]
+name = "matchers"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f099785f7595cc4b4553a174ce30dd7589ef93391ff414dbb67f62392b9e0ce1"
+dependencies = [
+ "regex-automata 0.1.10",
+]
 
 [[package]]
 name = "matchers"
@@ -12907,11 +12930,33 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
+version = "0.2.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0d2eaa99c3c2e41547cfa109e910a68ea03823cccad4a0525dcbc9b01e8c71"
+dependencies = [
+ "ansi_term",
+ "chrono",
+ "lazy_static",
+ "matchers 0.0.1",
+ "regex",
+ "serde",
+ "serde_json",
+ "sharded-slab",
+ "smallvec 1.11.0",
+ "thread_local",
+ "tracing",
+ "tracing-core",
+ "tracing-log",
+ "tracing-serde",
+]
+
+[[package]]
+name = "tracing-subscriber"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30a651bc37f915e81f087d86e62a18eec5f79550c7faff886f7090b4ea757c77"
 dependencies = [
- "matchers",
+ "matchers 0.1.0",
  "nu-ansi-term",
  "once_cell",
  "regex",
@@ -13208,7 +13253,7 @@ dependencies = [
  "sodoken",
  "tokio",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.17",
  "tx5-core",
  "warp",
 ]
