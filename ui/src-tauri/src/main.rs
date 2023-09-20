@@ -117,7 +117,10 @@ fn main() {
 
         env_logger::Builder::new()
             .target(env_logger::Target::Pipe(target))
-            .filter(None, LevelFilter::Debug)
+            .filter(Some("holochain"), LevelFilter::Warn)
+            .filter(Some("wasmer_compiler_cranelift"), LevelFilter::Warn)
+            .filter(Some("rust_executor"), LevelFilter::Debug)
+            .filter(Some("warp::server"), LevelFilter::Debug)
             .format(|buf, record| {
                 writeln!(
                     buf,
