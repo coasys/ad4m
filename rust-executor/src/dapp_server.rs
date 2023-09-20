@@ -8,7 +8,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
-use tracing::info;
+use log::info;
 
 use rust_embed::*;
 

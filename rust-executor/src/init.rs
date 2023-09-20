@@ -1,4 +1,4 @@
-use tracing::{info, warn};
+use log::{info, warn};
 use semver::{Version, VersionReq};
 use std::error::Error;
 use std::fs;

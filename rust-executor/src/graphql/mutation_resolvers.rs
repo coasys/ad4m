@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, graphql_value, FieldResult};
-use tracing::debug;
+use log::debug;
 
 use super::graphql_types::*;
 use super::utils::get_capabilies;

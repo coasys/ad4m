@@ -18,7 +18,7 @@ use holochain::prelude::{
 };
 use holochain::test_utils::itertools::Either;
 use holochain_types::dna::ValidatedDnaManifest;
-use tracing::info;
+use log::info;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
