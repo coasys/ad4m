@@ -113,26 +113,26 @@ fn main() {
         let _ = fs::remove_file(log_path());
     }
 
-        let target = Box::new(File::create(log_path()).expect("Can't create file"));
+    let target = Box::new(File::create(log_path()).expect("Can't create file"));
 
-        env_logger::Builder::new()
-            .target(env_logger::Target::Pipe(target))
-            .filter(Some("holochain"), LevelFilter::Warn)
-            .filter(Some("wasmer_compiler_cranelift"), LevelFilter::Warn)
-            .filter(Some("rust_executor"), LevelFilter::Debug)
-            .filter(Some("warp::server"), LevelFilter::Debug)
-            .format(|buf, record| {
-                writeln!(
-                    buf,
-                    "[{} {} {}:{}] {}",
-                    Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-                    record.level(),
-                    record.file().unwrap_or("unknown"),
-                    record.line().unwrap_or(0),
-                    record.args()
-                )
-            })
-            .init();
+    env_logger::Builder::new()
+        .target(env_logger::Target::Pipe(target))
+        .filter(Some("holochain"), LevelFilter::Warn)
+        .filter(Some("wasmer_compiler_cranelift"), LevelFilter::Warn)
+        .filter(Some("rust_executor"), LevelFilter::Debug)
+        .filter(Some("warp::server"), LevelFilter::Debug)
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{} {} {}:{}] {}",
+                Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.level(),
+                record.file().unwrap_or("unknown"),
+                record.line().unwrap_or(0),
+                record.args()
+            )
+        })
+        .init();
 
     let app_name = if std::env::consts::OS == "windows" { "AD4M.exe" } else { "AD4M" };
     if has_processes_running(app_name) > 1 {
