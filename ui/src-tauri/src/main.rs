@@ -3,12 +3,13 @@
     windows_subsystem = "windows"
 )]
 
-use tracing::{info, error};
+extern crate env_logger;
+use chrono::Local;
+use log::LevelFilter;
+use log::{info, error};
 use rust_executor::Ad4mConfig;
 use tauri::LogicalSize;
 use tauri::Size;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::format;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -112,23 +113,23 @@ fn main() {
         let _ = fs::remove_file(log_path());
     }
 
-    let file = File::create(log_path()).unwrap();
-    let file = Arc::new(Mutex::new(file));
+        let target = Box::new(File::create(log_path()).expect("Can't create file"));
 
-    let format = format::debug_fn(move |writer, _field, value| {
-        let _ = writeln!(file.lock().unwrap(), "{:?}", value);
-        write!(writer, "{:?}", value)
-    });
-
-    let filter = EnvFilter::from_default_env();
-
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .fmt_fields(format)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+        env_logger::Builder::new()
+            .target(env_logger::Target::Pipe(target))
+            .filter(None, LevelFilter::Debug)
+            .format(|buf, record| {
+                writeln!(
+                    buf,
+                    "[{} {} {}:{}] {}",
+                    Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                    record.level(),
+                    record.file().unwrap_or("unknown"),
+                    record.line().unwrap_or(0),
+                    record.args()
+                )
+            })
+            .init();
 
     let app_name = if std::env::consts::OS == "windows" { "AD4M.exe" } else { "AD4M" };
     if has_processes_running(app_name) > 1 {
