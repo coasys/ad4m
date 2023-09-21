@@ -16,13 +16,13 @@ pub enum PrologServiceResponse {
 }
 
 pub struct PrologEngine {
-    request_sender: mpsc::Sender<PrologServiceRequest>,
-    request_receiver: Option<mpsc::Receiver<PrologServiceRequest>>,
+    request_sender: mpsc::UnboundedSender<PrologServiceRequest>,
+    request_receiver: Option<mpsc::UnboundedReceiver<PrologServiceRequest>>,
 }
 
 impl PrologEngine {
     pub fn new() -> PrologEngine {
-        let (request_sender, request_receiver) = mpsc::channel::<PrologServiceRequest>(32);
+        let (request_sender, request_receiver) = mpsc::unbounded_channel::<PrologServiceRequest>();
 
         PrologEngine {
             request_sender,
@@ -38,41 +38,45 @@ impl PrologEngine {
         let (response_sender, response_receiver) = oneshot::channel();
 
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .thread_name(String::from("prolog_service"))
                 .build()
                 .expect("Failed to create Tokio runtime");
             let _guard = rt.enter();
 
-            rt.block_on(async move {
-                let mut machine = Machine::new_lib();
+            tokio::task::block_in_place(||
+                rt.block_on(async move {
+                    let mut machine = Machine::new_lib();
 
-                response_sender
-                    .send(PrologServiceResponse::InitComplete(Ok(())))
-                    .unwrap();
+                    response_sender
+                        .send(PrologServiceResponse::InitComplete(Ok(())))
+                        .unwrap();
 
-                while let Some(message) = receiver.recv().await {
-                    match message {
-                        PrologServiceRequest::RunQuery(query, response) => {
-                            let result = machine.run_query(query);
-                            let _ = response.send(PrologServiceResponse::QueryResult(result));
-                        }
-                        PrologServiceRequest::LoadModuleString(
-                            module_name,
-                            program_lines,
-                            response,
-                        ) => {
-                            let program = program_lines
-                                .iter()
-                                .map(|l| l.replace("\n", "").replace("\r", ""))
-                                .collect::<Vec<String>>()
-                                .join("\n");
-                            let _result =
-                                machine.consult_module_string(module_name.as_str(), program);
-                            let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
+                    while let Some(message) = receiver.recv().await {
+                        match message {
+                            PrologServiceRequest::RunQuery(query, response) => {
+                                let result = machine.run_query(query);
+                                let _ = response.send(PrologServiceResponse::QueryResult(result));
+                            }
+                            PrologServiceRequest::LoadModuleString(
+                                module_name,
+                                program_lines,
+                                response,
+                            ) => {
+                                let program = program_lines
+                                    .iter()
+                                    .map(|l| l.replace("\n", "").replace("\r", ""))
+                                    .collect::<Vec<String>>()
+                                    .join("\n");
+                                let _result =
+                                    machine.consult_module_string(module_name.as_str(), program);
+                                let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
+                            }
                         }
                     }
-                }
-            })
+                })
+            );
         });
 
         match response_receiver.await? {
@@ -86,12 +90,9 @@ impl PrologEngine {
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let (response_sender, response_receiver) = oneshot::channel();
         self.request_sender
-            .send(PrologServiceRequest::RunQuery(query, response_sender))
-            .await
-            .expect("Failed to send PrologServiceRequest::RunQuery");
+            .send(PrologServiceRequest::RunQuery(query, response_sender))?;
         let response = response_receiver
-            .await
-            .expect("Failed to receive PrologServiceResponse");
+            .await?;
         match response {
             PrologServiceResponse::QueryResult(query_result) => Ok(query_result),
             _ => unreachable!(),
@@ -109,12 +110,9 @@ impl PrologEngine {
                 module_name,
                 program_lines,
                 response_sender,
-            ))
-            .await
-            .expect("Failed to send PrologServiceRequest::LoadModuleString");
+            ))?;
         let response = response_receiver
-            .await
-            .expect("Failed to receive PrologServiceResponse");
+            .await?;
         match response {
             PrologServiceResponse::LoadModuleResult(result) => result,
             _ => unreachable!(),
