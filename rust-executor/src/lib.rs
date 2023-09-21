@@ -44,6 +44,7 @@ pub async fn run(mut config: Ad4mConfig) {
         std::thread::spawn(|| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
+                .thread_name(String::from("dapp_server"))
                 .build()
                 .unwrap();
             runtime.block_on(serve_dapp(8080)).unwrap();
@@ -53,6 +54,7 @@ pub async fn run(mut config: Ad4mConfig) {
     let handle = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .thread_name(String::from("graphql_server"))
             .build()
             .unwrap();
         runtime.block_on(graphql::start_server(
@@ -83,6 +85,7 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
     if config.run_dapp_server.unwrap() {
         std::thread::spawn(|| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
+                .thread_name(String::from("dapp_server"))
                 .enable_all()
                 .build()
                 .unwrap();
@@ -92,6 +95,7 @@ pub async fn run_with_tokio(mut config: Ad4mConfig) {
 
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .thread_name(String::from("graphql_server"))
             .enable_all()
             .build()
             .unwrap();
