@@ -245,6 +245,7 @@ impl JsCore {
         let tx_inside_clone = tx_inside.clone();
         std::thread::spawn(move || {
             let rt = Builder::new_current_thread()
+                .thread_name(String::from("js_core"))
                 .enable_all()
                 .build()
                 .expect("Failed to create Tokio runtime");
