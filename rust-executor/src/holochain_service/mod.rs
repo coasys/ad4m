@@ -21,8 +21,10 @@ use holochain_types::dna::ValidatedDnaManifest;
 use log::{info, error};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use tokio::select;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::yield_now;
+use tokio::time::timeout;
 use tokio_stream::StreamExt;
 
 pub(crate) mod holochain_service_extension;
@@ -69,110 +71,225 @@ impl HolochainService {
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
+                .thread_name(String::from("holochain_service"))
                 .enable_all()
                 .build()
                 .expect("Failed to create Tokio runtime");
             let _guard = rt.enter();
 
-            rt.block_on(async move {
-                let mut service = HolochainService::new(local_config).await.unwrap();
+            tokio::task::block_in_place(|| {
+                rt.block_on(async move {
+                    let mut service = HolochainService::new(local_config).await.unwrap();
+                    let conductor_clone = service.conductor.clone();
 
-                let conductor_clone = service.conductor.clone();
-                // Spawn a new task to forward items from the stream to the receiver
-                tokio::spawn(async move {
-                    let sig_broadcasters = conductor_clone.signal_broadcaster();
+                    // Spawn a new task to forward items from the stream to the receiver
+                    let spawned_sig = tokio::spawn(async move {
+                        let sig_broadcasters = conductor_clone.signal_broadcaster();
 
-                    let mut streams = tokio_stream::StreamMap::new();
-                    for (i, rx) in sig_broadcasters
-                        .subscribe_separately()
-                        .into_iter()
-                        .enumerate()
-                    {
-                        streams.insert(i, tokio_stream::wrappers::BroadcastStream::new(rx));
-                    }
-                    let mut stream =
-                        streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
-
-                    response_sender
-                        .send(HolochainServiceResponse::InitComplete(Ok(())))
-                        .unwrap();
-
-                    loop {
-                        while let Some(item) = stream.next().await {
-                            let _ = stream_sender.send(item);
+                        let mut streams = tokio_stream::StreamMap::new();
+                        for (i, rx) in sig_broadcasters
+                            .subscribe_separately()
+                            .into_iter()
+                            .enumerate()
+                        {
+                            streams.insert(i, tokio_stream::wrappers::BroadcastStream::new(rx));
                         }
-                        yield_now().await;
+                        let mut stream =
+                            streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
+
+                        response_sender
+                            .send(HolochainServiceResponse::InitComplete(Ok(())))
+                            .unwrap();
+
+                        loop {
+                            while let Some(item) = stream.next().await {
+                                let _ = stream_sender.send(item);
+                            }
+                            error!("Holochain service signal stream closed");
+                            yield_now().await;
+                        }
+                    });
+
+                    let spawned_receiver = tokio::spawn(async move {
+                        while let Some(message) = receiver.recv().await {
+                            info!("Got incoming message in holochain receiver: {:?}", message);
+                            match message {
+                                HolochainServiceRequest::InstallApp(payload, response) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(10), 
+                                        service.install_app(payload)
+                                    ).await.map_err(|_| anyhow!("Timeout error; InstallApp call")) {
+                                        Ok(result) => {
+                                            let _ = response.send(HolochainServiceResponse::InstallApp(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response.send(HolochainServiceResponse::InstallApp(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::CallZomeFunction {
+                                    app_id,
+                                    cell_name,
+                                    zome_name,
+                                    fn_name,
+                                    payload,
+                                    response,
+                                } => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(5), 
+                                        service.call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
+                                    ).await.map_err(|_| anyhow!("Timeout error; Call Zome Function")) {
+                                        Ok(result) => {
+                                            let _ = response.send(HolochainServiceResponse::CallZomeFunction(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response.send(HolochainServiceResponse::CallZomeFunction(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(10), 
+                                        service.remove_app(app_id)
+                                    ).await.map_err(|_| anyhow!("Timeout error; Remove App")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::RemoveApp(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::RemoveApp(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::AgentInfos(response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        service.agent_infos()
+                                    ).await.map_err(|_| anyhow!("Timeout error; AgentInfos")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::AgentInfos(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::AgentInfos(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        service.add_agent_infos(agent_infos)
+                                    ).await.map_err(|_| anyhow!("Timeout error; AddAgentInfos")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::AddAgentInfos(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::AddAgentInfos(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::Sign(data, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        service.sign(data)
+                                    ).await.map_err(|_| anyhow!("Timeout error; Sign")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::Sign(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::Sign(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::Shutdown(response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        service.shutdown()
+                                    ).await.map_err(|_| anyhow!("Timeout error Shutdown")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::Shutdown(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::Shutdown(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::GetAgentKey(response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        service.get_agent_key()
+                                    ).await.map_err(|_| anyhow!("Timeout error; GetAgentKey")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::GetAgentKey(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::GetAgentKey(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::GetAppInfo(app_id, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        service.get_app_info(app_id)
+                                    ).await.map_err(|_| anyhow!("Timeout error; GetAppInfo")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::LogNetworkMetrics(response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        service.log_network_metrics()
+                                    ).await.map_err(|_| anyhow!("Timeout error; LogNetworkMetrics")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::LogNetworkMetrics(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::LogNetworkMetrics(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::PackDna(path, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        HolochainService::pack_dna(path)
+                                    ).await.map_err(|_| anyhow!("Timeout error; PackDna")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::PackDna(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::PackDna(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::UnPackDna(path, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3), 
+                                        HolochainService::unpack_dna(path)
+                                    ).await.map_err(|_| anyhow!("Timeout error; UnpackDna")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::UnPackDna(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::UnPackDna(Err(err)));
+                                        },
+                                    }
+                                }
+                            };
+                        };
+                        error!("Holochain service receiver closed");
+                    });
+
+                    select! {
+                        _ = spawned_sig => {},
+                        _ = spawned_receiver => {},
                     }
+
+                    error!("Holochain service exited")
                 });
-
-                let _ = tokio::spawn(async move {
-                    while let Some(message) = receiver.recv().await {
-                        match message {
-                            HolochainServiceRequest::InstallApp(payload, response) => {
-                                let result = service.install_app(payload).await;
-                                let _ = response.send(HolochainServiceResponse::InstallApp(result));
-                            }
-                            HolochainServiceRequest::CallZomeFunction {
-                                app_id,
-                                cell_name,
-                                zome_name,
-                                fn_name,
-                                payload,
-                                response,
-                            } => {
-                                let result = service
-                                    .call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
-                                    .await;
-                                let _ =
-                                    response.send(HolochainServiceResponse::CallZomeFunction(result));
-                            }
-                            HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
-                                let result = service.remove_app(app_id).await;
-                                let _ = response_tx.send(HolochainServiceResponse::RemoveApp(result));
-                            }
-                            HolochainServiceRequest::AgentInfos(response_tx) => {
-                                let result = service.agent_infos().await;
-                                let _ = response_tx.send(HolochainServiceResponse::AgentInfos(result));
-                            }
-                            HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
-                                let result = service.add_agent_infos(agent_infos).await;
-                                let _ =
-                                    response_tx.send(HolochainServiceResponse::AddAgentInfos(result));
-                            }
-                            HolochainServiceRequest::Sign(data, response_tx) => {
-                                let result = service.sign(data).await;
-                                let _ = response_tx.send(HolochainServiceResponse::Sign(result));
-                            }
-                            HolochainServiceRequest::Shutdown(response_tx) => {
-                                let result = service.shutdown().await;
-                                let _ = response_tx.send(HolochainServiceResponse::Shutdown(result));
-                            }
-                            HolochainServiceRequest::GetAgentKey(response_tx) => {
-                                let result = service.get_agent_key().await;
-                                let _ = response_tx.send(HolochainServiceResponse::GetAgentKey(result));
-                            }
-                            HolochainServiceRequest::GetAppInfo(app_id, response_tx) => {
-                                let result = service.get_app_info(app_id).await;
-                                let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
-                            }
-                            HolochainServiceRequest::LogNetworkMetrics(response_tx) => {
-                                let result = service.log_network_metrics().await;
-                                let _ = response_tx
-                                    .send(HolochainServiceResponse::LogNetworkMetrics(result));
-                            }
-                            HolochainServiceRequest::PackDna(path, response_tx) => {
-                                let result = HolochainService::pack_dna(path).await;
-                                let _ = response_tx.send(HolochainServiceResponse::PackDna(result));
-                            }
-                            HolochainServiceRequest::UnPackDna(path, response_tx) => {
-                                let result = HolochainService::unpack_dna(path).await;
-                                let _ = response_tx.send(HolochainServiceResponse::UnPackDna(result));
-                            }
-                        }
-                    }
-                    error!("Holochain service receiver closed");
-                }).await.expect("Holochain service receiver failed");
-            });
+            })
         });
 
         match response_receiver.await? {
