@@ -10,6 +10,7 @@ use holochain::{
 };
 use tokio::time::timeout;
 use std::time::Duration;
+use log::error;
 
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 
@@ -26,13 +27,20 @@ async fn start_holochain_conductor(config: LocalConductorConfig) -> Result<(), A
 
 #[op]
 async fn log_dht_status() -> Result<(), AnyError> {
-    timeout(
+    let res = timeout(
         TIMEOUT_DURATION, 
         async {
             let interface = get_holochain_service().await;
             interface.log_network_metrics().await
         }
-    ).await.map_err(|_| anyhow!("Timeout error"))?
+    ).await;
+    match res {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            error!("Timeout error logging dht status");
+            Ok(())
+        },
+    }
 }
 
 #[op]
