@@ -128,7 +128,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
         asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
         asset_content_type: application/octet-stream
 
@@ -140,7 +140,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz
         asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz
         asset_content_type: application/octet-stream
 
@@ -152,7 +152,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz.sig
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz.sig
         asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
         asset_content_type: application/octet-stream
 
@@ -188,7 +188,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg.tar.gz"
+        asset_path:  "/Users/runner/work/ad4m/target/release/bundle/macos/ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg.tar.gz"
         asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.tar.gz
         asset_content_type: application/octet-stream
 
@@ -200,7 +200,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.tar.gz.sig"
+        asset_path:  "/Users/runner/work/ad4m/target/release/bundle/macos/ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.tar.gz.sig"
         asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg.tar.gz.sig
         asset_content_type: application/octet-stream
 
