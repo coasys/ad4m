@@ -59,8 +59,11 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - ad4m-connect connection settings gives you the option of connecting to local or remote [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
  - Convience overloads for telepresence functions: `setOnlineStatusU`, `sendSignalU`, `sendBroadcastU` in `NeighbourhoodProxy`, which take new type `PerspectiveUnsignedInput` as argument. This enables sending signed signals without having to create temporary perspectives. These functions sign the whole perspective including links. [PR#296](https://github.com/perspect3vism/ad4m/pull/296)
  - ad4m-launcher now has update functionality [PR#304](https://github.com/perspect3vism/ad4m/pull/304)
+ - Added missing Prolog declarations for new SDNA predicates `collection_adder/collection_remover`, fixing breaking apps using SDNA Subject Classes that don't have collections defined [PR#398](https://github.com/coasys/ad4m/pull/398)
+ - Replaced old and depreciated link to AD4Min launcher in docs with link to ADAM Launcher releases [PR#393](https://github.com/coasys/ad4m/pull/393)
 
 ### Changed
+ - Moved code that deals with the IPFS repo lock from JS to Rust, improving (in most cases: unblocking) startup of the Launcher on Windows [PR#392](https://github.com/coasys/ad4m/pull/392)
  
 ### Deprecated
 
