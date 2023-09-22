@@ -7,7 +7,7 @@ on:
 
 jobs:
   create-release:
-    runs-on: GH-hosted-ubuntu
+    runs-on: ubuntu-22.04
     outputs:
       upload_url: ${{ steps.create-release.outputs.upload_url }}
 
@@ -42,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
+        platform: [ubuntu-22.04, macos-latest, windows-latest]
         node-version: [18.17.0]
 
     needs:
@@ -73,7 +73,7 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
 
     - name: install dependencies (ubuntu only)
-      if: matrix.platform == 'GH-hosted-ubuntu'
+      if: matrix.platform == 'ubuntu-22.04'
       run: |
         sudo apt-get update
         sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
@@ -113,7 +113,7 @@ jobs:
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
-      if: matrix.platform == 'GH-hosted-ubuntu'
+      if: matrix.platform == 'ubuntu-22.04'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -125,7 +125,7 @@ jobs:
 
     - name: Upload Release AppImage Asset
       id: upload-release-appimage-asset
-      if: matrix.platform == 'GH-hosted-ubuntu'
+      if: matrix.platform == 'ubuntu-22.04'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,7 +161,7 @@ jobs:
 
     - name: Upload Release AD4M CLI Linux Binary
       id: upload-release-linux-ad4m-cli-binary
-      if: matrix.platform == 'GH-hosted-ubuntu'
+      if: matrix.platform == 'ubuntu-22.04'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -268,7 +268,7 @@ jobs:
         asset_content_type: application/octet-stream
 
   npm-publish:
-    runs-on: GH-hosted-ubuntu
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v3
       # Setup .npmrc file to publish to npm
@@ -318,7 +318,7 @@ jobs:
 
 
   crates-publish:
-    runs-on: GH-hosted-ubuntu
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
