@@ -105,14 +105,12 @@ impl HolochainService {
                             while let Some(item) = stream.next().await {
                                 let _ = stream_sender.send(item);
                             }
-                            error!("Holochain service signal stream closed");
                             yield_now().await;
                         }
                     });
 
                     let spawned_receiver = tokio::spawn(async move {
                         while let Some(message) = receiver.recv().await {
-                            info!("Got incoming message in holochain receiver: {:?}", message);
                             match message {
                                 HolochainServiceRequest::InstallApp(payload, response) => {
                                     match timeout(
