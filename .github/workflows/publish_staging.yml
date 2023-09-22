@@ -97,7 +97,23 @@ jobs:
       env:
         TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-      run: yarn run package-ad4m
+      run: yarn run build
+
+    - name: Build the app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          ENABLE_CODE_SIGNING: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        with:
+          tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
+          releaseName: 'ADAM Launcher v__VERSION__'
+          releaseBody: 'See the assets to download this version and install.'
+          releaseDraft: true
+          prerelease: false
 
     - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
       if: matrix.platform == 'windows-latest'
@@ -194,8 +210,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg.tar.gz"
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.tar.gz
+        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/macos/ADAM Launcher.app.tar.gz"
+        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.app.tar.gz
         asset_content_type: application/octet-stream
 
     - name: Upload Release Macos update sig Asset
@@ -206,8 +222,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.tar.gz.sig"
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg.tar.gz.sig
+        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/macos/ADAM Launcher.app.tar.gz.sig"
+        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.app.tar.gz.sig
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI Macos Binary
