@@ -15,6 +15,41 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
 
+## [0.6.0] - 22/09/2023
+
+### Added
+ - Rust runtime which runs a GraphQL server (warp & juniper based), Deno runtime, Scryer prolog engine & Holochain. Rust runtime now used as the main logic for ADAM and loads old JS code where needed, giving migration path to full Rust.
+ - Entanglement proof logic to ADAM to allow linking of ADAM DID's, Holochain Keys & Blockchain wallets
+ - Ability to update ADAM Layer via the Launcher
+ - MacOS signing in CD
+ - Ability to create paginated queries directly to prolog engine
+
+### Changed
+ - Updated Holochain to 0.2.2
+ - Updated Tauri to latest version 1.4.1
+ - All seperate ADAM Layer services now run on seperate thread pools
+ - ADAM Rust CLI can now init and run an agent
+ - ADAM Rust CLI command line arguments for init and run refactor to be much cleaner
+ - Each Perspective now has its own independant Scryer Prolog thread
+ - Whole ADAM Layer package now runs from a single binary; either ADAM CLI or ADAM Launcher
+ - ADAM Languages now expected to be Deno compatible modules; not old ESM node JS
+ - JS executor now builds to be a Deno bundle to be consumed by rust-executor
+ 
+### Deprecated
+
+### Removed
+ - SWIPL Prolog
+ - No longer used a node library to parse results coming in and out of a prolog engine
+ - AD4M Host
+ - GraphQL server from JS code
+ - Agent key methods from JS code
+ - Independant Holochain, HC & Lair-keystore binaries
+
+### Fixed
+ - Slow launcher start
+ - Very high CPU usage from ADAM and its related services
+ - No longer reconnection issues after sleeping computer or closing ADAM app instances
+
 ## [0.5.1] - 25/07/2023
 
 ### Added
