@@ -37,12 +37,18 @@ impl PubSub {
     }
 
     pub async fn publish(&self, topic: &Topic, message: &Message) {
-        let subscribers = self.subscribers.lock().await;
-        if let Some(subscribers) = subscribers.get(topic) {
-            for tx in subscribers {
-                let send_res = tx.send(message.to_owned());
+        let mut subscribers = self.subscribers.lock().await;
+        
+        if let Some(subscribers_vec) = subscribers.get_mut(topic) {
+            let mut i = 0;
+            while i < subscribers_vec.len() {
+                let send_res = subscribers_vec[i].send(message.to_owned());
                 if send_res.is_err() {
-                    warn!("Failed to send message to subscriber: {:?} on topic: {:?}, with subscribers, len: {:?}", send_res, topic, subscribers.len());
+                    warn!("Failed to send message to subscriber: {:?} on topic: {:?}, with subscribers, len: {:?}", send_res, topic, subscribers_vec.len());
+                    warn!("Removing subscriber from topic: {:?}", topic);
+                    subscribers_vec.remove(i);
+                } else {
+                    i += 1;
                 }
             }
         }
