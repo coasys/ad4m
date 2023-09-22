@@ -1,6 +1,6 @@
 [package]
 name = "rust-executor"
-version = "0.6.0"
+version = "0.6.1-prerelease"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]
 description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
