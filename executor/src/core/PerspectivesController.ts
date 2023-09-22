@@ -1,22 +1,24 @@
 import path from 'path'
 import fs from 'fs'
 import { v4 as uuidv4 } from 'uuid';
-import * as PubSub from './graphQL-interface/PubSub'
+import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression } from '@perspect3vism/ad4m'
 import Perspective from './Perspective'
+import { getPubSub, sleep } from './utils';
 
 export default class PerspectivesController {
     #perspectiveHandles: Map<string, PerspectiveHandle>
     #perspectiveInstances: Map<string, Perspective>
     #rootConfigPath
-    pubsub
     #context
+    #pubSub: PubSub
 
     constructor(rootConfigPath: string, context: PerspectiveContext) {
         this.#context = context
+        this.#context.updateControllersHandleSyncStatus = this.updateHandleSyncStatus.bind(this);
         this.#rootConfigPath = rootConfigPath
-        this.pubsub = PubSub.get()
+        this.#pubSub = getPubSub();
 
         this.#perspectiveHandles = new Map<string, PerspectiveHandle>()
         this.#perspectiveInstances = new Map<string, Perspective>()
@@ -30,8 +32,9 @@ export default class PerspectivesController {
             Object.keys(fileObject).map(k => {
                 let perspectiveHandle = fileObject[k].perspectiveHandle;
                 let createdFromJoin = fileObject[k].createdFromJoin;
-                console.debug(`PerspectivesController: Found existing perspective "${k}":`, perspectiveHandle)
-                this.#perspectiveInstances.set(k, new Perspective(perspectiveHandle, this.#context, perspectiveHandle.neighbourhood as Neighbourhood, createdFromJoin))
+                console.log(`PerspectivesController: Found existing perspective:`);
+                console.dir(perspectiveHandle, {depth: null});  
+                this.#perspectiveInstances.set(k, new Perspective(perspectiveHandle, this.#context, perspectiveHandle.neighbourhood as Neighbourhood, createdFromJoin, perspectiveHandle.state))
                 this.#perspectiveHandles.set(k, perspectiveHandle)
             })
         }
@@ -39,20 +42,19 @@ export default class PerspectivesController {
         this.#context.languageController!.addLinkObserver(async (diff: PerspectiveDiff, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                perspective.populateLocalLinks(diff.additions, diff.removals);
+                await perspective.populateLocalLinks(diff.additions, diff.removals);
 
                 try {
                     let perspectivePlain = perspective.plain();
                     for (const link of diff.additions) {
-                        await this.pubsub.publish(PubSub.LINK_ADDED_TOPIC, {
+                        await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
                             perspective: perspectivePlain,
                             link: link
                         })
                     }
 
                     for (const linkRemoved of diff.removals) {
-                        console.log("publishing removal:", linkRemoved)
-                        await this.pubsub.publish(PubSub.LINK_REMOVED_TOPIC, {
+                        await this.#pubSub.publish(PubSubDefinitions.LINK_REMOVED_TOPIC, {
                             perspective: perspectivePlain,
                             link: linkRemoved
                         })
@@ -65,10 +67,10 @@ export default class PerspectivesController {
             }
         })
 
-        this.#context.languageController!.addTelepresenceSignalObserver((signal: any, lang: LanguageRef) => {
+        this.#context.languageController!.addTelepresenceSignalObserver(async (signal: PerspectiveExpression, lang: LanguageRef) => {
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             if (perspective) {
-                this.pubsub.publish(PubSub.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
+                await this.#pubSub.publish(PubSubDefinitions.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
                     signal: signal,
                     perspective: perspective.plain()
                 })
@@ -78,11 +80,16 @@ export default class PerspectivesController {
         })
 
         this.#context.languageController!.addSyncStateChangeObserver(async (state: PerspectiveState, lang: LanguageRef) => {
+            console.log("PerspectiveController: sync state change");
+            console.dir(state, {depth: null});
             let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
             let perspectiveHandle = Array.from(this.#perspectiveHandles.values()).find((p) => p.uuid === perspective?.uuid);
             if (perspective) {
+                if (perspectiveHandle!.state !== state) {
+                    perspectiveHandle!.state = state;
+                    this.#perspectiveHandles.set(perspectiveHandle!.uuid, perspectiveHandle!);
+                };
                 await perspective.updatePerspectiveState(state);
-                perspectiveHandle!.state = state;
             } else {
                 console.warn(`Could not find perspective sync state change signal with lang: ${lang}`)
             }
@@ -101,7 +108,7 @@ export default class PerspectivesController {
         fs.writeFileSync(FILEPATH, JSON.stringify(obj))
     }
 
-    perspectiveID(uuid: string): PerspectiveHandle|void {
+    perspectiveID(uuid: string): PerspectiveHandle|undefined {
         const pID = this.#perspectiveHandles.get(uuid)
         // console.log("pID:", pID)
         return pID
@@ -109,7 +116,8 @@ export default class PerspectivesController {
 
     allPerspectiveHandles(): PerspectiveHandle[] {
         const alluuids = Array.from(this.#perspectiveHandles.values())
-        // console.log("ALL perspectiveHandles:", alluuids)
+        // console.log("ALL perspectiveHandles:");
+        // console.dir(alluuids);
         return alluuids
     }
 
@@ -118,12 +126,7 @@ export default class PerspectivesController {
         if(foundInstance) {
             return foundInstance
         } else {
-            const foundID = this.#perspectiveHandles.get(uuid)
-            if(foundID) {
-                return new Perspective(foundID, this.#context)
-            } else {
-                throw Error(`Perspective not found: ${uuid}`)
-            }
+            throw Error(`Perspective not found: ${uuid}`)
         }
     }
 
@@ -135,7 +138,7 @@ export default class PerspectivesController {
         return new Ad4mPerspective(await perspective.getLinks({} as LinkQuery));
     }
 
-    add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState): PerspectiveHandle {
+    async add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState): Promise<PerspectiveHandle> {
         let perspective = {
             uuid: uuidv4(),
             name,
@@ -146,42 +149,56 @@ export default class PerspectivesController {
         this.#perspectiveHandles.set(perspective.uuid, perspective)
         this.#perspectiveInstances.set(perspective.uuid, new Perspective(perspective, this.#context, neighbourhood, createdFromJoin, state))
         this.save()
-        this.pubsub.publish(PubSub.PERSPECTIVE_ADDED_TOPIC, { perspective })
+        await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_ADDED_TOPIC, perspective)
         return perspective
     }
 
-    replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
-        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: perspectiveHandle })
+    async replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
+        await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, perspectiveHandle);
+
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
-        this.#perspectiveInstances.get(perspectiveHandle.uuid)?.clearPolling();
+
+        let existingPerspective = this.#perspectiveInstances.get(perspectiveHandle.uuid);
+        if (existingPerspective) {
+            existingPerspective.clearPolling();
+            this.#perspectiveInstances.delete(perspectiveHandle.uuid);
+            existingPerspective = undefined;
+        }
         this.#perspectiveInstances.set(perspectiveHandle.uuid, new Perspective(perspectiveHandle, this.#context, neighbourhood, createdFromJoin, state));
         this.save()
     }
 
-    remove(uuid: string) {
+    async remove(uuid: string) {
         try {
             let perspective = this.#perspectiveInstances.get(uuid);
-            perspective?.clearPolling();
-            if (perspective?.neighbourhood) {
-                this.#context.languageController?.languageRemove(perspective.neighbourhood.linkLanguage);
+            if (perspective) {
+                perspective.clearPolling();
+                if (perspective.neighbourhood) {
+                    await this.#context.languageController?.languageRemove(perspective.neighbourhood.linkLanguage);
+                }
+                perspective = undefined;
+                this.#perspectiveHandles.delete(uuid)
+                this.#perspectiveInstances.delete(uuid)
+                this.save()
+                await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_REMOVED_TOPIC, uuid)
+                return true
+            } else {
+                return false
             }
-            this.#perspectiveHandles.delete(uuid)
-            this.#perspectiveInstances.delete(uuid)
-            this.save()
-            this.pubsub.publish(PubSub.PERSPECTIVE_REMOVED_TOPIC, { uuid })
         } catch (e) {
             console.error("Error removing perspective:", e);
             throw new Error(`Error removing perspective: ${e}`);
         }
     }
 
-    update(uuid: string, name: string) {
+    async update(uuid: string, name: string) {
         let perspective = this.perspective(uuid);
         perspective.name = name;
 
         let perspectiveHandle = new PerspectiveHandle(uuid, name, perspective.state);
         perspectiveHandle.sharedUrl = perspective.sharedUrl;
-        this.#perspectiveHandles.set(uuid, perspectiveHandle)
+        perspectiveHandle.neighbourhood = perspective.neighbourhood;
+        this.#perspectiveHandles.set(uuid, perspectiveHandle);
         this.save()
 
         const instance = this.#perspectiveInstances.get(uuid)
@@ -189,14 +206,23 @@ export default class PerspectivesController {
             instance.updateFromId(perspective as PerspectiveHandle)
         }
 
-        this.pubsub.publish(PubSub.PERSPECTIVE_UPDATED_TOPIC, { perspective: {
+        await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, {
             uuid: perspective.uuid,
             name: perspective.name,
             state: perspective.state,
             sharedUrl: perspective.sharedUrl,
             neighbourhood: perspective.neighbourhood
-        } as PerspectiveHandle });
+        });
 
         return perspective
+    }
+
+    updateHandleSyncStatus(uuid: string, status: PerspectiveState) {
+        let perspective = this.#perspectiveHandles.get(uuid);
+        if (!perspective) {
+            console.error("PerspectiveController.updateHandleSyncStatus(): could not find perspectiveHandle for uuid:", uuid);
+        }
+        perspective!.state = status;
+        this.#perspectiveHandles.set(uuid, perspective!);
     }
 }

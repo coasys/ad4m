@@ -11,3 +11,4 @@ build/*
 !*.config.icons.js
 !*.config.js
 !dna.js
+build/dna.js

@@ -1,10 +1,13 @@
 import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
-  LinkExpression, DID, Perspective, PerspectiveState } from "@perspect3vism/ad4m";
-import type { SyncStateChangeObserver } from "@perspect3vism/ad4m";
-import { DNA_NICK, ZOME_NAME } from "./dna";
+  LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
+import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
 
 class PeerInfo {
+  //@ts-ignore
   currentRevision: Buffer;
+  //@ts-ignore
   lastSeen: Date;
 };
 
@@ -13,8 +16,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   linkCallback?: PerspectiveDiffObserver
   syncStateChangeCallback?: SyncStateChangeObserver
   peers: Map<DID, PeerInfo> = new Map();
-  peersMutex: Mutex = new Mutex();
-  currentRevisionMutex: Mutex = new Mutex();
+  generalMutex: Mutex = withTimeout(new Mutex(), 10000, new Error('PerspectiveDiffSync: generalMutex timeout'));
   me: DID
   gossipLogCount: number = 0;
   myCurrentRevision: Buffer | null = null;
@@ -34,23 +36,30 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async others(): Promise<DID[]> {
+    //@ts-ignore
     return await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_others", null);
   }
 
   async currentRevision(): Promise<string> {
+    //@ts-ignore
     let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "current_revision", null);
     return res as string;
   }
 
   async sync(): Promise<PerspectiveDiff> {
+    //console.log("PerspectiveDiffSync.sync(); Getting lock");
+    const release = await this.generalMutex.acquire();
+    //console.log("PerspectiveDiffSync.sync(); Got lock");
     try {
-      await this.currentRevisionMutex.lock();
+      //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
       if (current_revision && Buffer.isBuffer(current_revision)) {
         this.myCurrentRevision = current_revision; 
       }
+    } catch (e) {
+      console.error("PerspectiveDiffSync.sync(); got error", e);
     } finally {
-      this.currentRevisionMutex.unlock();
+      release();
     }
     await this.gossip();
     return new PerspectiveDiff()
@@ -60,9 +69,8 @@ export class LinkAdapter implements LinkSyncAdapter {
     this.gossipLogCount += 1;
     let lostPeers: DID[] = [];
 
+    const release = await this.generalMutex.acquire();
     try {
-      await this.peersMutex.lock();
-      await this.currentRevisionMutex.lock();
       this.peers.forEach( (peerInfo, peer) => {
         if (peerInfo.lastSeen.getTime() + 10000 < new Date().getTime()) {
           lostPeers.push(peer);
@@ -107,19 +115,21 @@ export class LinkAdapter implements LinkSyncAdapter {
         });
       }
 
-      function checkSyncState(callback: SyncStateChangeObserver) {
+      async function checkSyncState(callback: SyncStateChangeObserver) {
         if (sameRevisions.length > 0 || differentRevisions.length > 0) {
           if (sameRevisions.length <= differentRevisions.length) {
-            callback(PerspectiveState.LinkLanguageInstalledButNotSynced);
+            await callback(PerspectiveState.LinkLanguageInstalledButNotSynced);
           } else {
-            callback(PerspectiveState.Synced);
+            await callback(PerspectiveState.Synced);
           };
         }
       }
 
+      //@ts-ignore
       generateRevisionStates(this.myCurrentRevision);
 
-      checkSyncState(this.syncStateChangeCallback);
+      //@ts-ignore
+      await checkSyncState(this.syncStateChangeCallback);
 
       for (const hash of Array.from(revisions)) {
         if(!hash) continue
@@ -133,8 +143,10 @@ export class LinkAdapter implements LinkSyncAdapter {
             let myRevision = pullResult.current_revision;
             this.myCurrentRevision = myRevision;
 
+            //@ts-ignore
             generateRevisionStates(this.myCurrentRevision);
-            checkSyncState(this.syncStateChangeCallback);
+            //@ts-ignore
+            await checkSyncState(this.syncStateChangeCallback);
           }
         }
       }
@@ -160,20 +172,24 @@ export class LinkAdapter implements LinkSyncAdapter {
         `);
         this.gossipLogCount = 0;
       }
+    } catch (e) {
+      console.error("PerspectiveDiffSync.gossip(); got error", e);
     } finally {
-      this.peersMutex.unlock();
-      this.currentRevisionMutex.unlock();
+      release();
     }
   }
 
   async render(): Promise<Perspective> {
+    //@ts-ignore
     let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "render", null);
     return new Perspective(res.links);
   }
 
   async commit(diff: PerspectiveDiff): Promise<string> {
+    //console.log("PerspectiveDiffSync.commit(); Getting lock");
+    const release = await this.generalMutex.acquire();
     try {
-      await this.currentRevisionMutex.lock();
+      //console.log("PerspectiveDiffSync.commit(); Got lock");
       let prep_diff = {
         additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
         removals: diff.removals.map((diff) => prepareLinkExpression(diff))
@@ -183,8 +199,10 @@ export class LinkAdapter implements LinkSyncAdapter {
         this.myCurrentRevision = res;
       }
       return res as string;
+    } catch (e) {
+      console.error("PerspectiveDiffSync.commit(); got error", e);
     } finally {
-      this.currentRevisionMutex.unlock();
+      release();
     }
   }
 
@@ -213,16 +231,18 @@ export class LinkAdapter implements LinkSyncAdapter {
       //       broadcast_author: ${broadcast_author}
       //       `)
       try {
-        await this.peersMutex.lock();
+        //console.log("PerspectiveDiffSync.handleHolochainSignal: Getting lock");
+
+        //console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
-      } finally {
-        this.peersMutex.unlock();
+      } catch (e) {
+        console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
       }
     } else {
       //console.log("PerspectiveDiffSync.handleHolochainSignal: received a signals from ourselves in fast_forward_signal or in a pull: ", signal.payload);
       //This signal only contains link data and no reference, and therefore came from us in a pull in fast_forward_signal
       if (this.linkCallback) {
-        this.linkCallback(signal.payload);
+        await this.linkCallback(signal.payload);
       }
     }
   }
@@ -235,6 +255,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         DNA_NICK,
         ZOME_NAME,
         "add_active_agent_link",
+        //@ts-ignore
         null
       );
     }
@@ -262,29 +283,4 @@ function prepareLinkExpression(link: LinkExpression): object {
     data.data.predicate = null;
   }
   return data;
-}
-
-
-class Mutex {
-  private locked = false;
-  private waitingResolvers: (() => void)[] = [];
-
-  async lock(): Promise<void> {
-    if (this.locked) {
-      return new Promise((resolve) => {
-        this.waitingResolvers.push(resolve);
-      });
-    }
-    this.locked = true;
-  }
-
-  unlock(): void {
-    if (!this.locked) return;
-    if (this.waitingResolvers.length > 0) {
-      const resolve = this.waitingResolvers.shift();
-      if (resolve) resolve();
-    } else {
-      this.locked = false;
-    }
-  }
 }

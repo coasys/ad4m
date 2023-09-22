@@ -14,3 +14,6 @@ ad4m-test.log
 yarn-error.log
 
 !dna.js
+
+!rollup.config*
+build/dna.js

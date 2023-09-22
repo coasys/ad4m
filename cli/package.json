@@ -1,0 +1,37 @@
+{
+  "name": "@perspect3vism/ad4m-cli",
+  "version": "0.3.4",
+  "description": "AD4M cli for starting an AD4M agent, and querying the executor",
+  "main": "",
+  "files": [],
+  "type": "module",
+  "types": "",
+  "scripts": {
+    "build": "cargo build --release",
+    "test": "cargo test --release"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/perspect3vism/ad4m.git"
+  },
+  "author": {
+    "name": "Nicolas Luck",
+    "email": "nicolas@lucksus.eu"
+  },
+  "contributors": [
+    {
+      "name": "Joshua Parkin",
+      "email": "joshuadparkin@gmail.com"
+    }
+  ],
+  "license": "CAL-1.0",
+  "bugs": {
+    "url": "https://github.com/perspect3vism/ad4m/issues"
+  },
+  "devDependencies": {
+    "@perspect3vism/ad4m-executor": "*",
+    "@perspect3vism/rust-ad4m-executor": "*"
+  },
+  "dependencies": {
+  }
+}

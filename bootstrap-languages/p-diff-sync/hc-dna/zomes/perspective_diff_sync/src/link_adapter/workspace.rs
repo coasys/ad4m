@@ -654,11 +654,14 @@ impl Workspace {
         debug!("===Workspace.get_snapshot(): Function start");
         let fn_start = get_now()?.time();
 
-        let mut snapshot_links = get_links(
-            hash_entry(address)?,
-            LinkTypes::Snapshot,
-            Some(LinkTag::new("snapshot")),
-        )?;
+        // let input = GetLinksInputBuilder::try_new(
+        //     hash_entry(address)?,
+        //     LinkTypes::Snapshot
+        // )
+        // .unwrap()
+        // .tag_prefix(LinkTag::new("snapshot"))
+        // .build();
+        let mut snapshot_links = get_links(hash_entry(address)?, LinkTypes::Snapshot, Some(LinkTag::new("snapshot")))?;
 
         if snapshot_links.len() > 0 {
             let snapshot = get(

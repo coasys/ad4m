@@ -24,7 +24,7 @@ pub struct LinkExpression {
     pub data: Link,
     pub proof: ExpressionProof,
     pub timestamp: String,
-    pub status: Option<String>
+    pub status: Option<String>,
 }
 
 #[derive(Debug)]
@@ -84,7 +84,7 @@ impl From<QueryLinksPerspectiveQueryLinks> for LinkExpression {
                 signature: link.proof.signature,
                 valid: link.proof.valid,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -105,7 +105,7 @@ impl From<SubscriptionLinkAddedPerspectiveLinkAdded> for LinkExpression {
                 signature: link.proof.signature,
                 valid: link.proof.valid,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -126,7 +126,7 @@ impl From<MeAgentPerspectiveLinks> for LinkExpression {
                 signature: link.proof.signature,
                 valid: link.proof.valid,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -147,7 +147,7 @@ impl From<ByDidAgentByDidPerspectiveLinks> for LinkExpression {
                 signature: link.proof.signature,
                 valid: link.proof.valid,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -172,7 +172,7 @@ impl From<SnapshotPerspectiveSnapshotLinks> for LinkExpression {
                 signature: link.proof.signature,
                 valid: None,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -191,7 +191,7 @@ impl From<LinkExpression> for SnapshotPerspectiveSnapshotLinks {
                 key: link.proof.key,
                 signature: link.proof.signature,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -212,28 +212,7 @@ impl From<LinkExpression> for LinkExpressionInput {
                 invalid: link.proof.invalid,
                 valid: link.proof.valid,
             },
-            status: link.status
-        }
-    }
-}
-
-impl From<LinkExpression> for friend_send_message::LinkExpressionInput {
-    fn from(link: LinkExpression) -> Self {
-        Self {
-            author: link.author,
-            timestamp: link.timestamp,
-            data: friend_send_message::LinkInput {
-                predicate: link.data.predicate,
-                source: link.data.source,
-                target: link.data.target,
-            },
-            proof: friend_send_message::ExpressionProofInput {
-                key: link.proof.key,
-                signature: link.proof.signature,
-                invalid: link.proof.invalid,
-                valid: link.proof.valid,
-            },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -256,7 +235,7 @@ impl From<AllPerspectivesNeighbourhoodMetaLinks> for LinkExpression {
                 signature: link.proof.signature,
                 valid: None,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -292,6 +271,27 @@ impl From<Perspective> for PerspectiveInput {
                 .into_iter()
                 .map(LinkExpressionInput::from)
                 .collect(),
+        }
+    }
+}
+
+impl From<LinkExpression> for friend_send_message::LinkExpressionInput {
+    fn from(link: LinkExpression) -> Self {
+        Self {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: friend_send_message::LinkInput {
+                predicate: link.data.predicate,
+                source: link.data.source,
+                target: link.data.target,
+            },
+            proof: friend_send_message::ExpressionProofInput {
+                key: link.proof.key,
+                signature: link.proof.signature,
+                invalid: link.proof.invalid,
+                valid: link.proof.valid,
+            },
+            status: link.status,
         }
     }
 }
@@ -353,7 +353,7 @@ impl From<MessageInboxRuntimeMessageInboxDataLinks> for LinkExpression {
                 signature: link.proof.signature,
                 valid: None,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }
@@ -377,7 +377,7 @@ impl From<MessageOutboxRuntimeMessageOutboxMessageDataLinks> for LinkExpression 
                 signature: link.proof.signature,
                 valid: None,
             },
-            status: link.status
+            status: link.status,
         }
     }
 }

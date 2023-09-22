@@ -14,6 +14,24 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Removed
 
 ### Fixed
+
+## [0.5.1] - 25/07/2023
+
+### Added
+ - After login / registration the launcher will now open by default [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - If the user has no installed applications, we now show some info about connecting apps to AD4M and a link to Flux [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Holochain DHT status logs every 60 seconds [PR#277](https://github.com/perspect3vism/ad4m/pull/277)
+ - ad4m-connect connection settings gives you the option of connecting to local or remote [PR#278](https://github.com/perspect3vism/ad4m/pull/278)
+ - Convience overloads for telepresence functions: `setOnlineStatusU`, `sendSignalU`, `sendBroadcastU` in `NeighbourhoodProxy`, which take new type `PerspectiveUnsignedInput` as argument. This enables sending signed signals without having to create temporary perspectives. These functions sign the whole perspective including links. [PR#296](https://github.com/perspect3vism/ad4m/pull/296)
+ - ad4m-launcher now has update functionality [PR#304](https://github.com/perspect3vism/ad4m/pull/304)
+
+### Changed
+ 
+### Deprecated
+
+### Removed
+
+### Fixed
 - Fixed resolveLanguage not working for properties [PR#402](https://github.com/coasys/ad4m/pull/402)
 - Fixed destructor not working because it would not remove all intial value [PR#402](https://github.com/coasys/ad4m/pull/402)
 - Handle not being able to parse expression URL if the language didn't exists [PR#402](https://github.com/coasys/ad4m/pull/402)

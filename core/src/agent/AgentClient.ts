@@ -519,10 +519,10 @@ export class AgentClient {
     const { agentSignMessage } = unwrapApolloResult(
       await this.#apolloClient.mutate({
         mutation: gql`mutation agentSignMessage($message: String!) {
-                agentSignMessage(message: $message) {
-                    ${AGENT_SIGNATURE_FIELDS}
-                }
-            }`,
+          agentSignMessage(message: $message) {
+              ${AGENT_SIGNATURE_FIELDS}
+          }
+        }`,
         variables: { message },
       })
     );

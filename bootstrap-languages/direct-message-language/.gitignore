@@ -8,7 +8,11 @@ build/*
 *.js
 *.js.map
 !*.config.js 
+!rollup.config.hc-dna.js
 !dna.js
+!esbuild.js
 
 node_modules
 target
+
+build/dna.js

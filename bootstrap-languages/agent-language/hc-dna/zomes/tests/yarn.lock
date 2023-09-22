@@ -23,45 +23,33 @@
     enabled "2.0.x"
     kuler "^2.0.0"
 
-"@holochain/client@0.12.0":
-  version "0.12.0"
-  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.12.0.tgz#1c9bdc082160badd1439962e8d5f30da6c4089a3"
-  integrity sha512-pvrB6Gdc6488iR3VZXoq5QKzoAPTGi0y69Ktrtgr/IZEvtSSHBqHeMhyEjXCa7iS8b1gXsL/HAvq47rs8mu50A==
+"@holochain/client@0.16.1", "@holochain/client@^0.16.0":
+  version "0.16.1"
+  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.16.1.tgz#3cdb110a5d4ab9bf51f31def289f0d082baa77ba"
+  integrity sha512-jfbrSZz3Yqr/hb3NwzfLSWpR6Cnt82hiHUZP5R1MrGpFQV8JVI2uq94CMVasBspNsWX3lMpT9LNz5Duvq7zF8Q==
   dependencies:
     "@holochain/serialization" "^0.1.0-beta-rc.3"
     "@msgpack/msgpack" "^2.7.2"
+    "@noble/ed25519" "^2.0.0"
     "@tauri-apps/api" "^1.2.0"
     emittery "^1.0.1"
     isomorphic-ws "^5.0.0"
     js-base64 "^3.7.3"
+    libsodium-wrappers "^0.7.11"
     lodash-es "^4.17.21"
-    tweetnacl "^1.0.3"
-
-"@holochain/client@^0.11.16":
-  version "0.11.16"
-  resolved "https://registry.yarnpkg.com/@holochain/client/-/client-0.11.16.tgz#3b2172cc5b0976d4bed01d067c2cebb28d644e0e"
-  integrity sha512-uX1/mRnNZHc0y88bkGJrfp6/mfh1UGFS+g+wvn+E69spzPQMxAkjo7FmZ6nmZfxPoYCoxKjVJyKmvswPUP1Xfw==
-  dependencies:
-    "@holochain/serialization" "^0.1.0-beta-rc.3"
-    "@msgpack/msgpack" "^2.7.2"
-    "@tauri-apps/api" "^1.2.0"
-    emittery "^1.0.1"
-    isomorphic-ws "^5.0.0"
-    js-base64 "^3.7.3"
-    lodash-es "^4.17.21"
-    tweetnacl "^1.0.3"
+    ws "^8.13.0"
 
 "@holochain/serialization@^0.1.0-beta-rc.3":
   version "0.1.0-beta-rc.3"
   resolved "https://registry.yarnpkg.com/@holochain/serialization/-/serialization-0.1.0-beta-rc.3.tgz#787a785fa48e00f2d168c6d4b45a233c4800cccb"
   integrity sha512-DJx4V2KXHVLciyOGjOYKTM/JLBpBEZ3RsPIRCgf7qmwhQdxXvhi2p+oFFRD51yUT5uC1/MzIVeJCl/R60PwFbw==
 
-"@holochain/tryorama@0.11.0":
-  version "0.11.0"
-  resolved "https://registry.yarnpkg.com/@holochain/tryorama/-/tryorama-0.11.0.tgz#55505b19e1d3bc9ca47cf42deabd35df94cab6bb"
-  integrity sha512-P2MNn//UulkYCo64j69HfhMfrWGtDrI/A1QEuEZYPUyW8fNg3iE5wh2ssHnu0siw0WRjB6H/PBdadNZz8hemcw==
+"@holochain/tryorama@0.15.0":
+  version "0.15.0"
+  resolved "https://registry.yarnpkg.com/@holochain/tryorama/-/tryorama-0.15.0.tgz#726dbd33159edf8866de7aa5cf6afdb2230aec74"
+  integrity sha512-GWsiheb6AFkPkT1ho+dJeFRB2jVboIm/Gp+7v1LshKbDZrgY7oDEopyQPWmy4SkQQYItuscGaIdaOUJIQJuGKQ==
   dependencies:
-    "@holochain/client" "^0.11.16"
+    "@holochain/client" "^0.16.0"
     get-port "^6.1.2"
     lodash "^4.17.21"
     uuid "^8.3.2"
@@ -90,6 +78,11 @@
   version "2.8.0"
   resolved "https://registry.yarnpkg.com/@msgpack/msgpack/-/msgpack-2.8.0.tgz#4210deb771ee3912964f14a15ddfb5ff877e70b9"
   integrity sha512-h9u4u/jiIRKbq25PM+zymTyW6bhTzELvOoUd+AvYriWOAKpLGnIamaET3pnHYoI5iYphAHBI4ayx0MehR+VVPQ==
+
+"@noble/ed25519@^2.0.0":
+  version "2.0.0"
+  resolved "https://registry.yarnpkg.com/@noble/ed25519/-/ed25519-2.0.0.tgz#5964c8190a4b4b804985717ca566113b93379e43"
+  integrity sha512-/extjhkwFupyopDrt80OMWKdLgP429qLZj+z6sYJz90rF2Iz0gjZh2ArMKPImUl13Kx+0EXI2hN9T/KJV0/Zng==
 
 "@tauri-apps/api@^1.2.0":
   version "1.2.0"
@@ -126,10 +119,10 @@
   resolved "https://registry.yarnpkg.com/@types/node/-/node-18.11.10.tgz#4c64759f3c2343b7e6c4b9caf761c7a3a05cee34"
   integrity sha512-juG3RWMBOqcOuXC643OAdSA525V44cVgGV6dUDuiFtss+8Fk5x1hI93Rsld43VeJVIeqlP9I7Fn9/qaVqoEAuQ==
 
-"@types/node@^14.0.14":
-  version "14.18.34"
-  resolved "https://registry.yarnpkg.com/@types/node/-/node-14.18.34.tgz#cd2e6fa0dbfb08a62582a7b967558e73c32061ec"
-  integrity sha512-hcU9AIQVHmPnmjRK+XUUYlILlr9pQrsqSrwov/JK1pnf3GTQowVBhx54FbvM0AU/VXGH4i3+vgXS5EguR7fysA==
+"@types/node@^18.0.0":
+  version "18.17.17"
+  resolved "https://registry.yarnpkg.com/@types/node/-/node-18.17.17.tgz#53cc07ce582c9d7c5850702a3c2cb0af0d7b0ca1"
+  integrity sha512-cOxcXsQ2sxiwkykdJqvyFS+MLQPLvIdwh5l6gNg8qF6s+C7XSkEWOZjK+XhUZd+mYvHV/180g2cnCcIl4l06Pw==
 
 "@types/tape-promise@^4.0.1":
   version "4.0.1"
@@ -690,6 +683,18 @@ kuler@^2.0.0:
   resolved "https://registry.yarnpkg.com/kuler/-/kuler-2.0.0.tgz#e2c570a3800388fb44407e851531c1d670b061b3"
   integrity sha512-Xq9nH7KlWZmXAtodXDDRE7vs6DU1gTU8zYDHDiWLSip45Egwq3plLHzPn27NgvzL2r1LMPC1vdqh98sQxtqj4A==
 
+libsodium-wrappers@^0.7.11:
+  version "0.7.13"
+  resolved "https://registry.yarnpkg.com/libsodium-wrappers/-/libsodium-wrappers-0.7.13.tgz#83299e06ee1466057ba0e64e532777d2929b90d3"
+  integrity sha512-kasvDsEi/r1fMzKouIDv7B8I6vNmknXwGiYodErGuESoFTohGSKZplFtVxZqHaoQ217AynyIFgnOVRitpHs0Qw==
+  dependencies:
+    libsodium "^0.7.13"
+
+libsodium@^0.7.13:
+  version "0.7.13"
+  resolved "https://registry.yarnpkg.com/libsodium/-/libsodium-0.7.13.tgz#230712ec0b7447c57b39489c48a4af01985fb393"
+  integrity sha512-mK8ju0fnrKXXfleL53vtp9xiPq5hKM0zbDQtcxQIsSmxNgSxqCj6R7Hl9PkrNe2j29T4yoDaF7DJLK9/i5iWUw==
+
 lodash-es@^4.17.21:
   version "4.17.21"
   resolved "https://registry.yarnpkg.com/lodash-es/-/lodash-es-4.17.21.tgz#43e626c46e6591b7750beb2b50117390c609e3ee"
@@ -984,11 +989,6 @@ ts-node@^10.8.0:
     v8-compile-cache-lib "^3.0.1"
     yn "3.1.1"
 
-tweetnacl@^1.0.3:
-  version "1.0.3"
-  resolved "https://registry.yarnpkg.com/tweetnacl/-/tweetnacl-1.0.3.tgz#ac0af71680458d8a6378d0d0d050ab1407d35596"
-  integrity sha512-6rt+RN7aOi1nGMyC4Xa5DdYiukl2UWCbcJft7YhxReBGQD7OAM8Pbxw6YMo4r2diNEA8FEmu32YOn9rhaiE5yw==
-
 typescript@^4.2.4:
   version "4.9.3"
   resolved "https://registry.yarnpkg.com/typescript/-/typescript-4.9.3.tgz#3aea307c1746b8c384435d8ac36b8a2e580d85db"
@@ -1087,6 +1087,11 @@ ws@^8.11.0:
   version "8.12.0"
   resolved "https://registry.yarnpkg.com/ws/-/ws-8.12.0.tgz#485074cc392689da78e1828a9ff23585e06cddd8"
   integrity sha512-kU62emKIdKVeEIOIKVegvqpXMSTAMLJozpHZaJNDYqBjzlSYXQGviYwN1osDLJ9av68qHd4a2oSjd7yD4pacig==
+
+ws@^8.13.0:
+  version "8.14.1"
+  resolved "https://registry.yarnpkg.com/ws/-/ws-8.14.1.tgz#4b9586b4f70f9e6534c7bb1d3dc0baa8b8cf01e0"
+  integrity sha512-4OOseMUq8AzRBI/7SLMUwO+FEDnguetSk7KMb1sHwvF2w2Wv5Hoj0nlifx8vtGsftE/jWHojPy8sMMzYLJ2G/A==
 
 yn@3.1.1:
   version "3.1.1"

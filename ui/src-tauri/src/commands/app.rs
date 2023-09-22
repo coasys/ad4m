@@ -2,7 +2,7 @@ extern crate remove_dir_all;
 use std::time::{Duration, SystemTime};
 
 use crate::Payload;
-use crate::{config::data_path, get_main_window, util::find_and_kill_processes};
+use crate::{config::data_path, get_main_window};
 
 use remove_dir_all::*;
 
@@ -65,10 +65,6 @@ pub fn open_tray_message(app_handle: tauri::AppHandle) {
 
 #[tauri::command]
 pub fn clear_state(app_handle: tauri::AppHandle) {
-    find_and_kill_processes("ad4m-host");
-
-    find_and_kill_processes("holochain");
-
     let _ = remove_dir_all(data_path());
 
     app_handle.restart();

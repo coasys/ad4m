@@ -21,9 +21,11 @@ if (isPreRelease) {
 }
 
 let VERSION = process.argv[2]
+let RUST_VERSION = process.argv[2]
 
 if (isPreRelease) {
-    VERSION = VERSION + ".prerelease";
+    VERSION = VERSION + "-prerelease";
+    RUST_VERSION = VERSION + ".0";
 }
 
 const RAW_VERSION = process.argv[2];
@@ -35,10 +37,18 @@ console.log("Root repo version: " + rootRepo.version + " -> " + VERSION)
 rootRepo.version = VERSION
 fs.writeFileSync('package.json', JSON.stringify(rootRepo, null, 2) + '\n')
 
-const cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), VERSION)
-console.log("CLI version: " + cli.oldVersion + " -> " + VERSION)
-const ad4mClient = replaceVersionLine(cli.newContent, VERSION, `ad4m-client = { path = "../rust-client", version = `, ` }`)
-console.log(`CLI ad4m-client dep: ${ad4mClient.oldVersion} -> ${VERSION}`)
+let ad4mClient;
+if (isPreRelease) {
+    const cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), RUST_VERSION)
+    console.log("CLI version: " + cli.oldVersion + " -> " + RUST_VERSION)
+    ad4mClient = replaceVersionLine(cli.newContent, RUST_VERSION, `ad4m-client = { path = "../rust-client", version = `, ` }`)
+    console.log(`CLI ad4m-client dep: ${ad4mClient.oldVersion} -> ${RUST_VERSION}`)
+} else {
+    const cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), RAW_VERSION)
+    console.log("CLI version: " + cli.oldVersion + " -> " + RAW_VERSION)
+    ad4mClient = replaceVersionLine(cli.newContent, RAW_VERSION, `ad4m-client = { path = "../rust-client", version = `, ` }`)
+    console.log(`CLI ad4m-client dep: ${ad4mClient.oldVersion} -> ${RAW_VERSION}`)
+}
 fs.writeFileSync('cli/Cargo.toml', ad4mClient.newContent)
 
 const connect = JSON.parse(fs.readFileSync('connect/package.json', 'utf8'))
@@ -56,6 +66,16 @@ console.log("Executor version: " + executor.version + " -> " + VERSION)
 executor.version = VERSION
 fs.writeFileSync('executor/package.json', JSON.stringify(executor, null, 2) + '\n')
 
+const rustExecutor = JSON.parse(fs.readFileSync('rust-executor/package.json', 'utf8'))
+console.log("Executor version: " + rustExecutor.version + " -> " + VERSION)
+rustExecutor.version = VERSION
+fs.writeFileSync('rust-executor/package.json', JSON.stringify(rustExecutor, null, 2) + '\n')
+
+const tests = JSON.parse(fs.readFileSync('tests/js/package.json', 'utf8'))
+console.log("Executor version: " + tests.version + " -> " + VERSION)
+tests.version = VERSION
+fs.writeFileSync('tests/js/package.json', JSON.stringify(tests, null, 2) + '\n')
+
 
 const executorHardWired = replaceVersionLine(
     fs.readFileSync('executor/src/core/Config.ts', 'utf8'), 
@@ -65,41 +85,49 @@ const executorHardWired = replaceVersionLine(
 console.log("Hard-wired version string in executor's Config.ts: " + executorHardWired.oldVersion + " -> " + VERSION)
 fs.writeFileSync('executor/src/core/Config.ts', executorHardWired.newContent)
 
-const host = JSON.parse(fs.readFileSync('host/package.json', 'utf8'))
-console.log("Host version: " + host.version + " -> " + VERSION)
-host.version = VERSION
-fs.writeFileSync('host/package.json', JSON.stringify(host, null, 2) + '\n')
-
 const rustClient = replaceVersionLine(fs.readFileSync('rust-client/Cargo.toml', 'utf8'), VERSION)
 console.log("rust-client version: " + rustClient.oldVersion + " -> " + VERSION)
 fs.writeFileSync('rust-client/Cargo.toml', rustClient.newContent)
 
+const rustExecutorCargo = replaceVersionLine(fs.readFileSync('rust-executor/Cargo.toml', 'utf8'), VERSION)
+console.log("rust-executor version: " + rustExecutorCargo.oldVersion + " -> " + VERSION)
+fs.writeFileSync('rust-executor/Cargo.toml', rustExecutorCargo.newContent)
+
+const globalsRs = replaceVersionLine(
+    fs.readFileSync('rust-executor/src/globals.rs', 'utf8'), 
+    VERSION,
+    `    pub static ref AD4M_VERSION: String = String::from(`,
+    `);`
+    )
+console.log("globals.rs version: " + globalsRs.oldVersion + " -> " + VERSION)
+fs.writeFileSync('rust-executor/src/globals.rs', globalsRs.newContent)
+
 const uiPackage = JSON.parse(fs.readFileSync('ui/package.json', 'utf8'))
 if (isPreRelease) {
-    console.log("UI version: " + uiPackage.version + " -> " + RAW_VERSION)
-    uiPackage.version = RAW_VERSION
-} else {
     console.log("UI version: " + uiPackage.version + " -> " + VERSION)
     uiPackage.version = VERSION
+} else {
+    console.log("UI version: " + uiPackage.version + " -> " + RAW_VERSION)
+    uiPackage.version = RAW_VERSION
 }
 fs.writeFileSync('ui/package.json', JSON.stringify(uiPackage, null, 2) + '\n')
 
 const uiTauri = JSON.parse(fs.readFileSync('ui/src-tauri/tauri.conf.json', 'utf8'))
 if (isPreRelease) {
-    console.log("UI Tauri version: " + uiTauri.package.version + " -> " + RAW_VERSION)
-    uiTauri.package.version = RAW_VERSION
-} else {
     console.log("UI Tauri version: " + uiTauri.package.version + " -> " + VERSION)
     uiTauri.package.version = VERSION
+} else {
+    console.log("UI Tauri version: " + uiTauri.package.version + " -> " + RAW_VERSION)
+    uiTauri.package.version = RAW_VERSION
 }
 fs.writeFileSync('ui/src-tauri/tauri.conf.json', JSON.stringify(uiTauri, null, 2) + '\n')
 
 let uiTauriCargo;
 if (isPreRelease) {
-    uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), RAW_VERSION)
-    console.log("UI Cargo version: " + uiTauriCargo.oldVersion + " -> " + RAW_VERSION)
+    uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), RUST_VERSION)
+    console.log("UI Cargo version: " + uiTauriCargo.oldVersion + " -> " + RUST_VERSION)
 } else {
-    uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), VERSION)
+    uiTauriCargo = replaceVersionLine(fs.readFileSync('ui/src-tauri/Cargo.toml', 'utf8'), RAW_VERSION)
     console.log("UI Cargo version: " + uiTauriCargo.oldVersion + " -> " + VERSION)
 }
 fs.writeFileSync('ui/src-tauri/Cargo.toml', uiTauriCargo.newContent)

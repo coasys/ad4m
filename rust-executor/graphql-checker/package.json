@@ -1,0 +1,12 @@
+{
+  "name": "@perspect3vism/graphql-checker",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "graphql": "^16.6.0"
+  },
+  "scripts": {
+    "check": "graphql-inspector diff ../../core/lib/src/schema.gql ../schema.gql"
+  }
+}

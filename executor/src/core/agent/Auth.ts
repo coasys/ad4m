@@ -1,6 +1,4 @@
 import lodash from "lodash";
-import path from "path";
-import * as fs from "fs";
 
 export type Capabilities = Capability[];
 export interface Capability {
@@ -369,12 +367,15 @@ export const checkTokenAuthorized = (
   if (!isAd4minCredential) {
     if (apps.length > 0) {
       if (token) {
-        const app = apps.find((app) => app.token === token);
+        const filteredApps = apps.filter((app) => app.token === token);
 
-        if (!app) {
+        if (filteredApps.length === 0) {
           throw Error(`Unauthorized access`);
-        } else if (app.revoked) {
-          throw Error(`Unauthorized access`);
+        } else {
+          const noRevoked = filteredApps.filter((app) => !app.revoked);
+          if (noRevoked.length === 0) {
+            throw Error(`Unauthorized access`);
+          }
         }
       }
     }

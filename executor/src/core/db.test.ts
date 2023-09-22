@@ -1,7 +1,7 @@
-import { PerspectivismDb } from './db'
+import { Ad4mDb } from './db'
 import { v4 as uuidv4 } from 'uuid';
 import { expect } from "chai";
-import { LinkExpression, LinkExpressionInput, PerspectiveDiff } from '@perspect3vism/ad4m';
+import { LinkExpressionInput, PerspectiveDiff } from '@perspect3vism/ad4m';
 import faker from 'faker'
 
 function constructDummyLinkExpression(): LinkExpressionInput {
@@ -22,12 +22,12 @@ function constructDummyLinkExpression(): LinkExpressionInput {
     } as LinkExpressionInput
 }
 
-describe('PerspectivismDb', () => {
-    let db: PerspectivismDb | undefined
+describe('Ad4mDb', () => {
+    let db: Ad4mDb | undefined
     let pUUID: string | undefined
 
     beforeEach(() => {
-        db = new PerspectivismDb();
+        db = new Ad4mDb();
         pUUID = uuidv4()
     })
 
@@ -44,8 +44,6 @@ describe('PerspectivismDb', () => {
         const link = constructDummyLinkExpression();
         delete link.data.predicate
         await db!.addLink(pUUID!, link);
-
-        link.data.predicate = null;
 
         const result = await db!.getLink(pUUID!, link);
         expect(result).to.be.deep.equal(link);

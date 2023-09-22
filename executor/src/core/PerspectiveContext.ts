@@ -1,3 +1,4 @@
+import { PerspectiveState } from "@perspect3vism/ad4m"
 import type AgentService from "./agent/AgentService"
 import { MainConfig } from "./Config"
 import type LanguageController from "./LanguageController"
@@ -7,4 +8,5 @@ export default class PerspectiveContext {
     agentService?: AgentService
     languageController?: LanguageController
     config?: MainConfig
+    updateControllersHandleSyncStatus?: (uuid: string, status: PerspectiveState) => void
 }

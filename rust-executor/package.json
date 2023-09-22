@@ -1,0 +1,35 @@
+{
+  "name": "@perspect3vism/rust-ad4m-executor",
+  "version": "0.6.0",
+  "description": "Rust built version of the ad4m-executor, exposing GraphQL methods for AD4M",
+  "main": "",
+  "files": [],
+  "type": "module",
+  "types": "",
+  "scripts": {
+    "build": "cargo build --release",
+    "test": "cargo test --release"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/perspect3vism/ad4m.git"
+  },
+  "author": {
+    "name": "Nicolas Luck",
+    "email": "nicolas@lucksus.eu"
+  },
+  "contributors": [
+    {
+      "name": "Joshua Parkin",
+      "email": "joshuadparkin@gmail.com"
+    }
+  ],
+  "license": "CAL-1.0",
+  "bugs": {
+    "url": "https://github.com/perspect3vism/ad4m/issues"
+  },
+  "devDependencies": {
+    "@perspect3vism/ad4m-executor": "*"
+  },
+  "dependencies": {}
+}

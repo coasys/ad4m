@@ -5,13 +5,13 @@ import { invoke } from "@tauri-apps/api";
 import { createClient } from "graphql-ws";
 import { version } from "../package.json";
 
-export async function buildAd4mClient(server: string): Promise<Ad4mClient> {
+export async function buildAd4mClient(server: string, subscribe = true): Promise<Ad4mClient> {
   let token: string = await invoke("request_credential");
 
-  return buildClient(server, token);
+  return buildClient(server, token, subscribe);
 }
 
-function buildClient(server: string, token: string): Ad4mClient {
+function buildClient(server: string, token: string, subscribe: boolean): Ad4mClient {
   const wsLink = new GraphQLWsLink(
     createClient({
       url: server,
@@ -37,7 +37,7 @@ function buildClient(server: string, token: string): Ad4mClient {
     },
   });
 
-  return new Ad4mClient(apolloClient);
+  return new Ad4mClient(apolloClient, subscribe);
 }
 
 export function generateLanguageInitials(name: string) {

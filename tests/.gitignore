@@ -1,0 +1,10 @@
+js/tst-tmp
+
+!cleanTestingData.js
+!cleanup.js
+!get-builtin-test-langs.js
+!injectLanguageLanguageBundle.js
+!injectPublishingAgent.js
+
+js/scripts/note-ipfs-hash
+js/scripts/perspective-diff-sync-hash

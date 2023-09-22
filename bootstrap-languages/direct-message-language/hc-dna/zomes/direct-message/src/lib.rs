@@ -35,7 +35,7 @@ fn recipient() -> ExternResult<Recipient> {
         Ok(Recipient(recipient.get()))
     } else {
         //debug!("RECIPIENT from properties");
-        let properties = Properties::try_from(dna_info()?.properties)
+        let properties = Properties::try_from(dna_info()?.modifiers.properties)
             .map_err(|err| wasm_error!(WasmErrorInner::Host(err.to_string())))?;
         let bytes = hex::decode(properties.recipient_hc_agent_pubkey).or_else(|_| {
             Err(wasm_error!(WasmErrorInner::Host(
@@ -77,11 +77,11 @@ pub fn get_status(_: ()) -> ExternResult<Option<PerspectiveExpression>> {
         // (either from local ad4m-executor or via remote_call)
         // we retrieve the latest status entry from source chain
         let mut filter = QueryFilter::new();
-        filter.entry_type = Some(EntryType::App(AppEntryDef::new(
+        filter.entry_type = Some(vec![EntryType::App(AppEntryDef::new(
             0.into(),
             0.into(),
             EntryVisibility::Private,
-        )));
+        ))]);
         filter.include_entries = true;
         if let Some(element) = query(filter)?.pop() {
             let status = StatusUpdate::try_from(element)?;
@@ -144,11 +144,11 @@ fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
 fn inbox(did_filter: Option<String>) -> ExternResult<Vec<PerspectiveExpression>> {
     //debug!("INBOX({:?})", did_filter);
     let mut filter = QueryFilter::new();
-    filter.entry_type = Some(EntryType::App(AppEntryDef::new(
+    filter.entry_type = Some(vec![EntryType::App(AppEntryDef::new(
         1.into(),
         0.into(),
         EntryVisibility::Private,
-    )));
+    ))]);
     filter.include_entries = true;
     Ok(query(filter)?
         .into_iter()
@@ -209,11 +209,15 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
     if Recipient(agent_info()?.agent_latest_pubkey) == recipient()? {
         //debug!("fetch_inbox agent");
         //debug!("agent_address: {}", agent_address);
-        for link in get_links(
-            agent_address,
-            LinkTypes::Message,
-            Some(LinkTag::new(String::from("message"))),
-        )? {
+        // let input = GetLinksInputBuilder::try_new(
+        //     agent_address,
+        //     LinkTypes::Message
+        // )
+        // .unwrap()
+        // .tag_prefix(LinkTag::new("message"))
+        // .build();
+
+        for link in get_links(agent_address, LinkTypes::Message, Some(LinkTag::new("message")))? {
             //debug!("fetch_inbox link");
             if let Some(message_entry) = get(
                 link.target
