@@ -1,5 +1,5 @@
-import PerspectivismCore from "./core/PerspectivismCore";
-import create from "./core/PerspectivismCore";
+import Ad4mCore from "./core/Ad4mCore";
+import create from "./core/Ad4mCore";
 import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, agentLanguageAlias, neighbourhoodLanguageAlias, perspectiveLanguageAlias, ad4mExecutorVersion } from "./core/Config"
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
@@ -7,12 +7,11 @@ import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, ag
 import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
 import getPort from 'get-port';
 import fs from "fs";
+import { createResolvers } from "./core/graphQL-interface/GraphQL";
 
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
 
 export interface OuterConfig {
-  //Path to resources used by ad4m-executor such as; hc, holochain, prolog
-  resourcePath: string
   //Path to be used for storing ad4m data
   appDataPath: string
   //Seed file used to load initial languages & agent configuration 
@@ -25,16 +24,16 @@ export interface OuterConfig {
   appLangAliases?: object,
   //Should the graphql server be started as mocking service
   mocks: boolean,
+  //Should we start a dApp UI server to allow connecting of crypto wallets
+  runDappServer: boolean,
+  //Optional port for the dApp UI server
+  dAppPort?: number,
   //Port for graphql server
   gqlPort?: number,
   //Port for holochain admin port
   hcPortAdmin?: number,
   //Port for holochain application port
   hcPortApp?: number,
-  //Port for IPFS swarm
-  ipfsSwarmPort?: number,
-  //Port for IPFS repo
-  ipfsRepoPath?: string
   //Should holochain use a local proxy
   hcUseLocalProxy?: boolean,
   //Should holochain use Mdns
@@ -43,14 +42,12 @@ export interface OuterConfig {
   hcUseProxy?: boolean,
   //Should holochain use a bootstrap server
   hcUseBootstrap?: boolean,
+  hcProxyUrl: string,
+  hcBootstrapUrl: string,
   //Should ad4m-executor connect to an existing holochain instance, or spawn its own
   connectHolochain?: boolean,
   //The credential used by admin client to make request
-  reqCredential?: string,
-  //Path to swipl executable
-  swiplPath?: string,
-  //Path to swipl home directory
-  swiplHomePath?: string,
+  adminCredential?: string
 }
 
 export interface SeedFileSchema {
@@ -81,15 +78,17 @@ export interface SeedFileSchema {
 }
 
 /// Main function which starts ad4m-executor
-export async function init(config: OuterConfig): Promise<PerspectivismCore> {
+export async function init(config: OuterConfig): Promise<Ad4mCore> {
     let { 
-      resourcePath, appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
-      mocks, gqlPort, ipfsSwarmPort, ipfsRepoPath, reqCredential, swiplPath, swiplHomePath
+      appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
+      mocks, gqlPort, adminCredential, runDappServer,
+      dAppPort
     } = config
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
     if(!config.hcPortAdmin) config.hcPortAdmin = await getPort({ port: 2000 });
     if(!config.hcPortApp) config.hcPortApp = await getPort({ port: 1337 });
+    if(!dAppPort) dAppPort = await getPort({port: 4200})
     if(config.hcUseMdns === undefined) config.hcUseMdns = false
     if(config.hcUseProxy === undefined) config.hcUseProxy = true
     if(config.hcUseBootstrap === undefined) config.hcUseBootstrap = true
@@ -151,22 +150,12 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
         preloadLanguages.push(address);
       })
     }
-    
 
-    console.log("\x1b[2m", 
-      "AD4M executor starting with version: ", ad4mExecutorVersion, "\n",
-      "Starting ad4m core with path:", appDataPath, "\n", 
-      "=> AD4M core language addresses: languageLanguage bundle (hidden) + ", systemLanguages.slice(1, systemLanguages.length), "\n",
-      "Languages to be preloaded, as supplied by appLangAliases", preloadLanguages, "\n",
-      "Language aliases:", languageAliases, "\n", 
-      "Bootstrap fixtures:", bootstrapFixtures, "\n",
-      "Resource path:", resourcePath, "\n", 
-      "\x1b[0m"
-    );
+    console.log("AD4M executor starting with config:");
+    console.dir(config);
 
     const core = new create({
       appDataPath,
-      appResourcePath: resourcePath,
       systemLanguages,
       preloadLanguages,
       languageLanguageBundle: networkBootstrapSeedData.languageLanguageBundle,
@@ -181,24 +170,15 @@ export async function init(config: OuterConfig): Promise<PerspectivismCore> {
       languageAliases,
       bootstrapFixtures,
       languageLanguageOnly,
-      reqCredential,
-      swiplPath,
-      swiplHomePath
+      adminCredential
     } as CoreConfig);
 
-    console.log("\x1b[34m", "Init services...", "\x1b[0m");
-    await core.initIPFS({ ipfsSwarmPort, ipfsRepoPath });
-    
-    console.log("\x1b[31m", "GraphQL server starting...", "\x1b[0m");
-
-    await core.startGraphQLServer(gqlPort, mocks, config);
-
-    console.log("\x1b[31m", "GraphQL server started, Unlock the agent to start holohchain", "\x1b[0m");
+    core.resolvers = createResolvers(core, config)
 
     return core
 }
 
 export default {
   init,
-  PerspectivismCore
+  Ad4mCore
 }

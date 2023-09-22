@@ -1,6 +1,5 @@
 import type { AppSignalCb } from '@holochain/client'
 import { Expression } from "../expression/Expression";
-import type { IPFS } from 'ipfs-core-types'
 
 export interface AgentService {
     readonly did: string
@@ -13,7 +12,6 @@ export interface SignaturesService {
 
 export interface LanguageContext {
     agent: AgentService;
-    IPFS: IPFS;
     signatures: SignaturesService;
     storageDirectory: string;
     customSettings: object;

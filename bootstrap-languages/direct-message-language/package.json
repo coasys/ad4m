@@ -1,17 +1,21 @@
 {
   "name": "@perspect3vism/direct-message-language",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "A templateable AD4M Language for personal, per-agent direct message Languages",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "test": "echo \"No direct message integration tests\"",
-    "build": "run-script-os",
-    "build:linux": "yarn run build-dna && tsc && rollup -c",
-    "build:macos": "yarn run build-dna && tsc && rollup -c",
-    "build:windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && tsc && rollup -c",
-    "build-dna": "cd hc-dna && ./build.sh && cd ..",
+    "rollup-dna": "rollup -c rollup.config.hc-dna.js",
+    "compile-dna": "cd hc-dna && ./build.sh && cd ..",
     "build-nix": "yarn run build-dna && tsc && rollup -c",
-    "dev": "tsc && rollup -c -w"
+    "compile-dna-windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd ..",
+    "deno-bundle": "deno bundle index.ts build/bundle.js",
+    "build": "run-script-os",
+    "build:linux": "yarn compile-dna && yarn build:common",
+    "build:macos": "yarn compile-dna && yarn build:common",
+    "build:windows": "yarn compile-dna-windows && yarn build:common",
+    "build:common": "yarn rollup-dna && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",

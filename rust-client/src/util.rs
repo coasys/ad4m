@@ -12,7 +12,7 @@ where
 {
     let response_body: Response<R> = reqwest::Client::new()
         .post(executor_url)
-        .header("Authorization", cap_token)
+        .header("authorization", cap_token)
         .json(&query)
         .send()
         .await?
@@ -35,7 +35,7 @@ where
 {
     Ok(reqwest::Client::new()
         .post(executor_url)
-        .header("Authorization", cap_token)
+        .header("authorization", cap_token)
         .json(&query)
         .send()
         .await?
@@ -77,12 +77,14 @@ pub async fn create_websocket_client(
     );
     request
         .headers_mut()
-        .insert("Authorization", HeaderValue::from_str(&cap_token).unwrap());
+        .insert("authorization", HeaderValue::from_str(&cap_token).unwrap());
     let (connection, _) = async_tungstenite::tokio::connect_async(request).await?;
 
     let (sink, stream) = connection.split();
-    Ok(GraphQLClientClientBuilder::new()
+    let client = GraphQLClientClientBuilder::new()
         .build(stream, sink, TokioSpawner::current())
         .await
-        .unwrap())
+        .unwrap();
+
+    Ok(client)
 }

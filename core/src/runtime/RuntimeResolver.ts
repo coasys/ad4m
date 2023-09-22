@@ -3,7 +3,7 @@ import { Perspective, PerspectiveExpression, PerspectiveInput } from "../perspec
 import { ExpressionProof } from "../expression/Expression";
 import { LinkExpression } from "../links/Links";
 import { ExceptionType } from "../Exception";
-import { DIRECT_MESSAGE_RECEIVED, EXCEPTION_OCCURRED_TOPIC } from '../PubSub';
+import { RUNTIME_MESSAGED_RECEIVED_TOPIC, EXCEPTION_OCCURRED_TOPIC } from '../PubSub';
 
 const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -177,7 +177,7 @@ export default class RuntimeResolver {
     }
 
  
-    @Subscription({topics: DIRECT_MESSAGE_RECEIVED, nullable: true})
+    @Subscription({topics: RUNTIME_MESSAGED_RECEIVED_TOPIC, nullable: true})
     runtimeMessageReceived(): PerspectiveExpression {
         return testPerspectiveExpression
     }

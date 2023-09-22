@@ -254,7 +254,6 @@ export async function mergeFetch(t) {
 
     await aliceConductor.shutDown();
     await bobConductor.shutDown();
-    await cleanAllConductors();
 }
 
 
@@ -267,6 +266,8 @@ test("pull", async (t) => {
         console.error("Pull test failed with error", e);
         //@ts-ignore
         t.fail(e)
+    } finally {
         t.end()
+        process.exit(0)
     }
 })

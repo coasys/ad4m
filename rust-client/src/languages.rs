@@ -152,8 +152,8 @@ pub async fn publish(
             language_meta: publish::LanguageMetaInput {
                 name,
                 description,
-                possibleTemplateParams: possible_template_params,
-                sourceCodeLink: source_code_link,
+                possible_template_params: possible_template_params,
+                source_code_link: source_code_link,
             },
         }),
     )

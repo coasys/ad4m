@@ -36,11 +36,15 @@ export class Subject {
                     if(results && results.length > 0) {
                         let expressionURI = results[0].Value
                         if(resolveExpressionURI) {
-                            const expression = await this.#perspective.getExpression(expressionURI)
                             try {
-                                return JSON.parse(expression.data)
-                            } catch(e) {
-                                return expression.data
+                                const expression = await this.#perspective.getExpression(expressionURI)
+                                try {
+                                    return JSON.parse(expression.data)
+                                } catch(e) {
+                                    return expression.data
+                                }
+                            } catch (err) {
+                                return expressionURI
                             }
                         } else {
                             return expressionURI
@@ -76,16 +80,6 @@ export class Subject {
             }
         }
         
-
-        const flattenPrologList = (list: object): any[] =>{
-            let result = []
-            while(list && list["head"]) {
-                result.push(list["head"])
-                list = list["tail"]
-            }
-            return result
-        }
-
         let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection(C, Collection)`)
         if(!results2) results2 = []
         let collections = results2.map(result => result.Collection)
@@ -96,7 +90,8 @@ export class Subject {
                 get: async () => {
                     let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
                     if(results && results.length > 0 && results[0].Value) {
-                        return flattenPrologList(eval(results[0].Value))
+                        let collectionContent = results[0].Value.filter((v: any) => v !== "" && v !== '')
+                        return collectionContent
                     } else {
                         return []
                     }

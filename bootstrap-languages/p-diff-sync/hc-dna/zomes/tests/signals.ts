@@ -28,7 +28,9 @@ export async function signals(t) {
             },
         }
     );
-    aliceHapps.conductor.appWs().on("signal", (signal) => {
+    const portAlice = await aliceHapps.conductor.attachAppInterface();
+    const appWs = await aliceHapps.conductor.connectAppWs(portAlice);
+    appWs.on("signal", (signal) => {
         console.log("Alice Received Signal:",signal)
         aliceSignalCount += 1;
     });
@@ -50,7 +52,9 @@ export async function signals(t) {
             }
         }
     );
-    bobHapps.conductor.appWs().on("signal", (signal) => {
+    const portBob = await bobHapps.conductor.attachAppInterface();
+    const appWsBob = await bobHapps.conductor.connectAppWs(portBob);
+    appWsBob.on("signal", (signal) => {
         console.log("Bob Received Signal:",signal)
         bobSignalCount += 1;
     })
@@ -98,4 +102,5 @@ export async function signals(t) {
 test("signals", async (t) => {
     await signals(t)
     t.end()
+    process.exit(0)
 })

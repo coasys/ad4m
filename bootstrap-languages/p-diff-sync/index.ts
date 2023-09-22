@@ -1,13 +1,13 @@
-import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "@perspect3vism/ad4m";
-import { LinkAdapter } from "./linksAdapter";
-import { TelepresenceAdapterImplementation } from "./telepresenceAdapter";
-import { DNA, DNA_NICK, ZOME_NAME } from "./dna";
+import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import { LinkAdapter } from "./linksAdapter.ts";
+import { TelepresenceAdapterImplementation } from "./telepresenceAdapter.ts";
+import { DNA, DNA_NICK, ZOME_NAME } from "./build/dna.js";
 
 function interactions(expression: Address): Interaction[] {
   return [];
 }
 
-//@ad4m-template-variable
+//!@ad4m-template-variable
 const name = "perspective-diff-sync";
 
 export default async function create(context: LanguageContext): Promise<Language> {
@@ -37,7 +37,7 @@ export default async function create(context: LanguageContext): Promise<Language
         await linksAdapter.handleHolochainSignal(signal)
       } else {
         for (const callback of telepresenceAdapter.signalCallbacks) {
-          callback(signal.payload);
+          await callback(signal.payload);
         }
       }
     }

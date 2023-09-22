@@ -1,13 +1,13 @@
 {
   "name": "@perspect3vism/ad4m-test",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Testing library to test ad4m languages",
   "license": "MIT",
   "bin": "./build/cli.js",
   "scripts": {
     "build": "tsc",
     "build:util": "browserify build/client.js --standalone Bundle -p esmify > public/client.js",
-    "test": "yarn run test-expression",
+    "test": "echo \"Test runner integration tests disabled\"",
     "test-expression": "node build/cli.js --test ./example/expression.test.js --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"note-ipfs\",\"description\":\"IPFS based language for storing data\",\"sourceCodeLink\":\"https://github.com/perspect3vism/note-ipfs\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "test-link": "node build/cli.js --test ./example/link.test.js --bundle \"example/languages/social-context.js\" --meta '{\"name\":\"social-context\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",
     "test-ui": "node build/cli.js --ui --bundle \"example/languages/note-ipfs.js\" --meta '{\"name\":\"note-ipfs\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'",

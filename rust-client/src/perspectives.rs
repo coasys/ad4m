@@ -6,6 +6,7 @@ use crate::util::{create_websocket_client, query, query_raw};
 use crate::ClientInfo;
 use anyhow::{anyhow, Context, Result};
 use chrono::naive::NaiveDateTime;
+use futures::StreamExt;
 use graphql_client::{GraphQLQuery, Response};
 use graphql_ws_client::graphql::StreamingOperation;
 use serde_json::Value;
@@ -184,8 +185,8 @@ pub async fn query_links(
                 source,
                 target,
                 predicate,
-                fromDate: from_date,
-                untilDate: until_date,
+                from_date: from_date,
+                until_date: until_date,
                 limit,
             },
         }),
@@ -263,8 +264,6 @@ pub async fn watch(
     id: String,
     link_callback: Box<dyn Fn(LinkExpression)>,
 ) -> Result<()> {
-    use futures::StreamExt;
-
     let mut client = create_websocket_client(executor_url, cap_token)
         .await
         .with_context(|| "Failed to create websocket client")?;

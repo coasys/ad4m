@@ -25,7 +25,6 @@ pub fn get_now() -> DateTime<Utc> {
 pub fn store_file_expression(expression: FileExpression) -> ExternResult<EntryHash> {
     let hash = hash_entry(&expression)?;
     create_entry(&EntryTypes::FileExpression(expression))?;
-
     Ok(hash)
 }
 

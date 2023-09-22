@@ -1,0 +1,188 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug ad4m executor for JS tests",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=ad4m",
+                    "--package=ad4m"
+                ],
+                "filter": {
+                    "name": "ad4m",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "run",
+                "--app-data-path", "/Users/nicolasluck/Coasys/code/ad4m/tests/js/tst-tmp/agents/integration-agent",
+                "--gql-port", "15500",
+                "--hc-admin-port", "15501",
+                "--hc-app-port", "15502",
+                "--ipfs-swarm-port", "15503",
+                "--hc-use-bootstrap", "false",
+                "--hc-use-proxy", "false",
+                "--hc-use-local-proxy", "false",
+                "--hc-use-mdns", "true",
+                "--language-language-only", "false",
+                "--run-dapp-server", "false"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'ad4m'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=ad4m",
+                    "--package=ad4m"
+                ],
+                "filter": {
+                    "name": "ad4m",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'ad4m'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=ad4m",
+                    "--package=ad4m"
+                ],
+                "filter": {
+                    "name": "ad4m",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'ad4m-client'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=ad4m-client"
+                ],
+                "filter": {
+                    "name": "ad4m-client",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'rust_executor'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=rust-executor"
+                ],
+                "filter": {
+                    "name": "rust_executor",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'rust_executor_bin'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=rust_executor_bin",
+                    "--package=rust-executor"
+                ],
+                "filter": {
+                    "name": "rust_executor_bin",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'rust_executor_bin'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=rust_executor_bin",
+                    "--package=rust-executor"
+                ],
+                "filter": {
+                    "name": "rust_executor_bin",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'ad4m-launcher'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=ad4m-launcher",
+                    "--package=ad4m-launcher"
+                ],
+                "filter": {
+                    "name": "ad4m-launcher",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'ad4m-launcher'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=ad4m-launcher",
+                    "--package=ad4m-launcher"
+                ],
+                "filter": {
+                    "name": "ad4m-launcher",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

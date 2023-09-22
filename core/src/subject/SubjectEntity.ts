@@ -3,15 +3,6 @@ import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom } from "./SDNADecorators";
 import { singularToPlural } from "./util";
 
-const flattenPrologList = (list: object): any[] => {
-  let result = []
-  while (list && list["head"]) {
-    result.push(list["head"])
-    list = list["tail"]
-  }
-  return result
-}
-
 export type QueryPartialEntity<T> = {
   [P in keyof T]?: T[P] | (() => string);
 };
@@ -49,13 +40,16 @@ export class SubjectEntity {
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, "${tempId}", "${p}", Value)`)
         if (results && results.length > 0) {
           let expressionURI = results[0].Value
-
           if (resolveExpressionURI) {
-            const expression = await this.#perspective.getExpression(expressionURI)
             try {
-              return JSON.parse(expression.data)
-            } catch (e) {
-              return expression.data
+              const expression = await this.#perspective.getExpression(expressionURI)
+              try {
+                return JSON.parse(expression.data)
+              } catch (e) {
+                return expression.data
+              }
+            } catch (err) {
+              return expressionURI
             }
           } else {
             return expressionURI
@@ -78,7 +72,7 @@ export class SubjectEntity {
       const getProperty = async () => {
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_getter(C, "${tempId}", "${c}", Value)`)
         if (results && results.length > 0 && results[0].Value) {
-          return flattenPrologList(eval(results[0].Value))
+          return eval(results[0].Value)
         } else {
           return []
         }
@@ -95,14 +89,13 @@ export class SubjectEntity {
   private async setProperty(key: string, value: any) {
     const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, "${key}", Setter)`)
     if (setters && setters.length > 0) {
-      const property = setters[0].Property
       const actions = eval(setters[0].Setter)
-      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${property}", Language)`)
+      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${key}", Language)`)
       let resolveLanguage
       if (resolveLanguageResults && resolveLanguageResults.length > 0) {
         resolveLanguage = resolveLanguageResults[0].Language
       }
-
+      
       if (resolveLanguage) {
         value = await this.#perspective.createExpression(value, resolveLanguage)
       }

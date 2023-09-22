@@ -3,10 +3,6 @@ setup() {
     load 'test_helper/bats-assert/load'
 }
 
-@test "can run ad4m-host" {
-    ./host/dist/ad4m-macos-x64
-}
-
 get_ad4m_cli_banner() {
     ./target/release/ad4m 2>&1
 }

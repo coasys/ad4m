@@ -1,8 +1,14 @@
 use std::sync::Arc;
 
-use crate::{types::Capability, util::query, ClientInfo};
+use crate::{
+    types::Capability,
+    util::{create_websocket_client, query},
+    ClientInfo,
+};
 use anyhow::{anyhow, Context, Result};
+use futures::StreamExt;
 use graphql_client::{GraphQLQuery, Response};
+use graphql_ws_client::graphql::StreamingOperation;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -23,11 +29,11 @@ pub async fn request_capability(
 ) -> Result<String> {
     let query = RequestCapability::build_query(request_capability::Variables {
         auth_info: request_capability::AuthInfoInput {
-            appName: app_name,
-            appDesc: app_desc,
-            appDomain: app_domain,
-            appUrl: app_url,
-            appIconPath: app_icon_path,
+            app_name: app_name,
+            app_desc: app_desc,
+            app_domain: app_domain,
+            app_url: app_url,
+            app_icon_path: app_icon_path,
             capabilities: capabilities.map(|val| val.into_iter().map(|val| val.into()).collect()),
         },
     });
@@ -296,6 +302,120 @@ pub async fn sign_message(
     Ok(response.agent_sign_message)
 }
 
+#[derive(GraphQLQuery, Debug, Clone)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct AddEntanglementProofs;
+
+pub async fn add_entanglement_proofs(
+    executor_url: String,
+    cap_token: String,
+    proofs: Vec<add_entanglement_proofs::EntanglementProofInput>,
+) -> Result<add_entanglement_proofs::ResponseData> {
+    query(
+        executor_url,
+        cap_token,
+        AddEntanglementProofs::build_query(add_entanglement_proofs::Variables { proofs }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-trusted-agents query")
+}
+
+#[derive(GraphQLQuery, Debug, Clone)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct DeleteEntanglementProofs;
+
+pub async fn delete_entanglement_proofs(
+    executor_url: String,
+    cap_token: String,
+    proofs: Vec<delete_entanglement_proofs::EntanglementProofInput>,
+) -> Result<delete_entanglement_proofs::ResponseData> {
+    query(
+        executor_url,
+        cap_token,
+        DeleteEntanglementProofs::build_query(delete_entanglement_proofs::Variables { proofs }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-trusted-agents query")
+}
+
+#[derive(GraphQLQuery, Debug, Clone)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct EntanglementProofPreFlight;
+
+pub async fn entanglement_proof_pre_flight(
+    executor_url: String,
+    cap_token: String,
+    device_key: String,
+    device_key_type: String,
+) -> Result<entanglement_proof_pre_flight::ResponseData> {
+    query(
+        executor_url,
+        cap_token,
+        EntanglementProofPreFlight::build_query(entanglement_proof_pre_flight::Variables {
+            device_key,
+            device_key_type,
+        }),
+    )
+    .await
+    .with_context(|| "Failed to run runtime->add-trusted-agents query")
+}
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/agent.gql",
+    response_derives = "Debug"
+)]
+pub struct SubscriptionAgentStatusChanged;
+
+pub async fn watch(executor_url: String, cap_token: String) -> Result<()> {
+    let mut client = create_websocket_client(executor_url, cap_token)
+        .await
+        .with_context(|| "Failed to create websocket client")?;
+
+    println!("Successfully created websocket client");
+    let mut stream = client
+        .streaming_operation({
+            StreamingOperation::<SubscriptionAgentStatusChanged>::new(
+                subscription_agent_status_changed::Variables {},
+            )
+        })
+        .await
+        .with_context(|| "Failed to subscribe to agentStatusChanged")?;
+
+    println!("Successfully subscribed agentStatusChanged",);
+    println!("Waiting for events...");
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(response) => {
+                if let Some(data) = response.data.and_then(|data| data.agent_status_changed) {
+                    println!("Received agentStatusChanged: {:?}", data);
+                }
+            }
+            Err(e) => {
+                println!("Received Error: {:?}", e);
+            }
+        }
+    }
+
+    println!("Stream ended. Exiting...");
+
+    Ok(())
+}
+
 pub struct AgentClient {
     info: Arc<ClientInfo>,
 }
@@ -388,5 +508,47 @@ impl AgentClient {
             message,
         )
         .await
+    }
+
+    pub async fn add_entanglement_proofs(
+        &self,
+        proofs: Vec<add_entanglement_proofs::EntanglementProofInput>,
+    ) -> Result<add_entanglement_proofs::ResponseData> {
+        add_entanglement_proofs(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            proofs,
+        )
+        .await
+    }
+
+    pub async fn delete_entanglement_proofs(
+        &self,
+        proofs: Vec<delete_entanglement_proofs::EntanglementProofInput>,
+    ) -> Result<delete_entanglement_proofs::ResponseData> {
+        delete_entanglement_proofs(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            proofs,
+        )
+        .await
+    }
+
+    pub async fn entanglement_proof_pre_flight(
+        &self,
+        device_key: String,
+        device_key_type: String,
+    ) -> Result<entanglement_proof_pre_flight::ResponseData> {
+        entanglement_proof_pre_flight(
+            self.info.executor_url.clone(),
+            self.info.cap_token.clone(),
+            device_key,
+            device_key_type,
+        )
+        .await
+    }
+
+    pub async fn watch(&self) -> Result<()> {
+        watch(self.info.executor_url.clone(), self.info.cap_token.clone()).await
     }
 }

@@ -109,7 +109,7 @@ test("Create update agent expression", async (t) => {
 
 
     //====================
-    await new Promise(r => setTimeout(r, 1000))
+    await new Promise(r => setTimeout(r, 5000))
     //====================
 
     let bobResult = await bob.cells[0].callZome({
@@ -125,5 +125,9 @@ test("Create update agent expression", async (t) => {
     await bobConductor.conductor.shutDown();
     await cleanAllConductors();
     await scenario.cleanUp()
+
+    t.end();
+
+    process.exit(0);
   })
 })

@@ -51,7 +51,9 @@ test("send direct message", async (t) => {
             }
         }
     }]);
-    alice.conductor.appWs().on("signal", (signal) => {
+    const portAlice = await alice.conductor.attachAppInterface();
+    const appWs = await alice.conductor.connectAppWs(portAlice);
+    appWs.on("signal", (signal) => {
       let payload = signal.payload
       try {
         let cropped = signal.payload.toString().substring(7)
@@ -193,7 +195,7 @@ test("send direct message", async (t) => {
       payload: message2
     }))
 
-    await sleep(1000)
+    await sleep(5000)
 
     inbox = await alice.cells[0].callZome({
       zome_name: ZOME, 
@@ -214,7 +216,7 @@ test("send direct message", async (t) => {
       bobFetchError = e
     }
     //@ts-ignore
-    t.equal(bobFetchError.data.data, 'Wasm runtime error while working with Ribosome: RuntimeError: WasmError { file: "zomes/direct-message/src/lib.rs", line: 237, error: Guest("Only recipient can fetch the inbox") }')
+    t.equal(JSON.parse(JSON.stringify(bobFetchError)).message, 'Wasm runtime error while working with Ribosome: RuntimeError: WasmError { file: "zomes/direct-message/src/lib.rs", line: 241, error: Guest("Only recipient can fetch the inbox") }')
 
     console.log("fetch_inbox Alice:", await alice.cells[0].callZome({
       zome_name: ZOME, 
