@@ -36,6 +36,21 @@ impl PubSub {
         rx
     }
 
+    pub async fn remove_dead_subscribers(&self) {
+        let mut subscribers = self.subscribers.lock().await;
+        for (_, subscribers_vec) in subscribers.iter_mut() {
+            let mut i = 0;
+            while i < subscribers_vec.len() {
+                if subscribers_vec[i].is_closed() {
+                    warn!("Found closed subscriber, removing...");
+                    subscribers_vec.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
     pub async fn publish(&self, topic: &Topic, message: &Message) {
         let mut subscribers = self.subscribers.lock().await;
         
@@ -63,6 +78,7 @@ pub(crate) async fn subscribe_and_process<
     filter: Option<String>,
 ) -> Pin<Box<dyn Stream<Item = FieldResult<T::Value>> + Send>> {
     debug!("Subscribing to topic: {}", topic);
+    pubsub.remove_dead_subscribers().await;
     let receiver = pubsub.subscribe(&topic).await;
     let receiver_stream = WatchStream::from_changes(receiver);
 
