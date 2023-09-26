@@ -27,7 +27,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     //@ts-ignore
     this.hcDna = context.Holochain as HolochainLanguageDelegate;
     this.me = context.agent.did;
-    this.socket = io("wss://socket.ad4m.dev");
+    this.socket = io("wss://socket.ad4m.dev", { transports: ['websocket'] });
     console.log("Created socket connection");
     console.dir(this.socket);
     this.socket.on('error', (error: any) => {
@@ -38,6 +38,12 @@ export class LinkAdapter implements LinkSyncAdapter {
     });
     this.socket.on('disconnect', () => {
       console.log('Disconnected from the server');
+    });
+    this.socket.on('connect_error', (error) => {
+      console.error('Connection Error:', error);
+    });
+    this.socket.on('reconnect_attempt', () => {
+      console.log('Trying to reconnect...');
     });
     this.socket.emit("join-room", DNA.toString());
     this.socket.on("signal", (signal: any) => {
