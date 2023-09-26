@@ -64,6 +64,12 @@ pub fn sync(_: ()) -> ExternResult<Option<Hash>> {
 }
 
 #[hdk_extern]
+pub fn get_broadcast_payload(_: ()) -> ExternResult<Option<HashBroadcast>> {
+    link_adapter::commit::get_broadcast_payload::<retriever::HolochainRetreiver>()
+        .map_err(|error| utils::err(&format!("{}", error)))
+}
+
+#[hdk_extern]
 pub fn pull(args: PullArguments) -> ExternResult<PullResult> {
     link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
         .map_err(|error| utils::err(&format!("{}", error)))

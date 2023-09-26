@@ -2,7 +2,8 @@ import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, La
   LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
-import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
+import { DNA_NICK, ZOME_NAME, DNA } from "./build/dna.js";
+import { io } from "https://esm.sh/socket.io-client@4.7.2";
 
 class PeerInfo {
   //@ts-ignore
@@ -20,11 +21,28 @@ export class LinkAdapter implements LinkSyncAdapter {
   me: DID
   gossipLogCount: number = 0;
   myCurrentRevision: Buffer | null = null;
+  socket: any | null = null;
 
   constructor(context: LanguageContext) {
     //@ts-ignore
     this.hcDna = context.Holochain as HolochainLanguageDelegate;
     this.me = context.agent.did;
+    this.socket = io("wss://socket.ad4m.dev");
+    console.log("Created socket connection");
+    console.dir(this.socket);
+    this.socket.on('error', (error: any) => {
+      console.error('Error:', error);
+    });
+    this.socket.on('connect', () => {
+      console.log('Connected to the server');
+    });
+    this.socket.on('disconnect', () => {
+      console.log('Disconnected from the server');
+    });
+    this.socket.emit("join-room", DNA.toString());
+    this.socket.on("signal", (signal: any) => {
+      this.handleHolochainSignal(signal);
+    });
   }
 
   writable(): boolean {
@@ -52,9 +70,14 @@ export class LinkAdapter implements LinkSyncAdapter {
     //console.log("PerspectiveDiffSync.sync(); Got lock");
     try {
       //@ts-ignore
-      let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
-      if (current_revision && Buffer.isBuffer(current_revision)) {
-        this.myCurrentRevision = current_revision; 
+      let broadcast_payload = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_broadcast_payload", null);
+      if (broadcast_payload) {
+        //Use client to send to socketIO
+        console.log("Broadcast to socket");
+        this.socket.emit("broadcast", {roomId: DNA.toString(), signal: broadcast_payload});
+      }
+      if (broadcast_payload.reference_hash && Buffer.isBuffer(broadcast_payload.reference_hash)) {
+        this.myCurrentRevision = broadcast_payload.reference_hash;
       }
     } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);
@@ -197,6 +220,11 @@ export class LinkAdapter implements LinkSyncAdapter {
       let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "commit", prep_diff);
       if (res && Buffer.isBuffer(res)) {
         this.myCurrentRevision = res;
+      }
+      let broadcast_payload = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_broadcast_payload", null);
+      if (broadcast_payload) {
+        //Use client to send to socketIO
+        this.socket.emit("broadcast", {roomId: DNA.toString(), signal: broadcast_payload});
       }
       return res as string;
     } catch (e) {
