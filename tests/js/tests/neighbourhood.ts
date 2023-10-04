@@ -5,7 +5,7 @@ import fs from "fs";
 import { v4 as uuidv4 } from 'uuid';
 import { expect } from "chai";
 
-const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
+const DIFF_SYNC_OFFICIAL = Deno.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 let aliceP1: null | PerspectiveProxy = null;
 let bobP1: null | PerspectiveHandle = null;
 

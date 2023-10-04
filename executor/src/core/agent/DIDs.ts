@@ -1,4 +1,4 @@
-import { resolver } from '@transmute/did-key.js';
+// import { resolver } from '@transmute/did-key.js';
 
 export class DIDResolver {
     #cacheMap = new Map()
@@ -11,10 +11,10 @@ export class DIDResolver {
         } 
         
         try {
-            const resolved = await resolver.resolve(did)
-            if(resolved) {
-                return resolved
-            }
+            // const resolved = await resolver.resolve(did)
+            // if(resolved) {
+            //     return resolved
+            // }
         } catch(e){}
         
         console.debug("Downloading document for DID:", did)

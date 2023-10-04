@@ -72,9 +72,10 @@ impl ModuleLoader for StringModuleLoader {
                 Box::pin(fut)
             }
             Err(_err) => {
-                info!("Module is not a file path, importing as raw module string");
+                info!("Module is not a file path, importing as raw module string {:?}", module_specifier.as_str());
                 let module_code = self.modules.get(module_specifier.as_str()).cloned();
                 let module_specifier = module_specifier.clone();
+                info!("mmmm 2 {:?}", module_specifier);
                 let fut = async move {
                     match module_code {
                         Some(code) => Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, code.into(), &module_specifier)),

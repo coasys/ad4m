@@ -59,7 +59,7 @@ export async function installSystemLanguages(relativePath = '') {
 
     const languageLanguageBundlePath = path.join(__dirname, 'languages', "languages", "build", "bundle.js");
         
-    seed['languageLanguageBundle'] = fs.readFileSync(languageLanguageBundlePath).toString();
+    seed['languageLanguageBundle'] = Deno.readFileSync(languageLanguageBundlePath).toString();
     seed['languageLanguageSettings'] = { storagePath: path.join(__dirname, 'publishedLanguages') }
     seed['neighbourhoodLanguageSettings'] = { storagePath: path.join(__dirname, 'publishedNeighbourhood') }
 

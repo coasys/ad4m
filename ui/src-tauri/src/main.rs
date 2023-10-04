@@ -14,6 +14,7 @@ use std::fs;
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(not(target_os = "windows"))]
 use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
 use std::io;
 use std::io::Write;
@@ -75,9 +76,8 @@ pub struct AppState {
     req_credential: String,
 }
 
-fn main() {
-    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debug,ad4m_launcher=info,warn,error");
-
+#[cfg(not(target_os = "windows"))]
+fn rlimit_nofile() {
     let mut rlim: rlimit = rlimit { rlim_cur: 0, rlim_max: 0 };
 
     // Get the current file limit
@@ -107,6 +107,13 @@ fn main() {
     }
 
     println!("Updated RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
+}
+
+fn main() {
+    env::set_var("RUST_LOG", "rust_executor=info,error,warn,debug,ad4m_launcher=info,warn,error");
+
+    #[cfg(not(target_os = "windows"))]
+    rlimit_nofile();
 
     if !data_path().exists() {
         let _ = fs::create_dir_all(data_path());

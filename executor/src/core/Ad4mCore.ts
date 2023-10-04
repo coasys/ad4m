@@ -13,12 +13,11 @@ import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import EntanglementProofController from './EntanglementProof'
-import fs from 'fs'
+import * as fs from "https://deno.land/std@0.203.0/fs/mod.ts";
 import { AgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
-import path from "path";
 import { getPubSub, sleep } from "./utils";
 
 export interface InitServicesParams {
@@ -72,14 +71,19 @@ export default class Ad4mCore {
 
     constructor(config: Config.CoreConfig) {
         this.#config = Config.init(config);
-
+        console.log('kkkkk 1')
         this.#agentService = new AgentService(this.#config.rootConfigPath, this.#config.adminCredential)
+        console.log('kkkkk 2')
         this.#runtimeService = new RuntimeService(this.#config)
+        console.log('kkkkk 3')
         this.#agentService.ready.then(() => {
             this.#runtimeService.did = this.#agentService!.did!
         })
+        console.log('kkkkk 4')
         this.#agentService.load()
+        console.log('kkkkk 5')
         this.#db = Db.init(this.#config.dataPath)
+        console.log('kkkkk 6')
         this.#didResolver = DIDs.init(this.#config.dataPath)
         this.#signatures = new Signatures()
         const that = this
@@ -318,8 +322,8 @@ export default class Ad4mCore {
         if (!this.#languageController) {
             throw Error("LanguageController not been init'd. Please init before calling language altering functions.")
         };
-
-        const sourceLanguage = fs.readFileSync(languagePath).toString();
+        const decoder = new TextDecoder("utf-8");
+        const sourceLanguage = decoder.decode(Deno.readFileSync(languagePath));
         const sourceLanguageLines = sourceLanguage!.split("\n");
 
         const languageLanguageInput = await this.#languageController.constructLanguageLanguageInput(sourceLanguageLines, languageMeta)

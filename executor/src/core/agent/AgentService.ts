@@ -1,5 +1,5 @@
-import * as path from "path";
-import * as fs from "fs";
+import * as path from "https://deno.land/std@0.203.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.203.0/fs/mod.ts";
 import { Key } from "../../wallet_extension";
 import {
   Language,
@@ -11,7 +11,7 @@ import {
 import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@perspect3vism/ad4m";
 import Signatures from "./Signatures";
 import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
-import { resolver } from "@transmute/did-key.js";
+// import { resolver } from "@transmute/did-key.js";
 import { v4 as uuidv4 } from "uuid";
 import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
 import {
@@ -52,7 +52,9 @@ export default class AgentService {
     this.#fileProfile = path.join(rootConfigPath, "agentProfile.json");
     this.#appsFile = path.join(rootConfigPath, "apps.json");
     try {
-      this.#apps = JSON.parse(fs.readFileSync(this.#appsFile).toString());
+      const decoder = new TextDecoder("utf-8");
+      const data = decoder.decode(Deno.readFileSync(this.#appsFile));
+      this.#apps = JSON.parse(data);
     } catch (e) {
       this.#apps = [];
     }
@@ -177,7 +179,9 @@ export default class AgentService {
   }
 
   async storeAgentProfile() {
-    fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent));
+    const encoder = new TextEncoder();
+    const data = encoder.encode(JSON.stringify(this.#agent));
+    Deno.writeFileSync(this.#fileProfile, data);
 
     const agentLanguage = this.getAgentLanguage();
 
@@ -210,17 +214,24 @@ export default class AgentService {
 
   async createNewKeys() {
     WALLET.createMainKey()
+    
     const didDocument = WALLET.getMainKeyDocument()
     const key = didDocument.verificationMethod[0]
+
+    console.log('mmmmmm', JSON.stringify(didDocument), JSON.stringify(WALLET.getMainKey()), JSON.stringify(WALLET.export()))
     
     this.#did = key.controller;
-    this.#didDocument = JSON.stringify(await resolver.resolve(this.#did));
+    // this.#didDocument = JSON.stringify(await resolver.resolve(this.#did));
     this.#agent = new Agent(this.#did);
     this.#signingKeyId = key.id;
   }
 
   isInitialized() {
-    return fs.existsSync(this.#file);
+    try {
+      return fs.existsSync(this.#file);
+    } catch (e) {
+      return false;
+    }
   }
 
   isUnlocked() {
@@ -259,22 +270,28 @@ export default class AgentService {
       agent: this.#agent,
     };
 
-    fs.writeFileSync(this.#file, JSON.stringify(dump));
+    const encoder = new TextEncoder();
+    const data = encoder.encode(JSON.stringify(dump));
+    Deno.writeFileSync(this.#file, data);
     this.#readyPromiseResolve!();
   }
 
   load() {
     if (!this.isInitialized()) return;
 
-    const dump = JSON.parse(fs.readFileSync(this.#file).toString());
+    const decoder = new TextDecoder("utf-8");
+    const data = decoder.decode(Deno.readFileSync(this.#file));
+    const dump = JSON.parse(data);
 
     this.#did = dump.did;
     this.#didDocument = dump.didDocument;
     this.#signingKeyId = dump.signingKeyId;
     WALLET.load(dump.keystore);
-    if (fs.existsSync(this.#fileProfile))
-      this.#agent = JSON.parse(fs.readFileSync(this.#fileProfile).toString());
-    else {
+    if (fs.existsSync(this.#fileProfile)) {
+      const decoder = new TextDecoder("utf-8");
+      const data = decoder.decode(Deno.readFileSync(this.#fileProfile));
+      this.#agent = JSON.parse(data);
+    } else {
       this.#agent = new Agent(this.#did!);
     }
   }
@@ -355,7 +372,10 @@ export default class AgentService {
     if (requestId === this.#requestingAuthInfo?.requestId) {
       const apps = [...this.#apps, { ...this.#requestingAuthInfo, token: jwt }];
       this.#apps = apps;
-      fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
+
+      const encoder = new TextEncoder();
+      const data = encoder.encode(JSON.stringify(apps));
+      Deno.writeFileSync(this.#appsFile, data);
 
       await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);      
     }
@@ -371,7 +391,9 @@ export default class AgentService {
     try {
       this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId);
 
-      fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
+      const encoder = new TextEncoder();
+      const data = encoder.encode(JSON.stringify(this.#apps));
+      Deno.writeFileSync(this.#appsFile, data);
 
       await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
     } catch (e) {
@@ -385,7 +407,9 @@ export default class AgentService {
         app.requestId === requestId ? { ...app, revoked: true } : app
       );
 
-      fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
+      const encoder = new TextEncoder();
+      const data = encoder.encode(JSON.stringify(this.#apps));
+      Deno.writeFileSync(this.#appsFile, data);
 
       await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
     } catch (e) {

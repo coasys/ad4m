@@ -47,7 +47,7 @@ function createTestingAgent() {
 
 function injectSystemLanguages() {
     if (fs.existsSync(bootstrapSeedPath)) {
-        const bootstrapSeed = JSON.parse(fs.readFileSync(bootstrapSeedPath).toString());
+        const bootstrapSeed = JSON.parse(Deno.readFileSync(bootstrapSeedPath).toString());
         bootstrapSeed["directMessageLanguage"] = languageHashes["directMessageLanguage"];
         bootstrapSeed["agentLanguage"] = languageHashes["agentLanguage"];
         bootstrapSeed["perspectiveLanguage"] = languageHashes["perspectiveLanguage"];

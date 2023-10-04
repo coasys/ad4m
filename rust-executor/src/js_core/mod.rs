@@ -189,6 +189,24 @@ impl JsCore {
             .expect("init_engine(): could not execute main module");
     }
 
+    // async fn init_engine(&self) {
+    //     info!("llll 8-1");
+    //     let mut worker = self
+    //         .worker
+    //         .lock()
+    //         .expect("init_engine(): couldn't lock worker");
+    //     info!("llll 8-2");
+    //     worker.bootstrap(&BootstrapOptions::default());
+    //     info!("llll 8-3");
+    //     match worker
+    //         .execute_main_module(&main_module_url())
+    //         .await {
+    //             Ok(_) => info!("worked"),
+    //             Err(err) => info!("Didnt work {:?}", err)
+    //         }
+    //     info!("llll 8-4");
+    // }
+
     fn event_loop(&self) -> EventLoopFuture {
         let event_loop = EventLoopFuture::new(self.worker.clone());
         event_loop
@@ -199,6 +217,7 @@ impl JsCore {
             .worker
             .lock()
             .expect("init_core(): couldn't lock worker");
+        info!("wow {:?}", format!("initCore({})", config.get_json()));
         let _init_core =
             worker.execute_script("js_core", format!("initCore({})", config.get_json()).into())?;
         Ok(GlobalVariableFuture::new(
@@ -229,45 +248,56 @@ impl JsCore {
     }
 
     pub async fn start(config: Ad4mConfig) -> JsCoreHandle {
+        info!("llll 1");
         let (tx_inside, rx_outside) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside, mut rx_inside) = mpsc::unbounded_channel::<JsCoreRequest>();
-
+        info!("llll 2");
         let (tx_inside_loader, rx_outside_loader) = broadcast::channel::<JsCoreResponse>(50);
         let (tx_outside_loader, mut rx_inside_loader) = mpsc::unbounded_channel::<JsCoreRequest>();
-
+        info!("llll 3");
         let tx_inside_clone = tx_inside.clone();
         let tx_inside_loader_clone = tx_inside_loader.clone();
+        info!("llll 4");
         std::thread::spawn(move || {
+            info!("llll 5");
             let rt = Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to create Tokio runtime");
+            info!("llll 6");
             let _guard = rt.enter();
-
+            info!("llll 7");
             let js_core = JsCore::new();
-
+            info!("llll 8");
             rt.block_on(js_core.init_engine());
+            info!("llll 9");
             info!("AD4M JS engine init completed");
-
             rt.block_on(async {
+                info!("llll 10-1");
                 let local = LocalSet::new();
+                info!("llll 10-2");
                 let tx_cloned = tx_inside.clone();
+                info!("llll 10-3");
                 let init_core_future = js_core
                     .init_core(config)
                     .expect("couldn't spawn JS initCore()");
+                info!("llll 10-4");
 
                 // Run the local task set.
                 let run_until = local.run_until(async move {
+                    info!("llll 11-1");
                     match init_core_future.await {
-                        Ok(_) => {}
+                        Ok(_) => {info!("llll 11-2");}
                         Err(err) => error!("AD4M coreInit() failed with error: {}", err),
                     };
+                    info!("llll 11-3");
                     tx_cloned
                         .send(JsCoreResponse {
                             result: Ok(String::from("initialized")),
                             id: String::from("initialized"),
                         })
                         .expect("couldn't send on channel");
+                    info!("llll 11-4");
                 });
                 tokio::select! {
                     _init_core_result = run_until => {
@@ -275,7 +305,7 @@ impl JsCore {
                     }
                     event_loop_result = js_core.event_loop() => {
                         match event_loop_result {
-                            Ok(_) => info!("AD4M event loop finished"),
+                            Ok(_) => info!("AD4M event loop finished 101"),
                             Err(err) => error!("AD4M event loop closed with error: {}", err)
                         }
                     }
@@ -287,10 +317,13 @@ impl JsCore {
                     //Listener future for loading JS modules into runtime
                     let module_load_fut = async {
                         loop {
+                            info!("llll ------");
                             if let Ok(request) = rx_inside_loader.try_recv() {
+                                info!("llll 12-1");
                                 let tx_loader_cloned = tx_inside_loader.clone();
                                 let script = request.script;
                                 let id = request.id;
+                                info!("llll 12-2");
 
                                 match js_core.load_module(script).await {
                                     Ok(()) => {
@@ -323,9 +356,11 @@ impl JsCore {
                     let receive_fut = async {
                         loop {
                             if let Ok(request) = rx_inside.try_recv() {
+                                info!("llll 13-1");
                                 let tx_cloned = tx_inside.clone();
                                 let script = request.script;
                                 let id = request.id;
+                                info!("llll 13-2");
                                 global_req_id = Some(id.clone());
                                 match js_core.execute_async(script) {
                                     Ok(execute_async_future) => match execute_async_future.await {

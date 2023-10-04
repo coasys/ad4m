@@ -1,12 +1,12 @@
 import Ad4mCore from "./core/Ad4mCore";
-import create from "./core/Ad4mCore";
+import { create } from "./core/Ad4mCore";
 import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, agentLanguageAlias, neighbourhoodLanguageAlias, perspectiveLanguageAlias, ad4mExecutorVersion } from "./core/Config"
 // Patch Reflect to have missing getOwnPropertyDescriptor()
 // which should be there in any ES6 runtime but for some reason
 // is missing on some machines...
 import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
-import getPort from 'get-port';
-import fs from "fs";
+import { getPort } from "https://deno.land/x/getport/mod.ts";
+import * as fs from "https://deno.land/std@0.203.0/fs/mod.ts";
 import { createResolvers } from "./core/graphQL-interface/GraphQL";
 
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor
@@ -79,27 +79,32 @@ export interface SeedFileSchema {
 
 /// Main function which starts ad4m-executor
 export async function init(config: OuterConfig): Promise<Ad4mCore> {
+  console.log('hhhhhh 1')
     let { 
       appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
       mocks, gqlPort, adminCredential, runDappServer,
       dAppPort
     } = config
+    console.log('hhhhhh 1-1')
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
     if(!config.hcPortAdmin) config.hcPortAdmin = await getPort({ port: 2000 });
+    console.log('hhhhhh 1-2')
     if(!config.hcPortApp) config.hcPortApp = await getPort({ port: 1337 });
     if(!dAppPort) dAppPort = await getPort({port: 4200})
     if(config.hcUseMdns === undefined) config.hcUseMdns = false
     if(config.hcUseProxy === undefined) config.hcUseProxy = true
     if(config.hcUseBootstrap === undefined) config.hcUseBootstrap = true
     if(config.languageLanguageOnly === undefined) config.languageLanguageOnly = false;
-
+    console.log('hhhhhh 2')
     if(!fs.existsSync(networkBootstrapSeed)) {
       throw new Error(`Could not find networkBootstrapSeed at path ${networkBootstrapSeed}`)
     }
-
-    let networkBootstrapSeedData = JSON.parse(fs.readFileSync(networkBootstrapSeed).toString()) as SeedFileSchema;
-
+    const decoder = new TextDecoder("utf-8");
+    const data = Deno.readFileSync(networkBootstrapSeed);
+    console.log('hhhhhh 3' )
+    let networkBootstrapSeedData = JSON.parse(decoder.decode(data)) as SeedFileSchema;
+    console.log('hhhhhh 4')
     if (!languageLanguageOnly) {
       if (!networkBootstrapSeedData.directMessageLanguage) {
         throw new Error('Direct Message Language hash not passed in the seed file');
@@ -154,7 +159,7 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
     console.log("AD4M executor starting with config:");
     console.dir(config);
 
-    const core = new create({
+    const core = create({
       appDataPath,
       systemLanguages,
       preloadLanguages,
@@ -173,7 +178,11 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
       adminCredential
     } as CoreConfig);
 
+    console.log('mmmmmmmmm 1', JSON.stringify(core))
+
     core.resolvers = createResolvers(core, config)
+
+    console.log('mmmmmmmmm 2', JSON.stringify(core.resolvers))
 
     return core
 }

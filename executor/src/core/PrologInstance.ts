@@ -1,5 +1,5 @@
 import Perspective from "./Perspective";
-import { randomUUID } from "crypto";
+// import { randomUUID } from "crypto";
 
 export default class PrologInstance {
     //@ts-ignore
@@ -7,7 +7,7 @@ export default class PrologInstance {
     name: string;
 
     constructor(perspective: Perspective) {
-        this.name = perspective.uuid || randomUUID()
+        this.name = perspective.uuid!
     }
 
     async start() {

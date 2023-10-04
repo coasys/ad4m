@@ -1,22 +1,27 @@
-import "https://deno.land/std@0.177.0/node/util.ts";
-import "https://deno.land/std@0.177.0/node/global.ts";
+// import "https://deno.land/std@0.177.0/node/util.ts";
+// import "https://deno.land/std@0.177.0/node/global.ts";
+import "node:util"
 
-const process = globalThis.process;
-const Buffer = globalThis.Buffer;
+import * as internalProcess from "node:process"
+import * as internalBuffer  from 'node:buffer'
+
+export const process = internalProcess;
+const Buffer = internalBuffer;
 const setImmediate = globalThis.setImmediate;
 const clearImmediate = globalThis.clearImmediate;
 const __dirname = new URL('.', import.meta.url).pathname;
 const __filename = new URL('', import.meta.url).pathname;
 globalThis.__dirname = __dirname;
 globalThis.__filename = __filename;
+globalThis.process = process;
 
 import { init as internalInit } from "./main.ts"
-import * as internalPath from "https://deno.land/std@0.177.0/node/path.ts";
-import * as internalOs from "https://deno.land/std@0.177.0/node/os.ts"
+import * as internalPath from "https://deno.land/std@0.195.0/path/mod.ts";
+// import * as internalOs from "https://deno.land/std@0.177.0/node/os.ts"
 
 export const init = internalInit
 export const path = internalPath
-export const os = internalOs
+// export const os = internalOs
 
 console.log = (...args) => {
   UTILS.consoleLog(`${args.reduce((acc, cur) => acc += `${cur} `, "")}`)
@@ -34,9 +39,12 @@ console.warn = (...args) => {
   UTILS.consoleWarn(`${args.reduce((acc, cur) => acc += `${cur} `, "")}`)
 };
 
+
 import "https://deno.land/x/xhr@0.3.0/mod.ts";
 
 import { HTMLElement } from "linkedom"
 
 // @ts-ignore
 globalThis.HTMLElement = HTMLElement;
+
+console.log('wellp')

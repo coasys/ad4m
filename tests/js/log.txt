@@ -1,0 +1,2005 @@
+yarn run v1.22.19
+$ ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration.test.ts
+
+
+  Integration tests
+C:\Users\fayee\dev\ad4m\tests\js\bootstrapSeed.json
+C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice
+Starting executor
+USING LOCAL BOOTSTRAP & PROXY URL:  http://127.0.0.1:62655 ws://127.0.0.1:62656
+Waiting for executor to settle...
+[2023-08-28T13:43:14Z INFO  rust_executor] Initializing Prolog service...
+[2023-08-28T13:43:14Z INFO  rust_executor] Starting js_core...
+
+[2023-08-28T13:43:14Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2023-08-28T13:43:14Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2023-08-28T13:43:14Z INFO  rust_executor::js_core] AD4M JS engine init completed
+
+[2023-08-28T13:43:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "AD4M executor starting with config: "
+
+{
+  appDataPath: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice",
+  networkBootstrapSeed: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\mainnet_seed.seed",
+  languageLanguageOnly: false,
+  runDappServer: false,
+  gqlPort: 15300,
+  hcPortAdmin: 15301,
+  hcPortApp: 15302,
+  hcUseLocalProxy: true,
+  hcUseMdns: true,
+  hcUseProxy: true,
+  hcUseBootstrap: false,
+  hcProxyUrl: "ws://127.0.0.1:62656",
+  hcBootstrapUrl: "http://127.0.0.1:62655",
+  connectHolochain: false,
+  adminCredential: null
+}
+
+[2023-08-28T13:43:14Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "adminCredential is not set or empty, empty token will possess admin capabililities. "
+
+[2023-08-28T13:43:14Z INFO  rust_executor::js_core] AD4M initCore() finished
+[2023-08-28T13:43:14Z INFO  rust_executor] js_core initialized.
+
+[2023-08-28T13:43:14Z INFO  rust_executor] Starting GraphQL...
+[2023-08-28T13:43:14Z INFO  rust_executor::js_core] AD4M init complete, starting await loop waiting for requests
+
+[2023-08-28T13:43:14Z INFO  warp::server] Server::run; addr=127.0.0.1:15300
+[2023-08-28T13:43:14Z INFO  warp::server] listening on http://127.0.0.1:15300
+
+    Agent / Agent-Setup
+      basic agent operations
+[2023-08-28T13:43:14Z INFO  warp::server] 127.0.0.1:62658 "GET /graphql HTTP/1.1" 101 "-" "-" 71.2µs
+
+[2023-08-28T13:43:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Init HolochainService with data path:  C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d . Conductor path:  C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\c . Resource path:   "
+[2023-08-28T13:43:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Holochain ports: admin=15301 app=15302 "
+
+[2023-08-28T13:43:14Z INFO  rust_executor::holochain_service] Starting holochain conductor with config: ConductorConfig {
+        tracing_override: None,
+        environment_path: DatabaseRootPath(
+            "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\c",
+        ),
+        keystore: LairServerInProc {
+            lair_root: None,
+        },
+        dpki: None,
+        admin_interfaces: None,
+        network: Some(
+            KitsuneP2pConfig {
+                transport_pool: [
+                    WebRTC {
+                        signal_url: "ws://127.0.0.1:62656",
+                    },
+                ],
+                bootstrap_service: None,
+                tuning_params: KitsuneP2pTuningParams {
+                    gossip_strategy: "sharded-gossip",
+                    gossip_loop_iteration_delay_ms: 1000,
+                    gossip_outbound_target_mbps: 100.0,
+                    gossip_inbound_target_mbps: 100.0,
+                    gossip_historic_outbound_target_mbps: 100.0,
+                    gossip_historic_inbound_target_mbps: 100.0,
+                    gossip_burst_ratio: 100.0,
+                    gossip_peer_on_success_next_gossip_delay_ms: 60000,
+                    gossip_peer_on_error_next_gossip_delay_ms: 300000,
+                    gossip_agent_info_update_interval_ms: 300000,
+                    gossip_round_timeout_ms: 60000,
+                    gossip_redundancy_target: 100.0,
+                    gossip_max_batch_size: 1000000,
+                    gossip_dynamic_arcs: true,
+                    gossip_arc_clamping: "none",
+                    default_rpc_single_timeout_ms: 60000,
+                    default_rpc_multi_remote_agent_count: 3,
+                    default_rpc_multi_remote_request_grace_ms: 3000,
+                    agent_info_expires_after_ms: 1200000,
+                    tls_in_mem_session_storage: 512,
+                    proxy_keepalive_ms: 120000,
+                    proxy_to_expire_ms: 300000,
+                    concurrent_limit_per_thread: 4096,
+                    tx2_quic_max_idle_timeout_ms: 60000,
+                    tx2_pool_max_connection_count: 4096,
+                    tx2_channel_count_per_connection: 2,
+                    tx2_implicit_timeout_ms: 60000,
+                    tx2_initial_connect_retry_delay_ms: 200,
+                    tx5_max_send_bytes: 16777216,
+                    tx5_max_recv_bytes: 16777216,
+                    tx5_max_conn_count: 255,
+                    tx5_max_conn_init_s: 60,
+                    tx5_ban_time_s: 10,
+                    danger_tls_keylog: "no_keylog",
+                    danger_gossip_recent_threshold_secs: 900,
+                    disable_publish: false,
+                    disable_recent_gossip: false,
+                    disable_historical_gossip: false,
+                    bootstrap_check_delay_backoff_multiplier: 2,
+                },
+                network_type: QuicMdns,
+            },
+        ),
+        db_sync_strategy: Fast,
+    }
+
+WARNING: running without local db encryption
+
+WARNING: running without local db encryption
+
+# lair-keystore connection_url # named-pipe:\\.\pipe\Zpm_QGJOhZj97_nMXatlQ?k=0skYk_kL9v-_jELFyjN8yexvkWmXNVN9CtW1CQzg1kE #
+# lair-keystore running #
+
+
+###HOLOCHAIN_SETUP###
+###HOLOCHAIN_SETUP_END###
+
+[2023-08-28T13:43:15Z INFO  rust_executor::holochain_service] Started holochain conductor
+[2023-08-28T13:43:15Z INFO  rust_executor::holochain_service] Added app interface: Ok(15302)
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Holochain run complete "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Holochain init complete "
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Wait for agent "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\\bundle.js "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\bundle.js
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:15Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:15 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4 "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4\\bundle.js "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:15 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4\bundle.js
+
+[2023-08-28T13:43:15Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:15Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: Installed DNA's: [object Object] "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: " with result: "
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4",
+  cell_info: [Object: null prototype] {
+    "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4-agent-store": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "agent-store"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4-agent-store",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb"... 30 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0k1rATXNCQrNKv2HXsEUcAzHuqTZYBU8Bq4sAEI46wYkfXAqJZ",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:16 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdexVtzt8GEY37qzRy15mNL59XrpjvZJjgYXa43j6CewKE "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwdexVtzt8GEY37qzRy15mNL59XrpjvZJjgYXa43j6CewKE\\bundle.js "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:16 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdexVtzt8GEY37qzRy15mNL59XrpjvZJjgYXa43j6CewKE\bundle.js
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:16Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:16 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdeBLCn99QU7DSnJuTFrp7TQGRZkrTDRXvxiv2XAbUFeEx "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwdeBLCn99QU7DSnJuTFrp7TQGRZkrTDRXvxiv2XAbUFeEx\\bundle.js "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:16 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdeBLCn99QU7DSnJuTFrp7TQGRZkrTDRXvxiv2XAbUFeEx\bundle.js
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:16Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\bundle.js
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:16Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Core languages init'd "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "wait for languages "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "finished wait "
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Agent doesn't have direct message language set yet. Creating from template... "
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Cloning direct message language from template... "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.readAndTemplateHolochainDNA: unpacking DNA "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::holochain_service] UnPacked dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\temp\\QmzSYwdgm4XKXgiZSuW7TKqauAZz4dhQ56aWdkiHufrw7Lc4wsL\\QmzSYwdgm4XKXgiZSuW7TKqauAZz4dhQ56aWdkiHufrw7Lc4wsL"
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.readAndTemplateHolochainDNA: packing DNA "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::holochain_service] Got dna name: "direct-message-language"
+
+[2023-08-28T13:43:16Z INFO  rust_executor::holochain_service] Packed dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\temp\\QmzSYwdgm4XKXgiZSuW7TKqauAZz4dhQ56aWdkiHufrw7Lc4wsL\\QmzSYwdgm4XKXgiZSuW7TKqauAZz4dhQ56aWdkiHufrw7Lc4wsL\\direct-message-language.dna"
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Writing meta & bundle path:  tst-tmp\\languages\\meta-QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS.json tst-tmp\\languages\\bundle-QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS.js "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:16 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS "
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:16Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS\\bundle.js "
+
+[2023-08-28T13:43:17Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:17 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:17Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS\bundle.js
+
+[2023-08-28T13:43:17Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:17Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:17Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: Installed DNA's: [object Object] "
+[2023-08-28T13:43:17Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: " with result: "
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS-direct-message-language": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "direct-message-language"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS-direct-message-language",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tE"... 42 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kxxRu3DlOFbW3juxagSIom2SboRH_aPAYi27sPi7lZYJztZYr",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2023-08-28T13:43:17Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: setting holochains signal callback for language QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS "
+[2023-08-28T13:43:17Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "adding callback on dm language "
+[2023-08-28T13:43:17Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU "
+
+[2023-08-28T13:43:17Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Agent's direct message language successfully cloned, installed and published! "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "\u{1b}[32m AD4M init complete \u{1b}[0m "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\\bundle.js "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\bundle.js
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:18Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4\\bundle.js "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:18 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4\bundle.js
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:18Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwdexVtzt8GEY37qzRy15mNL59XrpjvZJjgYXa43j6CewKE\\bundle.js "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:18 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdexVtzt8GEY37qzRy15mNL59XrpjvZJjgYXa43j6CewKE\bundle.js
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:18Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwdeBLCn99QU7DSnJuTFrp7TQGRZkrTDRXvxiv2XAbUFeEx\\bundle.js "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:18 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdeBLCn99QU7DSnJuTFrp7TQGRZkrTDRXvxiv2XAbUFeEx\bundle.js
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:18Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS\bundle.js
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\bundle.js
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:18Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:18Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: setting holochains signal callback for language QmzSYwdbDtzcXywMpnLpuTQ7b9WpQhLxUG2tEv7kY5mPGNwGQjS "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "adding callback on dm language "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU "
+
+[2023-08-28T13:43:18Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+        ✔ can get and create agent store (4203ms)
+[2023-08-28T13:43:18Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+[2023-08-28T13:43:19Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+[2023-08-28T13:43:19Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+[2023-08-28T13:43:19Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did na "
+
+[2023-08-28T13:43:19Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+        ✔ can get and create agent expression profile (1124ms)
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+        ✔ can mutate agent public profile (288ms)
+        ✔ can create entanglementProofPreFlight (76ms)
+    Runtime
+      ✔ Trusted Agents CRUD (102ms)
+      ✔ CRUD for known LinkLanguage templates (85ms)
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:test:1 "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:test:2 "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:test:1 "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:test:2 "
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+      ✔ CRUD for friends (86ms)
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:test:1 "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:test:2 "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+      ✔ doesn't mix up stores (94ms)
+      ✔ can deal with Holochain's agent_infos
+      ✔ can get runtimeInfo
+    Expression
+      Expressions
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Writing meta & bundle path:  tst-tmp\\languages\\meta-QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA.json tst-tmp\\languages\\bundle-QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA.js "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+        ✔ can get() my agent expression
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU "
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+        ✔ can getManyExpressions()
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+        ✔ can getRaw() my agent expression
+[2023-08-28T13:43:20Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+        ✔ can create()
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:20 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA "
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA\\bundle.js "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:20 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdmAKKivFm8sp7zLDPnT2kwyk2to8Ey1hqEb25DCPaJoRA\bundle.js
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:20Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "note-store language trying to get at path: tst-tmp\\note\\QmzSYwdd4yBri2qrfd1p6VHS1gDEH9baUgPvTvtRcD86CoYcSFD.txt "
+
+        ✔ can create valid signatures (71ms)
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "note-store language trying to get at path: tst-tmp\\note\\QmzSYwdhKzEdEQCtqU1SDakbw8qwmPogCoYwpxwADfZV8L6UYxQ.txt "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "note-store language trying to get at path: tst-tmp\\note\\QmzSYwdhKzEdEQCtqU1SDakbw8qwmPogCoYwpxwADfZV8L6UYxQ.txt "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "note-store language trying to get at path: tst-tmp\\note\\QmzSYwdbS4BenF8i4uD8G3iyU9ZdNP8erpV5wducXNsRkhbY3Dc.txt "
+
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "note-store language trying to get at path: tst-tmp\\note\\QmzSYwdbS4BenF8i4uD8G3iyU9ZdNP8erpV5wducXNsRkhbY3Dc.txt "
+
+        ✔ can get expression from cache (71ms)
+[2023-08-28T13:43:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Writing meta & bundle path:  tst-tmp\\languages\\meta-QmzSYwddb549zR6C4vDaQnjbC2FFJdSSK5HLQRu2puxvoV1JivH.json tst-tmp\\languages\\bundle-QmzSYwddb549zR6C4vDaQnjbC2FFJdSSK5HLQRu2puxvoV1JivH.js "
+
+[2023-08-28T13:43:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:21 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwddb549zR6C4vDaQnjbC2FFJdSSK5HLQRu2puxvoV1JivH "
+[2023-08-28T13:43:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwddb549zR6C4vDaQnjbC2FFJdSSK5HLQRu2puxvoV1JivH\\bundle.js "
+
+[2023-08-28T13:43:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:21 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:21Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddb549zR6C4vDaQnjbC2FFJdSSK5HLQRu2puxvoV1JivH\bundle.js
+
+[2023-08-28T13:43:21Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:21Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+        ✔ can use expression interactions (112ms)
+{
+  author: 'did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU',
+  timestamp: '2023-08-28T13:43:21.102Z',
+  data: 'Hello World',
+  proof: {
+    key: 'did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU#z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU',
+    signature: '2c29bf4bdec9c81d0f65eaa378820578b2af7c4958848a305f8a9febc6c98bef47d656a8035412dcf670f8e5f9f60b6626fa8d90590efe46e1a21829eadadc08',
+    valid: true,
+    invalid: false
+  }
+}
+        ✔ Literal language expressions can be created with signature and can get resolved from URL
+    Perspective
+      Perspectives
+        ✔ can create, get & delete perspective (107ms)
+        ✔ can CRUD local perspective links (96ms)
+        ✔ can CRUD local perspective links with local link method (80ms)
+        ✔ can make mutations using perspective addLinks(), removeLinks() & linkMutations() (101ms)
+        ✔ test local perspective links - time query (215ms)
+        ✔ test local perspective links (133ms)
+        ✔ subscriptions (1616ms)
+        ✔ can run Prolog queries (164ms)
+      PerspectiveProxy
+        ✔ can do link CRUD (90ms)
+        ✔ can do singleTarget operations (91ms)
+    with Alice and Bob
+C:\Users\fayee\dev\ad4m\tests\js\bootstrapSeed.json
+C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\bob
+Starting executor
+USING LOCAL BOOTSTRAP & PROXY URL:  http://127.0.0.1:62655 ws://127.0.0.1:62656
+Waiting for executor to settle...
+[2023-08-28T13:43:23Z INFO  rust_executor] Initializing Prolog service...
+[2023-08-28T13:43:23Z INFO  rust_executor] Starting js_core...
+
+[2023-08-28T13:43:23Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2023-08-28T13:43:23Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2023-08-28T13:43:24Z INFO  rust_executor::js_core] AD4M JS engine init completed
+
+[2023-08-28T13:43:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "AD4M executor starting with config: "
+
+{
+  appDataPath: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob",
+  networkBootstrapSeed: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\mainnet_seed.seed",
+  languageLanguageOnly: false,
+  runDappServer: false,
+  gqlPort: 15400,
+  hcPortAdmin: 15401,
+  hcPortApp: 15402,
+  hcUseLocalProxy: true,
+  hcUseMdns: true,
+  hcUseProxy: true,
+  hcUseBootstrap: false,
+  hcProxyUrl: "ws://127.0.0.1:62656",
+  hcBootstrapUrl: "http://127.0.0.1:62655",
+  connectHolochain: false,
+  adminCredential: null
+}
+
+[2023-08-28T13:43:24Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "adminCredential is not set or empty, empty token will possess admin capabililities. "
+
+[2023-08-28T13:43:24Z INFO  rust_executor::js_core] AD4M initCore() finished
+[2023-08-28T13:43:24Z INFO  rust_executor::js_core] AD4M init complete, starting await loop waiting for requests
+[2023-08-28T13:43:24Z INFO  rust_executor] js_core initialized.
+
+[2023-08-28T13:43:24Z INFO  rust_executor] Starting GraphQL...
+
+[2023-08-28T13:43:24Z INFO  warp::server] Server::run; addr=127.0.0.1:15400
+[2023-08-28T13:43:24Z INFO  warp::server] listening on http://127.0.0.1:15400
+
+[2023-08-28T13:43:24Z INFO  warp::server] 127.0.0.1:62665 "GET /graphql HTTP/1.1" 101 "-" "-" 26.5µs
+
+[2023-08-28T13:43:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Init HolochainService with data path:  C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d . Conductor path:  C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\c . Resource path:   "
+[2023-08-28T13:43:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Holochain ports: admin=15401 app=15402 "
+
+[2023-08-28T13:43:24Z INFO  rust_executor::holochain_service] Starting holochain conductor with config: ConductorConfig {
+        tracing_override: None,
+        environment_path: DatabaseRootPath(
+            "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\c",
+        ),
+        keystore: LairServerInProc {
+            lair_root: None,
+        },
+        dpki: None,
+        admin_interfaces: None,
+        network: Some(
+            KitsuneP2pConfig {
+                transport_pool: [
+                    WebRTC {
+                        signal_url: "ws://127.0.0.1:62656",
+                    },
+                ],
+                bootstrap_service: None,
+                tuning_params: KitsuneP2pTuningParams {
+                    gossip_strategy: "sharded-gossip",
+                    gossip_loop_iteration_delay_ms: 1000,
+                    gossip_outbound_target_mbps: 100.0,
+                    gossip_inbound_target_mbps: 100.0,
+                    gossip_historic_outbound_target_mbps: 100.0,
+                    gossip_historic_inbound_target_mbps: 100.0,
+                    gossip_burst_ratio: 100.0,
+                    gossip_peer_on_success_next_gossip_delay_ms: 60000,
+                    gossip_peer_on_error_next_gossip_delay_ms: 300000,
+                    gossip_agent_info_update_interval_ms: 300000,
+                    gossip_round_timeout_ms: 60000,
+                    gossip_redundancy_target: 100.0,
+                    gossip_max_batch_size: 1000000,
+                    gossip_dynamic_arcs: true,
+                    gossip_arc_clamping: "none",
+                    default_rpc_single_timeout_ms: 60000,
+                    default_rpc_multi_remote_agent_count: 3,
+                    default_rpc_multi_remote_request_grace_ms: 3000,
+                    agent_info_expires_after_ms: 1200000,
+                    tls_in_mem_session_storage: 512,
+                    proxy_keepalive_ms: 120000,
+                    proxy_to_expire_ms: 300000,
+                    concurrent_limit_per_thread: 4096,
+                    tx2_quic_max_idle_timeout_ms: 60000,
+                    tx2_pool_max_connection_count: 4096,
+                    tx2_channel_count_per_connection: 2,
+                    tx2_implicit_timeout_ms: 60000,
+                    tx2_initial_connect_retry_delay_ms: 200,
+                    tx5_max_send_bytes: 16777216,
+                    tx5_max_recv_bytes: 16777216,
+                    tx5_max_conn_count: 255,
+                    tx5_max_conn_init_s: 60,
+                    tx5_ban_time_s: 10,
+                    danger_tls_keylog: "no_keylog",
+                    danger_gossip_recent_threshold_secs: 900,
+                    disable_publish: false,
+                    disable_recent_gossip: false,
+                    disable_historical_gossip: false,
+                    bootstrap_check_delay_backoff_multiplier: 2,
+                },
+                network_type: QuicMdns,
+            },
+        ),
+        db_sync_strategy: Fast,
+    }
+
+WARNING: running without local db encryption
+
+WARNING: running without local db encryption
+
+# lair-keystore connection_url # named-pipe:\\.\pipe\eIp75XKZ7ObxhOYC8tuT_?k=MDoJ0hQj3Dm7pQrmjMcaxUYhW_nrBp1Fg4s8JqEfSFc #
+# lair-keystore running #
+
+
+###HOLOCHAIN_SETUP###
+###HOLOCHAIN_SETUP_END###
+
+[2023-08-28T13:43:25Z INFO  rust_executor::holochain_service] Started holochain conductor
+[2023-08-28T13:43:25Z INFO  rust_executor::holochain_service] Added app interface: Ok(15402)
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Holochain run complete "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Holochain init complete "
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Wait for agent "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\\bundle.js "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\bob\ad4m\languages\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\bundle.js
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:25Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:25 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4 "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4\\bundle.js "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:25 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\bob\ad4m\languages\QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4\bundle.js
+
+[2023-08-28T13:43:25Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:25Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: Installed DNA's: [object Object] "
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: " with result: "
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4",
+  cell_info: [Object: null prototype] {
+    "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4-agent-store": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "agent-store"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 120,  59,  78, 224, 221,
+    142,  83, 208, 142, 161,  23,  89,  15,
+    126, 254, 161, 133, 165, 153,  69,  70,
+    230,  19,  60, 139, 164,  26, 220, 123,
+    245, 170, 214,  58, 160, 171, 250
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4-agent-store",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d\\QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1R"... 28 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0k1rATXNCQrNKv2HXsEUcAzHuqTZYBU8Bq4sAEI46wYkfXAqJZ",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:26 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdexVtzt8GEY37qzRy15mNL59XrpjvZJjgYXa43j6CewKE "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\QmzSYwdexVtzt8GEY37qzRy15mNL59XrpjvZJjgYXa43j6CewKE\\bundle.js "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:26 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\bob\ad4m\languages\QmzSYwdexVtzt8GEY37qzRy15mNL59XrpjvZJjgYXa43j6CewKE\bundle.js
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:26Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:26 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdeBLCn99QU7DSnJuTFrp7TQGRZkrTDRXvxiv2XAbUFeEx "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\QmzSYwdeBLCn99QU7DSnJuTFrp7TQGRZkrTDRXvxiv2XAbUFeEx\\bundle.js "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:26 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\bob\ad4m\languages\QmzSYwdeBLCn99QU7DSnJuTFrp7TQGRZkrTDRXvxiv2XAbUFeEx\bundle.js
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:26Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\bob\ad4m\languages\QmzSYwddj8CMEsfgquEbPsxWjvG7VxvZ1Wfe6BcCDrYiuHYjHan\bundle.js
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:26Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Core languages init'd "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "wait for languages "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "finished wait "
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Agent doesn't have direct message language set yet. Creating from template... "
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Cloning direct message language from template... "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.readAndTemplateHolochainDNA: unpacking DNA "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::holochain_service] UnPacked dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\temp\\QmzSYwdgm4XKXgiZSuW7TKqauAZz4dhQ56aWdkiHufrw7Lc4wsL\\QmzSYwdgm4XKXgiZSuW7TKqauAZz4dhQ56aWdkiHufrw7Lc4wsL"
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.readAndTemplateHolochainDNA: packing DNA "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::holochain_service] Got dna name: "direct-message-language"
+
+[2023-08-28T13:43:26Z INFO  rust_executor::holochain_service] Packed dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\temp\\QmzSYwdgm4XKXgiZSuW7TKqauAZz4dhQ56aWdkiHufrw7Lc4wsL\\QmzSYwdgm4XKXgiZSuW7TKqauAZz4dhQ56aWdkiHufrw7Lc4wsL\\direct-message-language.dna"
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Writing meta & bundle path:  tst-tmp\\languages\\meta-QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY.json tst-tmp\\languages\\bundle-QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY.js "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:26 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY "
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY\\bundle.js "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:26 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\bob\ad4m\languages\QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY\bundle.js
+
+[2023-08-28T13:43:26Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:26Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:27Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: Installed DNA's: [object Object] "
+[2023-08-28T13:43:27Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: " with result: "
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY-direct-message-language": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "direct-message-language"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 120,  59,  78, 224, 221,
+    142,  83, 208, 142, 161,  23,  89,  15,
+    126, 254, 161, 133, 165, 153,  69,  70,
+    230,  19,  60, 139, 164,  26, 220, 123,
+    245, 170, 214,  58, 160, 171, 250
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY-direct-message-language",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d\\QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfD"... 40 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kMAlUGjd-HOSCZqn8gGhZsj014w-xCsKSLLbpo-M99fY9hjvj",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2023-08-28T13:43:27Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: setting holochains signal callback for language QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY "
+[2023-08-28T13:43:27Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "adding callback on dm language "
+[2023-08-28T13:43:27Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW "
+
+[2023-08-28T13:43:27Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "create_agent_expression"
+
+[2023-08-28T13:43:28Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Agent's direct message language successfully cloned, installed and published! "
+
+[2023-08-28T13:43:28Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "\u{1b}[32m AD4M init complete \u{1b}[0m "
+
+      Agent Language
+[2023-08-28T13:43:29Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW "
+
+[2023-08-28T13:43:29Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+        1) works across remote agents
+      Direct Messages
+[
+  {
+    message: 'expected value at line 1 column 2',
+    locations: [ { line: 2, column: 3 } ],
+    path: [ 'runtimeFriendStatus' ]
+  }
+]
+        ✔ don't work when we're not friends
+        with Alice and Bob being friends
+[2023-08-28T13:43:29Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW "
+
+[2023-08-28T13:43:29Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[2023-08-28T13:43:29Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU "
+
+[2023-08-28T13:43:29Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[2023-08-28T13:43:29Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW "
+
+[2023-08-28T13:43:29Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY" "direct-message-language" "direct-message" "set_status"
+
+[2023-08-28T13:43:31Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW "
+
+[2023-08-28T13:43:31Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[
+  {
+    message: 'expected value at line 1 column 2',
+    locations: [ { line: 2, column: 3 } ],
+    path: [ 'runtimeFriendStatus' ]
+  }
+]
+          2) Alice can get Bob's status
+[2023-08-28T13:43:31Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Getting expression with did did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW "
+
+[2023-08-28T13:43:31Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwddNvo3Yj3h3P8qcrfbttJeZTgouAmpb1RPJFWaWU497R4" "agent-store" "agent_store" "get_agent_expression"
+
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW "
+
+[2023-08-28T13:43:32Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY" "direct-message-language" "direct-message" "fetch_inbox"
+
+[2023-08-28T13:43:32Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdfEDgwup7C5eDhts8CYQUDVgXxE7K9nfDNFePydFkZ2YY" "direct-message-language" "direct-message" "inbox"
+
+          3) Alice can send a message to Bob
+          4) Alice finds her sent message in the outbox
+      Language
+        with a perspective-diff-sync templated by Alice
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Writing meta & bundle path:  tst-tmp\\languages\\meta-QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex.json tst-tmp\\languages\\bundle-QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex.js "
+
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+          ✔ Alice can get the source of her own templated language (57ms)
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:32 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex "
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex\\bundle.js "
+
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:32 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex\bundle.js
+
+[2023-08-28T13:43:32Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:32Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:33Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: Installed DNA's: [object Object] "
+[2023-08-28T13:43:33Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: " with result: "
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxR"... 40 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kKRVGO5-A-V4PGJKTq9MuehuJZlUpgHc6KJWexK29MBP3CVDt",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2023-08-28T13:43:33Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: setting holochains signal callback for language QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex "
+[2023-08-28T13:43:33Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex" "perspective-diff-sync" "perspective_diff_sync" "create_did_pub_key_link"
+
+[2m2023-08-28T13:43:34.930476Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:34.931229Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:34.935098Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU")
+
+[2m2023-08-28T13:43:34.935209Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkicHhVvPvO1jit-MR34kuBYmC_i7lXK4zQTl0DJaSc5KmO_H0)
+
+[2m2023-08-28T13:43:34.935886Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+          ✔ Alice can install her own published language (2252ms)
+          ✔ Alice can install her own non HC published language (124ms)
+          ✔ Alice can use language.meta() to get meta info of her Language
+          ✔ Alice can get her own templated perspective-diff-sync and it provides correct meta data
+          ✔ can publish and template a non-Holochain language and provide correct meta data
+[2023-08-28T13:43:36Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:36Z ERROR rust_executor::js_core::utils_extension] [JSCORE]: "Language not created by trusted agent: did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU and is not templated... aborting language install. Language metadata: {\"address\":\"QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex\",\"description\":\"..here for you template\",\"name\":\"Newly published perspective-diff-sync\",\"possibleTemplateParams\":[\"id\",\"description\",\"name\"],\"sourceCodeLink\":null} "
+
+[
+  {
+    message: 'Language not created by trusted agent: did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU and is not templated... aborting language install. Language metadata: {"address":"QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex","description":"..here for you template","name":"Newly published perspective-diff-sync","possibleTemplateParams":["id","description","name"],"sourceCodeLink":null}',
+    locations: [ { line: 2, column: 3 } ],
+    path: [ 'language' ]
+  }
+]
+Response for non trust got error ApolloError: Language not created by trusted agent: did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU and is not templated... aborting language install. Language metadata: {"address":"QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex","description":"..here for you template","name":"Newly published perspective-diff-sync","possibleTemplateParams":["id","description","name"],"sourceCodeLink":null}
+    at new ApolloError (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/errors/index.ts:72:5)
+    at file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/core/QueryManager.ts:1117:28
+    at both (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/asyncMap.ts:30:30)
+    at file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/asyncMap.ts:19:47
+    at new Promise (<anonymous>)
+    at Object.then (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/asyncMap.ts:19:16)
+    at Object.next (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/asyncMap.ts:31:39)
+    at notifySubscription (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:135:18)
+    at onNotify (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:179:3)
+    at SubscriptionObserver.next (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:235:7)
+    at file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/iteration.ts:13:58
+    at Array.forEach (<anonymous>)
+    at iterateObserversSafely (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/iteration.ts:13:23)
+    at Object.next (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/Concast.ts:171:9)
+    at notifySubscription (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:135:18)
+    at onNotify (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:179:3)
+    at SubscriptionObserver.next (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:235:7)
+    at Object.<anonymous> (file:///C:/Users/fayee/dev/ad4m/node_modules/graphql-ws/lib/client.mjs:364:42)
+    at emit (file:///C:/Users/fayee/dev/ad4m/node_modules/graphql-ws/lib/client.mjs:77:94)
+    at Object.emit (file:///C:/Users/fayee/dev/ad4m/node_modules/graphql-ws/lib/client.mjs:104:21)
+    at WebSocket.socket.onmessage (file:///C:/Users/fayee/dev/ad4m/node_modules/graphql-ws/lib/client.mjs:203:29)
+    at callListener (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\event-target.js:290:14)
+    at WebSocket.onMessage (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\event-target.js:209:9)
+    at WebSocket.emit (node:events:514:28)
+    at WebSocket.emit (node:domain:489:12)
+    at Receiver.receiverOnMessage (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\websocket.js:1184:20)
+    at Receiver.emit (node:events:514:28)
+    at Receiver.emit (node:domain:489:12)
+    at Receiver.dataMessage (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\receiver.js:541:14)
+    at Receiver.getData (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\receiver.js:459:17)
+    at Receiver.startLoop (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\receiver.js:158:22)
+    at Receiver._write (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\receiver.js:84:10)
+    at writeOrBuffer (node:internal/streams/writable:392:12)
+    at _write (node:internal/streams/writable:333:10)
+    at Receiver.Writable.write (node:internal/streams/writable:337:10)
+    at Socket.socketOnData (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\websocket.js:1278:35)
+    at Socket.emit (node:events:514:28)
+    at Socket.emit (node:domain:489:12)
+    at addChunk (node:internal/streams/readable:324:12)
+    at readableAddChunk (node:internal/streams/readable:297:9)
+    at Socket.Readable.push (node:internal/streams/readable:234:10)
+    at TCP.onStreamRead (node:internal/stream_base_commons:190:23) {
+  graphQLErrors: [
+    {
+      message: 'Language not created by trusted agent: did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU and is not templated... aborting language install. Language metadata: {"address":"QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex","description":"..here for you template","name":"Newly published perspective-diff-sync","possibleTemplateParams":["id","description","name"],"sourceCodeLink":null}',
+      locations: [Array],
+      path: [Array]
+    }
+  ],
+  clientErrors: [],
+  networkError: null,
+  extraInfo: undefined
+}
+          ✔ Bob can not get/install Alice's language since he doesn't trust her yet (1154ms)
+          with Bob having added Alice to list of trusted agents
+[2023-08-28T13:43:36Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "JS args [object Object] "
+
+[2023-08-28T13:43:36Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:36Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.readAndTemplateHolochainDNA: unpacking DNA "
+
+[2023-08-28T13:43:36Z INFO  rust_executor::holochain_service] UnPacked dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\temp\\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex\\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex"
+
+[2023-08-28T13:43:36Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.readAndTemplateHolochainDNA: packing DNA "
+
+[2023-08-28T13:43:36Z INFO  rust_executor::holochain_service] Got dna name: "perspective-diff-sync"
+
+[2023-08-28T13:43:36Z INFO  rust_executor::holochain_service] Packed dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\temp\\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex\\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex\\perspective-diff-sync.dna"
+
+[2023-08-28T13:43:36Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Writing meta & bundle path:  tst-tmp\\languages\\meta-QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC.json tst-tmp\\languages\\bundle-QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC.js "
+
+[2023-08-28T13:43:36Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:36Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXK"... 40 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kCCQv0OfCuoIKXK9u5ikczgBWXGhR2zrSmM8DqdhdIm6yj4Id",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:37.273112Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:37.273809Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:37.277739Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU")
+
+[2m2023-08-28T13:43:37.277818Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkicHhVvPvO1jit-MR34kuBYmC_i7lXK4zQTl0DJaSc5KmO_H0)
+
+[2m2023-08-28T13:43:37.278355Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+            ✔ Bob can template Alice's perspective-diff-sync, and alice can install (968ms)
+[2023-08-28T13:43:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Found meta file info [object Object] "
+
+[2023-08-28T13:43:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:37 GMT+0530 (India Standard Time) installLanguage: installing language with address QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex "
+[2023-08-28T13:43:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] "
+
+[2023-08-28T13:43:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Saving at path C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\languages\\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex\\bundle.js "
+
+[2023-08-28T13:43:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "Mon Aug 28 2023 19:13:37 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language "
+
+[2023-08-28T13:43:37Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\bob\ad4m\languages\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex\bundle.js
+
+[2023-08-28T13:43:37Z INFO  rust_executor::js_core] Module loaded!
+
+[2023-08-28T13:43:37Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: "LanguageController.loadLanguage: language loaded! "
+
+[2023-08-28T13:43:38Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: Installed DNA's: [object Object] "
+
+[2023-08-28T13:43:38Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: " with result: "
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 120,  59,  78, 224, 221,
+    142,  83, 208, 142, 161,  23,  89,  15,
+    126, 254, 161, 133, 165, 153,  69,  70,
+    230,  19,  60, 139, 164,  26, 220, 123,
+    245, 170, 214,  58, 160, 171, 250
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d\\QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnp"... 38 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kKRVGO5-A-V4PGJKTq9MuehuJZlUpgHc6KJWexK29MBP3CVDt",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2023-08-28T13:43:38Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: "HolochainService: setting holochains signal callback for language QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex "
+
+[2023-08-28T13:43:38Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdkHv7R9CzgXV2koE3UTnBmcTc534qxRnpa73BUJp6mGex" "perspective-diff-sync" "perspective_diff_sync" "create_did_pub_key_link"
+
+[2m2023-08-28T13:43:39.430074Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:39.430889Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:39.434589Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW")
+
+[2m2023-08-28T13:43:39.434663Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkeDtO4N2OU9COoRdZD37-oYWlmUVG5hM8i6Qa3Hv1qtY6oKv6)
+
+[2m2023-08-28T13:43:39.435228Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+            ✔ Bob can install Alice's perspective-diff-sync (2160ms)
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 120,  59,  78, 224, 221,
+    142,  83, 208, 142, 161,  23,  89,  15,
+    126, 254, 161, 133, 165, 153,  69,  70,
+    230,  19,  60, 139, 164,  26, 220, 123,
+    245, 170, 214,  58, 160, 171, 250
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwHLQuXpkhwPSFC-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d\\QmzSYwdpdL4e1yDBqGQVF9TJjVvr1nkjSanXKwH"... 38 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kCCQv0OfCuoIKXK9u5ikczgBWXGhR2zrSmM8DqdhdIm6yj4Id",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:39.717415Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:39.718089Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:39.722194Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW")
+
+[2m2023-08-28T13:43:39.722283Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkeDtO4N2OU9COoRdZD37-oYWlmUVG5hM8i6Qa3Hv1qtY6oKv6)
+
+[2m2023-08-28T13:43:39.722794Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+            ✔ Bob can install his own templated language (285ms)
+            ✔ Bob can delete a language
+      Neighbourhood
+        Neighbourhood
+[Object: null prototype] {
+  installed_app_id: "QmzSYwddoz67UBEs9soFMqaCgQLE46BzfbQV6GsMkGs2PnXk4LK",
+  cell_info: [Object: null prototype] {
+    "QmzSYwddoz67UBEs9soFMqaCgQLE46BzfbQV6GsMkGs2PnXk4LK-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwddoz67UBEs9soFMqaCgQLE46BzfbQV6GsMkGs2PnXk4LK",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwddoz67UBEs9soFMqaCgQLE46BzfbQV6GsMkGs2PnXk4LK-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwddoz67UBEs9soFMqaCgQLE46BzfbQV6"... 40 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kEE7vTUoa8HhPdrZ71-p4nrydQUsOmscuEoDMx0jkKyT9xoqd",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:40.664674Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:40.665348Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:40.669804Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU")
+
+[2m2023-08-28T13:43:40.669893Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkicHhVvPvO1jit-MR34kuBYmC_i7lXK4zQTl0DJaSc5KmO_H0)
+
+[2m2023-08-28T13:43:40.670501Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+          ✔ can publish and join locally @alice (956ms)
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vPNoCmywA5uswP",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vPNoCmywA5uswP-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vPNoCmywA5uswP",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vPNoCmywA5uswP-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6"... 40 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0k7B3nqu_4mnh8eKOLtO3fu_ri1HUyAxrispGH6mY1aLkumcl4",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:41.576331Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:41.577077Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:41.581034Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU")
+
+[2m2023-08-28T13:43:41.581131Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkicHhVvPvO1jit-MR34kuBYmC_i7lXK4zQTl0DJaSc5KmO_H0)
+
+[2m2023-08-28T13:43:41.581834Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vPNoCmywA5uswP",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vPNoCmywA5uswP-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 120,  59,  78, 224, 221,
+    142,  83, 208, 142, 161,  23,  89,  15,
+    126, 254, 161, 133, 165, 153,  69,  70,
+    230,  19,  60, 139, 164,  26, 220, 123,
+    245, 170, 214,  58, 160, 171, 250
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vPNoCmywA5uswP",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vPNoCmywA5uswP-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d\\QmzSYwdYawfJ6NZcjWUTNnCSMGtmYG7Asxzo6vP"... 38 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0k7B3nqu_4mnh8eKOLtO3fu_ri1HUyAxrispGH6mY1aLkumcl4",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:41.855190Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:41.856000Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:41.859992Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW")
+
+[2m2023-08-28T13:43:41.860065Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkeDtO4N2OU9COoRdZD37-oYWlmUVG5hM8i6Qa3Hv1qtY6oKv6)
+
+[2m2023-08-28T13:43:41.860612Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+          ✔ can be created by Alice and joined by Bob (1243ms)
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWGii7ffR5x592b",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWGii7ffR5x592b-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWGii7ffR5x592b",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWGii7ffR5x592b-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTr"... 40 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0k9XC7Sh6dhvswaWw7soCvsZ24y1j-8H6BsQLiAR4zdtOOKibh",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:42.855348Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:42.856017Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:42.859750Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU")
+
+[2m2023-08-28T13:43:42.859816Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkicHhVvPvO1jit-MR34kuBYmC_i7lXK4zQTl0DJaSc5KmO_H0)
+
+[2m2023-08-28T13:43:42.860320Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWGii7ffR5x592b",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWGii7ffR5x592b-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 120,  59,  78, 224, 221,
+    142,  83, 208, 142, 161,  23,  89,  15,
+    126, 254, 161, 133, 165, 153,  69,  70,
+    230,  19,  60, 139, 164,  26, 220, 123,
+    245, 170, 214,  58, 160, 171, 250
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWGii7ffR5x592b",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWGii7ffR5x592b-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d\\QmzSYwdaWiYaoAyUP6TyxSbDaLN89KRgWZpTrWG"... 38 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0k9XC7Sh6dhvswaWw7soCvsZ24y1j-8H6BsQLiAR4zdtOOKibh",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:43.132592Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:43.133209Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:43.136887Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW")
+
+[2m2023-08-28T13:43:43.136957Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkeDtO4N2OU9COoRdZD37-oYWlmUVG5hM8i6Qa3Hv1qtY6oKv6)
+
+[2m2023-08-28T13:43:43.137462Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+[2m2023-08-28T13:43:44.215633Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:19 ===PerspectiveDiffSync.commit(): Function start
+
+[2m2023-08-28T13:43:44.215891Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:30 ===PerspectiveDiffSync.commit(): Entries since snapshot: 0
+
+[2m2023-08-28T13:43:44.216606Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:55 ===PerspectiveDiffSync.commit(): Created diff entry ref: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7)
+
+[2m2023-08-28T13:43:44.216648Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:59 ===PerspectiveDiffSync.commit() - Profiling: Took 0 to create a PerspectiveDiff
+[2m2023-08-28T13:43:44.216689Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:85 ===PerspectiveDiffSync.commit() - Profiling: Took 0 to update the latest revision
+
+[2m2023-08-28T13:43:44.216716Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::revisions:zomes\perspective_diff_sync\src\link_adapter\revisions.rs:14 ===PerspectiveDiffSync.update_current_revision(): Function start
+
+[2m2023-08-28T13:43:44.217025Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::revisions:zomes\perspective_diff_sync\src\link_adapter\revisions.rs:18 ===PerspectiveDiffSync.update_current_revision() - Profiling: Took: 0 to update current_revision
+
+[2m2023-08-28T13:43:44.219653Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:102 ===PerspectiveDiffSync.commit() - Profiling: Took 3 to complete whole commit function
+
+Bob retrying getting links...
+[2m2023-08-28T13:43:46.148646Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:43:46.148943Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: None
+
+[2m2023-08-28T13:43:46.148992Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::workspace:zomes\perspective_diff_sync\src\link_adapter\workspace.rs:125 ===Workspace.collect_only_from_latest(): Function start
+
+[2m2023-08-28T13:43:46.149643Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::workspace:zomes\perspective_diff_sync\src\link_adapter\workspace.rs:187 ===Workspace.collect_only_from_latest() - Profiling: Took: 0 to complete collect_only_from_latest() function
+
+[2m2023-08-28T13:43:46.149701Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::workspace:zomes\perspective_diff_sync\src\link_adapter\workspace.rs:761 ===Workspace.squashed_diff(): Function start
+
+[2m2023-08-28T13:43:46.150096Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::workspace:zomes\perspective_diff_sync\src\link_adapter\workspace.rs:778 ===Workspace.squashed_diff() - Profiling: Took: 0 to complete squashed_diff() function
+
+[2m2023-08-28T13:43:46.150145Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::revisions:zomes\perspective_diff_sync\src\link_adapter\revisions.rs:14 ===PerspectiveDiffSync.update_current_revision(): Function start
+
+[2m2023-08-28T13:43:46.150543Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::revisions:zomes\perspective_diff_sync\src\link_adapter\revisions.rs:18 ===PerspectiveDiffSync.update_current_revision() - Profiling: Took: 0 to update current_revision
+
+          ✔ shared link created by Alice received by Bob (4319ms)
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQcHRZAT5RGSzT",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQcHRZAT5RGSzT-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQcHRZAT5RGSzT",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQcHRZAT5RGSzT-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftz"... 40 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kIZR3EvxRapzsjFhCl-zxfcbOocYBRpJOIZhwUfnKAywTfFc_",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:47.147573Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:47.148270Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:47.152108Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU")
+
+[2m2023-08-28T13:43:47.152177Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkicHhVvPvO1jit-MR34kuBYmC_i7lXK4zQTl0DJaSc5KmO_H0)
+
+[2m2023-08-28T13:43:47.152708Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+neighbourhoodUrl neighbourhood://QmzSYwdeH2qbvDCxMKUmGwFuong5TdPmySZSFXrSJFBtEKUx8Cj
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQcHRZAT5RGSzT",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQcHRZAT5RGSzT-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 120,  59,  78, 224, 221,
+    142,  83, 208, 142, 161,  23,  89,  15,
+    126, 254, 161, 133, 165, 153,  69,  70,
+    230,  19,  60, 139, 164,  26, 220, 123,
+    245, 170, 214,  58, 160, 171, 250
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQcHRZAT5RGSzT",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQcHRZAT5RGSzT-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d\\QmzSYwdYftXcXbUmBBNcJNnTVQqiTnsCq6ftzKQ"... 38 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0kIZR3EvxRapzsjFhCl-zxfcbOocYBRpJOIZhwUfnKAywTfFc_",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:47.434289Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:47.434945Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:47.439216Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW")
+
+[2m2023-08-28T13:43:47.439303Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkeDtO4N2OU9COoRdZD37-oYWlmUVG5hM8i6Qa3Hv1qtY6oKv6)
+
+[2m2023-08-28T13:43:47.439877Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+[2m2023-08-28T13:43:49.153532Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:43:49.153829Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:46.150117Z,
+    },
+)
+
+Bob retrying getting NOT received links...
+Bob retrying getting NOT received links...
+Bob retrying getting NOT received links...
+[2m2023-08-28T13:43:51.898819Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:43:51.899106Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:44.216660Z,
+    },
+)
+
+[2m2023-08-28T13:43:52.163915Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:43:52.164209Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:46.150117Z,
+    },
+)
+
+Bob retrying getting NOT received links...
+          ✔ local link created by Alice NOT received by Bob (7339ms)
+          with set up and joined NH for Telepresence
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3ydsjcZQC6CJgb",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3ydsjcZQC6CJgb-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 137, 193, 225,  86, 243,
+    239,  59,  88, 226, 183, 227,  17, 223,
+    137,  46,   5, 137, 130, 254,  46, 229,
+     92, 174,  51,  65,  57, 116,  12, 150,
+    146, 115, 146, 166,  59, 241, 244
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3ydsjcZQC6CJgb",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3ydsjcZQC6CJgb-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a"... 40 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0k4HWpWkDj9BIqb8B-IdTynppiBIP5YPmhr_5KdT6UlbyGy8Mk",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:54.523676Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:54.524364Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:54.528731Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU")
+
+[2m2023-08-28T13:43:54.528809Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkicHhVvPvO1jit-MR34kuBYmC_i7lXK4zQTl0DJaSc5KmO_H0)
+
+[2m2023-08-28T13:43:54.529369Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+[2m2023-08-28T13:43:54.909656Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:43:54.909918Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:44.216660Z,
+    },
+)
+
+[2m2023-08-28T13:43:55.172423Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:43:55.172704Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:46.150117Z,
+    },
+)
+
+[2m2023-08-28T13:43:57.925397Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:43:57.925742Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:44.216660Z,
+    },
+)
+
+[2m2023-08-28T13:43:58.174518Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:43:58.174767Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:46.150117Z,
+    },
+)
+
+[Object: null prototype] {
+  installed_app_id: "QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3ydsjcZQC6CJgb",
+  cell_info: [Object: null prototype] {
+    "QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3ydsjcZQC6CJgb-perspective-diff-sync": [
+      [Object: null prototype] {
+        provisioned: [Object: null prototype] {
+          cell_id: [Array],
+          dna_modifiers: [Object: null prototype],
+          name: "perspective-diff-sync"
+        }
+      }
+    ]
+  },
+  status: "running",
+  agent_pub_key: Uint8Array(39) [
+    132,  32,  36, 120,  59,  78, 224, 221,
+    142,  83, 208, 142, 161,  23,  89,  15,
+    126, 254, 161, 133, 165, 153,  69,  70,
+    230,  19,  60, 139, 164,  26, 220, 123,
+    245, 170, 214,  58, 160, 171, 250
+  ],
+  manifest: [Object: null prototype] {
+    manifest_version: "1",
+    name: "QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3ydsjcZQC6CJgb",
+    description: null,
+    roles: [
+      [Object: null prototype] {
+        name: "QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3ydsjcZQC6CJgb-perspective-diff-sync",
+        provisioning: null,
+        dna: [Object: null prototype] {
+          path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\bob\\ad4m\\h\\d\\QmzSYwdb38KnEgUF6iTjXsVgHFYD2rz8LNi2a3y"... 38 more characters,
+          modifiers: [Object: null prototype],
+          installed_hash: "uhC0k4HWpWkDj9BIqb8B-IdTynppiBIP5YPmhr_5KdT6UlbyGy8Mk",
+          clone_limit: 0
+        }
+      }
+    ]
+  }
+}
+
+[2m2023-08-28T13:43:59.805358Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:110 ===PerspectiveDiffSync.add_active_agent_link(): Function start
+
+[2m2023-08-28T13:43:59.806062Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::commit:zomes\perspective_diff_sync\src\link_adapter\commit.rs:124 ===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took 0 to complete whole add_active_agent_link()
+
+[2m2023-08-28T13:43:59.810180Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:64 PerspectiveDiffSync.create_did_pub_key_link("did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW")
+
+[2m2023-08-28T13:43:59.810290Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:66 PerspectiveDiffSync.create_did_pub_key_link() agent_key: AgentPubKey(uhCAkeDtO4N2OU9COoRdZD37-oYWlmUVG5hM8i6Qa3Hv1qtY6oKv6)
+
+[2m2023-08-28T13:43:59.811646Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:69 PerspectiveDiffSync.create_did_pub_key_link() did_links: []
+
+[2m2023-08-28T13:44:00.937435Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:44:00.937728Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:44.216660Z,
+    },
+)
+
+[2m2023-08-28T13:44:01.186751Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:44:01.187122Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:46.150117Z,
+    },
+)
+
+[2m2023-08-28T13:44:03.947063Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:44:03.947379Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:44.216660Z,
+    },
+)
+
+[2m2023-08-28T13:44:04.194513Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:44:04.194807Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:46.150117Z,
+    },
+)
+
+alice agents [ 'did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW' ]
+bob agents [ 'did:key:z6Mkr2d7H5joqFQoe6srrREsHbfdbMZ6paeDJqRoyWvaTdnU' ]
+            ✔ they see each other in `otherAgents` (1045ms)
+{
+  author: 'did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW',
+  timestamp: '2023-08-28T13:44:06.021Z',
+  data: { links: [ [Object] ] },
+  proof: {
+    valid: false,
+    invalid: true,
+    signature: '234ba95d804aa145c643265e5ce90b5733964b497fc08e483b56772ff47bbdfadea76befa1707375e0228047faff12304b2d0f8b922a98a44d2696ef873abb02',
+    key: 'did:key:z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW#z6Mkh9F37pFH6KB3A1XCkTFWa1zTK7uZa8wn2P6WRPCU7bqW'
+  }
+}
+            ✔ they can set their online status and see each others online status in `onlineAgents` (124ms)
+[2m2023-08-28T13:44:06.144599Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::telepresence::status:zomes\perspective_diff_sync\src\telepresence\status.rs:132 PerspectiveDiffSync.get_dids_agent_key() did_links: [Link { author: AgentPubKey(uhCAkeDtO4N2OU9COoRdZD37-oYWlmUVG5hM8i6Qa3Hv1qtY6oKv6), base: AnyLinkableHash(uhCEkA1q2MGrbQG69ERHf6WIUj-BJV6Y1xKyAWkkV7t7muXJGP5l2), target: AnyLinkableHash(uhCEkeDtO4N2OU9COoRdZD37-oYWlmUVG5hM8i6Qa3Hv1qtY6oKv6), timestamp: Timestamp(2023-08-28T13:43:59.812403Z), zome_index: ZomeIndex(0), link_type: LinkType(5), tag: LinkTag([100, 105, 100, 95, 108, 105, 110, 107]), create_link_hash: ActionHash(uhCkkcfJRghbFLUJdxW051xWil7MCNWOVC6n7XcxKWsTE9CIe_Err) }]
+
+[2m2023-08-28T13:44:06.953291Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:44:06.953592Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:44.216660Z,
+    },
+)
+
+[2m2023-08-28T13:44:07.203167Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:62 ===PerspectiveDiffSync.pull(): Function start
+
+[2m2023-08-28T13:44:07.203456Z[0m [34mDEBUG[0m [1mwasm_trace[0m[2m:[0m perspective_diff_sync::link_adapter::pull:zomes\perspective_diff_sync\src\link_adapter\pull.rs:67 ===PerspectiveDiffSync.pull(): Pull made with theirs: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7) and current: Some(
+    LocalHashReference {
+        hash: ActionHash(uhCkkVa_BkVgRJ4Z0wzu9Oojjv4KhP5hyteenwhShNEC4kxLjBvB7),
+        timestamp: 2023-08-28T13:43:46.150117Z,
+    },
+)
+
+            ✔ they can send signals via `sendSignal` and receive callbacks via `addSignalHandler` (2063ms)
+killed bobs executor with true
+killed executor with true
+killed local services with true
+
+
+  47 passing (1m)
+  4 failing
+
+  1) Integration tests
+       with Alice and Bob
+         Agent Language
+           works across remote agents:
+     AssertionError: expected null to deeply equal Agent{ …(3) }
+      at Context.<anonymous> (file:///C:/Users/fayee/dev/ad4m/tests/js/tests/agent-language.ts:20:44)
+      at processTicksAndRejections (node:internal/process/task_queues:95:5)
+
+  2) Integration tests
+       with Alice and Bob
+         Direct Messages
+           with Alice and Bob being friends
+             Alice can get Bob's status:
+     ApolloError: expected value at line 1 column 2
+      at new ApolloError (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/errors/index.ts:72:5)
+      at file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/core/QueryManager.ts:1117:28
+      at both (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/asyncMap.ts:30:30)
+      at file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/asyncMap.ts:19:47
+      at new Promise (<anonymous>)
+      at Object.then (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/asyncMap.ts:19:16)
+      at Object.next (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/asyncMap.ts:31:39)
+      at notifySubscription (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:135:18)
+      at onNotify (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:179:3)
+      at SubscriptionObserver.next (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:235:7)
+      at file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/iteration.ts:13:58
+      at Array.forEach (<anonymous>)
+      at iterateObserversSafely (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/iteration.ts:13:23)
+      at Object.next (file:///C:/Users/fayee/dev/ad4m/node_modules/@apollo/src/utilities/observables/Concast.ts:171:9)
+      at notifySubscription (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:135:18)
+      at onNotify (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:179:3)
+      at SubscriptionObserver.next (C:\Users\fayee\dev\ad4m\node_modules\zen-observable\lib\Observable.js:235:7)
+      at Object.<anonymous> (file:///C:/Users/fayee/dev/ad4m/node_modules/graphql-ws/lib/client.mjs:364:42)
+      at emit (file:///C:/Users/fayee/dev/ad4m/node_modules/graphql-ws/lib/client.mjs:77:94)
+      at Object.emit (file:///C:/Users/fayee/dev/ad4m/node_modules/graphql-ws/lib/client.mjs:104:21)
+      at WebSocket.socket.onmessage (file:///C:/Users/fayee/dev/ad4m/node_modules/graphql-ws/lib/client.mjs:203:29)
+      at callListener (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\event-target.js:290:14)
+      at WebSocket.onMessage (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\event-target.js:209:9)
+      at WebSocket.emit (node:events:514:28)
+      at WebSocket.emit (node:domain:489:12)
+      at Receiver.receiverOnMessage (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\websocket.js:1184:20)
+      at Receiver.emit (node:events:514:28)
+      at Receiver.emit (node:domain:489:12)
+      at Receiver.dataMessage (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\receiver.js:541:14)
+      at Receiver.getData (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\receiver.js:459:17)
+      at Receiver.startLoop (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\receiver.js:158:22)
+      at Receiver._write (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\receiver.js:84:10)
+      at writeOrBuffer (node:internal/streams/writable:392:12)
+      at _write (node:internal/streams/writable:333:10)
+      at Receiver.Writable.write (node:internal/streams/writable:337:10)
+      at Socket.socketOnData (C:\Users\fayee\dev\ad4m\node_modules\ws\lib\websocket.js:1278:35)
+      at Socket.emit (node:events:514:28)
+      at Socket.emit (node:domain:489:12)
+      at addChunk (node:internal/streams/readable:324:12)
+      at readableAddChunk (node:internal/streams/readable:297:9)
+      at Socket.Readable.push (node:internal/streams/readable:234:10)
+      at TCP.onStreamRead (node:internal/stream_base_commons:190:23)
+
+  3) Integration tests
+       with Alice and Bob
+         Direct Messages
+           with Alice and Bob being friends
+             Alice can send a message to Bob:
+
+      AssertionError: expected +0 to equal 1
+      + expected - actual
+
+      -0
+      +1
+      
+      at Context.<anonymous> (file:///C:/Users/fayee/dev/ad4m/tests/js/tests/direct-messages.ts:81:48)
+      at processTicksAndRejections (node:internal/process/task_queues:95:5)
+
+  4) Integration tests
+       with Alice and Bob
+         Direct Messages
+           with Alice and Bob being friends
+             Alice finds her sent message in the outbox:
+
+      AssertionError: expected +0 to equal 1
+      + expected - actual
+
+      -0
+      +1
+      
+      at Context.<anonymous> (file:///C:/Users/fayee/dev/ad4m/tests/js/tests/direct-messages.ts:100:45)
+      at processTicksAndRejections (node:internal/process/task_queues:95:5)
+
+
+
+info Visit https://yarnpkg.com/en/docs/cli/run for documentation about this command.

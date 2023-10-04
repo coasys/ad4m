@@ -6,6 +6,7 @@ mod utils;
 
 use graphql_types::RequestContext;
 use hyper::body::Bytes;
+use log::info;
 use mutation_resolvers::*;
 use query_resolvers::*;
 use subscription_resolvers::*;
@@ -33,12 +34,13 @@ fn schema() -> Schema {
 }
 
 pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path: String) -> Result<(), AnyError> {
+    info!("test 1");
     let log = warp::log("warp::server");
-
+    info!("test 2");
     let mut file = std::fs::File::create(
         Path::new(&app_data_path).join("schema.gql")
     ).unwrap();
-
+    info!("test 3");
     file.write_all(schema().as_schema_language().as_bytes()).unwrap();
 
     let homepage = warp::path::end().map(|| {
@@ -46,14 +48,15 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path
             .header("content-type", "text/html")
             .body("<html><h1>AD4M Executor</h1><div>visit <a href=\"/playground\">graphql playground</a> to explore the executor</html>")
     });
+    info!("test 4");
 
     let qm_schema = schema();
     let js_core_handle_cloned1 = js_core_handle.clone();
-
+    info!("test 5");
     let default_auth = warp::any().map(|| {
         String::from("")
     });
-
+    info!("test 6");
     let qm_state = warp::any()
         .and(warp::header::<String>("authorization"))
         .or(default_auth)

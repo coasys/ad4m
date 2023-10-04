@@ -25,7 +25,7 @@ export default function languageTests(testContext: TestContext) {
                 bobAd4mClient = testContext.bob;
 
                 //First edit bundle for perspective-diff-sync so we get a unique hash which does not clash with existing loaded perspective-diff-sync object in LanguageController
-                let socialContextData = fs.readFileSync("./tst-tmp/languages/perspective-diff-sync/build/bundle.js").toString();
+                let socialContextData = Deno.readFileSync("./tst-tmp/languages/perspective-diff-sync/build/bundle.js").toString();
                 socialContextData = socialContextData + "\n//Test";
                 fs.writeFileSync("./tst-tmp/languages/perspective-diff-sync/build/bundle.js", socialContextData);
 
@@ -41,7 +41,7 @@ export default function languageTests(testContext: TestContext) {
 
             it('Alice can get the source of her own templated language', async () => {
                 const sourceFromAd4m = await ad4mClient.languages.source(sourceLanguage.address)
-                const sourceFromFile = fs.readFileSync(path.join(__dirname, "../tst-tmp/languages/perspective-diff-sync/build/bundle.js")).toString()
+                const sourceFromFile = Deno.readFileSync(path.join(__dirname, "../tst-tmp/languages/perspective-diff-sync/build/bundle.js")).toString()
                 expect(sourceFromAd4m).to.be.equal(sourceFromFile)
             })
 
@@ -54,7 +54,7 @@ export default function languageTests(testContext: TestContext) {
 
             it('Alice can install her own non HC published language', async () => {
                 let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published perspective-language", "..here for you template");
-                let socialContextData = fs.readFileSync("./tst-tmp/languages/perspective-language/build/bundle.js").toString();
+                let socialContextData = Deno.readFileSync("./tst-tmp/languages/perspective-language/build/bundle.js").toString();
                 socialContextData = socialContextData + "\n//Test";
                 fs.writeFileSync("./tst-tmp/languages/perspective-language/build/bundle.js", socialContextData);
 

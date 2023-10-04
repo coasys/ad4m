@@ -6,9 +6,9 @@ const publishingBootstrapSeedPath = "./publishBootstrapSeed.json";
 
 async function main() {
     if (fs.existsSync(languageLanguagePath)) {
-        const bundleData = fs.readFileSync(languageLanguagePath).toString();
+        const bundleData = Deno.readFileSync(languageLanguagePath).toString();
         if (fs.existsSync(bootstrapSeedPath)) {
-            const bootstrapSeed = JSON.parse(fs.readFileSync(bootstrapSeedPath).toString());
+            const bootstrapSeed = JSON.parse(Deno.readFileSync(bootstrapSeedPath).toString());
             bootstrapSeed["languageLanguageBundle"] = bundleData;
             fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
         } else {
@@ -16,7 +16,7 @@ async function main() {
         }
 
         if (fs.existsSync(publishingBootstrapSeedPath)) {
-            const bootstrapSeed = JSON.parse(fs.readFileSync(publishingBootstrapSeedPath).toString());
+            const bootstrapSeed = JSON.parse(Deno.readFileSync(publishingBootstrapSeedPath).toString());
             bootstrapSeed["languageLanguageBundle"] = bundleData;
             fs.writeFileSync(publishingBootstrapSeedPath, JSON.stringify(bootstrapSeed));
         } else {

@@ -18,12 +18,13 @@ function checkLinkLanguageInstalled(perspective: Perspective) {
 }
 
 export function createResolvers(core: Ad4mCore, config: OuterConfig) {
+    console.log('ccccc 1')
     function signPerspectiveDeep(input: PerspectiveUnsignedInput): PerspectiveExpression {
         let out = new PerspectiveExpression()
         out.links = input.links.map(l => core.agentService.createSignedExpression(l))
         return core.agentService.createSignedExpression(out)
     }
-
+    console.log('ccccc 2')
     return {
         Query: {
             getCapabilities: async (token: string) => {

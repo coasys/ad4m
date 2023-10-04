@@ -1,5 +1,5 @@
-import path from 'path'
-import fs from 'fs'
+import * as path from "https://deno.land/std@0.203.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.203.0/fs/mod.ts";
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import type PerspectiveContext from './PerspectiveContext'
@@ -26,7 +26,9 @@ export default class PerspectivesController {
         const FILEPATH = path.join(rootConfigPath, FILENAME)
 
         if(fs.existsSync(FILEPATH)) {
-            const fileObject = JSON.parse(fs.readFileSync(FILEPATH).toString())
+            const decoder = new TextDecoder("utf-8");
+            const data = decoder.decode(Deno.readFileSync(FILEPATH));
+            const fileObject = JSON.parse(data)
 
             Object.keys(fileObject).map(k => {
                 let perspectiveHandle = fileObject[k].perspectiveHandle;
@@ -98,7 +100,9 @@ export default class PerspectivesController {
             //@ts-ignore
             obj[uuid] = {perspectiveHandle: perspectiveHandle, createdFromJoin: perspective?.createdFromJoin}
         })
-        fs.writeFileSync(FILEPATH, JSON.stringify(obj))
+        const encoder = new TextEncoder();
+        const data = encoder.encode(JSON.stringify(obj));
+        Deno.writeFileSync(FILEPATH, data)
     }
 
     perspectiveID(uuid: string): PerspectiveHandle|undefined {

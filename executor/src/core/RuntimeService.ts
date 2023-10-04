@@ -1,5 +1,5 @@
-import * as path from 'path';
-import * as fs from 'fs';
+import * as path from "https://deno.land/std@0.203.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.203.0/fs/mod.ts";
 import { PerspectiveExpression } from '@perspect3vism/ad4m';
 import { MainConfig } from './Config';
 
@@ -11,49 +11,65 @@ const OUTBOX_FILE = "outbox.json"
 function _add(items: string[], file: string): void {
     let all: string[];
     if (fs.existsSync(file)) {
-        all = Array.from(JSON.parse(fs.readFileSync(file).toString()));
+        const decoder = new TextDecoder("utf-8");
+        const data = decoder.decode(Deno.readFileSync(file));
+        all = Array.from(JSON.parse(data));
         all = all.concat(items);
         all = Array.from(new Set(all));
     } else {
         all = items
     }
-
-    fs.writeFileSync(file, JSON.stringify(all))
+    const encoder = new TextEncoder();
+    const data = encoder.encode(JSON.stringify(all));
+    Deno.writeFileSync(file, data)
 }
 
 function _addObject(item: object, file: string): void {
     let all: object[];
     if (fs.existsSync(file)) {
-        all = Array.from(JSON.parse(fs.readFileSync(file).toString()));
+        const decoder = new TextDecoder("utf-8");
+        const data = decoder.decode(Deno.readFileSync(file));
+        all = Array.from(JSON.parse(data));
         all.push(item)
     } else {
         all = [item]
     }
 
-    fs.writeFileSync(file, JSON.stringify(all))
+    const encoder = new TextEncoder();
+    const data = encoder.encode(JSON.stringify(all));
+    Deno.writeFileSync(file, data)
 }
 
 function _delete(items: string[], file: string): void {
     if (fs.existsSync(file)) {
-        let all= Array.from(JSON.parse(fs.readFileSync(file).toString()));
+        const decoder = new TextDecoder("utf-8");
+        const data = decoder.decode(Deno.readFileSync(file));
+        let all= Array.from(JSON.parse(data));
         for (const item of items) {
             all.splice(all.findIndex((value) => value == item), 1);
         }
-        fs.writeFileSync(file, JSON.stringify(all))
+
+        const encoder = new TextEncoder();
+        const allEncoded = encoder.encode(JSON.stringify(all));
+        Deno.writeFileSync(file, allEncoded)
     }
 }
 
 function _get(file: string): string[] {
     let all: string[] = []
     if (fs.existsSync(file)) {
-        all.push(...Array.from<string>(JSON.parse(fs.readFileSync(file).toString())));
+        const decoder = new TextDecoder("utf-8");
+        const data = decoder.decode(Deno.readFileSync(file));
+        all.push(...Array.from<string>(JSON.parse(data)));
     }
     return all
 }
 
 function _getObjects(file: string): object[] {
     if (fs.existsSync(file)) {
-        return JSON.parse(fs.readFileSync(file).toString())
+        const decoder = new TextDecoder("utf-8");
+        const data = decoder.decode(Deno.readFileSync(file));
+        return JSON.parse(data)
     } else {
         return []
     }

@@ -5,8 +5,8 @@ import {
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import fs from 'fs'
-import path from 'path'
+import * as fs from "https://deno.land/std@0.203.0/fs/mod.ts";
+import * as path from "https://deno.land/std@0.203.0/path/mod.ts";
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
@@ -156,7 +156,7 @@ export default class LanguageController {
     }
 
     async loadInstalledLanguages() {
-        const files = fs.readdirSync(this.#config.languagesPath)
+        const files = Deno.readDirSync(this.#config.languagesPath)
         return Promise.all(files.map(async file => {
             //Ensure we do not loaded previously loaded system languages again
             if (!this.#config.systemLanguages.find((lang) => lang === file) && !this.#config.preloadLanguages.find((lang) => lang === file)) {
@@ -205,9 +205,9 @@ export default class LanguageController {
         hash: string,
     }> {
         if(!path.isAbsolute(sourceFilePath))
-            sourceFilePath = path.join(process.env.PWD!, sourceFilePath)
-
-        const bundleBytes = fs.readFileSync(sourceFilePath)
+            sourceFilePath = path.join(Deno.cwd(), sourceFilePath)
+        const decoder = new TextDecoder("utf-8");
+        const bundleBytes = decoder.decode(Deno.readFileSync(sourceFilePath));
         if (bundleBytes.length === 0) {
             throw new Error("Language to be loaded does not contain any data")
         }
@@ -343,11 +343,13 @@ export default class LanguageController {
         console.log("Saving at path", sourcePath);
 
         if (!fs.existsSync(languagePath)) {
-            fs.mkdirSync(languagePath)
+            Deno.mkdirSync(languagePath, { recursive: true })
         }
 
-        fs.writeFileSync(sourcePath, bundle)
-        if (languageMeta) { fs.writeFileSync(metaPath, JSON.stringify(languageMeta)) }
+        const encoder = new TextEncoder();
+        const data = encoder.encode(bundle);
+        Deno.writeFileSync(sourcePath, data)
+        if (languageMeta) { Deno.writeFileSync(metaPath, encoder.encode(JSON.stringify(languageMeta))) }
 
         return {languagePath, sourcePath, metaPath, hash}
     }
@@ -377,7 +379,9 @@ export default class LanguageController {
                 }
             }
         } else {
-            languageMeta = JSON.parse(fs.readFileSync(metaFile).toString());
+            const decoder = new TextDecoder("utf-8");
+            const data = decoder.decode(Deno.readFileSync(metaFile));
+            languageMeta = JSON.parse(data);
         };
         if (languageMeta == null) {
             //@ts-ignore
@@ -415,7 +419,8 @@ export default class LanguageController {
                 return
             }
         } else {
-            source = fs.readFileSync(bundlePath).toString();
+            const decoder = new TextDecoder("utf-8");
+            source = decoder.decode(Deno.readFileSync(bundlePath));
             hash = await this.ipfsHash(source);
         }
 
@@ -449,7 +454,7 @@ export default class LanguageController {
 
         //Remove language files
         const languagePath = path.join(this.#config.languagesPath, hash as string);
-        fs.rmdirSync(languagePath, {recursive: true});
+        Deno.removeSync(languagePath, {recursive: true});
     }
 
     languageForExpression(e: ExpressionRef): Language {
@@ -573,7 +578,7 @@ export default class LanguageController {
             }
             //Create a directory for all of our DNA templating operations
             const tempTemplatingPath = path.join(this.#config.tempLangPath, sourceLanguageHash);
-            fs.mkdirSync(tempTemplatingPath);
+            Deno.mkdirSync(tempTemplatingPath, { recursive: true });
             //The place where we will put the .dna from the b64
             const tempDnaPath = path.join(tempTemplatingPath, `${sourceLanguageHash}.dna`);
             const wasmPath = path.join(tempTemplatingPath, "target/wasm32-unknown-unknown/release/")
@@ -582,13 +587,13 @@ export default class LanguageController {
             let dnaCode = sourceLanguageLines[dnaIndex].split("var dna = ")[1]
             //TODO: here was are assuming that the first character is " and the last two "; we should check for this and not assume
             dnaCode = dnaCode.substring(1, dnaCode.length-2);
-            fs.writeFileSync(tempDnaPath, Buffer.from(dnaCode, "base64"));
+            Deno.writeFileSync(tempDnaPath, Buffer.from(dnaCode, "base64"));
 
             //Unpack the DNA
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             console.log("LanguageController.readAndTemplateHolochainDNA: unpacking DNA");
             let unpackPath = (await this.#holochainService.unpackDna(tempDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
-            fs.unlinkSync(tempDnaPath);
+            Deno.removeSync(tempDnaPath);
             //TODO: are all dna's using the same dna.yaml?
             const dnaYamlPath = path.join(unpackPath, "dna.yaml");
             if (!fs.existsSync(dnaYamlPath)) {
@@ -596,13 +601,15 @@ export default class LanguageController {
             }
 
             //Read for files inside wasm path after unpack since we should now have .wasm file there but we do not know which name it may have
-            const wasmName = fs.readdirSync(wasmPath);
+            const wasmName = Deno.readDirSync(wasmPath);
             if (wasmName.length == 0) {
                 throw new Error("Got incorrect number of files inside wasm path when unpacking DNA");
             }
 
             //Read the yaml file
-            let dnaYaml = yaml.load(fs.readFileSync(dnaYamlPath, 'utf8'));
+            const decoder = new TextDecoder("utf-8");
+            const data = decoder.decode(Deno.readFileSync(dnaYamlPath));
+            let dnaYaml = yaml.load(data);
             //@ts-ignore
             if (templateData.uid) {
                 //@ts-ignore
@@ -619,15 +626,19 @@ export default class LanguageController {
                   '!!null': 'canonical' // dump null as ~
                 }
             });
-            fs.writeFileSync(dnaYamlPath, dnaYamlDump);
+            const encoder = new TextEncoder();
+            const dnaYamlDumpEncoded = encoder.encode(dnaYamlDump);
+            Deno.writeFileSync(dnaYamlPath, dnaYamlDumpEncoded);
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             console.log("LanguageController.readAndTemplateHolochainDNA: packing DNA");
             let packPath = (await this.#holochainService.packDna(unpackPath)).replace(/(\r\n|\n|\r)/gm, "");
-            const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
+            const base64Decoder = new TextDecoder("base64");
+            const base64Data = base64Decoder.decode(Deno.readFileSync(packPath));
+            const base64 = base64Data.replace(/[\r\n]+/gm, '');
 
             //Cleanup temp directory
-            fs.rmdirSync(tempTemplatingPath, {recursive: true});
+            Deno.removeSync(tempTemplatingPath, {recursive: true});
             dnaCodeRes = base64;
         }
         return {
@@ -908,7 +919,9 @@ export default class LanguageController {
     getSettings(hash: string): object {
         const FILEPATH = path.join(this.#config.languagesPath, hash, 'settings.json')
         if(fs.existsSync(FILEPATH)) {
-            return JSON.parse(fs.readFileSync(FILEPATH).toString())
+            const decoder = new TextDecoder("utf-8");
+            const data = decoder.decode(Deno.readFileSync(FILEPATH));
+            return JSON.parse(data)
         } else {
             return {}
         }
@@ -917,9 +930,11 @@ export default class LanguageController {
     writeSettings(hash: string, settings: object) {
         const directory = path.join(this.#config.languagesPath, hash)
         if(!fs.existsSync(directory))
-            fs.mkdirSync(directory)
+            Deno.mkdirSync(directory, { recursive: true })
         const FILEPATH = path.join(directory, 'settings.json')
-        fs.writeFileSync(FILEPATH, JSON.stringify(settings))
+        const encoder = new TextEncoder();
+        const data = encoder.encode(JSON.stringify(settings));
+        Deno.writeFileSync(FILEPATH, data)
     }
 
     async putSettings(hash: string, settings: object) {
@@ -930,10 +945,10 @@ export default class LanguageController {
     getLanguageStoragePath(hash: string) {
         const languageConfigPath = path.join(this.#config.languagesPath, hash)
         if(!fs.existsSync(languageConfigPath))
-            fs.mkdirSync(languageConfigPath)
+            Deno.mkdirSync(languageConfigPath, { recursive: true })
         const storageDirectory = path.join(languageConfigPath, "storage")
         if(!fs.existsSync(storageDirectory))
-            fs.mkdirSync(storageDirectory)
+            Deno.mkdirSync(storageDirectory, { recursive: true })
         return storageDirectory
     }
 

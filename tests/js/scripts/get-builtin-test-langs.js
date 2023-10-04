@@ -27,7 +27,7 @@ const languages = {
 
 async function main() {
   for (const lang in languages) {
-    const targetDir = fs.readFileSync('./scripts/download-languages-path').toString()
+    const targetDir = Deno.readFileSync('./scripts/download-languages-path').toString()
     const dir = path.join(targetDir, lang)
     await fs.ensureDir(dir + "/build");
 

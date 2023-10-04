@@ -120,7 +120,7 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
     const agentSeedFile = path.join(__dirname, `../${relativePath}-bootstrapSeed.json`);
 
 
-    const tempSeedFile = JSON.parse(fs.readFileSync(seedFile).toString())
+    const tempSeedFile = JSON.parse(Deno.readFileSync(seedFile).toString())
 
     if (!fs.pathExistsSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)) {
       fs.removeSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)

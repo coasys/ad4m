@@ -11,14 +11,18 @@ let resolveFile = ({path}) => {
   }
 }
 
-export let resolveUrl = ({path, importer}) => {
+export let resolveUrl = (args) => {
+  const {path, importer} = args;
+
   return {
     path: new URL(path, importer).href,
     namespace: 'imports'
   }
 }
 
-export let loadSource = async ({path}) => {
+export let loadSource = async (args) => {
+  const {path, importer} = args;
+  // console.log('lllll', args)
   let source;
   if (path.includes('perspect3vism')) {
       const commit = path.split("#");
@@ -44,8 +48,6 @@ export let loadSource = async ({path}) => {
       let comment = `//# sourceMappingURL=${dataurl}`
       contents = contents.replace(pattern, comment)
   }
-
-
 
   let {pathname} = new URL(source.url)
   let loader = pathname.match(/[^.]+$/)[0]

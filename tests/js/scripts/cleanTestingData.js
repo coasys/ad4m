@@ -6,7 +6,7 @@ const publishingBootstrapSeedPath = "./publishBootstrapSeed.json";
 
 async function main() {
     if (fs.existsSync(bootstrapSeedPath)) {
-        const bootstrapSeed = JSON.parse(fs.readFileSync(bootstrapSeedPath).toString());
+        const bootstrapSeed = JSON.parse(Deno.readFileSync(bootstrapSeedPath).toString());
         bootstrapSeed["languageLanguageBundle"] = "";
         bootstrapSeed["trustedAgents"] = ["did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"];
         fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
@@ -15,7 +15,7 @@ async function main() {
     }
 
     if (fs.existsSync(publishingBootstrapSeedPath)) {
-        const bootstrapSeed = JSON.parse(fs.readFileSync(publishingBootstrapSeedPath).toString());
+        const bootstrapSeed = JSON.parse(Deno.readFileSync(publishingBootstrapSeedPath).toString());
         bootstrapSeed["languageLanguageBundle"] = "";
         fs.writeFileSync(publishingBootstrapSeedPath, JSON.stringify(bootstrapSeed));
     } else {

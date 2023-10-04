@@ -1,6 +1,6 @@
 import { Database } from 'aloedb-node'
-import path from 'path'
-import fs from 'fs';
+import * as path from "https://deno.land/std@0.203.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.203.0/fs/mod.ts";
 import type { Expression, LinkExpression, LinkStatus, PerspectiveDiff } from "@perspect3vism/ad4m";  
 
 interface LinkSchema {
@@ -36,13 +36,19 @@ export class Ad4mDb {
         let expressionDbPath = dbPath ? path.join(dbPath, "expression.json") : undefined;
         let diffDbPath = dbPath ? path.join(dbPath, "diffs.json") : undefined;
         if (linkDbPath && !fs.existsSync(linkDbPath)) {
-            fs.writeFileSync(linkDbPath, "");
+            const encoder = new TextEncoder();
+            const data = encoder.encode("");
+            Deno.writeFileSync(linkDbPath, data);
         }
         if (expressionDbPath && !fs.existsSync(expressionDbPath)) {
-            fs.writeFileSync(expressionDbPath, "");
+            const encoder = new TextEncoder();
+            const data = encoder.encode("");
+            Deno.writeFileSync(expressionDbPath, data);
         }
         if (diffDbPath && !fs.existsSync(diffDbPath)) {
-            fs.writeFileSync(diffDbPath, "");
+            const encoder = new TextEncoder();
+            const data = encoder.encode("");
+            Deno.writeFileSync(diffDbPath, data);
         }
         this.#linkDb = new Database<LinkSchema>(dbPath ? path.join(dbPath, "links.json") : undefined);
         this.#expressionDb = new Database<ExpressionSchema>(dbPath ? path.join(dbPath, "expression.json") : undefined);

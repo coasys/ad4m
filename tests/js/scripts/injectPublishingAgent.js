@@ -5,9 +5,9 @@ const bootstrapSeedPath = "./bootstrapSeed.json";
 
 async function main() {
     if (fs.existsSync(publishingAgentPath)) {
-        const didData = JSON.parse(fs.readFileSync(publishingAgentPath).toString());
+        const didData = JSON.parse(Deno.readFileSync(publishingAgentPath).toString());
         if (fs.existsSync(bootstrapSeedPath)) {
-            const bootstrapSeed = JSON.parse(fs.readFileSync(bootstrapSeedPath).toString());
+            const bootstrapSeed = JSON.parse(Deno.readFileSync(bootstrapSeedPath).toString());
             bootstrapSeed["trustedAgents"].push(didData["did"]);
             fs.writeFileSync(bootstrapSeedPath, JSON.stringify(bootstrapSeed));
         } else {

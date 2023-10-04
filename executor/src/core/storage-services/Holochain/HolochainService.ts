@@ -1,6 +1,6 @@
 import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest, EncodedAppSignal } from '@holochain/client'
-import path from 'path'
-import fs from 'fs'
+import * as path from "https://deno.land/std@0.203.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.203.0/fs/mod.ts";
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import type { Dna } from '@perspect3vism/ad4m'
 import { AsyncQueue } from './Queue'
@@ -162,7 +162,10 @@ export default class HolochainService {
                 console.debug("HolochainService: Installing DNAs for language", lang);
                 const roles = dnas.map(dna => {
                     const p = path.join(this.#dataPath, `${lang}-${dna.nick}.dna`);
-                    fs.writeFileSync(p, dna.file);
+
+                    const encoder = new TextEncoder();
+                    const data = encoder.encode(dna.file);
+                    Deno.writeFileSync(p, data);
                     return {
                         //note; this name value might have to be unique per role across different apps
                         //in which case we should use naming of dna file above

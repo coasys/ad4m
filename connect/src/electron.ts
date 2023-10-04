@@ -11,7 +11,7 @@ const EXECUTOR_URL_FILENAME = "executor-url";
 
 function ensureDir(dataPath) {
   if (fs.existsSync(dataPath) === false) {
-    fs.mkdirSync(dataPath, 777);
+    Deno.mkdirSync(dataPath);
   }
 }
 
