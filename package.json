@@ -43,14 +43,15 @@
     "build-all-windows": "turbo run build-all-windows",
     "patchpackage": "patch-package",
     "set-version": "node setVersion.js",
-    "patch-package": "^6.5.0"
+    "postinstall": "patch-package"
   },
   "devDependencies": {
     "@changesets/cli": "^2.25.2",
     "eslint-config-custom": "*",
     "prettier": "latest",
     "turbo": "latest",
-    "readline-sync": "1.4.10"
+    "readline-sync": "1.4.10",
+    "patch-package": "^6.5.0"
   },
   "engines": {
     "node": ">=16.0.0"
