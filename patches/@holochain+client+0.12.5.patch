@@ -1,11 +1,11 @@
 diff --git a/node_modules/@holochain/client/lib/api/zome-call-signing.js b/node_modules/@holochain/client/lib/api/zome-call-signing.js
-index aaddf61..257781f 100644
+index aaddf61..fa20172 100644
 --- a/node_modules/@holochain/client/lib/api/zome-call-signing.js
 +++ b/node_modules/@holochain/client/lib/api/zome-call-signing.js
 @@ -1,5 +1,7 @@
  import nacl from "tweetnacl";
  import { encodeHashToBase64 } from "../utils/base64.js";
-+import crypto from 'crypto';
++import crypto from 'node:crypto';
 +
  const signingCredentials = new Map();
  /**
