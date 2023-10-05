@@ -1,5 +1,51 @@
-import "https://deno.land/std@0.177.0/node/util.ts";
-import "https://deno.land/std@0.177.0/node/global.ts";
+import "node:util";
+// import "https://deno.land/std@0.177.0/node/global.ts";
+
+import processModule from "node:process";
+// import { Buffer as bufferModule } from "node:process";
+import timers from "node:timers";
+import {Buffer as BufferModule} from 'node:buffer';
+
+Object.defineProperty(globalThis, "global", {
+  value: globalThis,
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
+
+Object.defineProperty(globalThis, "process", {
+  value: {
+    ...processModule,
+    env: {
+      NODE_ENV: "production"
+    }
+  },
+  enumerable: false,
+  writable: true,
+  configurable: true,
+});
+
+Object.defineProperty(globalThis, "Buffer", {
+  value: BufferModule,
+  enumerable: false,
+  writable: true,
+  configurable: true,
+});
+
+Object.defineProperty(globalThis, "setImmediate", {
+  value: timers.setImmediate,
+  enumerable: true,
+  writable: true,
+  configurable: true,
+});
+
+Object.defineProperty(globalThis, "clearImmediate", {
+  value: timers.clearImmediate,
+  enumerable: true,
+  writable: true,
+  configurable: true,
+});
+
 
 const process = globalThis.process;
 const Buffer = globalThis.Buffer;
@@ -11,8 +57,8 @@ globalThis.__dirname = __dirname;
 globalThis.__filename = __filename;
 
 import { init as internalInit } from "./main.ts"
-import * as internalPath from "https://deno.land/std@0.177.0/node/path.ts";
-import * as internalOs from "https://deno.land/std@0.177.0/node/os.ts"
+import * as internalPath from "node:path";
+import * as internalOs from "node:os"
 
 export const init = internalInit
 export const path = internalPath

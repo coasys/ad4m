@@ -13,12 +13,11 @@ import type { DIDResolver } from './agent/DIDs'
 import Signatures from './agent/Signatures'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import EntanglementProofController from './EntanglementProof'
-import fs from 'fs'
+import fs from 'node:fs'
 import { AgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
-import path from "path";
 import { getPubSub, sleep } from "./utils";
 
 export interface InitServicesParams {
