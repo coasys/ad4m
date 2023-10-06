@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.6.1"
+version = "0.6.1-prerelease.0"
 dependencies = [
  "ad4m-client",
  "chrono",
@@ -126,8 +126,7 @@ dependencies = [
 [[package]]
 name = "aead-gcm-stream"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a09ecb526d53de2842cc876ee5c9b51161ee60399edeca4cf74892a01b48177"
+source = "git+https://github.com/coasys/aead-gcm-stream.git#b449abc60de4145efabc2fc08dd869de1a5e8f0d"
 dependencies = [
  "aead",
  "aes",
