@@ -88,15 +88,15 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     );
     update_current_revision::<Retriever>(diff_entry_reference.clone(), now)?;
 
-    if *ENABLE_SIGNALS {
-        // let signal_data = PerspectiveDiffReference {
-        //     diff,
-        //     reference: diff_entry_ref_entry,
-        //     reference_hash: diff_entry_reference.clone(),
-        // };
-        // send_revision_signal(signal_data)?;
-        broadcast_current::<Retriever>()?;
-    };
+    // if *ENABLE_SIGNALS {
+    //     // let signal_data = PerspectiveDiffReference {
+    //     //     diff,
+    //     //     reference: diff_entry_ref_entry,
+    //     //     reference_hash: diff_entry_reference.clone(),
+    //     // };
+    //     // send_revision_signal(signal_data)?;
+    //     broadcast_current::<Retriever>()?;
+    // };
 
     let after_fn_end = get_now()?.time();
     debug!(

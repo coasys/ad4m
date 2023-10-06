@@ -232,7 +232,7 @@ pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver>(
             emit_signal(broadcast.diff.clone())?;
         };
     };
-    emit_signal(broadcast)?;
+    //emit_signal(broadcast)?;
     // let fn_end = get_now()?.time();
     // debug!("===PerspectiveDiffSync.fast_forward_signal() - Profiling: Took: {} to complete fast_forward_signal() function", (fn_end - fn_start).num_milliseconds());
     Ok(())

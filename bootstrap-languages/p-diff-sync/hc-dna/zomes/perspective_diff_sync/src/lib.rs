@@ -101,6 +101,7 @@ fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
     //Check if its a normal diff expression signal
     match HashBroadcast::try_from(signal.clone()) {
         Ok(broadcast) => {
+            debug!("Received broadcast: {:?} in HOLOCHAIN", broadcast);
             link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
                 .map_err(|err| utils::err(&format!("{}", err)))?;
         }
@@ -111,6 +112,13 @@ fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
             Err(_) => return Err(utils::err(&format!("Signal not recognized: {:?}", signal))),
         },
     };
+    Ok(())
+}
+
+#[hdk_extern]
+pub fn handle_broadcast(broadcast: HashBroadcast) -> ExternResult<()> {
+    link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
+        .map_err(|err| utils::err(&format!("{}", err)))?;
     Ok(())
 }
 
