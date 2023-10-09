@@ -49,7 +49,7 @@
   },
   "devDependencies": {
     "@apollo/client": "3.7.10",
-    "@perspect3vism/ad4m": "*",
+    "@perspect3vism/ad4m": "link:../core",
     "esbuild": "^0.15.5",
     "esbuild-plugin-lit": "^0.0.10",
     "graphql-ws": "5.12.0",

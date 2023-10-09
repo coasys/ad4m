@@ -29,7 +29,7 @@
     "url": "https://github.com/perspect3vism/ad4m/issues"
   },
   "devDependencies": {
-    "@perspect3vism/ad4m-executor": "*"
+    "@perspect3vism/ad4m-executor": "link:../core"
   },
   "dependencies": {}
 }
