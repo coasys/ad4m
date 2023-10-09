@@ -14,12 +14,7 @@ Object.defineProperty(globalThis, "global", {
 });
 
 Object.defineProperty(globalThis, "process", {
-  value: {
-    ...processModule,
-    env: {
-      NODE_ENV: "production"
-    }
-  },
+  value: processModule,
   enumerable: false,
   writable: true,
   configurable: true,
