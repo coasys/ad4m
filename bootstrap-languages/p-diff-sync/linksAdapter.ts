@@ -22,38 +22,37 @@ export class LinkAdapter implements LinkSyncAdapter {
   gossipLogCount: number = 0;
   myCurrentRevision: Buffer | null = null;
   languageName: String | null = null;
+  socket: any;
 
   constructor(context: LanguageContext, name: String) {
     //@ts-ignore
     this.hcDna = context.Holochain as HolochainLanguageDelegate;
     this.me = context.agent.did;
     this.languageName = name;
-    const socket = io("wss://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
+    this.socket = io("https://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
     console.log("Created socket connection");
-    socket.on('error', (error: any) => {
+    this.socket.on('error', (error: any) => {
       console.error('Error:', error);
     });
-    socket.on('connect', () => {
+    this.socket.on('connect', () => {
       console.log('Connected to the server');
       try {
-        socket.emit("join-room", this.languageName);
+        this.socket.emit("join-room", this.languageName);
         console.log("Sent the join-room signal");
-        socket.on("signal", (signal: any) => {
-          this.handleHolochainSignal(signal);
-        });
       } catch (e) {
         console.error("Error in socket connection: ", e);
       }
     });
-    socket.on('disconnect', () => {
+    this.socket.on("signal", (signal: any) => {
+      this.handleHolochainSignal(signal);
+    });
+    this.socket.on('disconnect', () => {
       console.log('Disconnected from the server');
-      socket.connect();
     });
-    socket.on('connect_error', (error) => {
+    this.socket.on('connect_error', (error) => {
       console.error('Connection Error:', error);
-      socket.connect();
     });
-    socket.on('reconnect_attempt', () => {
+    this.socket.on('reconnect_attempt', () => {
       console.log('Trying to reconnect...');
     });
   }
@@ -95,8 +94,9 @@ export class LinkAdapter implements LinkSyncAdapter {
           broadcast_payload.reference.parents = broadcast_payload.reference.parents.map( (parent: Buffer) => parent ? Buffer.from(parent).toString('base64') : 'null');
         };
         console.log("sync(); sending referenceh hash", broadcast_payload.reference_hash);
-        const socket = io("wss://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
-        socket.emit("broadcast", {roomId: this.languageName, signal: broadcast_payload});
+        console.log("sync(); sending broadcast payload");
+        console.log(JSON.stringify(broadcast_payload));
+        this.socket.emit("broadcast", {roomId: this.languageName, signal: broadcast_payload});
       }
     } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);
@@ -251,9 +251,7 @@ export class LinkAdapter implements LinkSyncAdapter {
           broadcast_payload.reference.parents = broadcast_payload.reference.parents.map( (parent: Buffer) => parent ? Buffer.from(parent).toString('base64') : 'null');
         };
         console.log("commit sending referenceh hash", broadcast_payload.reference_hash);
-        //Use client to send to socketIO
-        const socket = io("wss://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
-        socket.emit("broadcast", {roomId: this.languageName, signal: broadcast_payload});
+        this.socket.emit("broadcast", {roomId: this.languageName, signal: broadcast_payload});
       }
       return res as string;
     } catch (e) {
@@ -304,7 +302,13 @@ export class LinkAdapter implements LinkSyncAdapter {
 
         //console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
         //const parsed = JSON.parse(reference_hash);
-        //console.log("Parsed ref hash", parsed);
+        console.log("Handle holochain signal parsed ref hash");
+        console.log(JSON.stringify({
+          diff,
+          reference_hash,
+          reference,
+          broadcast_author
+        }));
         if (!Buffer.isBuffer(reference_hash)) {
           reference_hash = Buffer.from(reference_hash, 'base64');
         }
