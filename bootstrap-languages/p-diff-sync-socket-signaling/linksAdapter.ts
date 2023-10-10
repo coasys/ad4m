@@ -3,6 +3,7 @@ import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, La
 import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
 import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
+import { io } from "https://esm.sh/socket.io-client@4.7.2";
 
 class PeerInfo {
   //@ts-ignore
@@ -20,11 +21,40 @@ export class LinkAdapter implements LinkSyncAdapter {
   me: DID
   gossipLogCount: number = 0;
   myCurrentRevision: Buffer | null = null;
+  languageName: String | null = null;
+  socket: any;
 
-  constructor(context: LanguageContext) {
+  constructor(context: LanguageContext, name: String) {
     //@ts-ignore
     this.hcDna = context.Holochain as HolochainLanguageDelegate;
     this.me = context.agent.did;
+    this.languageName = name;
+    this.socket = io("https://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
+    console.log("Created socket connection");
+    this.socket.on('error', (error: any) => {
+      console.error('Error:', error);
+    });
+    this.socket.on('connect', () => {
+      console.log('Connected to the server');
+      try {
+        this.socket.emit("join-room", this.languageName);
+        console.log("Sent the join-room signal");
+      } catch (e) {
+        console.error("Error in socket connection: ", e);
+      }
+    });
+    this.socket.on("signal", (signal: any) => {
+      this.handleHolochainSignal(signal);
+    });
+    this.socket.on('disconnect', () => {
+      console.log('Disconnected from the server');
+    });
+    this.socket.on('connect_error', (error) => {
+      console.error('Connection Error:', error);
+    });
+    this.socket.on('reconnect_attempt', () => {
+      console.log('Trying to reconnect...');
+    });
   }
 
   writable(): boolean {
@@ -52,9 +82,21 @@ export class LinkAdapter implements LinkSyncAdapter {
     //console.log("PerspectiveDiffSync.sync(); Got lock");
     try {
       //@ts-ignore
-      let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
-      if (current_revision && Buffer.isBuffer(current_revision)) {
-        this.myCurrentRevision = current_revision; 
+      let broadcast_payload = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_broadcast_payload", null);
+      if (broadcast_payload) {
+        if (broadcast_payload.reference_hash && Buffer.isBuffer(broadcast_payload.reference_hash)) {
+          this.myCurrentRevision = broadcast_payload.reference_hash;
+        }
+        //Use client to send to socketIO
+        broadcast_payload.reference_hash = Buffer.from(broadcast_payload.reference_hash).toString('base64');
+        broadcast_payload.reference.diff = Buffer.from(broadcast_payload.reference.diff).toString('base64');
+        if (broadcast_payload.reference.parents) {
+          broadcast_payload.reference.parents = broadcast_payload.reference.parents.map( (parent: Buffer) => parent ? Buffer.from(parent).toString('base64') : 'null');
+        };
+        // console.log("sync(); sending referenceh hash", broadcast_payload.reference_hash);
+        // console.log("sync(); sending broadcast payload");
+        // console.log(JSON.stringify(broadcast_payload));
+        this.socket.emit("broadcast", {roomId: this.languageName, signal: broadcast_payload});
       }
     } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);
@@ -134,6 +176,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       for (const hash of Array.from(revisions)) {
         if(!hash) continue
         if (this.myCurrentRevision && hash.equals(this.myCurrentRevision)) continue
+        console.log("Pulling with hash", hash);
         let pullResult = await this.hcDna.call(DNA_NICK, ZOME_NAME, "pull", { 
           hash,
           is_scribe 
@@ -198,6 +241,18 @@ export class LinkAdapter implements LinkSyncAdapter {
       if (res && Buffer.isBuffer(res)) {
         this.myCurrentRevision = res;
       }
+      let broadcast_payload = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_broadcast_payload", null);
+      // console.log('commit got broadcast payload', broadcast_payload.referencence_hash);
+      // console.log("which has type", typeof broadcast_payload.reference_hash);
+      if (broadcast_payload) {
+        broadcast_payload.reference_hash = Buffer.from(broadcast_payload.reference_hash).toString('base64');
+        broadcast_payload.reference.diff = Buffer.from(broadcast_payload.reference.diff).toString('base64');
+        if (broadcast_payload.reference.parents) {
+          broadcast_payload.reference.parents = broadcast_payload.reference.parents.map( (parent: Buffer) => parent ? Buffer.from(parent).toString('base64') : 'null');
+        };
+        //console.log("commit sending referenceh hash", broadcast_payload.reference_hash);
+        this.socket.emit("broadcast", {roomId: this.languageName, signal: broadcast_payload});
+      }
       return res as string;
     } catch (e) {
       console.error("PerspectiveDiffSync.commit(); got error", e);
@@ -217,7 +272,19 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async handleHolochainSignal(signal: any): Promise<void> {
-    const { diff, reference_hash, reference, broadcast_author } = signal.payload;
+    let diff;
+    let reference_hash;
+    let reference;
+    let broadcast_author;
+    if (signal.payload) {
+      ({ diff, reference_hash, reference, broadcast_author } = signal.payload);
+    } else {
+      ({ diff, reference_hash, reference, broadcast_author } = signal);
+    }
+    // console.log("Setting a peer hash to", reference_hash);
+    // console.log(JSON.stringify(diff));
+    // console.log("Reference", JSON.stringify(reference));
+    // console.log(broadcast_author);
     //Check if this signal came from another agent & contains a diff and reference_hash
     if (diff && reference_hash && reference && broadcast_author) {
       // console.log(`PerspectiveDiffSync.handleHolochainSignal: 
@@ -234,14 +301,39 @@ export class LinkAdapter implements LinkSyncAdapter {
         //console.log("PerspectiveDiffSync.handleHolochainSignal: Getting lock");
 
         //console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
+        //const parsed = JSON.parse(reference_hash);
+        // console.log("Handle holochain signal parsed ref hash");
+        // console.log(JSON.stringify({
+        //   diff,
+        //   reference_hash,
+        //   reference,
+        //   broadcast_author
+        // }));
+        if (!Buffer.isBuffer(reference_hash)) {
+          reference_hash = Buffer.from(reference_hash, 'base64');
+        }
+        if (!Buffer.isBuffer(reference.diff)) {
+          reference.diff = Buffer.from(reference.diff, 'base64');
+        }
+        if (reference.parents) {
+          reference.parents = reference.parents.map( (parent: string) => parent == 'null' ? null : Buffer.from(parent, 'base64'));
+        }
+
+        await this.hcDna.call(DNA_NICK, ZOME_NAME, "handle_broadcast", {
+          diff,
+          reference_hash,
+          reference,
+          broadcast_author
+        });
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
       } catch (e) {
         console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
       }
     } else {
-      //console.log("PerspectiveDiffSync.handleHolochainSignal: received a signals from ourselves in fast_forward_signal or in a pull: ", signal.payload);
+      console.log("PerspectiveDiffSync.handleHolochainSignal: received a signals from ourselves in fast_forward_signal or in a pull: ", JSON.stringify(signal.payload));
       //This signal only contains link data and no reference, and therefore came from us in a pull in fast_forward_signal
       if (this.linkCallback) {
+        console.log("PerspectiveDiffSync.handleHolochainSignal: calling linkCallback");
         await this.linkCallback(signal.payload);
       }
     }

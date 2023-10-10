@@ -4,11 +4,20 @@
         {
             "meta": {
                 "name": "perspectiveDiffSync",
-                "description": "Holochain based Perspective link sharing language, with revision signals sent with socket.io",
+                "description": "Holochain based Perspective link sharing language",
                 "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/p-diff-sync/build/bundle.js"
+        },
+        {
+            "meta": {
+                "name": "perspectiveDiffSync",
+                "description": "Holochain based Perspective link sharing language, with revision signals sent with socket.io",
+                "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
+                "possibleTemplateParams": ["uid", "name", "description"]
+            },
+            "resource": "../bootstrap-languages/p-diff-sync-socket-signaling/build/bundle.js"
         }
     ],
     "agentLanguage": {

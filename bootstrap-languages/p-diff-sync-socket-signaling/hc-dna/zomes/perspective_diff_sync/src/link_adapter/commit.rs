@@ -88,15 +88,15 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     );
     update_current_revision::<Retriever>(diff_entry_reference.clone(), now)?;
 
-    if *ENABLE_SIGNALS {
-        // let signal_data = PerspectiveDiffReference {
-        //     diff,
-        //     reference: diff_entry_ref_entry,
-        //     reference_hash: diff_entry_reference.clone(),
-        // };
-        // send_revision_signal(signal_data)?;
-        broadcast_current::<Retriever>()?;
-    };
+    // if *ENABLE_SIGNALS {
+    //     // let signal_data = PerspectiveDiffReference {
+    //     //     diff,
+    //     //     reference: diff_entry_ref_entry,
+    //     //     reference_hash: diff_entry_reference.clone(),
+    //     // };
+    //     // send_revision_signal(signal_data)?;
+    //     broadcast_current::<Retriever>()?;
+    // };
 
     let after_fn_end = get_now()?.time();
     debug!(
@@ -149,4 +149,23 @@ pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>() -> SocialContext
         remote_signal(signal_data.get_sb()?, recent_agents.clone())?;
     };
     Ok(current.map(|rev| rev.hash))
+}
+
+pub fn get_broadcast_payload<Retriever: PerspectiveDiffRetreiver>() -> SocialContextResult<Option<HashBroadcast>> {
+    match current_revision::<Retriever>()? {
+        Some(current) => {
+            let current_revision = current;
+            let entry_ref =
+                Retriever::get::<PerspectiveDiffEntryReference>(current_revision.hash.clone())?;
+            let diff = Retriever::get::<PerspectiveDiff>(entry_ref.diff.clone())?;
+
+            Ok(Some(HashBroadcast {
+                reference: entry_ref,
+                reference_hash: current_revision.hash.clone(),
+                diff,
+                broadcast_author: get_my_did()?.unwrap(),
+            }))
+        },
+        None => Ok(None)
+    }
 }

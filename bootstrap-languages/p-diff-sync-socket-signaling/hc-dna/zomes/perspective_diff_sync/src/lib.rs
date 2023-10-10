@@ -64,6 +64,12 @@ pub fn sync(_: ()) -> ExternResult<Option<Hash>> {
 }
 
 #[hdk_extern]
+pub fn get_broadcast_payload(_: ()) -> ExternResult<Option<HashBroadcast>> {
+    link_adapter::commit::get_broadcast_payload::<retriever::HolochainRetreiver>()
+        .map_err(|error| utils::err(&format!("{}", error)))
+}
+
+#[hdk_extern]
 pub fn pull(args: PullArguments) -> ExternResult<PullResult> {
     link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
         .map_err(|error| utils::err(&format!("{}", error)))
@@ -95,6 +101,7 @@ fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
     //Check if its a normal diff expression signal
     match HashBroadcast::try_from(signal.clone()) {
         Ok(broadcast) => {
+            debug!("Received broadcast: {:?} in HOLOCHAIN", broadcast);
             link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
                 .map_err(|err| utils::err(&format!("{}", err)))?;
         }
@@ -105,6 +112,13 @@ fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
             Err(_) => return Err(utils::err(&format!("Signal not recognized: {:?}", signal))),
         },
     };
+    Ok(())
+}
+
+#[hdk_extern]
+pub fn handle_broadcast(broadcast: HashBroadcast) -> ExternResult<()> {
+    link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
+        .map_err(|err| utils::err(&format!("{}", err)))?;
     Ok(())
 }
 

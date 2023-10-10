@@ -10,11 +10,14 @@ function interactions(expression: Address): Interaction[] {
 //!@ad4m-template-variable
 const name = "perspective-diff-sync";
 
+//!@ad4m-template-variable
+const uid = "perspective-diff-sync-uuid";
+
 export default async function create(context: LanguageContext): Promise<Language> {
   const Holochain = context.Holochain as HolochainLanguageDelegate;
   const agent = context.agent as AgentService;
 
-  const linksAdapter = new LinkAdapter(context);
+  const linksAdapter = new LinkAdapter(context, uid);
   const telepresenceAdapter = new TelepresenceAdapterImplementation(context);
 
   await Holochain.registerDNAs(
