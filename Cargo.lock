@@ -389,7 +389,7 @@ dependencies = [
  "num-traits",
  "rusticata-macros",
  "thiserror",
- "time 0.3.23",
+ "time",
 ]
 
 [[package]]
@@ -1049,7 +1049,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "time 0.3.23",
+ "time",
  "uuid 1.4.1",
 ]
 
@@ -1321,16 +1321,15 @@ dependencies = [
 
 [[package]]
 name = "chrono"
-version = "0.4.27"
+version = "0.4.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f56b4c72906975ca04becb8a30e102dfecddd0c06181e3e95ddc444be28881f8"
+checksum = "7f2c685bad3eb3d45a01354cedb7d5faa66194d1d58ba6e267a8de788f79db38"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
  "js-sys",
  "num-traits",
  "serde",
- "time 0.1.45",
  "wasm-bindgen",
  "windows-targets 0.48.5",
 ]
@@ -6329,7 +6328,7 @@ dependencies = [
 [[package]]
 name = "juniper"
 version = "0.16.0-dev"
-source = "git+https://github.com/graphql-rust/juniper?branch=graphql-transport-ws-protocol#a6ae3864573977a131723c21c28fba3e812fb09f"
+source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
 dependencies = [
  "async-trait",
  "bson",
@@ -6338,7 +6337,7 @@ dependencies = [
  "futures",
  "futures-enum",
  "graphql-parser",
- "indexmap 1.9.3",
+ "indexmap 2.0.0",
  "juniper_codegen",
  "serde",
  "smartstring",
@@ -6351,7 +6350,7 @@ dependencies = [
 [[package]]
 name = "juniper_codegen"
 version = "0.16.0-dev"
-source = "git+https://github.com/graphql-rust/juniper?branch=graphql-transport-ws-protocol#a6ae3864573977a131723c21c28fba3e812fb09f"
+source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
 dependencies = [
  "proc-macro-error",
  "proc-macro2 1.0.66",
@@ -6363,9 +6362,10 @@ dependencies = [
 [[package]]
 name = "juniper_graphql_transport_ws"
 version = "0.4.0-dev"
-source = "git+https://github.com/graphql-rust/juniper?branch=graphql-transport-ws-protocol#a6ae3864573977a131723c21c28fba3e812fb09f"
+source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
 dependencies = [
  "juniper",
+ "juniper_graphql_ws",
  "juniper_subscriptions",
  "serde",
  "tokio",
@@ -6374,7 +6374,7 @@ dependencies = [
 [[package]]
 name = "juniper_graphql_ws"
 version = "0.4.0-dev"
-source = "git+https://github.com/graphql-rust/juniper?branch=graphql-transport-ws-protocol#a6ae3864573977a131723c21c28fba3e812fb09f"
+source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
 dependencies = [
  "juniper",
  "juniper_subscriptions",
@@ -6385,7 +6385,7 @@ dependencies = [
 [[package]]
 name = "juniper_subscriptions"
 version = "0.17.0-dev"
-source = "git+https://github.com/graphql-rust/juniper?branch=graphql-transport-ws-protocol#a6ae3864573977a131723c21c28fba3e812fb09f"
+source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
 dependencies = [
  "futures",
  "juniper",
@@ -6394,7 +6394,7 @@ dependencies = [
 [[package]]
 name = "juniper_warp"
 version = "0.8.0-dev"
-source = "git+https://github.com/graphql-rust/juniper?branch=graphql-transport-ws-protocol#a6ae3864573977a131723c21c28fba3e812fb09f"
+source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
 dependencies = [
  "anyhow",
  "futures",
@@ -6402,6 +6402,7 @@ dependencies = [
  "juniper",
  "juniper_graphql_transport_ws",
  "juniper_graphql_ws",
+ "log",
  "serde",
  "serde_json",
  "thiserror",
@@ -6759,7 +6760,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml 0.9.25",
- "time 0.3.23",
+ "time",
  "tokio",
  "toml 0.5.11",
  "toml 0.7.6",
@@ -7253,7 +7254,7 @@ dependencies = [
  "dirs-next",
  "objc-foundation",
  "objc_id",
- "time 0.3.23",
+ "time",
 ]
 
 [[package]]
@@ -8965,7 +8966,7 @@ dependencies = [
  "line-wrap",
  "quick-xml 0.29.0",
  "serde",
- "time 0.3.23",
+ "time",
 ]
 
 [[package]]
@@ -9710,7 +9711,7 @@ checksum = "6413f3de1edee53342e6138e75b56d32e7bc6e332b3bd62d497b1929d4cfbcdd"
 dependencies = [
  "pem",
  "ring",
- "time 0.3.23",
+ "time",
  "yasna",
 ]
 
@@ -9722,7 +9723,7 @@ checksum = "ffbe84efe2f38dea12e9bfc1f65377fdf03e53a18cb3b995faedf7934c7e785b"
 dependencies = [
  "pem",
  "ring",
- "time 0.3.23",
+ "time",
  "yasna",
  "zeroize",
 ]
@@ -10874,7 +10875,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with_macros 3.3.0",
- "time 0.3.23",
+ "time",
 ]
 
 [[package]]
@@ -11156,7 +11157,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "thiserror",
- "time 0.3.23",
+ "time",
 ]
 
 [[package]]
@@ -12258,7 +12259,7 @@ dependencies = [
  "tauri-utils",
  "tempfile",
  "thiserror",
- "time 0.3.23",
+ "time",
  "tokio",
  "url 2.4.1",
  "uuid 1.4.1",
@@ -12306,7 +12307,7 @@ dependencies = [
  "sha2 0.10.7",
  "tauri-utils",
  "thiserror",
- "time 0.3.23",
+ "time",
  "uuid 1.4.1",
  "walkdir",
 ]
@@ -12613,17 +12614,6 @@ checksum = "3fdd6f064ccff2d6567adcb3873ca630700f00b5ad3f060c25b5dcfd9a4ce152"
 dependencies = [
  "cfg-if 1.0.0",
  "once_cell",
-]
-
-[[package]]
-name = "time"
-version = "0.1.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b797afad3f312d1c66a56d11d0316f916356d11bd158fbc6ca6389ff6bf805a"
-dependencies = [
- "libc",
- "wasi 0.10.0+wasi-snapshot-preview1",
- "winapi 0.3.9",
 ]
 
 [[package]]
@@ -13026,7 +13016,7 @@ dependencies = [
  "sharded-slab",
  "smallvec 1.11.0",
  "thread_local",
- "time 0.3.23",
+ "time",
  "tracing",
  "tracing-core",
  "tracing-log",
@@ -13802,12 +13792,6 @@ name = "wasi"
 version = "0.9.0+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cccddf32554fecc6acb585f82a32a72e28b48f8c4c1883ddfeeeaa96f7d8e519"
-
-[[package]]
-name = "wasi"
-version = "0.10.0+wasi-snapshot-preview1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a143597ca7c7793eff794def352d41792a93c481eb1042423ff7ff72ba2c31f"
 
 [[package]]
 name = "wasi"
@@ -14871,7 +14855,7 @@ dependencies = [
  "oid-registry",
  "rusticata-macros",
  "thiserror",
- "time 0.3.23",
+ "time",
 ]
 
 [[package]]
@@ -14934,7 +14918,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
 dependencies = [
- "time 0.3.23",
+ "time",
 ]
 
 [[package]]
@@ -14973,7 +14957,7 @@ dependencies = [
  "hmac 0.12.1",
  "pbkdf2 0.11.0",
  "sha1",
- "time 0.3.23",
+ "time",
  "zstd",
 ]
 
