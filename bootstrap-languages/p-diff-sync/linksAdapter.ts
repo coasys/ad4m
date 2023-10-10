@@ -93,9 +93,9 @@ export class LinkAdapter implements LinkSyncAdapter {
         if (broadcast_payload.reference.parents) {
           broadcast_payload.reference.parents = broadcast_payload.reference.parents.map( (parent: Buffer) => parent ? Buffer.from(parent).toString('base64') : 'null');
         };
-        console.log("sync(); sending referenceh hash", broadcast_payload.reference_hash);
-        console.log("sync(); sending broadcast payload");
-        console.log(JSON.stringify(broadcast_payload));
+        // console.log("sync(); sending referenceh hash", broadcast_payload.reference_hash);
+        // console.log("sync(); sending broadcast payload");
+        // console.log(JSON.stringify(broadcast_payload));
         this.socket.emit("broadcast", {roomId: this.languageName, signal: broadcast_payload});
       }
     } catch (e) {
@@ -242,15 +242,15 @@ export class LinkAdapter implements LinkSyncAdapter {
         this.myCurrentRevision = res;
       }
       let broadcast_payload = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_broadcast_payload", null);
-      console.log('commit got broadcast payload', broadcast_payload.referencence_hash);
-      console.log("which has type", typeof broadcast_payload.reference_hash);
+      // console.log('commit got broadcast payload', broadcast_payload.referencence_hash);
+      // console.log("which has type", typeof broadcast_payload.reference_hash);
       if (broadcast_payload) {
         broadcast_payload.reference_hash = Buffer.from(broadcast_payload.reference_hash).toString('base64');
         broadcast_payload.reference.diff = Buffer.from(broadcast_payload.reference.diff).toString('base64');
         if (broadcast_payload.reference.parents) {
           broadcast_payload.reference.parents = broadcast_payload.reference.parents.map( (parent: Buffer) => parent ? Buffer.from(parent).toString('base64') : 'null');
         };
-        console.log("commit sending referenceh hash", broadcast_payload.reference_hash);
+        //console.log("commit sending referenceh hash", broadcast_payload.reference_hash);
         this.socket.emit("broadcast", {roomId: this.languageName, signal: broadcast_payload});
       }
       return res as string;
@@ -302,13 +302,13 @@ export class LinkAdapter implements LinkSyncAdapter {
 
         //console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
         //const parsed = JSON.parse(reference_hash);
-        console.log("Handle holochain signal parsed ref hash");
-        console.log(JSON.stringify({
-          diff,
-          reference_hash,
-          reference,
-          broadcast_author
-        }));
+        // console.log("Handle holochain signal parsed ref hash");
+        // console.log(JSON.stringify({
+        //   diff,
+        //   reference_hash,
+        //   reference,
+        //   broadcast_author
+        // }));
         if (!Buffer.isBuffer(reference_hash)) {
           reference_hash = Buffer.from(reference_hash, 'base64');
         }
