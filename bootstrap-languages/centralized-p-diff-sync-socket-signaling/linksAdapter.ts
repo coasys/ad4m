@@ -95,6 +95,8 @@ export class LinkAdapter implements LinkSyncAdapter {
           hash: this.myCurrentRevision.hash,
           timestamp: this.myCurrentRevision.timestamp
         })
+
+        this.linkCallback(result)
     } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);
     } finally {
