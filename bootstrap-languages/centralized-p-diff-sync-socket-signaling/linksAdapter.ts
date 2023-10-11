@@ -26,6 +26,9 @@ export class LinkAdapter implements LinkSyncAdapter {
   constructor(context: LanguageContext, name: String) {
     this.me = context.agent.did;
     this.languageName = name;
+
+    this.addAgentRecord();
+
     this.socket = io("https://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
     console.log("Created socket connection");
     this.socket.on('error', (error: any) => {
@@ -66,9 +69,8 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async others(): Promise<DID[]> {
     // @ts-ignore
-    return await makeHttpRequest("http://127.0.0.1:8787/getActiveAgent", "GET",  {}, {
-      LinkLanguageUUID: this.languageName,
-      did: this.me
+    return await makeHttpRequest("http://127.0.0.1:8787/getOthers", "GET",  {}, {
+      LinkLanguageUUID: this.languageName
     })
   }
 
@@ -180,13 +182,15 @@ export class LinkAdapter implements LinkSyncAdapter {
     }
   }
 
-  async addActiveAgentLink(hcDna: HolochainLanguageDelegate): Promise<any> {
-    const result = await makeHttpRequest("http://127.0.0.1:8787/addActiveAgent", "POST",  {}, {
-      LinkLanguageUUID: this.languageName,
-      did: this.me
-    })
+  async addAgentRecord(): Promise<any> {
+    const others = await this.others();
 
-    return result
+    if (others.filter((other) => other === this.me).length == 0) {
+        const result = await makeHttpRequest("http://127.0.0.1:8787/addAgent", "POST",  {}, {
+          LinkLanguageUUID: this.languageName,
+          did: this.me
+        })
+    }
   }
 }
 
