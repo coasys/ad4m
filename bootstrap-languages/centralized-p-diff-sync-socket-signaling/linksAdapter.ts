@@ -54,15 +54,24 @@ export class LinkAdapter implements LinkSyncAdapter {
 
     //Response from a given call to commit by us or any other agent
     //contains all the data we need to update our local state and our recordTimestamp as held by the server
-    this.socket.on("signal-emit", (signal) => {
-      console.log("Got some live signal from the server", signal, this.myCurrentRevision.timestamp);
+    this.socket.on("signal-emit", async (signal) => {
+      //Try and get the mutex, so that we dont allow signals to be processed until we have done the first sync
+      const release = await this.generalMutex.acquire();
 
-      let serverRecordTimestamp = signal.serverRecordTimestamp;
-      if (!this.myCurrentRevision.timestamp || this.myCurrentRevision.timestamp < serverRecordTimestamp) {
-        this.myCurrentRevision.timestamp = serverRecordTimestamp;
-        this.updateServerSyncState();
-        
-        this.handleSignal(signal.payload);
+      try {
+        console.log("Got some live signal from the server", signal, this.myCurrentRevision.timestamp);
+
+        let serverRecordTimestamp = signal.serverRecordTimestamp;
+        if (!this.myCurrentRevision.timestamp || this.myCurrentRevision.timestamp < serverRecordTimestamp) {
+          this.myCurrentRevision.timestamp = serverRecordTimestamp;
+          this.updateServerSyncState();
+          
+          this.handleSignal(signal.payload);
+        }
+      } catch (e) {
+        console.error("PerspectiveDiffSync.signal-emit(); got error", e);
+      } finally {
+        release();
       }
     })
     
