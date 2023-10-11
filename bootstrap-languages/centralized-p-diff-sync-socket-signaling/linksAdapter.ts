@@ -31,9 +31,11 @@ export class LinkAdapter implements LinkSyncAdapter {
     this.socket.on('error', (error: any) => {
       console.error('Error:', error);
     });
-    this.socket.on('connect', () => {
+    this.socket.on('connect', async () => {
       console.log('Connected to the server');
       try {
+        await this.sync();
+
         this.socket.emit("join-room", this.languageName);
         console.log("Sent the join-room signal");
       } catch (e) {
