@@ -14,6 +14,7 @@ perspect-diff-sync.dna
 !rollup.config*
 !.dna.js
 !integration-test.js
+!customHttpDownloader.js
 
 .ad4m-test
 ad4m-test-*
