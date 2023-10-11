@@ -28,7 +28,10 @@ export class LinkAdapter implements LinkSyncAdapter {
     this.socket.on('connect', async () => {
       console.log('Connected to the server');
       try {
-        await this.sync();
+        this.socket.emit("sync", {
+          linkLanguageUUID: this.languageUid,
+          did: this.me,
+        })
 
         this.socket.emit("join-room", this.languageUid);
         console.log("Sent the join-room signal");
@@ -37,6 +40,9 @@ export class LinkAdapter implements LinkSyncAdapter {
       }
     });
     this.socket.on("signal", (signal: any) => {
+      this.handleSignal(signal);
+    });
+    this.socket.on("sync-emit", (signal: any) => {
       this.handleSignal(signal);
     });
     this.socket.on('disconnect', () => {
@@ -85,14 +91,10 @@ export class LinkAdapter implements LinkSyncAdapter {
     const release = await this.generalMutex.acquire();
     //console.log("PerspectiveDiffSync.sync(); Got lock");
     try {
-      //@ts-ignore
-      const result = await makeHttpRequest("http://127.0.0.1:8787/sync", "GET",  {}, {
-        LinkLanguageUUID: this.languageUid,
+      this.socket.emit("sync", {
+        linkLanguageUUID: this.languageUid,
         did: this.me,
-        timestamp: this.myCurrentRevision.timestamp
       })
-
-      this.linkCallback(result)
     } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);
     } finally {
@@ -102,35 +104,50 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async render(): Promise<Perspective> {
-    //@ts-ignore
-    const result = await makeHttpRequest("http://127.0.0.1:8787/render", "GET",  {}, {
-      LinkLanguageUUID: this.languageUid
-    })
-    return new Perspective(result);
+    return new Promise((resolve) => {
+      this.socket.emit("render", {
+        linkLanguageUUID: this.languageUid,
+      })
+
+      this.socket.on("render-emit", (signal) => {
+        resolve(new Perspective(signal.payload))
+      })
+    });
   }
 
   async commit(diff: PerspectiveDiff): Promise<string> {
-    const release = await this.generalMutex.acquire();
-    try {
-      let prep_diff = {
-        additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
-        removals: diff.removals.map((diff) => prepareLinkExpression(diff))
+    return new Promise(async (resolve, reject) => {
+      const release = await this.generalMutex.acquire();
+      
+      try {
+        let prep_diff = {
+          additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
+          removals: diff.removals.map((diff) => prepareLinkExpression(diff))
+        }
+  
+        this.socket.emit("commit", {
+          additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
+          removals: diff.removals.map((diff) => prepareLinkExpression(diff)),
+          linkLanguageUUID: this.languageUid,
+          did: this.me,
+        })
+
+        this.socket.on("commit-status", (signal) => {
+          if (signal.status === "Ok") {
+            resolve(null);
+          } else {
+            reject()
+          }
+        });
+        
+        return ;
+      } catch (e) {
+        console.error("PerspectiveDiffSync.commit(); got error", e);
+      } finally {
+        release();
+        reject(null);
       }
-
-      const result = await makeHttpRequest("http://127.0.0.1:8787/commit", "POST",  {}, {
-        ...prep_diff,
-        LinkLanguageUUID: this.languageUid
-      })
-
-      this.myCurrentRevision = result;
-
-      this.socket.emit("broadcast", {roomId: this.languageUid, signal: prep_diff});
-      return ;
-    } catch (e) {
-      console.error("PerspectiveDiffSync.commit(); got error", e);
-    } finally {
-      release();
-    }
+    })
   }
 
   addCallback(callback: PerspectiveDiffObserver): number {
