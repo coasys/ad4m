@@ -14,7 +14,7 @@ const uid = "centralized-perspective-diff-sync-uuid";
 
 export default async function create(context: LanguageContext): Promise<Language> {
   const linksAdapter = new LinkAdapter(context, uid);
-  const telepresenceAdapter = new TelepresenceAdapterImplementation(context);
+  const telepresenceAdapter = new TelepresenceAdapterImplementation(context, uid);
 
   //@ts-ignore
   return {

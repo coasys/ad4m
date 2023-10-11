@@ -5,27 +5,18 @@ import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
 import { io } from "https://esm.sh/socket.io-client@4.7.2";
 import makeHttpRequest from "./util.ts";
 
-class PeerInfo {
-  //@ts-ignore
-  currentRevision: Buffer;
-  //@ts-ignore
-  lastSeen: Date;
-};
-
 export class LinkAdapter implements LinkSyncAdapter {
   linkCallback?: PerspectiveDiffObserver
   syncStateChangeCallback?: SyncStateChangeObserver
-  peers: Map<DID, PeerInfo> = new Map();
   generalMutex: Mutex = withTimeout(new Mutex(), 10000, new Error('PerspectiveDiffSync: generalMutex timeout'));
   me: DID
-  gossipLogCount: number = 0;
   myCurrentRevision: any | null = null;
-  languageName: String | null = null;
+  languageUid: String | null = null;
   socket: any;
 
-  constructor(context: LanguageContext, name: String) {
+  constructor(context: LanguageContext, uid: String) {
     this.me = context.agent.did;
-    this.languageName = name;
+    this.languageUid = uid;
 
     this.addAgentRecord();
 
@@ -39,14 +30,14 @@ export class LinkAdapter implements LinkSyncAdapter {
       try {
         await this.sync();
 
-        this.socket.emit("join-room", this.languageName);
+        this.socket.emit("join-room", this.languageUid);
         console.log("Sent the join-room signal");
       } catch (e) {
         console.error("Error in socket connection: ", e);
       }
     });
     this.socket.on("signal", (signal: any) => {
-      this.handleHolochainSignal(signal);
+      this.handleSignal(signal);
     });
     this.socket.on('disconnect', () => {
       console.log('Disconnected from the server');
@@ -70,14 +61,15 @@ export class LinkAdapter implements LinkSyncAdapter {
   async others(): Promise<DID[]> {
     // @ts-ignore
     return await makeHttpRequest("http://127.0.0.1:8787/getOthers", "GET",  {}, {
-      LinkLanguageUUID: this.languageName
+      LinkLanguageUUID: this.languageUid
     })
   }
 
   async currentRevision(): Promise<string> {
     //@ts-ignore
-    const result = await makeHttpRequest("http://127.0.0.1:8787/render", "GET",  {}, {
-      LinkLanguageUUID: this.languageName
+    const result = await makeHttpRequest("http://127.0.0.1:8787/currentRevision", "GET",  {}, {
+      LinkLanguageUUID: this.languageUid,
+      did: this.me
     })
 
     if (result) {
@@ -93,14 +85,14 @@ export class LinkAdapter implements LinkSyncAdapter {
     const release = await this.generalMutex.acquire();
     //console.log("PerspectiveDiffSync.sync(); Got lock");
     try {
-        //@ts-ignore
-        const result = await makeHttpRequest("http://127.0.0.1:8787/sync", "GET",  {}, {
-          LinkLanguageUUID: this.languageName,
-          hash: this.myCurrentRevision.hash,
-          timestamp: this.myCurrentRevision.timestamp
-        })
+      //@ts-ignore
+      const result = await makeHttpRequest("http://127.0.0.1:8787/sync", "GET",  {}, {
+        LinkLanguageUUID: this.languageUid,
+        did: this.me,
+        timestamp: this.myCurrentRevision.timestamp
+      })
 
-        this.linkCallback(result)
+      this.linkCallback(result)
     } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);
     } finally {
@@ -112,7 +104,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   async render(): Promise<Perspective> {
     //@ts-ignore
     const result = await makeHttpRequest("http://127.0.0.1:8787/render", "GET",  {}, {
-      LinkLanguageUUID: this.languageName
+      LinkLanguageUUID: this.languageUid
     })
     return new Perspective(result);
   }
@@ -127,16 +119,12 @@ export class LinkAdapter implements LinkSyncAdapter {
 
       const result = await makeHttpRequest("http://127.0.0.1:8787/commit", "POST",  {}, {
         ...prep_diff,
-        LinkLanguageUUID: this.languageName
+        LinkLanguageUUID: this.languageUid
       })
 
       this.myCurrentRevision = result;
 
-      this.socket.emit("broadcast", {roomId: this.languageName, signal: {
-        reference_hash: "", 
-        diff: prep_diff,
-        broadcast_author: this.me
-      }});
+      this.socket.emit("broadcast", {roomId: this.languageUid, signal: prep_diff});
       return ;
     } catch (e) {
       console.error("PerspectiveDiffSync.commit(); got error", e);
@@ -155,30 +143,11 @@ export class LinkAdapter implements LinkSyncAdapter {
     return 1;
   }
 
-  async handleHolochainSignal(signal: any): Promise<void> {
-    let diff;          
-    let reference_hash;          
-    let reference;
-    let broadcast_author;
-    if (signal.payload) {
-      ({ diff, reference_hash, reference, broadcast_author } = signal.payload);
-    } else {
-      ({ diff, reference_hash, reference, broadcast_author } = signal);
-    }
-
-    if (diff && reference_hash && reference && broadcast_author) {
-      try {
-        this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
-      } catch (e) {
-        console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
-      }
-    } else {
-      console.log("PerspectiveDiffSync.handleHolochainSignal: received a signals from ourselves in fast_forward_signal or in a pull: ", JSON.stringify(signal.payload));
-      //This signal only contains link data and no reference, and therefore came from us in a pull in fast_forward_signal
-      if (this.linkCallback) {
-        console.log("PerspectiveDiffSync.handleHolochainSignal: calling linkCallback");
-        await this.linkCallback(signal.payload);
-      }
+  async handleSignal(signal: any): Promise<void> {
+    //This signal only contains link data and no reference, and therefore came from us in a pull in fast_forward_signal
+    if (this.linkCallback) {
+      console.log("PerspectiveDiffSync.handleHolochainSignal: calling linkCallback", signal);
+      await this.linkCallback(signal);
     }
   }
 
@@ -187,7 +156,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
     if (others.filter((other) => other === this.me).length == 0) {
         const result = await makeHttpRequest("http://127.0.0.1:8787/addAgent", "POST",  {}, {
-          LinkLanguageUUID: this.languageName,
+          LinkLanguageUUID: this.languageUid,
           did: this.me
         })
     }
