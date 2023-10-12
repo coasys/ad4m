@@ -26,6 +26,10 @@ console.debug = (...args) => {
   UTILS.consoleDebug(`${args.reduce((acc, cur) => acc += `${cur} `, "")}`)
 };
 
+console.dir = (...args) => {
+  UTILS.consoleDebug(`${args.reduce((acc, cur) => acc += `${JSON.stringify(cur)} `, "")}`)
+};
+
 console.error = (...args) => {
   UTILS.consoleError(`${args.reduce((acc, cur) => acc += `${cur} `, "")}`)
 };
