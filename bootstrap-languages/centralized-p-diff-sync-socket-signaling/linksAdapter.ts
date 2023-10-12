@@ -78,6 +78,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
         let serverRecordTimestamp = signal.serverRecordTimestamp;
         if (!this.myCurrentTime|| this.myCurrentTime < serverRecordTimestamp) {
+          console.log("Returning that live signal to executor");
           this.myCurrentTime = serverRecordTimestamp;
           this.updateServerSyncState();
           
@@ -140,9 +141,16 @@ export class LinkAdapter implements LinkSyncAdapter {
       did: this.me
     })
 
+    console.log("Current revision got result", result);
+
     if (result) {
       //@ts-ignore
-      return result.currentRevision;
+      if (result.currentRevision === null) {
+        return "";
+      } else {
+        //@ts-ignore
+        return result.currentRevision;
+      };
     }
 
     return "";
@@ -150,6 +158,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   //Call sync on the server, which will should fetch all the links we missed since last start of the link language
   async sync(): Promise<PerspectiveDiff> {
+    console.log("Sync call has called sync", this.hasCalledSync);
     //Only allow sync to be called once since once we have sync'd once we will get future links via signal
     if (!this.hasCalledSync) {
       //console.log("PerspectiveDiffSync.sync(); Getting lock");
@@ -210,7 +219,7 @@ export class LinkAdapter implements LinkSyncAdapter {
             this.myCurrentTime = signal.serverRecordTimestamp;
             this.updateServerSyncState();
 
-            resolve(null);
+            resolve("");
           } else {
             reject()
           }
