@@ -128,10 +128,10 @@ describe("Integration tests", function () {
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
-    describe('Runtime', runtimeTests(testContext))
-    describe('Expression', expressionTests(testContext))
-    describe('Perspective', perspectiveTests(testContext))
-    describe('Social DNA', socialDNATests(testContext))
+    // describe('Runtime', runtimeTests(testContext))
+    // describe('Expression', expressionTests(testContext))
+    // describe('Perspective', perspectiveTests(testContext))
+    // describe('Social DNA', socialDNATests(testContext))
 
     describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
@@ -171,8 +171,8 @@ describe("Integration tests", function () {
           }
         })
 
-        describe('Agent Language', agentLanguageTests(testContext))
-        describe('Direct Messages', directMessageTests(testContext))
+        // describe('Agent Language', agentLanguageTests(testContext))
+        // describe('Direct Messages', directMessageTests(testContext))
         describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
     })

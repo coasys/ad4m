@@ -15,7 +15,7 @@ const languages = {
     bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.6/bundle.js",
   },
   "perspective-diff-sync": {
-    bundle: "../../bootstrap-languages/p-diff-sync/build/bundle.js",
+    bundle: "../../bootstrap-languages/centralized-p-diff-sync-socket-signaling/build/bundle.js",
   },
   "direct-message-language": {
     bundle: "../../bootstrap-languages/direct-message-language/build/bundle.js"

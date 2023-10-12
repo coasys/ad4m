@@ -18,6 +18,15 @@
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/p-diff-sync-socket-signaling/build/bundle.js"
+        },
+        {
+            "meta": {
+                "name": "perspectiveDiffSync",
+                "description": "Centralized link language",
+                "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
+                "possibleTemplateParams": ["uid", "name", "description"]
+            },
+            "resource": "../bootstrap-languages/centralized-p-diff-sync/build/bundle.js"
         }
     ],
     "agentLanguage": {

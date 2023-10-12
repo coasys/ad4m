@@ -1,7 +1,7 @@
 {
-  "name": "@perspect3vism/centralized-perspective-diff-sync-socket-signaling",
+  "name": "@perspect3vism/centralized-perspective-diff-sync",
   "version": "0.6.0",
-  "description": "An AD4M language for syncing mutations to a share perspective",
+  "description": "An AD4M language for syncing mutations to a shared perspective via a centralized server",
   "main": "index.js",
   "scripts": {
     "build": "run-script-os",
