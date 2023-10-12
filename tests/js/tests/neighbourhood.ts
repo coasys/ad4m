@@ -97,49 +97,49 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobLinks.length).to.be.equal(1)
             })
 
-            // it('local link created by Alice NOT received by Bob', async () => {
-            //     const alice = testContext.alice
-            //     const bob = testContext.bob
+            it('local link created by Alice NOT received by Bob', async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
 
-            //     aliceP1 = await alice.perspective.add("friends")
-            //     const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test local links"}));
-            //     const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
-            //     console.log("neighbourhoodUrl", neighbourhoodUrl);
-            //     bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+                aliceP1 = await alice.perspective.add("friends")
+                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test local links"}));
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+                console.log("neighbourhoodUrl", neighbourhoodUrl);
+                bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-            //     await testContext.makeAllNodesKnown()
+                await testContext.makeAllNodesKnown()
 
-            //     await sleep(1000)
+                await sleep(1000)
 
-            //     await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'}, 'local')
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'}, 'local')
 
-            //     await sleep(1000)
+                await sleep(1000)
 
-            //     let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
-            //     let tries = 1
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let tries = 1
 
-            //     while(bobLinks.length < 1 && tries < 5) {
-            //         console.log("Bob retrying getting NOT received links...");
-            //         await sleep(1000)
-            //         bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
-            //         tries++
-            //     }
+                while(bobLinks.length < 1 && tries < 5) {
+                    console.log("Bob retrying getting NOT received links...");
+                    await sleep(1000)
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    tries++
+                }
                 
-            //     expect(bobLinks.length).to.be.equal(0)
-            // })
+                expect(bobLinks.length).to.be.equal(0)
+            })
 
-            // it('can delete neighbourhood', async () => {
-            //     const alice = testContext.alice;
-            //     const bob = testContext.bob;
+            it('can delete neighbourhood', async () => {
+                const alice = testContext.alice;
+                const bob = testContext.bob;
 
-            //     const deleteNeighbourhood = await alice.perspective.remove(aliceP1!.uuid);
-            //     expect(deleteNeighbourhood.perspectiveRemove).to.be.true;
+                const deleteNeighbourhood = await alice.perspective.remove(aliceP1!.uuid);
+                expect(deleteNeighbourhood.perspectiveRemove).to.be.true;
 
-            //     const bobDeleteNeighbourhood = await bob.perspective.remove(bobP1!.uuid);
-            //     expect(bobDeleteNeighbourhood.perspectiveRemove).to.be.true;
+                const bobDeleteNeighbourhood = await bob.perspective.remove(bobP1!.uuid);
+                expect(bobDeleteNeighbourhood.perspectiveRemove).to.be.true;
 
-            //     const perspectives = await alice.perspective.all();
-            // })
+                const perspectives = await alice.perspective.all();
+            })
             
             // it('can get the correct state change signals', async () => {
             //     const aliceP1 = await testContext.alice.perspective.add("state-changes")
@@ -200,137 +200,137 @@ export default function neighbourhoodTests(testContext: TestContext) {
             //     expect(bobSyncChangeData).to.be.equal(PerspectiveState.Synced);
             // })
 
-            // describe('with set up and joined NH for Telepresence', async () => {
-            //     let aliceNH: NeighbourhoodProxy|undefined
-            //     let bobNH: NeighbourhoodProxy|undefined
-            //     let aliceDID: string|undefined
-            //     let bobDID: string|undefined
+            describe('with set up and joined NH for Telepresence', async () => {
+                let aliceNH: NeighbourhoodProxy|undefined
+                let bobNH: NeighbourhoodProxy|undefined
+                let aliceDID: string|undefined
+                let bobDID: string|undefined
 
-            //     before(async () => {
-            //         const alice = testContext.alice
-            //         const bob = testContext.bob
+                before(async () => {
+                    const alice = testContext.alice
+                    const bob = testContext.bob
 
-            //         const aliceP1 = await alice.perspective.add("telepresence")
-            //         const linkLang = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood for Telepresence"}));
-            //         const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
-            //         await sleep(5000)
-            //         const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            //         const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
-            //         await testContext.makeAllNodesKnown()
+                    const aliceP1 = await alice.perspective.add("telepresence")
+                    const linkLang = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood for Telepresence"}));
+                    const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
+                    await sleep(5000)
+                    const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+                    const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
+                    await testContext.makeAllNodesKnown()
                     
-            //         aliceNH = aliceP1.getNeighbourhoodProxy()
-            //         bobNH = bobP1!.getNeighbourhoodProxy()
-            //         aliceDID = (await alice.agent.me()).did
-            //         bobDID = (await bob.agent.me()).did
-            //         await sleep(5000)
-            //     })
+                    aliceNH = aliceP1.getNeighbourhoodProxy()
+                    bobNH = bobP1!.getNeighbourhoodProxy()
+                    aliceDID = (await alice.agent.me()).did
+                    bobDID = (await bob.agent.me()).did
+                    await sleep(5000)
+                })
 
-            //     it('they see each other in `otherAgents`', async () => {
-            //         await sleep(10000);
-            //         const aliceAgents = await aliceNH!.otherAgents()
-            //         console.log("alice agents", aliceAgents);
-            //         const bobAgents = await bobNH!.otherAgents()
-            //         console.log("bob agents", bobAgents);
-            //         expect(aliceAgents.length).to.be.equal(1)
-            //         expect(aliceAgents[0]).to.be.equal(bobDID)
-            //         expect(bobAgents.length).to.be.equal(1)
-            //         expect(bobAgents[0]).to.be.equal(aliceDID)
-            //     })
+                it('they see each other in `otherAgents`', async () => {
+                    await sleep(10000);
+                    const aliceAgents = await aliceNH!.otherAgents()
+                    console.log("alice agents", aliceAgents);
+                    const bobAgents = await bobNH!.otherAgents()
+                    console.log("bob agents", bobAgents);
+                    expect(aliceAgents.length).to.be.equal(1)
+                    expect(aliceAgents[0]).to.be.equal(bobDID)
+                    expect(bobAgents.length).to.be.equal(1)
+                    expect(bobAgents[0]).to.be.equal(aliceDID)
+                })
 
-            //     it('they can set their online status and see each others online status in `onlineAgents`', async () => {
-            //         let link = new LinkExpression()
-            //         link.author = "did:test";
-            //         link.timestamp = new Date().toISOString();
-            //         link.data = new Link({source: "src", target: "target", predicate: "pred"});
-            //         link.proof = new ExpressionProof("sig", "key");
-            //         link.proof.invalid = true;
-            //         link.proof.valid = false;
-            //         const testPerspective = new Perspective([link])
-            //         await aliceNH!.setOnlineStatus(testPerspective)
-            //         await bobNH!.setOnlineStatus(testPerspective)
+                it('they can set their online status and see each others online status in `onlineAgents`', async () => {
+                    let link = new LinkExpression()
+                    link.author = "did:test";
+                    link.timestamp = new Date().toISOString();
+                    link.data = new Link({source: "src", target: "target", predicate: "pred"});
+                    link.proof = new ExpressionProof("sig", "key");
+                    link.proof.invalid = true;
+                    link.proof.valid = false;
+                    const testPerspective = new Perspective([link])
+                    await aliceNH!.setOnlineStatus(testPerspective)
+                    await bobNH!.setOnlineStatus(testPerspective)
 
-            //         const aliceOnline = await aliceNH!.onlineAgents()
-            //         const bobOnline = await bobNH!.onlineAgents()
-            //         expect(aliceOnline.length).to.be.equal(1)
-            //         expect(aliceOnline[0].did).to.be.equal(bobDID)
-            //         console.log(aliceOnline[0].status);
-            //         expect(aliceOnline[0].status.data.links).to.deep.equal(testPerspective.links)
+                    const aliceOnline = await aliceNH!.onlineAgents()
+                    const bobOnline = await bobNH!.onlineAgents()
+                    expect(aliceOnline.length).to.be.equal(1)
+                    expect(aliceOnline[0].did).to.be.equal(bobDID)
+                    console.log(aliceOnline[0].status);
+                    expect(aliceOnline[0].status.data.links).to.deep.equal(testPerspective.links)
                     
-            //         expect(bobOnline.length).to.be.equal(1)
-            //         expect(bobOnline[0].did).to.be.equal(aliceDID)
-            //         expect(bobOnline[0].status.data.links).to.deep.equal(testPerspective.links)
+                    expect(bobOnline.length).to.be.equal(1)
+                    expect(bobOnline[0].did).to.be.equal(aliceDID)
+                    expect(bobOnline[0].status.data.links).to.deep.equal(testPerspective.links)
 
 
-            //         await aliceNH!.setOnlineStatusU(PerspectiveUnsignedInput.fromLink(new Link({
-            //             source: "test://source",
-            //             target: "test://target" 
-            //         })))
+                    await aliceNH!.setOnlineStatusU(PerspectiveUnsignedInput.fromLink(new Link({
+                        source: "test://source",
+                        target: "test://target" 
+                    })))
 
-            //         const bobOnline2 = await bobNH!.onlineAgents()
+                    const bobOnline2 = await bobNH!.onlineAgents()
 
-            //         expect(bobOnline2.length).to.be.equal(1)
-            //         expect(bobOnline2[0].did).to.be.equal(aliceDID)
-            //         expect(bobOnline2[0].status.data.links[0].data.source).to.equal("test://source")
-            //         expect(bobOnline2[0].status.data.links[0].data.target).to.equal("test://target")
-            //         expect(bobOnline2[0].status.data.links[0].proof.valid).to.be.true
-            //         // TODO: Signature check for the whole perspective is broken
-            //         // Got to fix that and add back this assertion
-            //         //expect(bobOnline2[0].status.proof.valid).to.be.true
+                    expect(bobOnline2.length).to.be.equal(1)
+                    expect(bobOnline2[0].did).to.be.equal(aliceDID)
+                    expect(bobOnline2[0].status.data.links[0].data.source).to.equal("test://source")
+                    expect(bobOnline2[0].status.data.links[0].data.target).to.equal("test://target")
+                    expect(bobOnline2[0].status.data.links[0].proof.valid).to.be.true
+                    // TODO: Signature check for the whole perspective is broken
+                    // Got to fix that and add back this assertion
+                    //expect(bobOnline2[0].status.proof.valid).to.be.true
                     
-            //     })
+                })
 
-            //     it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
-            //         let aliceCalls = 0;
-            //         let aliceData = null;
-            //         const aliceHandler = async (payload: Perspective) => {
-            //             aliceCalls += 1;
-            //             //@ts-ignore
-            //             aliceData = payload;
-            //         };
-            //         aliceNH!.addSignalHandler(aliceHandler)
+                it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
+                    let aliceCalls = 0;
+                    let aliceData = null;
+                    const aliceHandler = async (payload: Perspective) => {
+                        aliceCalls += 1;
+                        //@ts-ignore
+                        aliceData = payload;
+                    };
+                    aliceNH!.addSignalHandler(aliceHandler)
 
-            //         let bobCalls = 0;
-            //         let bobData = null;
-            //         const bobHandler = async (payload: Perspective) => {
-            //             bobCalls += 1;
-            //             //@ts-ignore
-            //             bobData = payload;
-            //         };
-            //         bobNH!.addSignalHandler(bobHandler)
+                    let bobCalls = 0;
+                    let bobData = null;
+                    const bobHandler = async (payload: Perspective) => {
+                        bobCalls += 1;
+                        //@ts-ignore
+                        bobData = payload;
+                    };
+                    bobNH!.addSignalHandler(bobHandler)
 
-            //         let link = new LinkExpression()
-            //         link.author = aliceDID;
-            //         link.timestamp = new Date().toISOString();
-            //         link.data = new Link({source: "alice", target: "bob", predicate: "signal"});
-            //         link.proof = new ExpressionProof("sig", "key");
-            //         const aliceSignal = new Perspective([link])
+                    let link = new LinkExpression()
+                    link.author = aliceDID;
+                    link.timestamp = new Date().toISOString();
+                    link.data = new Link({source: "alice", target: "bob", predicate: "signal"});
+                    link.proof = new ExpressionProof("sig", "key");
+                    const aliceSignal = new Perspective([link])
 
-            //         await aliceNH!.sendSignal(bobDID!, aliceSignal)
+                    await aliceNH!.sendSignal(bobDID!, aliceSignal)
 
-            //         await sleep(1000)
+                    await sleep(1000)
 
-            //         expect(bobCalls).to.be.equal(1)
-            //         expect(aliceCalls).to.be.equal(0)
+                    expect(bobCalls).to.be.equal(1)
+                    expect(aliceCalls).to.be.equal(0)
 
-            //         link.proof.invalid = true;
-            //         link.proof.valid = false;
-            //         //@ts-ignore
-            //         expect(bobData.data.links).to.deep.equal(aliceSignal.links)
+                    link.proof.invalid = true;
+                    link.proof.valid = false;
+                    //@ts-ignore
+                    expect(bobData.data.links).to.deep.equal(aliceSignal.links)
 
                     
-            //         let link2 = new Link({source: "bob", target: "alice", predicate: "signal"});
-            //         const bobSignal = new PerspectiveUnsignedInput([link2])
+                    let link2 = new Link({source: "bob", target: "alice", predicate: "signal"});
+                    const bobSignal = new PerspectiveUnsignedInput([link2])
 
-            //         await bobNH!.sendBroadcastU(bobSignal)
+                    await bobNH!.sendBroadcastU(bobSignal)
 
-            //         await sleep(1000)
+                    await sleep(1000)
 
-            //         expect(aliceCalls).to.be.equal(1)
+                    expect(aliceCalls).to.be.equal(1)
 
-            //         //@ts-ignore
-            //         expect(aliceData.data.links[0].data).to.deep.equal(link2)
-            //     })
-            // })
+                    //@ts-ignore
+                    expect(aliceData.data.links[0].data).to.deep.equal(link2)
+                })
+            })
         })
     }
 }
