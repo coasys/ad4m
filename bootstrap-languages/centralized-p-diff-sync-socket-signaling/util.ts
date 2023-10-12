@@ -1,4 +1,4 @@
-import http from 'node:http';
+import http from 'https://deno.land/std@0.177.0/node/http.ts';
 
 export default function makeHttpRequest(url, method, queryParams, requestBody) {
     return new Promise((resolve, reject) => {

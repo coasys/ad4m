@@ -2,7 +2,7 @@ import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, La
   LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
-import { io } from "https://esm.sh/socket.io-client@4.7.2";
+import { io, Socket, ServerToClientEvents, ClientToServerEvents } from "https://esm.sh/socket.io-client@4.7.2";
 import makeHttpRequest from "./util.ts";
 
 export class LinkAdapter implements LinkSyncAdapter {
@@ -10,9 +10,9 @@ export class LinkAdapter implements LinkSyncAdapter {
   syncStateChangeCallback?: SyncStateChangeObserver
   generalMutex: Mutex = withTimeout(new Mutex(), 10000, new Error('PerspectiveDiffSync: generalMutex timeout'));
   me: DID
-  myCurrentRevision: any | null = null;
+  myCurrentTime: any | null = null;
   languageUid: String | null = null;
-  socket: any;
+  socketClient: Socket<ServerToClientEvents, ClientToServerEvents>;
   hasCalledSync = false;
 
   constructor(context: LanguageContext, uid: String) {
@@ -21,17 +21,18 @@ export class LinkAdapter implements LinkSyncAdapter {
 
     //this.addAgentRecord();
 
-    this.socket = io("https://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
+    this.socketClient = io("https://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
     console.log("Created socket connection");
     
-    this.socket.on('error', (error: any) => {
+    this.socketClient.on('error', (error: any) => {
       console.error('Error:', error);
     });
     
-    this.socket.on('connect', async () => {
+    this.socketClient.on('connect', async () => {
       console.log('Connected to the server');
       try {
-        this.socket.emit("join-room", this.languageUid);
+        console.log("Trying to join room", this.languageUid);
+        this.socketClient.emit("join-room", this.languageUid);
         console.log("Sent the join-room signal");
       } catch (e) {
         console.error("Error in socket connection: ", e);
@@ -39,10 +40,14 @@ export class LinkAdapter implements LinkSyncAdapter {
     });
 
     //Response from a given call to sync; contains all the data we need to update our local state and our recordTimestamp as held by the server
-    this.socket.on("sync-emit", (signal) => {
-      console.log("Got some result from sync", signal, this.myCurrentRevision.timestamp);
+    this.socketClient.on("sync-emit", (signal) => {
+      console.log("Got some result from sync", signal);
 
-      this.myCurrentRevision.timestamp = signal.serverRecordTimestamp;
+      if (this.myCurrentTime) {
+        console.log("With current time", this.myCurrentTime);
+      }
+
+      this.myCurrentTime = signal.serverRecordTimestamp;
       this.updateServerSyncState();
       this.hasCalledSync = true;
 
@@ -54,16 +59,20 @@ export class LinkAdapter implements LinkSyncAdapter {
 
     //Response from a given call to commit by us or any other agent
     //contains all the data we need to update our local state and our recordTimestamp as held by the server
-    this.socket.on("signal-emit", async (signal) => {
+    this.socketClient.on("signal-emit", async (signal) => {
       //Try and get the mutex, so that we dont allow signals to be processed until we have done the first sync
       const release = await this.generalMutex.acquire();
 
       try {
-        console.log("Got some live signal from the server", signal, this.myCurrentRevision.timestamp);
+        console.log("Got some live signal from the server", signal);
+
+        if (this.myCurrentTime) {
+          console.log("With current time", this.myCurrentTime);
+        }
 
         let serverRecordTimestamp = signal.serverRecordTimestamp;
-        if (!this.myCurrentRevision.timestamp || this.myCurrentRevision.timestamp < serverRecordTimestamp) {
-          this.myCurrentRevision.timestamp = serverRecordTimestamp;
+        if (!this.myCurrentTime|| this.myCurrentTime< serverRecordTimestamp) {
+          this.myCurrentTime = serverRecordTimestamp;
           this.updateServerSyncState();
           
           this.handleSignal(signal.payload);
@@ -75,15 +84,15 @@ export class LinkAdapter implements LinkSyncAdapter {
       }
     })
     
-    this.socket.on('disconnect', () => {
+    this.socketClient.on('disconnect', () => {
       console.log('Disconnected from the server');
     });
     
-    this.socket.on('connect_error', (error) => {
+    this.socketClient.on('connect_error', (error) => {
       console.error('Connection Error:', error);
     });
 
-    this.socket.on('reconnect', (attemptNumber) => {
+    this.socketClient.on('reconnect', (attemptNumber) => {
       console.log('Reconnected to the server on attempt:', attemptNumber);
 
       //If we have disconnected and reconnected, we need to sync again
@@ -91,14 +100,16 @@ export class LinkAdapter implements LinkSyncAdapter {
       this.sync();
     });
     
-    this.socket.on('reconnect_attempt', () => {
+    this.socketClient.on('reconnect_attempt', () => {
       console.log('Trying to reconnect...');
     });
   }
 
   //Tell the server that we have updated our current timestamp so that the server can keep in sync with what we have seen
   updateServerSyncState() {
-    this.socket.emit("update-sync-state", {did: this.me, date: this.myCurrentRevision.timestamp, linkLanguageUUID: this.languageUid})
+    if (this.myCurrentTime) {
+      this.socketClient.emit("update-sync-state", {did: this.me, date: this.myCurrentTime, linkLanguageUUID: this.languageUid})
+    }
   }
 
   writable(): boolean {
@@ -139,7 +150,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       const release = await this.generalMutex.acquire();
       //console.log("PerspectiveDiffSync.sync(); Got lock");
       try {
-        this.socket.emit("sync", {
+        this.socketClient.emit("sync", {
           linkLanguageUUID: this.languageUid,
           did: this.me,
         });
@@ -156,13 +167,14 @@ export class LinkAdapter implements LinkSyncAdapter {
   async render(): Promise<Perspective> {
     return new Promise((resolve) => {
       //Send the request to get the links
-      this.socket.emit("render", {
+      this.socketClient.emit("render", {
         linkLanguageUUID: this.languageUid,
       })
 
       //Wait for the response
-      this.socket.on("render-emit", (signal) => {
-        this.myCurrentRevision.timestamp = signal.serverRecordTimestamp;
+      this.socketClient.on("render-emit", (signal) => {
+        this.myCurrentTime = signal.serverRecordTimestamp;
+        this.updateServerSyncState();
         resolve(new Perspective(signal.payload))
       })
     });
@@ -174,7 +186,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       
       try {  
         //Send the commit to the server
-        this.socket.emit("commit", {
+        this.socketClient.emit("commit", {
           additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
           removals: diff.removals.map((diff) => prepareLinkExpression(diff)),
           linkLanguageUUID: this.languageUid,
@@ -182,10 +194,10 @@ export class LinkAdapter implements LinkSyncAdapter {
         })
 
         //Wait for a response saying that the commit was successful
-        this.socket.on("commit-status", (signal) => {
+        this.socketClient.on("commit-status", (signal) => {
           if (signal.status === "Ok") {
             //Update our local timestamp to match the server
-            this.myCurrentRevision.timestamp = signal.serverRecordTimestamp;
+            this.myCurrentTime = signal.serverRecordTimestamp;
             this.updateServerSyncState();
 
             resolve(null);

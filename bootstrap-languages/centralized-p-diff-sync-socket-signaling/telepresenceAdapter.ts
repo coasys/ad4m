@@ -14,7 +14,7 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     }
 
     async setOnlineStatus(status: PerspectiveExpression): Promise<void> {     
-        await makeHttpRequest("http://127.0.0.1:8787/setStatus", "POST",  {}, {
+        await makeHttpRequest("https://socket.ad4m.dev/setStatus", "POST",  {}, {
             did: this.me,
             link: status,
             LinkLanguageUUID: this.uuid
@@ -22,7 +22,7 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     }
 
     async getOnlineAgents(): Promise<OnlineAgent[]> {
-        const result = await makeHttpRequest("http://127.0.0.1:8787/getOnlineAgents", "GET",  {}, {
+        const result = await makeHttpRequest("https://socket.ad4m.dev/getOnlineAgents", "GET",  {}, {
             did: this.me,
             LinkLanguageUUID: this.uuid
         })
@@ -32,13 +32,13 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     }
 
     async sendSignal(remoteAgentDid: string, payload: PerspectiveExpression): Promise<object> {
-        let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "send_signal", {remote_agent_did: remoteAgentDid, payload});
-        return res;
+        //let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "send_signal", {remote_agent_did: remoteAgentDid, payload});
+        return {};
     }
 
     async sendBroadcast(payload: PerspectiveExpression): Promise<object> {
-        let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "send_broadcast", payload);
-        return res;
+        //let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "send_broadcast", payload);
+        return {};
     }
 
     async registerSignalCallback(callback: TelepresenceSignalCallback): Promise<void> {
