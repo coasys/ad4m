@@ -43,6 +43,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     this.socketClient.on("sync-emit", (signal) => {
       console.log("Got some result from sync");
       console.dir(signal);
+      console.log(this.me);
 
       if (this.myCurrentTime) {
         console.log("With current time", this.myCurrentTime);
@@ -67,14 +68,16 @@ export class LinkAdapter implements LinkSyncAdapter {
       const release = await this.generalMutex.acquire();
 
       try {
-        console.log("Got some live signal from the server", signal);
+        console.log("Got some live signal from the server");
+        console.dir(signal);
+        console.log(this.me);
 
         if (this.myCurrentTime) {
           console.log("With current time", this.myCurrentTime);
         }
 
         let serverRecordTimestamp = signal.serverRecordTimestamp;
-        if (!this.myCurrentTime|| this.myCurrentTime< serverRecordTimestamp) {
+        if (!this.myCurrentTime|| this.myCurrentTime < serverRecordTimestamp) {
           this.myCurrentTime = serverRecordTimestamp;
           this.updateServerSyncState();
           
@@ -153,6 +156,8 @@ export class LinkAdapter implements LinkSyncAdapter {
       const release = await this.generalMutex.acquire();
       //console.log("PerspectiveDiffSync.sync(); Got lock");
       try {
+        console.log("Sending the sync event to server");
+        console.log(this.me);
         this.socketClient.emit("sync", {
           linkLanguageUUID: this.languageUid,
           did: this.me,
@@ -196,7 +201,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         };
         console.log("Commit sending prepped diff", preppedDiff);
         //Send the commit to the server
-        this.socketClient.emit("commit", preppedDiff)
+        this.socketClient.emit("commit", preppedDiff);
 
         //Wait for a response saying that the commit was successful
         this.socketClient.on("commit-status", (signal) => {
