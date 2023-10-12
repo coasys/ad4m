@@ -43,7 +43,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     //contains all the data we need to update our local state and our recordTimestamp as held by the server
     this.socketClient.on("signal-emit", async (signal) => {
       //Try and get the mutex, so that we dont allow signals to be processed until we have done the first sync
-      const release = await this.generalMutex.acquire();
+      //const release = await this.generalMutex.acquire();
 
       try {
         console.log("Got some live signal from the server");
@@ -65,7 +65,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       } catch (e) {
         console.error("PerspectiveDiffSync.signal-emit(); got error", e);
       } finally {
-        release();
+        //release();
       }
     })
     
@@ -119,11 +119,18 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async currentRevision(): Promise<string> {
-    //@ts-ignore
-    const result = await makeHttpRequest("https://socket.ad4m.dev/currentRevision", "POST",  {}, {
-      linkLanguageUUID: this.languageUid,
-      did: this.me
-    })
+    console.log("Getting current revision");
+    let result;
+    try {
+      //@ts-ignore
+      result = await makeHttpRequest("https://socket.ad4m.dev/currentRevision", "POST",  {}, {
+        linkLanguageUUID: this.languageUid,
+        did: this.me
+      })
+    } catch (e) {
+      console.log("Error in currentRevision call", e);
+      result = null;
+    }
 
     console.log("Current revision got result", result);
 
@@ -146,7 +153,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     //Only allow sync to be called once since once we have sync'd once we will get future links via signal
     if (!this.hasCalledSync) {
       //console.log("PerspectiveDiffSync.sync(); Getting lock");
-      const release = await this.generalMutex.acquire();
+      //const release = await this.generalMutex.acquire();
       //console.log("PerspectiveDiffSync.sync(); Got lock");
       try {
         console.log("Sending the sync event to server");
@@ -181,7 +188,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       } catch (e) {
         console.error("PerspectiveDiffSync.sync(); got error", e);
       } finally {
-        release();
+        //release();
       }
     }
     return new PerspectiveDiff()
@@ -206,39 +213,48 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async commit(diff: PerspectiveDiff): Promise<string> {
-    return new Promise(async (resolve, reject) => {
-      const release = await this.generalMutex.acquire();
-      
-      try {  
-        let preppedDiff = {
-          additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
-          removals: diff.removals.map((diff) => prepareLinkExpression(diff)),
+      //const release = await this.generalMutex.acquire();
+      try {
+        const preppedDiff = {
+          additions: diff.additions.map((item) => prepareLinkExpression(item)),
+          removals: diff.removals.map((item) => prepareLinkExpression(item)),
           linkLanguageUUID: this.languageUid,
           did: this.me,
         };
         console.log("Commit sending prepped diff", preppedDiff);
-        //Send the commit to the server
-        this.socketClient.emit("commit", preppedDiff, (err, signal) => {
-          if (err) {
-            console.error("Error in sync call", err);
-            return reject(err);
-          };
-          if (signal.status === "Ok") {
-            //Update our local timestamp to match the server
-            this.myCurrentTime = signal.serverRecordTimestamp;
-            this.updateServerSyncState();
 
-            resolve("");
-          } else {
-            reject()
-          }
-        });
+        const signal = await this.emitCommit(preppedDiff);
+
+        if (signal.status === "Ok") {
+          console.log("Got some result from commit");
+          console.dir(signal);
+          //Update our local timestamp to match the server
+          this.myCurrentTime = signal.serverRecordTimestamp;
+          this.updateServerSyncState();
+          return ""; // Resolve the function with an empty string
+        } else {
+          throw new Error("Commit failed with non-Ok status");
+        }
       } catch (e) {
         console.error("PerspectiveDiffSync.commit(); got error", e);
+        throw e; // Propagate the error up
       } finally {
-        release();
+        //release();
       }
-    })
+  }
+
+  // Utility method to wrap the socketClient.emit in a Promise
+  private emitCommit(preppedDiff: any): Promise<any> {
+    return new Promise((resolve, reject) => {
+      this.socketClient.emit("commit", preppedDiff, (err, signal) => {
+        if (err) {
+          console.error("Error in commit call", err);
+          reject(err);
+        } else {
+          resolve(signal);
+        }
+      });
+    });
   }
 
   addCallback(callback: PerspectiveDiffObserver): number {
