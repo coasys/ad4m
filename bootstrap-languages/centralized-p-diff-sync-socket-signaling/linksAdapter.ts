@@ -39,28 +39,6 @@ export class LinkAdapter implements LinkSyncAdapter {
       }
     });
 
-    //Response from a given call to sync; contains all the data we need to update our local state and our recordTimestamp as held by the server
-    this.socketClient.on("sync-emit", (signal) => {
-      console.log("Got some result from sync");
-      console.dir(signal);
-      console.log(this.me);
-
-      if (this.myCurrentTime) {
-        console.log("With current time", this.myCurrentTime);
-      }
-
-      this.myCurrentTime = signal.serverRecordTimestamp;
-      this.updateServerSyncState();
-      this.hasCalledSync = true;
-
-      if (signal.payload.additions.length > 0 || signal.payload.removals.length > 0) {
-        this.handleSignal(signal.payload);
-      }
-
-      //Emit and event saying that we are synced
-      this.syncStateChangeCallback(PerspectiveState.Synced);
-    });
-
     //Response from a given call to commit by us or any other agent
     //contains all the data we need to update our local state and our recordTimestamp as held by the server
     this.socketClient.on("signal-emit", async (signal) => {
@@ -115,7 +93,13 @@ export class LinkAdapter implements LinkSyncAdapter {
   //Tell the server that we have updated our current timestamp so that the server can keep in sync with what we have seen
   updateServerSyncState() {
     if (this.myCurrentTime) {
-      this.socketClient.emit("update-sync-state", {did: this.me, date: this.myCurrentTime, linkLanguageUUID: this.languageUid})
+      this.socketClient.emit("update-sync-state", {did: this.me, date: this.myCurrentTime, linkLanguageUUID: this.languageUid}, (err, signal) => {
+        if (err) {
+          console.error("Error in update-sync-state call", err);
+        };
+        console.log("Got some result from update-sync-state");
+        console.dir(signal);
+      })
     }
   }
 
@@ -170,6 +154,29 @@ export class LinkAdapter implements LinkSyncAdapter {
         this.socketClient.emit("sync", {
           linkLanguageUUID: this.languageUid,
           did: this.me,
+        }, (err, signal) => {
+          if (err) {
+            console.error("Error in sync call", err);
+            throw Error(err);
+          };
+          console.log("Got some result from sync");
+          console.dir(signal);
+          console.log(this.me);
+
+          if (this.myCurrentTime) {
+            console.log("With current time", this.myCurrentTime);
+          }
+
+          this.myCurrentTime = signal.serverRecordTimestamp;
+          this.updateServerSyncState();
+          this.hasCalledSync = true;
+
+          if (signal.payload.additions.length > 0 || signal.payload.removals.length > 0) {
+            this.handleSignal(signal.payload);
+          }
+
+          //Emit and event saying that we are synced
+          this.syncStateChangeCallback(PerspectiveState.Synced);
         });
       } catch (e) {
         console.error("PerspectiveDiffSync.sync(); got error", e);
@@ -182,14 +189,15 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   //Fetch all the links from the server
   async render(): Promise<Perspective> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       //Send the request to get the links
       this.socketClient.emit("render", {
         linkLanguageUUID: this.languageUid,
-      })
-
-      //Wait for the response
-      this.socketClient.on("render-emit", (signal) => {
+      }, (err, signal) => {
+        if (err) {
+          console.error("Error in sync call", err);
+          return reject(err);
+        };
         this.myCurrentTime = signal.serverRecordTimestamp;
         this.updateServerSyncState();
         resolve(new Perspective(signal.payload))
@@ -210,10 +218,11 @@ export class LinkAdapter implements LinkSyncAdapter {
         };
         console.log("Commit sending prepped diff", preppedDiff);
         //Send the commit to the server
-        this.socketClient.emit("commit", preppedDiff);
-
-        //Wait for a response saying that the commit was successful
-        this.socketClient.on("commit-status", (signal) => {
+        this.socketClient.emit("commit", preppedDiff, (err, signal) => {
+          if (err) {
+            console.error("Error in sync call", err);
+            return reject(err);
+          };
           if (signal.status === "Ok") {
             //Update our local timestamp to match the server
             this.myCurrentTime = signal.serverRecordTimestamp;
@@ -224,13 +233,10 @@ export class LinkAdapter implements LinkSyncAdapter {
             reject()
           }
         });
-        
-        return ;
       } catch (e) {
         console.error("PerspectiveDiffSync.commit(); got error", e);
       } finally {
         release();
-        reject(null);
       }
     })
   }
