@@ -41,7 +41,8 @@ export class LinkAdapter implements LinkSyncAdapter {
 
     //Response from a given call to sync; contains all the data we need to update our local state and our recordTimestamp as held by the server
     this.socketClient.on("sync-emit", (signal) => {
-      console.log("Got some result from sync", signal);
+      console.log("Got some result from sync");
+      console.dir(signal);
 
       if (this.myCurrentTime) {
         console.log("With current time", this.myCurrentTime);
@@ -51,7 +52,9 @@ export class LinkAdapter implements LinkSyncAdapter {
       this.updateServerSyncState();
       this.hasCalledSync = true;
 
-      this.handleSignal(signal.payload);
+      if (signal.payload.additions.length > 0 || signal.payload.removals.length > 0) {
+        this.handleSignal(signal.payload);
+      }
 
       //Emit and event saying that we are synced
       this.syncStateChangeCallback(PerspectiveState.Synced);
@@ -185,13 +188,15 @@ export class LinkAdapter implements LinkSyncAdapter {
       const release = await this.generalMutex.acquire();
       
       try {  
-        //Send the commit to the server
-        this.socketClient.emit("commit", {
+        let preppedDiff = {
           additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
           removals: diff.removals.map((diff) => prepareLinkExpression(diff)),
           linkLanguageUUID: this.languageUid,
           did: this.me,
-        })
+        };
+        console.log("Commit sending prepped diff", preppedDiff);
+        //Send the commit to the server
+        this.socketClient.emit("commit", preppedDiff)
 
         //Wait for a response saying that the commit was successful
         this.socketClient.on("commit-status", (signal) => {
