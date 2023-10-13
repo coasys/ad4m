@@ -253,7 +253,7 @@ export default class Perspective {
                 }
             } catch(e) {
                 console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter render: ${e}`)
-                reject(e)
+                resolve(new Ad4mPerspective([]))
             }
         })
     }
@@ -288,7 +288,10 @@ export default class Perspective {
                 }
             } catch(e) {
                 console.error(`NH [${this.sharedUrl}; (${functionName})] (${this.name}): Error while trying to call links adapter general:`, e)
-                reject(e)
+                resolve({
+                    additions: [],
+                    removals: []
+                } as PerspectiveDiff)
             }
         })
     }
@@ -329,7 +332,7 @@ export default class Perspective {
                 }
             } catch(e) {
                 console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter current revision: ${e}`)
-                reject(e)
+                resolve(null)
             }
         })
     }
