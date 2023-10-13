@@ -127,8 +127,14 @@ export class LinkAdapter implements LinkSyncAdapter {
         linkLanguageUUID: this.languageUid,
         did: this.me
       })
+      if (result.status === 200) {
+        result = result.data;
+      } else {
+        console.error("Error in currentRevision call");
+        console.error("Got status", result.status);
+        result = null;
+      }
       console.log("Current revision returned with result");
-      console.dir(result);
     } catch (e) {
       console.log("Error in currentRevision call", e);
       result = null;
@@ -285,7 +291,8 @@ export class LinkAdapter implements LinkSyncAdapter {
         linkLanguageUUID: this.languageUid,
         did: this.me
       });
-      console.log("Added agent record with result", result);
+      console.log("Added agent record with result");
+      console.dir(result.data);
     }
   }
 }
