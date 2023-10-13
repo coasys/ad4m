@@ -1,5 +1,5 @@
 import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, DID, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";;
-import makeHttpRequest from "./util.ts";
+import axiod from "https://deno.land/x/axiod/mod.ts";
 
 export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     me: DID
@@ -14,7 +14,7 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     }
 
     async setOnlineStatus(status: PerspectiveExpression): Promise<void> {     
-        await makeHttpRequest("https://socket.ad4m.dev/setStatus", "POST",  {}, {
+        await axiod.post("https://socket.ad4m.dev/setStatus", {
             did: this.me,
             link: status,
             LinkLanguageUUID: this.uuid
@@ -22,7 +22,7 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     }
 
     async getOnlineAgents(): Promise<OnlineAgent[]> {
-        const result = await makeHttpRequest("https://socket.ad4m.dev/getOnlineAgents", "GET",  {}, {
+        const result = await axiod.post("https://socket.ad4m.dev/getOnlineAgents", {
             did: this.me,
             LinkLanguageUUID: this.uuid
         })

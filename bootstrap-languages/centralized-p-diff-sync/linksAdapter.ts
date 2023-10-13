@@ -3,7 +3,7 @@ import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, La
 import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
 import { io, Socket, ServerToClientEvents, ClientToServerEvents } from "https://esm.sh/socket.io-client@4.7.2";
-import makeHttpRequest from "./util.ts";
+import axiod from "https://deno.land/x/axiod/mod.ts";
 
 export class LinkAdapter implements LinkSyncAdapter {
   linkCallback?: PerspectiveDiffObserver
@@ -113,20 +113,22 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async others(): Promise<DID[]> {
     // @ts-ignore
-    return await makeHttpRequest("https://socket.ad4m.dev/getOthers", "GET",  {}, {
-      linkLanguageUUID: this.languageUid
-    })
+    // return await axiod.get("https://socket.ad4m.dev/getOthers", "GET",  {}, {
+    //   linkLanguageUUID: this.languageUid
+    // })
+    return [];
   }
 
   async currentRevision(): Promise<string> {
     console.log("Getting current revision");
     let result;
     try {
-      //@ts-ignore
-      result = await makeHttpRequest("https://socket.ad4m.dev/currentRevision", "POST",  {}, {
+      result = await axiod.post("https://socket.ad4m.dev/currentRevision", {
         linkLanguageUUID: this.languageUid,
         did: this.me
       })
+      console.log("Current revision returned with result");
+      console.dir(result);
     } catch (e) {
       console.log("Error in currentRevision call", e);
       result = null;
@@ -279,10 +281,11 @@ export class LinkAdapter implements LinkSyncAdapter {
     const others = await this.others();
 
     if (others.filter((other) => other === this.me).length == 0) {
-      const result = await makeHttpRequest("https://socket.ad4m.dev/addAgent", "POST",  {}, {
+      const result = await axiod.post("https://socket.ad4m.dev/addAgent", {
         linkLanguageUUID: this.languageUid,
         did: this.me
-      })
+      });
+      console.log("Added agent record with result", result);
     }
   }
 }
