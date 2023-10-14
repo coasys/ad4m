@@ -2,7 +2,7 @@ import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, La
   LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
-import { io, Socket, ServerToClientEvents, ClientToServerEvents } from "https://esm.sh/socket.io-client@4.7.2";
+import type { Socket, ServerToClientEvents, ClientToServerEvents } from "https://esm.sh/socket.io-client@4.7.2";
 import axiod from "https://deno.land/x/axiod/mod.ts";
 
 export class LinkAdapter implements LinkSyncAdapter {
@@ -15,14 +15,10 @@ export class LinkAdapter implements LinkSyncAdapter {
   socketClient: Socket<ServerToClientEvents, ClientToServerEvents>;
   hasCalledSync = false;
 
-  constructor(context: LanguageContext, uid: String) {
+  constructor(context: LanguageContext, uid: String, socketClient: Socket<ServerToClientEvents, ClientToServerEvents>) {
     this.me = context.agent.did;
     this.languageUid = uid;
-
-    //this.addAgentRecord();
-
-    this.socketClient = io("https://socket.ad4m.dev", { transports: ['websocket', 'polling'], autoConnect: true });
-    console.log("Created socket connection");
+    this.socketClient = socketClient;
     
     this.socketClient.on('error', (error: any) => {
       console.error('Error:', error);
@@ -46,17 +42,17 @@ export class LinkAdapter implements LinkSyncAdapter {
       //const release = await this.generalMutex.acquire();
 
       try {
-        console.log("Got some live signal from the server");
-        console.dir(signal);
-        console.log(this.me);
+        // console.log("Got some live signal from the server");
+        // console.dir(signal);
+        // console.log(this.me);
 
-        if (this.myCurrentTime) {
-          console.log("With current time", this.myCurrentTime);
-        }
+        // if (this.myCurrentTime) {
+        //   console.log("With current time", this.myCurrentTime);
+        // }
 
         let serverRecordTimestamp = signal.serverRecordTimestamp;
         if (!this.myCurrentTime|| this.myCurrentTime < serverRecordTimestamp) {
-          console.log("Returning that live signal to executor");
+          //console.log("Returning that live signal to executor");
           this.myCurrentTime = serverRecordTimestamp;
           this.updateServerSyncState();
           
@@ -97,8 +93,8 @@ export class LinkAdapter implements LinkSyncAdapter {
         if (err) {
           console.error("Error in update-sync-state call", err);
         };
-        console.log("Got some result from update-sync-state");
-        console.dir(signal);
+        // console.log("Got some result from update-sync-state");
+        // console.dir(signal);
       })
     }
   }
@@ -112,15 +108,26 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async others(): Promise<DID[]> {
-    // @ts-ignore
-    // return await axiod.get("https://socket.ad4m.dev/getOthers", "GET",  {}, {
-    //   linkLanguageUUID: this.languageUid
-    // })
-    return [];
+    const others = await axiod.get("https://socket.ad4m.dev/getOthers", {
+      params: {
+        linkLanguageUUID: this.languageUid
+      }
+    });
+    if (others.status === 200) {
+      //Remove myself from others if it exists
+      const othersIndex = others.data.indexOf(this.me);
+      if (othersIndex > -1) {
+        others.data.splice(othersIndex, 1);
+      }
+      return others.data;
+    } else {
+      console.error("Error fetching others in linkAdapter, got status", others.status);
+      return [];
+    }
   }
 
   async currentRevision(): Promise<string> {
-    console.log("Getting current revision");
+    //console.log("Getting current revision");
     let result;
     try {
       result = await axiod.post("https://socket.ad4m.dev/currentRevision", {
@@ -157,7 +164,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   //Call sync on the server, which will should fetch all the links we missed since last start of the link language
   async sync(): Promise<PerspectiveDiff> {
-    console.log("Sync call has called sync", this.hasCalledSync);
+    //console.log("Sync call has called sync", this.hasCalledSync);
     //Only allow sync to be called once since once we have sync'd once we will get future links via signal
     if (!this.hasCalledSync) {
       //console.log("PerspectiveDiffSync.sync(); Getting lock");
@@ -174,13 +181,13 @@ export class LinkAdapter implements LinkSyncAdapter {
             console.error("Error in sync call", err);
             throw Error(err);
           };
-          console.log("Got some result from sync");
-          console.dir(signal);
-          console.log(this.me);
+          // console.log("Got some result from sync");
+          // console.dir(signal);
+          //console.log(this.me);
 
-          if (this.myCurrentTime) {
-            console.log("With current time", this.myCurrentTime);
-          }
+          // if (this.myCurrentTime) {
+          //   console.log("With current time", this.myCurrentTime);
+          // }
 
           this.myCurrentTime = signal.serverRecordTimestamp;
           this.updateServerSyncState();
@@ -221,34 +228,34 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async commit(diff: PerspectiveDiff): Promise<string> {
-      //const release = await this.generalMutex.acquire();
-      try {
-        const preppedDiff = {
-          additions: diff.additions.map((item) => prepareLinkExpression(item)),
-          removals: diff.removals.map((item) => prepareLinkExpression(item)),
-          linkLanguageUUID: this.languageUid,
-          did: this.me,
-        };
-        console.log("Commit sending prepped diff", preppedDiff);
+    //const release = await this.generalMutex.acquire();
+    try {
+      const preppedDiff = {
+        additions: diff.additions.map((item) => prepareLinkExpression(item)),
+        removals: diff.removals.map((item) => prepareLinkExpression(item)),
+        linkLanguageUUID: this.languageUid,
+        did: this.me,
+      };
+      //console.log("Commit sending prepped diff", preppedDiff);
 
-        const signal = await this.emitCommit(preppedDiff);
+      const signal = await this.emitCommit(preppedDiff);
 
-        if (signal.status === "Ok") {
-          console.log("Got some result from commit");
-          console.dir(signal);
-          //Update our local timestamp to match the server
-          this.myCurrentTime = signal.serverRecordTimestamp;
-          this.updateServerSyncState();
-          return ""; // Resolve the function with an empty string
-        } else {
-          throw new Error("Commit failed with non-Ok status");
-        }
-      } catch (e) {
-        console.error("PerspectiveDiffSync.commit(); got error", e);
-        throw e; // Propagate the error up
-      } finally {
-        //release();
+      if (signal.status === "Ok") {
+        console.log("Got some result from commit");
+        console.dir(signal);
+        //Update our local timestamp to match the server
+        this.myCurrentTime = signal.serverRecordTimestamp;
+        this.updateServerSyncState();
+        return ""; // Resolve the function with an empty string
+      } else {
+        throw new Error("Commit failed with non-Ok status");
       }
+    } catch (e) {
+      console.error("PerspectiveDiffSync.commit(); got error", e);
+      throw e; // Propagate the error up
+    } finally {
+      //release();
+    }
   }
 
   // Utility method to wrap the socketClient.emit in a Promise
@@ -278,21 +285,8 @@ export class LinkAdapter implements LinkSyncAdapter {
   async handleSignal(signal: any): Promise<void> {
     //This signal only contains link data and no reference, and therefore came from us in a pull in fast_forward_signal
     if (this.linkCallback) {
-      console.log("PerspectiveDiffSync.handleHolochainSignal: calling linkCallback", signal);
+      //console.log("PerspectiveDiffSync.handleHolochainSignal: calling linkCallback", signal);
       await this.linkCallback(signal);
-    }
-  }
-
-  async addAgentRecord(): Promise<any> {
-    const others = await this.others();
-
-    if (others.filter((other) => other === this.me).length == 0) {
-      const result = await axiod.post("https://socket.ad4m.dev/addAgent", {
-        linkLanguageUUID: this.languageUid,
-        did: this.me
-      });
-      console.log("Added agent record with result");
-      console.dir(result.data);
     }
   }
 }

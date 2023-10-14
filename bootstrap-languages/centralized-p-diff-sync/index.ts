@@ -1,6 +1,7 @@
 import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { LinkAdapter } from "./linksAdapter.ts";
 import { TelepresenceAdapterImplementation } from "./telepresenceAdapter.ts";
+import { io } from "https://esm.sh/socket.io-client@4.7.2";
 
 function interactions(expression: Address): Interaction[] {
   return [];
@@ -13,8 +14,15 @@ const name = "centralized-perspective-diff-sync";
 const uid = "centralized-perspective-diff-sync-uuid";
 
 export default async function create(context: LanguageContext): Promise<Language> {
-  const linksAdapter = new LinkAdapter(context, uid);
-  const telepresenceAdapter = new TelepresenceAdapterImplementation(context, uid);
+  let socketClient = io("https://socket.ad4m.dev", { 
+    transports: ['websocket', 'polling'], 
+    autoConnect: true, 
+    query: { did: context.agent.did, linkLanguageUUID: uid } 
+  });
+  console.log("Created socket connection");
+
+  const linksAdapter = new LinkAdapter(context, uid, socketClient);
+  const telepresenceAdapter = new TelepresenceAdapterImplementation(context, uid, socketClient);
 
   //@ts-ignore
   return {
