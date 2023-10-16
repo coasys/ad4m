@@ -1,0 +1,18 @@
+[package]
+authors = ["josh@junto.foundation"]
+edition = "2018"
+name = "perspective_diff_sync_integrity"
+version = "0.0.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "perspective_diff_sync_integrity"
+
+[dependencies]
+derive_more = "0"
+serde = "1"
+chrono = { version = "0.4.22", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+
+holo_hash = "0.2.2"
+hdi = "0.3.2"
+hdk = "0.2.2"

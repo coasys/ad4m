@@ -23,7 +23,9 @@ impl Future for EventLoopFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let worker = self.worker.try_lock();
         if let Ok(mut worker) = worker {
-            worker.poll_event_loop(cx, false)
+            let res = worker.poll_event_loop(cx, false);
+            cx.waker().wake_by_ref();
+            res
         } else {
             Poll::Pending
         }
