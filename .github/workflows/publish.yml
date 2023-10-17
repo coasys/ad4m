@@ -18,7 +18,7 @@ jobs:
           root-reserve-mb: 512
           swap-size-mb: 1024
           remove-dotnet: 'true'
-          remove-andriod: 'true'
+          remove-android: 'true'
           remove-haskell: 'true'
       - uses: actions/checkout@v3
       - name: setup node
@@ -66,7 +66,7 @@ jobs:
         root-reserve-mb: 512
         swap-size-mb: 1024
         remove-dotnet: 'true'
-        remove-andriod: 'true'
+        remove-android: 'true'
         remove-haskell: 'true'
     - name: Fetch source code
       uses: actions/checkout@v2
@@ -366,7 +366,7 @@ jobs:
           root-reserve-mb: 512
           swap-size-mb: 1024
           remove-dotnet: 'true'
-          remove-andriod: 'true'
+          remove-android: 'true'
           remove-haskell: 'true'
       - uses: actions/checkout@v3
       # Setup .npmrc file to publish to npm
@@ -424,7 +424,7 @@ jobs:
           root-reserve-mb: 512
           swap-size-mb: 1024
           remove-dotnet: 'true'
-          remove-andriod: 'true'
+          remove-android: 'true'
           remove-haskell: 'true'
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1

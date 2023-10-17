@@ -26,7 +26,7 @@ jobs:
         root-reserve-mb: 512
         swap-size-mb: 1024
         remove-dotnet: 'true'
-        remove-andriod: 'true'
+        remove-android: 'true'
         remove-haskell: 'true'
     - uses: actions/checkout@v3
     - uses: actions-rs/toolchain@v1
