@@ -16,14 +16,21 @@ jobs:
 
     strategy:
       matrix:
-        platform: [self-hosted]
-        container: ["ubuntu:22.04"]
+        platform: [ubuntu-22.04]
         node-version: [16.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     runs-on: ${{ matrix.platform }}
 
     steps:
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 512
+        swap-size-mb: 1024
+        remove-dotnet: 'true'
+        remove-andriod: 'true'
+        remove-haskell: 'true'
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
