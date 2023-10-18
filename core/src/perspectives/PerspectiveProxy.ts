@@ -483,6 +483,20 @@ export class PerspectiveProxy {
         return instances
     }
 
+    async querySubjectProxies<T>(subjectClass: T, source: string = "ad4m://self", pageNumber: number = 1, pageSize: number = 10): Promise<T[]> {
+        let classes = []
+        if(typeof subjectClass === "string") {
+            classes = [subjectClass]
+        } else {
+            classes = await this.subjectClassesByTemplate(subjectClass as object)
+        }
+
+        let instances = []
+        for(let className of classes) {
+            instances = await this.infer(`findall([Base, Timestamp], (subject_class("${className}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), paginate(SortedData, ${pageNumber}, ${pageSize}, PageData).`)
+        }
+        return instances
+    }
 
     /** Returns all subject classes that match the given template object.
      * This function looks at the properties of the template object and
