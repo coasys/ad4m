@@ -627,6 +627,29 @@ describe("Prolog + Literals", () => {
 
                     expect(recipes.length).to.equal(1)
                 })
+                
+                it("query()", async () => {
+                    let root = Literal.from("Active record implementation test 1").toUrl()
+                    const recipe2 = new Recipe(perspective!, root)
+                    recipe2.name = "recipe://test1"
+
+                    await recipe2.save();
+
+                    const recipes = await Recipe.all(perspective!);
+
+                    expect(recipes.length).to.equal(2)
+
+                    const queryRecipe = await Recipe.query(perspective!, "ad4m://self", 1, 1);
+
+                    expect(queryRecipe.length).to.equal(1);
+                    expect(queryRecipe[0].name).to.equal("recipe://test1")
+
+                    const queryRecipe2 = await Recipe.query(perspective!, "ad4m://self", 2, 1);
+
+                    expect(queryRecipe2.length).to.equal(1);
+                    expect(queryRecipe[0].name).to.equal("recipe://test2")
+                })
+
 
                 it("can constrain collection entries clause", async () => {
                     let root = Literal.from("Active record implementation collection test").toUrl()
