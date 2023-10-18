@@ -20,14 +20,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-    - name: Maximize build space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 6048
-        swap-size-mb: 1024
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
     - uses: actions/checkout@v3
     - uses: actions-rs/toolchain@v1
       with:
@@ -68,7 +60,7 @@ jobs:
     - name: install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler gcc gcc-multilib build-essential
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler
 
     - name: Install HC
       run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
