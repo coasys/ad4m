@@ -221,6 +221,26 @@ export class SubjectEntity {
 
     return []
   }
+
+  static async query(perspective: PerspectiveProxy, source: string = "ad4m://self", pageNumber: number = 1, pageSize: number = 10) {
+    let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this);
+    const proxies = await perspective.querySubjectProxies(subjectClass, source, pageNumber, pageSize);
+
+    const instances = []
+
+    if (proxies) {
+      for (const proxy of proxies) {
+        // @ts-ignore
+        const instance = new this(perspective, proxy[0])
+
+        instances.push(await instance.get())
+      }
+
+      return instances;
+    }
+
+    return []
+  }
 }
 
 export type SubjectArray<T> = T[] | {
