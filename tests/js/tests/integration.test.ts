@@ -12,7 +12,7 @@ import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 import runtimeTests from "./runtime";
-import { Crypto } from "@peculiar/webcrypto"
+//import { Crypto } from "@peculiar/webcrypto"
 import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
@@ -25,7 +25,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 //@ts-ignore
-global.crypto = new Crypto();
+//global.crypto = new Crypto();
 
 const TEST_DIR = `${__dirname}/../tst-tmp`
 

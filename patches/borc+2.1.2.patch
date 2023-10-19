@@ -1,0 +1,48 @@
+diff --git a/node_modules/borc/src/decoder.js b/node_modules/borc/src/decoder.js
+index 5100dc3..5e12a89 100644
+--- a/node_modules/borc/src/decoder.js
++++ b/node_modules/borc/src/decoder.js
+@@ -1,6 +1,6 @@
+ 'use strict'
+ 
+-const { Buffer } = require('buffer')
++import { Buffer } from 'node:buffer'
+ const ieee754 = require('ieee754')
+ const Bignumber = require('bignumber.js').BigNumber
+ 
+diff --git a/node_modules/borc/src/diagnose.js b/node_modules/borc/src/diagnose.js
+index c65abde..964a623 100644
+--- a/node_modules/borc/src/diagnose.js
++++ b/node_modules/borc/src/diagnose.js
+@@ -1,6 +1,6 @@
+ 'use strict'
+ 
+-const { Buffer } = require('buffer')
++import { Buffer } from 'node:buffer'
+ const Decoder = require('./decoder')
+ const utils = require('./utils')
+ 
+diff --git a/node_modules/borc/src/encoder.js b/node_modules/borc/src/encoder.js
+index 4b7ef5b..a5f7743 100644
+--- a/node_modules/borc/src/encoder.js
++++ b/node_modules/borc/src/encoder.js
+@@ -1,6 +1,6 @@
+ 'use strict'
+ 
+-const { Buffer } = require('buffer')
++import { Buffer } from 'node:buffer'
+ const { URL } = require('iso-url')
+ const Bignumber = require('bignumber.js').BigNumber
+ 
+diff --git a/node_modules/borc/src/utils.js b/node_modules/borc/src/utils.js
+index 7219bf1..fd5e40c 100644
+--- a/node_modules/borc/src/utils.js
++++ b/node_modules/borc/src/utils.js
+@@ -1,6 +1,6 @@
+ 'use strict'
+ 
+-const { Buffer } = require('buffer')
++import { Buffer } from 'node:buffer'
+ const Bignumber = require('bignumber.js').BigNumber
+ 
+ const constants = require('./constants')

@@ -12,3 +12,4 @@ members = [
 sodiumoxide = { git = "https://github.com/fayeed/sodiumoxide" }
 serde = { git = "https://github.com/fayeed/serde.git", branch = "ad4m-compatible" }
 notify-rust = { version = "4.6.0", git = "https://github.com/coasys/notify-rust.git" }
+aead-gcm-stream = { version = "0.1.0", git = "https://github.com/coasys/aead-gcm-stream.git" }

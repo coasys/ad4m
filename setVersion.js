@@ -4,6 +4,7 @@ const readline = require('readline-sync');
 function replaceVersionLine(content, version, prefix = 'version = ', suffix = '') {
     const lines = content.split('\n')
     const versionLineIndex = lines.findIndex(line => line.startsWith(prefix))
+    if (versionLineIndex === -1) throw new Error(`Could not find version line in ${content}`)
     const scope = lines[versionLineIndex].substring(prefix.length)
     const oldVersion = scope.split('"')[1]
     const newVersionLine = `${prefix}"${version}"${suffix}` 
@@ -39,17 +40,17 @@ fs.writeFileSync('package.json', JSON.stringify(rootRepo, null, 2) + '\n')
 
 let ad4mClient;
 if (isPreRelease) {
-    const cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), RUST_VERSION)
+    cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), RUST_VERSION)
     console.log("CLI version: " + cli.oldVersion + " -> " + RUST_VERSION)
-    ad4mClient = replaceVersionLine(cli.newContent, RUST_VERSION, `ad4m-client = { path = "../rust-client", version = `, ` }`)
-    console.log(`CLI ad4m-client dep: ${ad4mClient.oldVersion} -> ${RUST_VERSION}`)
+    // ad4mClient = replaceVersionLine(cli.newContent, RUST_VERSION, `ad4m-client = { path = "../rust-client", version = `, ` }`)
+    // console.log(`CLI ad4m-client dep: ${ad4mClient.oldVersion} -> ${RUST_VERSION}`)
 } else {
-    const cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), RAW_VERSION)
+    cli = replaceVersionLine(fs.readFileSync('cli/Cargo.toml', 'utf8'), RAW_VERSION)
     console.log("CLI version: " + cli.oldVersion + " -> " + RAW_VERSION)
-    ad4mClient = replaceVersionLine(cli.newContent, RAW_VERSION, `ad4m-client = { path = "../rust-client", version = `, ` }`)
-    console.log(`CLI ad4m-client dep: ${ad4mClient.oldVersion} -> ${RAW_VERSION}`)
+    // ad4mClient = replaceVersionLine(cli.newContent, RAW_VERSION, `ad4m-client = { path = "../rust-client", version = `, ` }`)
+    // console.log(`CLI ad4m-client dep: ${ad4mClient.oldVersion} -> ${RAW_VERSION}`)
 }
-fs.writeFileSync('cli/Cargo.toml', ad4mClient.newContent)
+fs.writeFileSync('cli/Cargo.toml', cli.newContent)
 
 const connect = JSON.parse(fs.readFileSync('connect/package.json', 'utf8'))
 console.log("Connect version: " + connect.version + " -> " + VERSION)
