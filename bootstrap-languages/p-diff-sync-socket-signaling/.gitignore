@@ -13,6 +13,7 @@ perspect-diff-sync.dna
 *.js.map
 !rollup.config*
 !dna.js
+build/dna.js
 !integration-test.js
 !customHttpDownloader.js
 
