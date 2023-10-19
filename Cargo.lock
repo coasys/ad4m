@@ -10507,7 +10507,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "scryer-prolog"
 version = "0.9.1"
-source = "git+https://github.com/coasys/scryer-prolog?branch=ad4m-compatible#7d78acf2f99b6177fb9a6f14d1021772f1416cf7"
+source = "git+https://github.com/coasys/scryer-prolog?rev=0e90381eee2d455bf34be0209ef29996daf51c65#0e90381eee2d455bf34be0209ef29996daf51c65"
 dependencies = [
  "base64 0.12.3",
  "bit-set",

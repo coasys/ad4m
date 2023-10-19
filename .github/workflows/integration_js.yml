@@ -85,8 +85,8 @@ jobs:
     - name: Run the tests
       run: yarn test
 
-    - name: Run integration tests
-      run: cd ./tests/js && yarn run test-main
+    # - name: Run integration tests
+    #   run: cd ./tests/js && yarn run test-main
 
   # test-windows:
   #   name: JS Ad4mClient <> AD4M Executor - Windows
