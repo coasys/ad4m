@@ -7,7 +7,7 @@ on:
 
 jobs:
   create-release:
-    runs-on: ubuntu-22.04
+    runs-on: GH-hosted-ubuntu
     outputs:
       upload_url: ${{ steps.create-release.outputs.upload_url }}
 
@@ -42,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-22.04, macos-latest, windows-latest]
+        platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
         node-version: [18.17.0]
 
     needs:
@@ -65,10 +65,18 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
 
     - name: install dependencies (ubuntu only)
-      if: matrix.platform == 'ubuntu-22.04'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
+
+    - name: install dependencies (macos only)
+      if: matrix.platform == 'macos-latest'
+      run: brew install protobuf cmake
+
+    - name: install dependencies (windows only)
+      if: matrix.platform == 'windows-latest'
+      run: choco install protoc cmake
 
     - name: get version
       run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
@@ -97,7 +105,23 @@ jobs:
       env:
         TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-      run: yarn run package-ad4m
+      run: yarn run build
+
+    - name: Build the app
+      uses: tauri-apps/tauri-action@v0
+      env:
+        ENABLE_CODE_SIGNING: ${{ secrets.APPLE_CERTIFICATE }}
+        APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      with:
+        tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
+        releaseName: 'ADAM Launcher v__VERSION__'
+        releaseBody: 'See the assets to download this version and install.'
+        releaseDraft: true
+        prerelease: false
 
     - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
       if: matrix.platform == 'windows-latest'
@@ -116,7 +140,7 @@ jobs:
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
-      if: matrix.platform == 'ubuntu-22.04'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -128,7 +152,7 @@ jobs:
 
     - name: Upload Release AppImage Asset
       id: upload-release-appimage-asset
-      if: matrix.platform == 'ubuntu-22.04'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -140,7 +164,7 @@ jobs:
 
     - name: Upload Release AppImage Update Asset
       id: upload-release-appimage-asset-update
-      if: matrix.platform == 'ubuntu-latest'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -152,7 +176,7 @@ jobs:
 
     - name: Upload Release AppImage update sig Asset
       id: upload-release-appimage-asset-update-sig
-      if: matrix.platform == 'ubuntu-latest'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -164,7 +188,7 @@ jobs:
 
     - name: Upload Release AD4M CLI Linux Binary
       id: upload-release-linux-ad4m-cli-binary
-      if: matrix.platform == 'ubuntu-22.04'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -271,7 +295,7 @@ jobs:
         asset_content_type: application/octet-stream
 
   npm-publish:
-    runs-on: ubuntu-22.04
+    runs-on: GH-hosted-ubuntu
     steps:
       - uses: actions/checkout@v3
       # Setup .npmrc file to publish to npm
@@ -349,7 +373,7 @@ jobs:
 
 
   crates-publish:
-    runs-on: ubuntu-22.04
+    runs-on: GH-hosted-ubuntu
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1

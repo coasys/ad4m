@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.6.0",
+  "version": "0.6.1-prerelease",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -62,7 +62,7 @@
     "@holochain/client": "perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",
     "@msgpack/msgpack": "3.0.0-beta2",
     "@noble/secp256k1": "^1.7.0",
-    "@perspect3vism/ad4m": "*",
+    "@perspect3vism/ad4m": "link:../core",
     "@transmute/did-key.js": "^0.2.1-unstable.29",
     "@types/json-stable-stringify": "^1.0.33",
     "@types/mocha": "^10.0.0",

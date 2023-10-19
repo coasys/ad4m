@@ -1,11 +1,11 @@
 {
   "name": "@perspect3vism/direct-message-language",
-  "version": "0.6.0",
+  "version": "0.6.1-prerelease",
   "description": "A templateable AD4M Language for personal, per-agent direct message Languages",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"No direct message integration tests\"",
+    "test-disabled": "echo \"No direct message integration tests\"",
     "rollup-dna": "rollup -c rollup.config.hc-dna.js",
     "compile-dna": "cd hc-dna && ./build.sh && cd ..",
     "build-nix": "yarn run build-dna && tsc && rollup -c",

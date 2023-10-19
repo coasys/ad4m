@@ -1,23 +1,25 @@
 import * as esbuild from "https://deno.land/x/esbuild@v0.18.2/mod.js";
-import * as path from "https://deno.land/std@0.177.0/path/mod.ts";
+import fs from "node:fs"
 import { loadSource, resolveUrl } from "./customHttpDownloader.js";
 
 function denoAlias(nodeModule) {
     return {
         name: `${nodeModule}-alias`,
         setup(build) {
-            build.onResolve({ filter: new RegExp(`^${nodeModule}$`) }, (args) => {
-                return { path: `https://deno.land/std@0.177.0/node/${nodeModule}.ts`, namespace: 'imports' };
+            build.onResolve({ filter: new RegExp(`^node:${nodeModule}$`) }, (args) => {
+                console.log('meow 1111', args)
+                return { path: nodeModule, namespace: 'imports' };
             });
-
-            build.onResolve({filter: /.*/, namespace: 'imports'}, resolveUrl)
-
-            build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                return loadSource(args)
-            })
         },
     }
 }
+
+const nodePackages = [
+    'path', 'fs', 'net', 'dns', 'cluster', 'https',
+    'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
+    'zlib', 'assert', 'buffer', 'constants', 'querystring', 'string_decoder',
+    'global', 'process',
+];
 
 const result = await esbuild.build({
     entryPoints: ['src/deno.ts'],
@@ -31,40 +33,19 @@ const result = await esbuild.build({
     legalComments: 'inline',
     plugins: [
         {
-            name: `node:net`,
-            setup(build) {
-                build.onResolve({ filter: new RegExp(`^node:net$`) }, (args) => {
-                    return { path: path.resolve(`deno_std-0.177.0/node/net.ts`), external: false };
-                });
-            },
-        },
-        ...[
-            'crypto', 'path', 'fs', 'net', 'dns', 'cluster', 'https',
-            'dgram', 'os', 'tls', 'http', 'url', 'util', 'stream', 'events', 'tty',
-            'zlib', 'assert', 'buffer', 'constants', 'querystring', 'string_decoder',
-            'global', 'process',
-        ].map(denoAlias),
-        {
             name: `dns-promisis-alias`,
             setup(build) {
                 build.onResolve({ filter: new RegExp(`^dns/promises$`) }, (args) => {
                     return { path: `https://deno.land/std@0.177.0/node/dns.ts`, external: true };
                 });
 
-                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                    return loadSource(args)
-                })
-            },
-        },
-        {
-            name: `child_process`,
-            setup(build) {
-                build.onResolve({ filter: new RegExp(`^child_process$`) }, (args) => {
-                    return { path: `https://deno.land/std@0.177.0/node/child_process.ts`, namespace: 'imports' };
-                });
+                build.onResolve({filter: /.*/, namespace: 'imports'}, resolveUrl)
 
                 build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                    return loadSource(args)
+                    const packageName = args.path.slice('node:'.length);
+                    if(!nodePackages.includes(packageName)) {
+                        return loadSource(args)
+                    }
                 })
             },
         },
@@ -74,9 +55,20 @@ const result = await esbuild.build({
                 build.onResolve({ filter: new RegExp(`^fs/promises$`) }, (args) => {
                     return { path: `https://deno.land/std@0.177.0/node/fs.ts`, external: true };
                 });
+            },
+        },
+        {
+            name: `crypto-promisis-alias`,
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^crypto$`) }, (args) => {
+                    return { path: `node:crypto`, external: true, namespace: "imports" };
+                });
 
-                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                    return loadSource(args)
+                build.onResolve({filter: new RegExp(`https://deno.land/std@0.203.0/crypto/crypto.ts`), namespace: 'imports'}, resolveUrl)
+
+                build.onLoad({filter: new RegExp(`https://deno.land/std@0.203.0/crypto/crypto.ts`), namespace: 'file'}, (args) => {
+                    console.log('wow 1', args)
+                    return loadSource({path: 'https://deno.land/std@0.203.0/crypto/crypto.ts'})
                 })
             },
         },
@@ -86,10 +78,6 @@ const result = await esbuild.build({
                 build.onResolve({ filter: new RegExp(`^ws$`) }, (args) => {
                     return { path: `https://deno.land/x/websocket@v0.1.4/mod.ts`, namespace: 'imports' };
                 });
-
-                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                    return loadSource(args)
-                })
             },
         },
         {
@@ -100,7 +88,10 @@ const result = await esbuild.build({
                 });
 
                 build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                    return loadSource(args)
+                    const packageName = args.path.slice('node:'.length);
+                    if(!nodePackages.includes(packageName)) {
+                        return loadSource(args)
+                    }
                 })
             },
         },
@@ -110,34 +101,14 @@ const result = await esbuild.build({
                 build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.150.0/media_types/mod.ts$`) }, (args) => {
                     return { path: `https://deno.land/std@0.177.0/media_types/mod.ts`, external: true };
                 });
-
-                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                    return loadSource(args)
-                })
             },
         },
         {
-            name: "https://deno.land/std@0.177.0/node/util.ts",
+            name: "https://deno.land/x/xhr@0.3.0/mod.ts",
             setup(build) {
-                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.177.0/node/util.ts$`) }, (args) => {
-                    return { path: `https://deno.land/std@0.177.0/node/util.ts`, namespace: 'imports' };
+                build.onResolve({ filter: new RegExp(`^https://deno.land/x/xhr@0.3.0/mod.ts$`) }, (args) => {
+                    return { path: `https://deno.land/x/xhr@0.3.0/mod.ts`, namespace: 'imports' };
                 });
-
-                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                    return loadSource(args)
-                })
-            },
-        },
-        {
-            name: "https://deno.land/std@0.177.0/node/os.ts",
-            setup(build) {
-                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.177.0/node/os.ts$`) }, (args) => {
-                    return { path: `https://deno.land/std@0.177.0/node/os.ts`, namespace: 'imports' };
-                });
-
-                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
-                    return loadSource(args)
-                })
             },
         },
         {
@@ -153,10 +124,10 @@ const result = await esbuild.build({
             },
         },
         {
-            name: "https://deno.land/std@0.177.0/node/path.ts",
+            name: "https://deno.land/std@0.203.0/crypto/crypto.ts",
             setup(build) {
-                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.177.0/node/path.ts$`) }, (args) => {
-                    return { path: `https://deno.land/std@0.177.0/node/path.ts`, namespace: 'imports' };
+                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.203.0/crypto/crypto.ts$`) }, (args) => {
+                    return { path: `https://deno.land/std@0.203.0/crypto/crypto.ts`, namespace: 'imports' };
                 });
 
                 build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
@@ -165,10 +136,10 @@ const result = await esbuild.build({
             },
         },
         {
-            name: "https://deno.land/x/xhr@0.3.0/mod.ts",
+            name: "https://deno.land/x/getport/mod.ts",
             setup(build) {
-                build.onResolve({ filter: new RegExp(`^https://deno.land/x/xhr@0.3.0/mod.ts$`) }, (args) => {
-                    return { path: `https://deno.land/x/xhr@0.3.0/mod.ts`, namespace: 'imports' };
+                build.onResolve({ filter: new RegExp(`^https://deno.land/x/getport/mod.ts$`) }, (args) => {
+                    return { path: `https://deno.land/x/getport/mod.ts`, namespace: 'imports' };
                 });
 
                 build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
@@ -176,8 +147,39 @@ const result = await esbuild.build({
                 })
             },
         },
+        {
+            name: "https://deno.land/std@0.203.0/path/mod.ts",
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.203.0/path/mod.ts$`) }, (args) => {
+                    return { path: `https://deno.land/std@0.203.0/path/mod.ts`, namespace: 'imports' };
+                });
+
+                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
+                    return loadSource(args)
+                })
+            },
+        },
+        {
+            name: "https://deno.land/std@0.203.0/fs/mod.ts",
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.203.0/fs/mod.ts$`) }, (args) => {
+                    return { path: `https://deno.land/std@0.203.0/fs/mod.ts`, namespace: 'imports' };
+                });
+
+                build.onLoad({filter: /.*/, namespace: 'imports'}, (args) => {
+                    return loadSource(args)
+                })
+            },
+        },
+        {
+            name: "https://deno.land/std@0.195.0/path/mod.ts",
+            setup(build) {
+                build.onResolve({ filter: new RegExp(`^https://deno.land/std@0.195.0/path/mod.ts$`) }, (args) => {
+                    return { path: `https://deno.land/std@0.195.0/path/mod.ts`, namespace: 'imports' };
+                });
+            },
+        },
     ],
 });
-console.log(result.outputFiles);
 
 esbuild.stop();

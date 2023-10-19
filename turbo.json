@@ -32,9 +32,8 @@
     "serve": {
       "cache": false
     },
-    
+    "test-main": {},
     "test": {
-      "dependsOn": ["^test"],
       "outputs": []
     },
     "test:macos": {

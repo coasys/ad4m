@@ -28,6 +28,9 @@ jobs:
         override: true
         toolchain: 1.71.1
 
+    - name: Install protobuf & cmake
+      run: brew install protobuf cmake
+
     - name: Cache cargo
       id: cache-cargo
       uses: actions/cache@v3

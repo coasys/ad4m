@@ -1,6 +1,6 @@
 import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest, EncodedAppSignal } from '@holochain/client'
-import path from 'path'
-import fs from 'fs'
+import path from 'node:path'
+import fs from 'node:fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import type { Dna } from '@perspect3vism/ad4m'
 import { AsyncQueue } from './Queue'

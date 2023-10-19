@@ -4,7 +4,7 @@
   "description": "An AD4M Language for storing of language bundles on Cloudflare",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"No language language integration tests\"",
+    "test-disabled": "echo \"No language language integration tests\"",
     "build": "deno run --allow-all esbuild.ts"
   },
   "author": "joshuadparkin@gmail.com",
