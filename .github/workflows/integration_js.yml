@@ -85,6 +85,9 @@ jobs:
     - name: Run the tests
       run: yarn test
 
+    - name: Run integration tests
+      run: yarn test-main
+
   # test-windows:
   #   name: JS Ad4mClient <> AD4M Executor - Windows
   #   runs-on: windows-2019

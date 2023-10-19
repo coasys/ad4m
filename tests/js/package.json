@@ -4,7 +4,7 @@
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "type": "module",
   "scripts": {
-    "test": "node scripts/cleanTestingData.js && yarn run prepare-test && yarn run test-all && node scripts/cleanTestingData.js",
+    "test-main": "node scripts/cleanTestingData.js && yarn run prepare-test && yarn run test-all && node scripts/cleanTestingData.js",
     "test:windows": "yarn run prepare-test:windows && yarn run test-all:windows && node scripts/cleanTestingData.js",
     "test-all:windows": "node scripts/cleanup.js && yarn run test-simple && node scripts/cleanup.js && yarn run test-app && node scripts/cleanup.js && yarn run test-auth && node scripts/cleanup.js && yarn run test-integration && node scripts/cleanup.js && yarn run test-prolog-and-literals",
     "test-all": "yarn run test-simple && yarn run test-app && yarn run test-auth && yarn run test-integration && yarn run test-prolog-and-literals",
