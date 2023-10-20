@@ -18,7 +18,7 @@ export default function languageTests(testContext: TestContext) {
             let sourceLanguage: LanguageRef = new LanguageRef()
             let nonHCSourceLanguage: LanguageRef = new LanguageRef()
             let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published perspective-diff-sync", "..here for you template");
-            sourceLanguageMeta.possibleTemplateParams = ["id", "description", "name"];
+            sourceLanguageMeta.possibleTemplateParams = ["uid", "description", "name"];
 
             before(async () => {
                 ad4mClient = testContext.ad4mClient;

@@ -1,8 +1,8 @@
-import fs from "fs-extra";
+import fs from "https://esm.sh/fs-extra@11.1.1";
 import wget from "node-wget-js";
 import unzipper from "unzipper";
-import path from "path";
-import os from "os";
+import path from "node:path";
+import os from "node:os";
 
 const languages = {
   "agent-expression-store": {
@@ -37,7 +37,7 @@ async function main() {
       let dest = dir + "/build/bundle.js";
       if (url.slice(0, 8) != "https://" && url.slice(0, 7) != "http://") {
         if (os.platform() == "win32") url = url.replace(/\//g, "\\");
-        fs.copyFileSync(path.join(process.cwd(), url), dest);
+        fs.copyFileSync(path.join(Deno.cwd(), url), dest);
       } else {
         wget({ url, dest });
       }

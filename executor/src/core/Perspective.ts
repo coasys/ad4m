@@ -241,7 +241,7 @@ export default class Perspective {
             try {
                 const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
-                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
+                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}; (render)] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
                     //console.debug(`Calling linksAdapter.${functionName}(${JSON.stringify(args)})`)
                     const result = await linksAdapter.render();
                     clearTimeout(timeout)
@@ -252,8 +252,8 @@ export default class Perspective {
                     resolve(new Ad4mPerspective([]))
                 }
             } catch(e) {
-                console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter: ${e}`)
-                reject(e)
+                console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter render: ${e}`)
+                resolve(new Ad4mPerspective([]))
             }
         })
     }
@@ -272,7 +272,7 @@ export default class Perspective {
             try {
                 const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
-                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
+                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}; (${functionName})] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000)
                     //console.debug(`NH [${this.sharedUrl}] (${this.name}): Calling linksAdapter.${functionName}(${JSON.stringify(args).substring(0, 50)})`)
                     //@ts-ignore
                     const result = await linksAdapter[functionName](...args)
@@ -287,8 +287,11 @@ export default class Perspective {
                     })
                 }
             } catch(e) {
-                console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter:`, e)
-                reject(e)
+                console.error(`NH [${this.sharedUrl}; (${functionName})] (${this.name}): Error while trying to call links adapter general:`, e)
+                resolve({
+                    additions: [],
+                    removals: []
+                } as PerspectiveDiff)
             }
         })
     }
@@ -302,7 +305,7 @@ export default class Perspective {
             try {
                 const linksAdapter = await this.getLinksAdapter();
                 if(linksAdapter) {
-                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl}] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000);
+                    const timeout = setTimeout(() => reject(Error(`NH [${this.sharedUrl} (currentRevision)] (${this.name}): LinkLanguage took to long to respond, timeout at 20000ms`)), 20000);
                     let currentRevisionString = await linksAdapter.currentRevision();
                     clearInterval(timeout);
 
@@ -328,8 +331,8 @@ export default class Perspective {
                     resolve(null)
                 }
             } catch(e) {
-                console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter: ${e}`)
-                reject(e)
+                console.error(`NH [${this.sharedUrl}] (${this.name}): Error while trying to call links adapter current revision: ${e}`)
+                resolve(null)
             }
         })
     }

@@ -17,7 +17,9 @@ use crate::holochain_service::{HolochainService, LocalConductorConfig};
 use super::get_holochain_service;
 
 // The duration to use for timeouts
-const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+
+const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
 #[op]
 async fn start_holochain_conductor(config: LocalConductorConfig) -> Result<(), AnyError> {
@@ -46,7 +48,7 @@ async fn log_dht_status() -> Result<(), AnyError> {
 #[op]
 async fn install_app(install_app_payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
     timeout(
-        TIMEOUT_DURATION,
+        APP_INSTALL_TIMEOUT_DURATION,
         async {
             let interface = get_holochain_service().await;
             interface.install_app(install_app_payload).await

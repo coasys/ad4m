@@ -6,7 +6,7 @@ import { LanguageAlias, CoreConfig, BootstrapFixtures, languageLanguageAlias, ag
 // is missing on some machines...
 import getOwnPropertyDescriptor from './shims/getOwnPropertyDescriptor'
 import getPort from 'get-port';
-import fs from "fs";
+import fs from "node:fs";
 import { createResolvers } from "./core/graphQL-interface/GraphQL";
 
 Reflect.getOwnPropertyDescriptor = getOwnPropertyDescriptor

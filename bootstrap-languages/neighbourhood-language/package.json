@@ -1,10 +1,10 @@
 {
   "name": "@perspect3vism/neighbourhood-language",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "This is a Language for storing AD4M neighbourhood objects",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"No neighbourhood language integration tests\"",
+    "test-disabled": "echo \"No neighbourhood language integration tests\"",
     "build": "deno run --allow-all esbuild.ts"
   },
   "author": "joshuadparkin@gmail.com",

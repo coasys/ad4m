@@ -9,7 +9,7 @@
     "moduleResolution": "Node",
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
-    "types": ["node", "jest"],
+    "types": ["node"],
     "skipLibCheck": true
   },
   "include": ["./src"],

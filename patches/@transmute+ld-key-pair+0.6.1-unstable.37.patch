@@ -1,0 +1,13 @@
+diff --git a/node_modules/@transmute/ld-key-pair/dist/index.js b/node_modules/@transmute/ld-key-pair/dist/index.js
+index 614d3eb..73a2666 100644
+--- a/node_modules/@transmute/ld-key-pair/dist/index.js
++++ b/node_modules/@transmute/ld-key-pair/dist/index.js
+@@ -1,7 +1,7 @@
+ 
+ 'use strict'
+ 
+-if (process.env.NODE_ENV === 'production') {
++if (true) {
+   module.exports = require('./ld-key-pair.cjs.production.min.js')
+ } else {
+   module.exports = require('./ld-key-pair.cjs.development.js')

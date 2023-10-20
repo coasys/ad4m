@@ -14,6 +14,7 @@ use std::env;
 use std::fs;
 use std::fs::File;
 use std::sync::Mutex;
+#[cfg(not(target_os = "windows"))]
 use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
 use std::io;
 use std::io::Write;
@@ -76,24 +77,21 @@ pub struct AppState {
     req_credential: String,
 }
 
-fn main() {
-    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
-
+#[cfg(not(target_os = "windows"))]
+fn rlim_execute() {
     let mut rlim: rlimit = rlimit { rlim_cur: 0, rlim_max: 0 };
-
     // Get the current file limit
     unsafe {
         if libc::getrlimit(RLIMIT_NOFILE, &mut rlim) != 0 {
             panic!("{}", io::Error::last_os_error());
         }
     }
-
     let rlim_max = 1000 as u64;
+    
     println!("Current RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
 
     // Attempt to increase the limit
     rlim.rlim_cur = rlim_max;
-
     unsafe {
         if setrlimit(RLIMIT_NOFILE, &rlim) != 0 {
             panic!("{}", io::Error::last_os_error());
@@ -106,8 +104,15 @@ fn main() {
             panic!("{}", io::Error::last_os_error());
         }
     }
-
     println!("Updated RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
+
+}
+
+fn main() {
+    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
+
+    #[cfg(not(target_os = "windows"))]
+    rlim_execute();
 
     if !data_path().exists() {
         let _ = fs::create_dir_all(data_path());

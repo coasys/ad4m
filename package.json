@@ -1,6 +1,6 @@
 {
   "name": "ad4m-monorepo",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "workspaces": [
     "core",
     "docs",
@@ -26,6 +26,7 @@
     "test:macos": "turbo run test:macos --concurrency=1",
     "test:linux": "turbo run test:linux --concurrency=1",
     "test:windows": "turbo run test:windows --concurrency=1",
+    "test-main": "turbo run test-main",
     "package-ad4m": "turbo run package-ad4m",
     "build-languages": "turbo run build-languages --concurrency=1",
     "docs": "jsdoc -c jsdoc.json",
@@ -43,14 +44,15 @@
     "build-all-windows": "turbo run build-all-windows",
     "patchpackage": "patch-package",
     "set-version": "node setVersion.js",
-    "patch-package": "^6.5.0"
+    "postinstall": "patch-package"
   },
   "devDependencies": {
     "@changesets/cli": "^2.25.2",
     "eslint-config-custom": "*",
     "prettier": "latest",
     "turbo": "latest",
-    "readline-sync": "1.4.10"
+    "readline-sync": "1.4.10",
+    "patch-package": "^6.5.0"
   },
   "engines": {
     "node": ">=16.0.0"
