@@ -50,7 +50,8 @@
   "devDependencies": {
     "@types/express": "^4.17.13",
     "@types/uuid": "^8.3.2",
-    "browserify": "^17.0.0"
+    "browserify": "^17.0.0",
+    "@types/glob": "8.1.0"
   },
   "exports": {
     ".": "./build/cli.js",

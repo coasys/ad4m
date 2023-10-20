@@ -2760,31 +2760,8 @@
     tslib "^2.5.0"
     webcrypto-core "^1.7.7"
 
-"@perspect3vism/ad4m-executor@*":
-  version "0.6.0"
-  resolved "https://registry.yarnpkg.com/@perspect3vism/ad4m-executor/-/ad4m-executor-0.6.0.tgz#e1ae599e7ebea06b3a4be53d782504cc93e99021"
-  integrity sha512-oIVXaXOHEiUyu7yZSXejI4OyZpdPdd7XfGAnSd96pReiRr/NU6gAMSwv9Lw6yz9VCW9TroBUk4VLrlLouhgjdA==
-  dependencies:
-    "@holochain/client" perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b
-    "@msgpack/msgpack" "3.0.0-beta2"
-    "@noble/secp256k1" "^1.7.0"
-    "@perspect3vism/ad4m" "*"
-    "@transmute/did-key.js" "^0.2.1-unstable.29"
-    "@types/json-stable-stringify" "^1.0.33"
-    "@types/mocha" "^10.0.0"
-    aloedb-node "^1.1.1"
-    async-mutex "^0.3.2"
-    get-port "5.1.1"
-    js-yaml "^4.1.0"
-    json-stable-stringify "^1.0.1"
-    linkedom "^0.14.26"
-    lodash "^4.17.21"
-    sha256 "^0.2.0"
-    tmp "^0.2.1"
-    uuid "*"
-
 "@perspect3vism/ad4m-executor@link:core":
-  version "0.6.1-prerelease"
+  version "0.7.0"
   dependencies:
     "@apollo/client" "3.7.10"
     "@apollo/server" "^4.9.4"
@@ -2796,58 +2773,8 @@
     reflect-metadata "^0.1.13"
     type-graphql "1.1.1"
 
-"@perspect3vism/ad4m-test@*":
-  version "0.6.0"
-  resolved "https://registry.yarnpkg.com/@perspect3vism/ad4m-test/-/ad4m-test-0.6.0.tgz#a295bc414684b00b63c0f16815b0c63a0ec7804f"
-  integrity sha512-HQS9+P5pPjE7X41wqzjUiXy4VManc6br87jL4YLrXPokp2q9RqgIDUiY/OKVnk3sgSjhGTgAhrl2zK/JbLF98Q==
-  dependencies:
-    "@apollo/client" "3.7.10"
-    "@perspect3vism/ad4m" "*"
-    "@types/fs-extra" "^9.0.13"
-    "@types/node" "^18.0.0"
-    "@types/node-fetch" "^2.6.1"
-    "@types/unzipper" "^0.10.5"
-    "@types/ws" "8.5.4"
-    "@types/yargs" "^17.0.8"
-    appdata-path perspect3vism/appdata-path
-    chalk "4.1.2"
-    esm "^3.2.25"
-    esmify "^2.1.1"
-    express "4.18.2"
-    find-process "^1.4.7"
-    fs-extra "^10.0.1"
-    get-port "5.1.1"
-    glob "^7.2.0"
-    graphql "15.7.2"
-    graphql-ws "5.12.0"
-    node-fetch "2"
-    node-wget-js "^1.0.1"
-    subscriptions-transport-ws "^0.11.0"
-    tree-kill "^1.2.2"
-    ts-node "^10.5.0"
-    typescript "^4.6.2"
-    unzipper "^0.10.11"
-    uuid "^8.3.2"
-    wget-improved "^3.3.0"
-    ws "8.13.0"
-    yargs "^17.3.1"
-
-"@perspect3vism/ad4m@*":
-  version "0.6.0"
-  resolved "https://registry.yarnpkg.com/@perspect3vism/ad4m/-/ad4m-0.6.0.tgz#594c50189133f6a7becaa7908c146f5e42707fa3"
-  integrity sha512-E069bVC7WTR7eN6dB5WXN7rc+9TWbd4KkLvJVdHyJty02RxfOyFIbDAGy4C5tgmbg5wTKJI+tka8xZ9QTiXEaQ==
-  dependencies:
-    "@apollo/client" "3.7.10"
-    "@holochain/client" "0.16.0"
-    "@types/jest" "^26.0.14"
-    class-validator "^0.13.1"
-    express "4.18.2"
-    graphql "15.7.2"
-    reflect-metadata "^0.1.13"
-    type-graphql "1.1.1"
-
 "@perspect3vism/ad4m@link:core":
-  version "0.6.1-prerelease"
+  version "0.7.0"
   dependencies:
     "@apollo/client" "3.7.10"
     "@apollo/server" "^4.9.4"
@@ -4024,6 +3951,14 @@
   dependencies:
     "@types/node" "*"
 
+"@types/glob@8.1.0":
+  version "8.1.0"
+  resolved "https://registry.yarnpkg.com/@types/glob/-/glob-8.1.0.tgz#b63e70155391b0584dce44e7ea25190bbc38f2fc"
+  integrity sha512-IO+MJPVhoqz+28h1qLAcBEH2+xHMK6MTyHJc7MTnnYb6wsoLR29POVGJ7LycmVXIqyy/4/2ShP5sUwTXuOwb/w==
+  dependencies:
+    "@types/minimatch" "^5.1.2"
+    "@types/node" "*"
+
 "@types/glob@^7.1.3":
   version "7.2.0"
   resolved "https://registry.yarnpkg.com/@types/glob/-/glob-7.2.0.tgz#bc1b5bf3aa92f25bd5dd39f35c57361bdce5b2eb"
@@ -4203,7 +4138,7 @@
   resolved "https://registry.yarnpkg.com/@types/mime/-/mime-1.3.3.tgz#bbe64987e0eb05de150c305005055c7ad784a9ce"
   integrity sha512-Ys+/St+2VF4+xuY6+kDIXGxbNRO0mesVg0bbxEfB97Od1Vjpjx9KD1qxs64Gcb3CWPirk9Xe+PT4YiiHQ9T+eg==
 
-"@types/minimatch@*":
+"@types/minimatch@*", "@types/minimatch@^5.1.2":
   version "5.1.2"
   resolved "https://registry.yarnpkg.com/@types/minimatch/-/minimatch-5.1.2.tgz#07508b45797cb81ec3f273011b054cd0755eddca"
   integrity sha512-K0VQKziLUWkVKiRVrx4a40iPaxTUefQmjtkQofBkYRcoaaL/8rhwDWww9qWbrgicNOgnpIsMxyNIUM4+n6dUIA==
