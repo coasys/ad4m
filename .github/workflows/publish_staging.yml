@@ -343,6 +343,11 @@ jobs:
             echo "NPM_TAG=latest" >> $GITHUB_ENV
           fi
 
+      - name: Change Package Visibility to Public
+        run: |
+          cd core
+          sed -i 's/"private": true/"private": false/' package.json
+
       - name: Publish core
         uses: JS-DevTools/npm-publish@v1
         with:
