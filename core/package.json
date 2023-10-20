@@ -6,6 +6,7 @@
   "module": "lib/index.js",
   "types": "lib/src/index.d.ts",
   "type": "module",
+  "private": true,
   "scripts": {
     "build": "patch-package && tsc && yarn run buildSchema && yarn run bundle",
     "buildSchema": "node --es-module-specifier-resolution=node lib/src/buildSchema.js",
