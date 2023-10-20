@@ -66,6 +66,9 @@ jobs:
       with:
         go-version: '1.18'
 
+    - name: Install HC
+      run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
+
     - name: Install Deno
       uses: denoland/setup-deno@v1
       with:
@@ -106,6 +109,8 @@ jobs:
     - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
       if: matrix.platform != 'windows-latest'
       env:
+        TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+        TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         ENABLE_CODE_SIGNING: ${{ secrets.APPLE_CERTIFICATE }}
         APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
