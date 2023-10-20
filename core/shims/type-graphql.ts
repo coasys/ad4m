@@ -34,7 +34,7 @@
   ```
 */
 
-import * as src from "../../node_modules/type-graphql/dist/index.js";
+import * as src from "type-graphql/dist/index.js";
 
 export const dummyValue = "";
 export function dummyFn() {
