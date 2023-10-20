@@ -15,6 +15,24 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
 
+## [0.7.0] - 20/10/2023
+
+### Added
+ - Tauri auto updates (In app ad4m launcher updates) [#304](https://github.com/coasys/ad4m/pull/304)
+ - Two new Link Languages! Holochain + Socket Signaling & Pure Centralized implementation [#413](https://github.com/coasys/ad4m/pull/413)
+ - Pagination Predicate support into Prolog Engine
+
+### Changed
+ - Update core Deno engine to latest version (and use Deno core node modules) [#410](https://github.com/coasys/ad4m/pull/410)
+
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Launcher not working in Windows [#410](https://github.com/coasys/ad4m/pull/410)
+ - Cargo caching on Linux CI [#410](https://github.com/coasys/ad4m/pull/410)
+
 ## [0.6.0] - 22/09/2023
 
 ### Added
