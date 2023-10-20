@@ -43,7 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
-        node-version: [18.17.0]
+        node-version: [16.x]
 
     needs:
       - create-release
@@ -60,6 +60,7 @@ jobs:
       with:
         override: true
         toolchain: 1.71.1
+    - run: rustup target add wasm32-unknown-unknown
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -73,7 +74,6 @@ jobs:
       uses: denoland/setup-deno@v1
       with:
         deno-version: v1.32.4
-    - run: rustup target add wasm32-unknown-unknown
 
     - name: install dependencies (ubuntu only)
       if: matrix.platform == 'GH-hosted-ubuntu'
@@ -87,7 +87,7 @@ jobs:
 
     - name: install dependencies (windows only)
       if: matrix.platform == 'windows-latest'
-      run: choco install protoc cmake
+      run: choco install protoc cmake curl cygwin gnuwin32-m4 libgcc make mingw
 
     - name: get version
       run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
@@ -124,9 +124,7 @@ jobs:
       env:
         TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-      run: |
-          choco install curl cygwin gnuwin32-m4 libgcc make mingw
-          yarn run package-ad4m
+      run: yarn run package-ad4m
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
