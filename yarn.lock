@@ -1900,9 +1900,8 @@
     lodash-es "^4.17.21"
     ws "^8.13.0"
 
-"@holochain/client@github:perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b", "@holochain/client@perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b":
+"@holochain/client@perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b":
   version "0.12.5"
-  uid "2f3a436b6d28344b0aca883ef3dc229cd042c04b"
   resolved "https://codeload.github.com/perspect3vism/holochain-client-js/tar.gz/2f3a436b6d28344b0aca883ef3dc229cd042c04b"
   dependencies:
     "@holochain/serialization" "^0.1.0-beta-rc.3"
@@ -5206,7 +5205,7 @@ apollo-utilities@1.3.4, apollo-utilities@^1.3.0, apollo-utilities@^1.3.4:
     ts-invariant "^0.4.0"
     tslib "^1.10.0"
 
-"appdata-path@github:perspect3vism/appdata-path", appdata-path@perspect3vism/appdata-path:
+appdata-path@perspect3vism/appdata-path:
   version "1.0.0"
   resolved "https://codeload.github.com/perspect3vism/appdata-path/tar.gz/6304ea16cbfebc98749c33941d643c3046b45985"
 

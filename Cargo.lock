@@ -3887,9 +3887,9 @@ dependencies = [
 
 [[package]]
 name = "flate2"
-version = "1.0.27"
+version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6c98ee8095e9d1dcbf2fcc6d95acccb90d1c81db1e44725c6a984b1dbdfb010"
+checksum = "46303f565772937ffe1d394a4fac6f411c6013172fadde9dcdb1e147a086940e"
 dependencies = [
  "crc32fast",
  "libz-ng-sys",
@@ -6328,7 +6328,7 @@ dependencies = [
 [[package]]
 name = "juniper"
 version = "0.16.0-dev"
-source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
+source = "git+https://github.com/graphql-rust/juniper?rev=57628de8649be071b04a3fedb45c47add7dc5192#57628de8649be071b04a3fedb45c47add7dc5192"
 dependencies = [
  "async-trait",
  "bson",
@@ -6350,7 +6350,7 @@ dependencies = [
 [[package]]
 name = "juniper_codegen"
 version = "0.16.0-dev"
-source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
+source = "git+https://github.com/graphql-rust/juniper?rev=57628de8649be071b04a3fedb45c47add7dc5192#57628de8649be071b04a3fedb45c47add7dc5192"
 dependencies = [
  "proc-macro-error",
  "proc-macro2 1.0.66",
@@ -6362,7 +6362,7 @@ dependencies = [
 [[package]]
 name = "juniper_graphql_transport_ws"
 version = "0.4.0-dev"
-source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
+source = "git+https://github.com/graphql-rust/juniper?rev=57628de8649be071b04a3fedb45c47add7dc5192#57628de8649be071b04a3fedb45c47add7dc5192"
 dependencies = [
  "juniper",
  "juniper_graphql_ws",
@@ -6374,7 +6374,7 @@ dependencies = [
 [[package]]
 name = "juniper_graphql_ws"
 version = "0.4.0-dev"
-source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
+source = "git+https://github.com/graphql-rust/juniper?rev=57628de8649be071b04a3fedb45c47add7dc5192#57628de8649be071b04a3fedb45c47add7dc5192"
 dependencies = [
  "juniper",
  "juniper_subscriptions",
@@ -6385,7 +6385,7 @@ dependencies = [
 [[package]]
 name = "juniper_subscriptions"
 version = "0.17.0-dev"
-source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
+source = "git+https://github.com/graphql-rust/juniper?rev=57628de8649be071b04a3fedb45c47add7dc5192#57628de8649be071b04a3fedb45c47add7dc5192"
 dependencies = [
  "futures",
  "juniper",
@@ -6394,7 +6394,7 @@ dependencies = [
 [[package]]
 name = "juniper_warp"
 version = "0.8.0-dev"
-source = "git+https://github.com/graphql-rust/juniper#801820a3b67389ee567f0c540a4d6a8a3b8d9fbc"
+source = "git+https://github.com/graphql-rust/juniper?rev=57628de8649be071b04a3fedb45c47add7dc5192#57628de8649be071b04a3fedb45c47add7dc5192"
 dependencies = [
  "anyhow",
  "futures",
@@ -12720,9 +12720,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-metrics"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b2fc67d5dec41db679b9b052eb572269616926040b7831e32c8a152df77b84"
+checksum = "eace09241d62c98b7eeb1107d4c5c64ca3bd7da92e8c218c153ab3a78f9be112"
 dependencies = [
  "futures-util",
  "pin-project-lite",

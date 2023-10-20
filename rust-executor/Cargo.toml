@@ -58,10 +58,10 @@ hyper-util = { git = "https://github.com/hyperium/hyper-util.git" }
 rust-embed="8.0.0"
 dirs = "5.0.1"
 
-juniper = { git = "https://github.com/graphql-rust/juniper", features = ["chrono"] }
-juniper_subscriptions = { git = "https://github.com/graphql-rust/juniper" }
-juniper_graphql_transport_ws = { git = "https://github.com/graphql-rust/juniper" }
-juniper_warp = { git = "https://github.com/graphql-rust/juniper", features = ["subscriptions"] }
+juniper = { git = "https://github.com/graphql-rust/juniper", features = ["chrono"], rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
+juniper_subscriptions = { git = "https://github.com/graphql-rust/juniper", rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
+juniper_graphql_transport_ws = { git = "https://github.com/graphql-rust/juniper", rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
+juniper_warp = { git = "https://github.com/graphql-rust/juniper", features = ["subscriptions"], rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
 warp = "0.3.4"
 
 jsonwebtoken = "8.3.0"
