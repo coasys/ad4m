@@ -13,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        platform: [ubuntu-22.04]
+        platform: [GH-hosted-ubuntu]
         node-version: [16.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
@@ -60,7 +60,7 @@ jobs:
     - name: install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
 
     - name: Install HC
       run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
@@ -80,10 +80,13 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: $${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
       
     - name: Run the tests
       run: yarn test
+
+    # - name: Run integration tests
+    #   run: cd ./tests/js && yarn run test-main
 
   # test-windows:
   #   name: JS Ad4mClient <> AD4M Executor - Windows

@@ -5,8 +5,8 @@ import {
 } from '@perspect3vism/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
 import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
-import fs from 'fs'
-import path from 'path'
+import fs from 'node:fs'
+import path from 'node:path'
 import * as Config from './Config'
 import type HolochainService from './storage-services/Holochain/HolochainService';
 import type AgentService from './agent/AgentService'
@@ -18,6 +18,26 @@ import Signatures from './agent/Signatures';
 import { Ad4mDb } from './db';
 import stringify from 'json-stable-stringify'
 import { getPubSub } from './utils';
+
+function cloneWithoutCircularReferences(obj: any, seen: WeakSet<any> = new WeakSet()): any {
+    if (typeof obj === 'object' && obj !== null) {
+      if (seen.has(obj)) {
+        return;
+      }
+      seen.add(obj);
+  
+      const clonedObj: any = Array.isArray(obj) ? [] : {};
+      for (const key in obj) {
+        if (obj.hasOwnProperty(key)) {
+          clonedObj[key] = cloneWithoutCircularReferences(obj[key], seen);
+        }
+      }
+  
+      return clonedObj;
+    }
+  
+    return obj;
+}
 
 type LinkObservers = (diff: PerspectiveDiff, lang: LanguageRef)=>void;
 type TelepresenceSignalObserver = (signal: PerspectiveExpression, lang: LanguageRef)=>void;
@@ -452,9 +472,11 @@ export default class LanguageController {
         //Remove language from memory
         this.#languages.delete(hash as string);
         this.#languageConstructors.delete(hash as string);
-
-        await this.#holochainService.removeDnaForLang(hash as string);
-
+        try {
+            await this.#holochainService.removeDnaForLang(hash as string);
+        } catch(e) {
+            console.log("No DNA found for language installed");
+        }
         //Remove language files
         const languagePath = path.join(this.#config.languagesPath, hash as string);
         fs.rmdirSync(languagePath, {recursive: true});
@@ -503,7 +525,13 @@ export default class LanguageController {
                 if (languageHash == languageMetaData.address) {
                     //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                     const lang = await this.installLanguage(address, languageMeta)
-                    return lang!
+
+                      let newLang = {
+                        ...lang,
+                        linksAdapter: cloneWithoutCircularReferences(lang).linksAdapter
+                      };
+                    // @ts-ignore
+                    return newLang
                 } else {
                     throw new Error("Calculated languageHash did not match address found in meta information")
                 }
@@ -550,7 +578,12 @@ export default class LanguageController {
                     if (sourceLanguageTemplated.meta.address === languageHash) {
                         //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                         const lang = await this.installLanguage(address, languageMeta)
-                        return lang!
+                        let newLang = {
+                            ...lang,
+                            linksAdapter: cloneWithoutCircularReferences(lang).linksAdapter
+                        };
+                          // @ts-ignore
+                        return newLang!
                     } else {
                         throw new Error(`Templating of original source language did not result in the same language hash of un-trusted language trying to be installed... aborting language install. Expected hash: ${languageHash}. But got: ${sourceLanguageTemplated.meta.address}`)
                     }

@@ -1,0 +1,19 @@
+diff --git a/node_modules/@stablelib/random/lib/source/node.js b/node_modules/@stablelib/random/lib/source/node.js
+index 391749f..ff1ce7b 100644
+--- a/node_modules/@stablelib/random/lib/source/node.js
++++ b/node_modules/@stablelib/random/lib/source/node.js
+@@ -1,4 +1,6 @@
+ "use strict";
++import nodeCrypto from "node:crypto";
++
+ // Copyright (C) 2016 Dmitry Chestnykh
+ // MIT License. See LICENSE file for details.
+ Object.defineProperty(exports, "__esModule", { value: true });
+@@ -9,7 +11,6 @@ class NodeRandomSource {
+         this.isAvailable = false;
+         this.isInstantiated = false;
+         if (typeof require !== "undefined") {
+-            const nodeCrypto = require("crypto");
+             if (nodeCrypto && nodeCrypto.randomBytes) {
+                 this._crypto = nodeCrypto;
+                 this.isAvailable = true;

@@ -1,0 +1,10 @@
+diff --git a/node_modules/sha256/lib/nodecrypto.js b/node_modules/sha256/lib/nodecrypto.js
+index 1929ad2..7ca127a 100644
+--- a/node_modules/sha256/lib/nodecrypto.js
++++ b/node_modules/sha256/lib/nodecrypto.js
+@@ -1,4 +1,4 @@
+-var crypto = require('crypto');
++import crypto from 'node:crypto';
+ 
+ // Node.js has its own Crypto function that can handle this natively
+ var sha256 = module.exports = function(message, options) {

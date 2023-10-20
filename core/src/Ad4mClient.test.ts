@@ -1,13 +1,16 @@
 import { buildSchema } from "type-graphql"
 
 import { createServer } from 'http';
-import { ApolloServerPluginDrainHttpServer } from "apollo-server-core";
-import { ApolloServer } from "apollo-server-express";
+import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer'
+
 import { WebSocketServer } from 'ws';
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { useServer } from 'graphql-ws/lib/use/ws';
 
 import { ApolloClient, InMemoryCache } from "@apollo/client/core";
+
 import { createClient } from 'graphql-ws';
 import Websocket from "ws";
 import express from 'express';
@@ -51,21 +54,23 @@ async function createGqlServer(port: number) {
             {
                 async serverWillStart() {
                     return {
-                            async drainServer() {
-                                await serverCleanup.dispose();
+                        async drainServer() {
+                            await serverCleanup.dispose();
                         },
                     };
                 },
             },
-        ]
+        ],
     });
+
+
     // Creating the WebSocket server
     const wsServer = new WebSocketServer({
         // This is the `httpServer` we created in a previous step.
         server: httpServer,
         // Pass a different path here if your ApolloServer serves at
         // a different path.
-        path: '/graphql',
+        path: '/subscriptions',
     });
 
     // Hand in the schema we just created and have the
@@ -73,7 +78,8 @@ async function createGqlServer(port: number) {
     serverCleanup = useServer({ schema }, wsServer);
 
     await server.start()
-    server.applyMiddleware({ app });
+    app.use('/graphql', expressMiddleware(server));
+    // server.applyMiddleware({ app });
     httpServer.listen({ port })
     return port
 }
@@ -88,9 +94,11 @@ describe('Ad4mClient', () => {
         console.log(`GraphQL server listening at: http://localhost:${port}/graphql`)
 
         const wsLink = new GraphQLWsLink(createClient({
-            url: `ws://localhost:${port}/graphql`,
+            url: `ws://localhost:${port}/subscriptions`,
             webSocketImpl: Websocket
         }));
+
+        
 
         apolloClient = new ApolloClient({
             link: wsLink,
@@ -106,6 +114,8 @@ describe('Ad4mClient', () => {
         console.log("GraphQL client connected")
 
         ad4mClient = new Ad4mClient(apolloClient)
+
+        console.log("GraphQL client connected")
     })
 
     describe('.agent', () => {

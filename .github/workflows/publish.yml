@@ -7,7 +7,7 @@ on:
 
 jobs:
   create-release:
-    runs-on: ubuntu-22.04
+    runs-on: GH-hosted-ubuntu
     outputs:
       upload_url: ${{ steps.create-release.outputs.upload_url }}
 
@@ -42,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-22.04, macos-latest, windows-latest]
+        platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
         node-version: [18.17.0]
 
     needs:
@@ -73,10 +73,18 @@ jobs:
     - run: rustup target add wasm32-unknown-unknown
 
     - name: install dependencies (ubuntu only)
-      if: matrix.platform == 'ubuntu-22.04'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
+
+    - name: install dependencies (macos only)
+      if: matrix.platform == 'macos-latest'
+      run: brew install protobuf cmake
+
+    - name: install dependencies (windows only)
+      if: matrix.platform == 'windows-latest'
+      run: choco install protoc cmake
 
     - name: get version
       run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
@@ -117,7 +125,7 @@ jobs:
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
-      if: matrix.platform == 'ubuntu-22.04'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -129,7 +137,7 @@ jobs:
 
     - name: Upload Release AppImage Asset
       id: upload-release-appimage-asset
-      if: matrix.platform == 'ubuntu-22.04'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -141,7 +149,7 @@ jobs:
 
     - name: Upload Release AppImage Update Asset
       id: upload-release-appimage-asset-update
-      if: matrix.platform == 'ubuntu-latest'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -153,7 +161,7 @@ jobs:
 
     - name: Upload Release AppImage update sig Asset
       id: upload-release-appimage-asset-update-sig
-      if: matrix.platform == 'ubuntu-latest'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -165,7 +173,7 @@ jobs:
 
     - name: Upload Release AD4M CLI Linux Binary
       id: upload-release-linux-ad4m-cli-binary
-      if: matrix.platform == 'ubuntu-22.04'
+      if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -272,7 +280,7 @@ jobs:
         asset_content_type: application/octet-stream
 
   npm-publish:
-    runs-on: ubuntu-22.04
+    runs-on: GH-hosted-ubuntu
     steps:
       - uses: actions/checkout@v3
       # Setup .npmrc file to publish to npm
@@ -294,8 +302,19 @@ jobs:
         with:
           go-version: '1.18'
 
+      - name: Install Linux Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
+
       - name: Build modules
         run: yarn run build-libs
+
+      - name: Change Package Visibility to Public
+        run: |
+          cd core
+          sed -i 's/"private": true/"private": false/' package.json
+
       - name: Publish core
         uses: JS-DevTools/npm-publish@v1
         with:
@@ -322,7 +341,7 @@ jobs:
 
 
   crates-publish:
-    runs-on: ubuntu-22.04
+    runs-on: GH-hosted-ubuntu
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -334,6 +353,11 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: '1.18'
+
+      - name: Install Linux Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
 
       - uses: actions/setup-node@v3
         with:
