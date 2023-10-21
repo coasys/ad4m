@@ -77,7 +77,7 @@ jobs:
 
     - name: install dependencies (windows only)
       if: matrix.platform == 'windows-latest'
-      run: choco install protoc cmake curl cygwin gnuwin32-m4 libgcc make mingw
+      run: choco install protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
 
     - name: get version
       run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
