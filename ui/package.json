@@ -31,7 +31,7 @@
     "package-ad4m": "run-script-os",
     "package-ad4m:windows": "yarn run build && yarn tauri build --verbose",
     "package-ad4m:macos": "yarn run build && yarn tauri build --verbose",
-    "package-ad4m:linux": "yarn run build && ./scripts/path-safe-buffer.sh && yarn tauri build --verbose && ./scripts/reverse-path-safe-buffer.sh"
+    "package-ad4m:linux": "yarn run build && ./scripts/patch-safe-buffer.sh && yarn tauri build --verbose && ./scripts/reverse-patch-safe-buffer.sh"
   },
   "eslintConfig": {
     "extends": [
