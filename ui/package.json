@@ -28,7 +28,10 @@
     "tauri": "tauri",
     "eject": "vite eject",
     "build": "vite build",
-    "package-ad4m": "yarn run build && yarn tauri build --verbose"
+    "package-ad4m": "run-script-os",
+    "package-ad4m:windows": "yarn run build && yarn tauri build --verbose",
+    "package-ad4m:macos": "yarn run build && yarn tauri build --verbose",
+    "package-ad4m:linux": "yarn run build && ./scripts/path-safe-buffer.sh && yarn tauri build --verbose && ./scripts/reverse-path-safe-buffer.sh"
   },
   "eslintConfig": {
     "extends": [
@@ -62,7 +65,8 @@
     "customize-cra": "1.0.0",
     "react-app-rewired": "^2.2.1",
     "react-error-overlay": "6.0.9",
-    "vite": "^4.0.1"
+    "vite": "^4.0.1",
+    "run-script-os": "^1.1.6"
   },
   "resolutions": {
     "react-error-overlay": "6.0.9"
