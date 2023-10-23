@@ -90,6 +90,7 @@ jobs:
 
     - name: Change package UI version
       id: changed_version
+      if: matrix.platform == 'windows-latest'
       run: cd ui && yarn change-ui-version
 
     - name: Extract changed version
@@ -239,11 +240,6 @@ jobs:
         asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m
         asset_name: ad4m-macos-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
-
-    - name: Set Version Without Prerelease
-      id: set_version
-      if: matrix.platform == 'windows-latest'
-      run: echo "::set-output name=version::$(echo ${{ steps.extract_version.outputs.version }} -replace '-prerelease')"
 
     - name: Upload Release MSI Asset
       id: upload-release-msi-asset
