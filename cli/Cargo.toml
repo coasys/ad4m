@@ -1,7 +1,7 @@
 [package]
 name = "ad4m"
 
-version = "0.7.1-prerelease.0"
+version = "0.7.1"
 
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]

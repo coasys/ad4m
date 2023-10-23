@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { Address, Expression } from '@perspect3vism/ad4m';
 
-export let ad4mExecutorVersion = "0.7.1-prerelease";
+export let ad4mExecutorVersion = "0.7.1";
 export let agentLanguageAlias = "did";
 export let languageLanguageAlias = "lang";
 export let neighbourhoodLanguageAlias = "neighbourhood";

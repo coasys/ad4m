@@ -1,6 +1,6 @@
 {
   "name": "ad4m-launcher",
-  "version": "0.7.1-prerelease",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "dependencies": {
