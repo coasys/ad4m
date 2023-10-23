@@ -230,6 +230,11 @@ jobs:
         asset_name: ad4m-macos-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
+    - name: Set Version Without Prerelease
+      id: set_version
+      if: matrix.platform == 'windows-latest'
+      run: echo "::set-output name=version::$(echo ${{ steps.extract_version.outputs.version }} -replace '-prerelease')"
+
     - name: Upload Release MSI Asset
       id: upload-release-msi-asset
       if: matrix.platform == 'windows-latest'
@@ -238,8 +243,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi'
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi
+        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.set_version.outputs.version }}_x64_en-US.msi'
+        asset_name: ADAM\ Launcher_${{ steps.set_version.outputs.version }}_x64_en-US.msi
         asset_content_type: application/octet-stream
 
     - name: Upload Release MSI update Asset
@@ -250,8 +255,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi.zip'
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi.zip
+        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.set_version.outputs.version }}_x64_en-US.msi.zip'
+        asset_name: ADAM\ Launcher_${{ steps.set_version.outputs.version }}_x64_en-US.msi.zip
         asset_content_type: application/octet-stream
 
     - name: Upload Release MSI update sig Asset
@@ -262,21 +267,21 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi.zip.sig'
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64_en-US.msi.zip.sig
+        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.set_version.outputs.version }}_x64_en-US.msi.zip.sig'
+        asset_name: ADAM\ Launcher_${{ steps.set_version.outputs.version }}_x64_en-US.msi.zip.sig
         asset_content_type: application/octet-stream
 
-    - name: Upload Release AD4M CLI Windows Binary
-      id: upload-release-windows-ad4m-cli-binary
-      if: matrix.platform == 'windows-latest'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: D:\a\ad4m\ad4m\target\release\ad4m-x64.exe
-        asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
-        asset_content_type: application/octet-stream
+    # - name: Upload Release AD4M CLI Windows Binary
+    #   id: upload-release-windows-ad4m-cli-binary
+    #   if: matrix.platform == 'windows-latest'
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #     asset_path: D:\a\ad4m\ad4m\target\release\ad4m-x64.exe
+    #     asset_name: ad4m-windows-${{ steps.extract_version.outputs.version }}-x64.exe
+    #     asset_content_type: application/octet-stream
 
   npm-publish:
     runs-on: GH-hosted-ubuntu
