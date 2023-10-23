@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/agent-language",
-  "version": "0.7.0-prerelease",
+  "version": "0.7.1-prerelease",
   "description": "AD4M Language implementation for Holochain profile DNA",
   "main": "index.js",
   "scripts": {

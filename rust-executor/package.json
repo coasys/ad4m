@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/rust-ad4m-executor",
-  "version": "0.7.0-prerelease",
+  "version": "0.7.1-prerelease",
   "description": "Rust built version of the ad4m-executor, exposing GraphQL methods for AD4M",
   "main": "",
   "files": [],
