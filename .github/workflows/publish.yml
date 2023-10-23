@@ -100,6 +100,7 @@ jobs:
 
     - name: Change package UI version
       id: changed_version
+      if: matrix.platform == 'windows-latest'
       run: cd ui && yarn change-ui-version
 
     - name: Extract changed version
