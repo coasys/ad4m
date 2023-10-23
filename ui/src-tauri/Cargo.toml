@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-launcher"
-version = "0.7.0"
+version = "0.7.1"
 description = "Administration of ad4m services"
 authors = ["Kaichao Sun"]
 license = ""
@@ -51,3 +51,7 @@ dev = []
 # this feature is used used for production builds where `devPath` points to the filesystem
 # DO NOT remove this
 custom-protocol = [ "tauri/custom-protocol"]
+
+
+
+

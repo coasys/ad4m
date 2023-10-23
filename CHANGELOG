@@ -15,6 +15,19 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
 
+## [0.7.1] - 20/10/2023
+
+### Added
+
+### Changed
+ 
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Fix CI release workflows
+
 ## [0.7.0] - 20/10/2023
 
 ### Added

@@ -1,6 +1,8 @@
 [package]
 name = "ad4m"
-version = "0.7.0"
+
+version = "0.7.1"
+
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]
 description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
@@ -12,6 +14,8 @@ documentation = "https://docs.ad4m.dev"
 readme = "README.md"
 
 [dependencies]
+
+
 ad4m-client = { path = "../rust-client"}
 rust-executor = { path = "../rust-executor" }
 anyhow = "1.0.65"
