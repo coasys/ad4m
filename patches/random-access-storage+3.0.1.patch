@@ -1,0 +1,10 @@
+diff --git a/node_modules/random-access-storage/index.js b/node_modules/random-access-storage/index.js
+index 9ed6780..600a31f 100644
+--- a/node_modules/random-access-storage/index.js
++++ b/node_modules/random-access-storage/index.js
+@@ -1,4 +1,4 @@
+-const EventEmitter = require('events')
++import { EventEmitter } from 'node:events'
+ const queueTick = require('queue-tick')
+ 
+ const NOT_READABLE = defaultImpl(new Error('Not readable'))

@@ -1,0 +1,20 @@
+diff --git a/node_modules/hyperdht/lib/connection-pool.js b/node_modules/hyperdht/lib/connection-pool.js
+index 46404e3..627d5f4 100644
+--- a/node_modules/hyperdht/lib/connection-pool.js
++++ b/node_modules/hyperdht/lib/connection-pool.js
+@@ -1,4 +1,4 @@
+-const EventEmitter = require('events')
++import { EventEmitter } from 'node:events'
+ const b4a = require('b4a')
+ const errors = require('./errors')
+ 
+diff --git a/node_modules/hyperdht/lib/server.js b/node_modules/hyperdht/lib/server.js
+index d1feb7c..2c5a5c0 100644
+--- a/node_modules/hyperdht/lib/server.js
++++ b/node_modules/hyperdht/lib/server.js
+@@ -1,4 +1,4 @@
+-const { EventEmitter } = require('events')
++import { EventEmitter } from 'node:events'
+ const safetyCatch = require('safety-catch')
+ const NoiseSecretStream = require('@hyperswarm/secret-stream')
+ const b4a = require('b4a')

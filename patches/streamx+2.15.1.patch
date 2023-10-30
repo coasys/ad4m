@@ -1,0 +1,10 @@
+diff --git a/node_modules/streamx/index.js b/node_modules/streamx/index.js
+index c3aac12..32ec8f1 100644
+--- a/node_modules/streamx/index.js
++++ b/node_modules/streamx/index.js
+@@ -1,4 +1,4 @@
+-const { EventEmitter } = require('events')
++import { EventEmitter } from 'node:events'
+ const STREAM_DESTROYED = new Error('Stream was destroyed')
+ const PREMATURE_CLOSE = new Error('Premature close')
+ 

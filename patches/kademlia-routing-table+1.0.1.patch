@@ -1,0 +1,10 @@
+diff --git a/node_modules/kademlia-routing-table/index.js b/node_modules/kademlia-routing-table/index.js
+index ad7dee0..658b5cb 100644
+--- a/node_modules/kademlia-routing-table/index.js
++++ b/node_modules/kademlia-routing-table/index.js
+@@ -1,4 +1,4 @@
+-const { EventEmitter } = require('events')
++import { EventEmitter } from 'node:events'
+ 
+ module.exports = class RoutingTable extends EventEmitter {
+   constructor (id, opts) {

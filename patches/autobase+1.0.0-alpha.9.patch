@@ -1,0 +1,20 @@
+diff --git a/node_modules/autobase/index.js b/node_modules/autobase/index.js
+index 37da7e0..cd52645 100644
+--- a/node_modules/autobase/index.js
++++ b/node_modules/autobase/index.js
+@@ -1,4 +1,4 @@
+-const { EventEmitter } = require('events')
++import { EventEmitter } from 'node:events'
+ 
+ const safetyCatch = require('safety-catch')
+ const streamx = require('streamx')
+diff --git a/node_modules/autobase/lib/linearize.js b/node_modules/autobase/lib/linearize.js
+index 6a1af15..c96b76c 100644
+--- a/node_modules/autobase/lib/linearize.js
++++ b/node_modules/autobase/lib/linearize.js
+@@ -1,4 +1,4 @@
+-const { EventEmitter } = require('events')
++import { EventEmitter } from 'node:events'
+ const safetyCatch = require('safety-catch')
+ const debounceify = require('debounceify')
+ const b = require('b4a')

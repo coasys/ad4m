@@ -1,0 +1,10 @@
+diff --git a/node_modules/blind-relay/index.js b/node_modules/blind-relay/index.js
+index 7d34f5b..848b1e2 100644
+--- a/node_modules/blind-relay/index.js
++++ b/node_modules/blind-relay/index.js
+@@ -1,4 +1,4 @@
+-const EventEmitter = require('events')
++import { EventEmitter } from 'node:events'
+ const Protomux = require('protomux')
+ const { Readable } = require('streamx')
+ const sodium = require('sodium-universal')

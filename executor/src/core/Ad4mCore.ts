@@ -19,6 +19,7 @@ import RuntimeService from './RuntimeService'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
 import { getPubSub, sleep } from "./utils";
+import HypercoreService from "./storage-services/Hypercore";
 
 export interface InitServicesParams {
     agentService: AgentService,
@@ -51,6 +52,7 @@ export interface ConnectHolochainParams {
 export default class Ad4mCore {
     #config: MainConfig;
     #holochain?: HolochainService
+    #hypercore?: HypercoreService
     //#IPFS?: IPFSType
 
     #agentService: AgentService
@@ -210,6 +212,10 @@ export default class Ad4mCore {
             ...holochainConfig,
             passphrase: params.passphrase!
         });
+    }
+
+    async initHypercore() {
+        this.#hypercore = new HypercoreService(this.agentService);
     }
 
     async waitForAgent(): Promise<void> {

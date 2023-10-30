@@ -1,0 +1,13 @@
+diff --git a/node_modules/random-access-file/index.js b/node_modules/random-access-file/index.js
+index 4824381..72246c0 100644
+--- a/node_modules/random-access-file/index.js
++++ b/node_modules/random-access-file/index.js
+@@ -1,6 +1,6 @@
+ const RandomAccessStorage = require('random-access-storage')
+-const fs = require('fs')
+-const path = require('path')
++import fs from 'node:fs'
++import path from 'node:path'
+ const constants = fs.constants || require('constants') // eslint-disable-line n/no-deprecated-api
+ 
+ let fsext = null

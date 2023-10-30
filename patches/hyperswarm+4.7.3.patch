@@ -1,0 +1,20 @@
+diff --git a/node_modules/hyperswarm/index.js b/node_modules/hyperswarm/index.js
+index 58f107d..5136ae2 100644
+--- a/node_modules/hyperswarm/index.js
++++ b/node_modules/hyperswarm/index.js
+@@ -1,4 +1,4 @@
+-const { EventEmitter } = require('events')
++import { EventEmitter } from 'node:events'
+ const DHT = require('hyperdht')
+ const spq = require('shuffled-priority-queue')
+ const b4a = require('b4a')
+diff --git a/node_modules/hyperswarm/lib/peer-info.js b/node_modules/hyperswarm/lib/peer-info.js
+index 2afa735..eceb432 100644
+--- a/node_modules/hyperswarm/lib/peer-info.js
++++ b/node_modules/hyperswarm/lib/peer-info.js
+@@ -1,4 +1,4 @@
+-const { EventEmitter } = require('events')
++import { EventEmitter } from 'node:events'
+ const b4a = require('b4a')
+ 
+ const VERY_LOW_PRIORITY = 0

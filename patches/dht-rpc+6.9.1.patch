@@ -1,0 +1,10 @@
+diff --git a/node_modules/dht-rpc/index.js b/node_modules/dht-rpc/index.js
+index 25a1fdc..e854aa2 100644
+--- a/node_modules/dht-rpc/index.js
++++ b/node_modules/dht-rpc/index.js
+@@ -1,4 +1,4 @@
+-const { EventEmitter } = require('events')
++import { EventEmitter } from 'node:events'
+ const Table = require('kademlia-routing-table')
+ const TOS = require('time-ordered-set')
+ const UDX = require('udx-native')

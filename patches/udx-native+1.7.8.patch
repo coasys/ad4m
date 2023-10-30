@@ -1,0 +1,20 @@
+diff --git a/node_modules/udx-native/lib/network-interfaces.js b/node_modules/udx-native/lib/network-interfaces.js
+index d4fbeb8..da67e01 100644
+--- a/node_modules/udx-native/lib/network-interfaces.js
++++ b/node_modules/udx-native/lib/network-interfaces.js
+@@ -1,4 +1,4 @@
+-const events = require('events')
++import events from 'node:events'
+ const b4a = require('b4a')
+ const binding = require('../binding')
+ 
+diff --git a/node_modules/udx-native/lib/socket.js b/node_modules/udx-native/lib/socket.js
+index 88b09e8..572af3e 100644
+--- a/node_modules/udx-native/lib/socket.js
++++ b/node_modules/udx-native/lib/socket.js
+@@ -1,4 +1,4 @@
+-const events = require('events')
++import events from 'node:events'
+ const b4a = require('b4a')
+ const binding = require('../binding')
+ const ip = require('./ip')

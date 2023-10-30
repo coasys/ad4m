@@ -500,6 +500,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 await core.waitForAgent();
                 console.log("Wait for agent");
                 core.initControllers()
+                await core.initHypercore();
                 await core.initLanguages()
                 console.log("Core languages init'd");
 
