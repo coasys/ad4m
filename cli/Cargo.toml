@@ -34,3 +34,5 @@ serde = { version = "1.0", features = ["derive"] }
 colour = "0.7.0"
 syntect = "5.0"
 ctrlc = "3.4.0"
+
+llm = "0.1.1"
