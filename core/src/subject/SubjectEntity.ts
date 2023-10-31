@@ -1,4 +1,5 @@
 import { Literal } from "../Literal";
+import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom } from "./SDNADecorators";
 import { singularToPlural } from "./util";
@@ -11,13 +12,15 @@ export type QueryPartialEntity<T> = {
 export class SubjectEntity {
   #baseExpression: string;
   #subjectClass: string;
+  #source: string;
   #perspective: PerspectiveProxy
   author: string;
   timestamp: string;
 
-  constructor(perspective: PerspectiveProxy, baseExpression?: string) {
+  constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
     this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomPrologAtom(24)).toUrl();
-    this.#perspective = perspective
+    this.#perspective = perspective;
+    this.#source = source || "ad4m://self";
   }
 
   get baseExpression() {
@@ -95,7 +98,7 @@ export class SubjectEntity {
       if (resolveLanguageResults && resolveLanguageResults.length > 0) {
         resolveLanguage = resolveLanguageResults[0].Language
       }
-      
+
       if (resolveLanguage) {
         value = await this.#perspective.createExpression(value, resolveLanguage)
       }
@@ -156,6 +159,14 @@ export class SubjectEntity {
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
 
     await this.#perspective.createSubject(this, this.#baseExpression);
+
+    await this.#perspective.add(
+      new Link({
+        source: this.#source,
+        predicate: "rdf://has_child",
+        target: this.baseExpression,
+      })
+    );
 
     await this.update()
   }
@@ -221,6 +232,56 @@ export class SubjectEntity {
 
     return []
   }
+
+  static async query(perspective: PerspectiveProxy, query?: SubjectEntityQueryParam) {
+    const source = query?.source || "ad4m://self";
+    let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this)
+
+    let res = [];
+
+    if (query) {
+      try {
+        const queryResponse = (await perspective.infer(`findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), length(AllData, DataLength), sort(AllData, SortedData).`))[0]
+
+        if (queryResponse.DataLength >= query.size) {
+          const isOutofBound = query.size * query.page > queryResponse.DataLength;
+
+          const newPageSize = isOutofBound ? queryResponse.DataLength - (query.size * (query.page - 1)) : query.size;
+
+          const mainQuery = `findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), sort(AllData, SortedData), reverse(SortedData, ReverseSortedData), paginate(ReverseSortedData, ${query.page}, ${newPageSize}, PageData).`
+
+          res = await perspective.infer(mainQuery);
+
+          res = res[0].PageData.map(r => ({
+            Base: r[1],
+            Timestamp: r[0]
+          }))
+        } else {
+          res = await perspective.infer(
+            `subject_class("${subjectClass}", C), instance(C, Base), triple("${source}", Predicate, Base).`
+          );
+        }
+      } catch (e) {
+        console.log("Query failed", e);
+      }
+    } else {
+      res = await perspective.infer(
+        `subject_class("${subjectClass}", C), instance(C, Base), triple("${source}", Predicate, Base).`
+      );
+    }
+
+    if (!res) return [];
+
+    const data = await Promise.all(
+      res.map(async (result) => {
+        const instance = new this(perspective, result.Base)
+
+        return await instance.get();
+      })
+    );
+
+    return data;
+  }
 }
 
 export type SubjectArray<T> = T[] | {
@@ -228,3 +289,8 @@ export type SubjectArray<T> = T[] | {
   value: T[]
 }
 
+export type SubjectEntityQueryParam = {
+  source?: string;
+  size?: number;
+  page?: number;
+}

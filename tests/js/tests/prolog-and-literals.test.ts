@@ -671,6 +671,16 @@ describe("Prolog + Literals", () => {
                     expect(links![0].status).to.equal('LOCAL')
                 })
 
+                it("query()", async () => {
+                    let recipes = await Recipe.query(perspective!, { page: 1, size: 2 });
+
+                    expect(recipes.length).to.equal(2)
+
+                    recipes = await Recipe.query(perspective!, { page: 2, size: 2 });
+
+                    expect(recipes.length).to.equal(1)
+                })
+
                 it("delete()", async () => {
                     const recipe2 = await Recipe.all(perspective!);
 
