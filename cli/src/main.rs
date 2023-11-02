@@ -307,8 +307,8 @@ async fn main() -> Result<()> {
         Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve => {
 
-            let training = r##"
-system:
+            let system = r##"
+<<SYS>>
 You are Eve, the personal assistant AI in Adam. 
 You are mainly there to help create AD4M Subject classes (in Prolog) from user input. 
 You'll respond to the user directly and mark Subject class code with "SDNA:" at the start and ":ANDS" at the end, 
@@ -319,15 +319,14 @@ but ensure the same identifier used throughout all predicate occurrences of the 
 When the user signals that the code is complete, 
 provide the the latest version to Perspect3ve to be written to the perspective's social DNA 
 by wrapping the code to commit with "WRITE-SDNA:" and ":ANDS-ETIRW"` 
+<</SYS>>
+"##;
 
-Eve:
-Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
 
-User:
-Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
-
-Eve:
-Sure. I have made-up a "todo" ADAM Language to use in the predicates of this Subject class definition.
+            let history = r##"
+Eve: Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
+User: Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
+Eve: Sure. I have made-up a "todo" ADAM Language to use in the predicates of this Subject class definition.
 
 SDNA:
 subject_class("Todo", cjdotdng).
@@ -353,9 +352,7 @@ collection_setter(cjdotdng, "comments", '[{action: "collectionSetter", source: "
 What icon should it have in the toolbar? (You can choose from the "Bootstrap" icon set) 
             
 User: The "check" icon. Render todos as circles with the color depending on the state. Also, please add options for the state property, being Ready, Doing and Done.
-
-Eve:
-Ok, I have this now:
+Eve: Ok, I have this now:
 
 SDNA:
 subject_class("Todo", cjdotdng).
@@ -387,14 +384,9 @@ p3_instance_color(cjdotdng, Instance, "#FFFF00") :- property_getter(c, Instance,
 p3_instance_color(cjdotdng, Instance, "#00FF00") :- property_getter(c, Instance, "state", "todo://done").
 :ANDS
 
-Anything else?`
-                
-User:
-No, that's it. Please write this to the SDNA.`
-
-
-Eve:
-Ok...
+Anything else?            
+User: No, that's it. Please write this to the SDNA.`
+Eve: Ok.. 
 WRITE-SDNA:
 subject_class("Todo", cjdotdng).
 constructor(cjdotdng, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
@@ -430,26 +422,9 @@ Done.
 
 
 let reduced = r##"
-system:
-You are Eve, the personal assistant AI in Adam. 
-You are mainly there to help create AD4M Subject classes (in Prolog) from user input. 
-You'll respond to the user directly and mark Subject class code with "SDNA:" at the start and ":ANDS" at the end, 
-so that Perspect3ve can parse that out. 
-Make sure that each new Subject class definition uses a new random identifier 
-(2nd parameter in "subject_class", 1st parameter in the other predicates),
-but ensure the same identifier used throughout all predicate occurrences of the same class definition.
-When the user signals that the code is complete, 
-provide the the latest version to Perspect3ve to be written to the perspective's social DNA 
-by wrapping the code to commit with "WRITE-SDNA:" and ":ANDS-ETIRW"` 
-
-Eve:
-Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
-
-User:
-Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
-
-Eve:
-Sure. I have made-up a "todo" ADAM Language to use in the predicates of this Subject class definition.
+Eve: Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
+User: Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
+Eve: Sure. I have made-up a "todo" ADAM Language to use in the predicates of this Subject class definition.
 
 SDNA:
 subject_class("Todo", cjdotdng).
@@ -524,14 +499,6 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
                 std::io::stdout().flush().unwrap();
             }
 
-            let character_name = "### Assistant";
-            let user_name = "### Human";
-            let persona = "A chat between a human and an assistant.";
-            let history = format!(
-                "{character_name}: Hello - How may I help you today?\n\
-                 {user_name}: What is the capital of France?\n\
-                 {character_name}:  Paris is the capital of France."
-            );
 
             let inference_parameters = llm::InferenceParameters::default();
 
@@ -540,7 +507,7 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
             
             session.feed_prompt(
                 &llama,
-                format!("{persona}\n{history}").as_str(),
+                format!("{system}\n{reduced}").as_str(),
                 &mut Default::default(),
                 llm::feed_prompt_callback(|resp| match resp {
                     llm::InferenceResponse::PromptToken(t)
@@ -553,13 +520,11 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
                 }),
             ).unwrap_or_else(|err| panic!("Failed to feed prompt: {err}"));
 
-            println!("Training done. Ready!");
+            println!("\n\nTraining done. Ready!");
 
             let mut rl = rustyline::Editor::<()>::new()?;
             let line = rl.readline(">> ")?;
             println!("\n\n");
-
-            let prompt = format!("User:\n{}\n\nEve:\n", line);
                 
             let res = session.infer::<std::convert::Infallible>(
                 // model to use for text generation
@@ -569,7 +534,7 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
                 // the prompt to use for text generation, as well as other
                 // inference parameters
                 &llm::InferenceRequest {
-                    prompt: format!("{user_name}: {line}\n{character_name}:")
+                    prompt: format!("User: {line}\nEve:")
                         .as_str()
                         .into(),
                     parameters: &inference_parameters,
