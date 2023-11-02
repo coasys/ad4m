@@ -241,14 +241,11 @@ export class SubjectEntity {
 
     if (query) {
       try {
-        const queryResponse = (await perspective.infer(`findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), length(AllData, DataLength), sort(AllData, SortedData).`))[0]
+        const queryResponse = (await perspective.infer(`findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), sort(AllData, SortedData), length(SortedData, DataLength).`))[0]
 
         if (queryResponse.DataLength >= query.size) {
-          const isOutofBound = query.size * query.page > queryResponse.DataLength;
+          const mainQuery = `findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), sort(AllData, SortedData), reverse(SortedData, ReverseSortedData), paginate(ReverseSortedData, ${query.page}, ${query.size}, PageData).`
 
-          const newPageSize = isOutofBound ? queryResponse.DataLength - (query.size * (query.page - 1)) : query.size;
-
-          const mainQuery = `findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), sort(AllData, SortedData), reverse(SortedData, ReverseSortedData), paginate(ReverseSortedData, ${query.page}, ${newPageSize}, PageData).`
 
           res = await perspective.infer(mainQuery);
 
