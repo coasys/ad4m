@@ -478,30 +478,43 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
 
             use std::io::Write;
             use llm::Model;
+            use llm::InferenceResponse;
+            use std::convert::Infallible;
 
             println!("Loading model...");
 
+            
             // load a GGML model from disk
             let llama = llm::load::<llm::models::Llama>(
                 // path to GGML file
                 std::path::Path::new("/Users/nicolasluck/models/eve.model"),
+                llm::TokenizerSource::Embedded,
                 // llm::ModelParameters
                 Default::default(),
                 // load progress callback
                 |_| {},
+
             )
             .unwrap_or_else(|err| panic!("Failed to load model: {err}"));
 
             println!("Model loaded!");
 
             /*
-            let model = llm::load_dynamic(
-                llm::ModelArchitecture::Llama,
+
+            
+            let llama = llm::load_dynamic(
+                Some(llm::ModelArchitecture::Llama),
                 &std::path::Path::new("/Users/nicolasluck/eve.model"),
+                llm::TokenizerSource::Embedded,
                 Default::default(),
                 llm::load_progress_callback_stdout,
             ).unwrap_or_else(|err| panic!("Failed to load model: {err}"));
-            */
+
+            println!("Model loaded!");
+             */
+
+            let mut session = llama.start_session(Default::default());
+            
 
             println!("Ad hoc training model for ADAM subject classes...");
 
@@ -510,27 +523,43 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
                 print!("{t}");
                 std::io::stdout().flush().unwrap();
             }
+
+            let character_name = "### Assistant";
+            let user_name = "### Human";
+            let persona = "A chat between a human and an assistant.";
+            let history = format!(
+                "{character_name}: Hello - How may I help you today?\n\
+                 {user_name}: What is the capital of France?\n\
+                 {character_name}:  Paris is the capital of France."
+            );
+
+            let inference_parameters = llm::InferenceParameters::default();
+
             
             // use the model to generate text from a prompt
-            let mut session = llama.start_session(Default::default());
+            
             session.feed_prompt(
-                &llama, 
-                &Default::default(),
-                reduced,
-                &mut llm::OutputRequest::default(),
-                |t| {
-                    print!(".");
-                    Ok::<(), std::io::Error>(())
-                }
+                &llama,
+                format!("{persona}\n{history}").as_str(),
+                &mut Default::default(),
+                llm::feed_prompt_callback(|resp| match resp {
+                    llm::InferenceResponse::PromptToken(t)
+                    | llm::InferenceResponse::InferredToken(t) => {
+                        print_token(t);
+    
+                        Ok::<llm::InferenceFeedback, Infallible>(llm::InferenceFeedback::Continue)
+                    }
+                    _ => Ok(llm::InferenceFeedback::Continue),
+                }),
             ).unwrap_or_else(|err| panic!("Failed to feed prompt: {err}"));
 
             println!("Training done. Ready!");
 
             let mut rl = rustyline::Editor::<()>::new()?;
-            let prompt = rl.readline(">> ")?;
+            let line = rl.readline(">> ")?;
             println!("\n\n");
 
-            let prompt = format!("User:\n{}\n\nEve:\n", prompt);
+            let prompt = format!("User:\n{}\n\nEve:\n", line);
                 
             let res = session.infer::<std::convert::Infallible>(
                 // model to use for text generation
@@ -540,17 +569,26 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
                 // the prompt to use for text generation, as well as other
                 // inference parameters
                 &llm::InferenceRequest {
-                    prompt: prompt.as_str(),
-                    ..Default::default()
+                    prompt: format!("{user_name}: {line}\n{character_name}:")
+                        .as_str()
+                        .into(),
+                    parameters: &inference_parameters,
+                    play_back_previous_tokens: false,
+                    maximum_token_count: None,
                 },
                 // llm::OutputRequest
                 &mut Default::default(),
                 // output callback
                 |t| {
-                    print!("{t}");
+                    match t {
+                        InferenceResponse::PromptToken(t) | InferenceResponse::InferredToken(t) | llm::InferenceResponse::SnapshotToken(t) => {
+                            print_token(t);
+                        }
+                        _ => {}
+                    }
                     std::io::stdout().flush().unwrap();
 
-                    Ok(())
+                    Ok(llm::InferenceFeedback::Continue)
                 }
             );
 
