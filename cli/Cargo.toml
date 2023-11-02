@@ -36,3 +36,4 @@ syntect = "5.0"
 ctrlc = "3.4.0"
 
 llm = { git = "https://github.com/rustformers/llm", features = ["metal"] }
+serde_cbor = "0.11"
