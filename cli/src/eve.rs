@@ -253,15 +253,23 @@ pub async fn run(command: EveCommands) -> Result<()> {
                 &mut Default::default(),
                 // output callback
                 |t| {
+                    let mut cont = true;
                     match t {
                         InferenceResponse::PromptToken(t) | InferenceResponse::InferredToken(t) | llm::InferenceResponse::SnapshotToken(t) => {
+                            if t == "Eve:" || t == "User:" {
+                                cont = false;
+                            }
                             print_token(t);
                         }
                         _ => {}
                     }
                     std::io::stdout().flush().unwrap();
 
-                    Ok(llm::InferenceFeedback::Continue)
+                    if cont {
+                        Ok(llm::InferenceFeedback::Continue)
+                    } else {
+                        Ok(llm::InferenceFeedback::Halt)
+                    }
                 }
             );
 
