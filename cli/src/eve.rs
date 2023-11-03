@@ -214,8 +214,7 @@ pub async fn run(command: EveCommands) -> Result<()> {
             println!("\n\nTraining done. Ready!");
             
             unsafe {
-                let snapshot_ref: llm::InferenceSnapshotRef<'_> = session.get_snapshot();
-                let snapshot = snapshot_ref.to_owned();
+                let snapshot: llm::InferenceSnapshotRef<'_> = session.get_snapshot();
                 let snapshot_cbor = serde_cbor::to_vec(&snapshot).expect("Failed to serialize snapshot");
                 File::create("/Users/nicolasluck/models/eve.snapshot.json").unwrap().write_all(snapshot_cbor.as_slice()).unwrap();
                 println!("Snapshot saved!");
