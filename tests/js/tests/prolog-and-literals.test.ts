@@ -676,7 +676,7 @@ describe("Prolog + Literals", () => {
 
                     expect(recipes.length).to.equal(2)
 
-                    recipes = await Recipe.query(perspective!, { page: 2, size: 2 });
+                    recipes = await Recipe.query(perspective!, { page: 2, size: 1 });
 
                     expect(recipes.length).to.equal(1)
                 })

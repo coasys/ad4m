@@ -163,7 +163,7 @@ export class SubjectEntity {
     await this.#perspective.add(
       new Link({
         source: this.#source,
-        predicate: "rdf://has_child",
+        predicate: "ad4m://has_child",
         target: this.baseExpression,
       })
     );
@@ -245,7 +245,6 @@ export class SubjectEntity {
 
         if (queryResponse.DataLength >= query.size) {
           const mainQuery = `findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), sort(AllData, SortedData), reverse(SortedData, ReverseSortedData), paginate(ReverseSortedData, ${query.page}, ${query.size}, PageData).`
-
 
           res = await perspective.infer(mainQuery);
 
