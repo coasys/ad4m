@@ -15,7 +15,7 @@ serde_json = "1"
 chrono = { version = "0.4.22", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 hex = "0.4.3"
 
-hdk = "0.2.2"
-holo_hash = "0.2.2"
+hdk = "0.3.0-beta-dev.18"
+holo_hash = "0.3.0-beta-dev.11"
 
 direct-message-integrity = { path = "../direct-message-integrity" }

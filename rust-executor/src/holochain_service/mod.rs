@@ -10,11 +10,11 @@ use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
-//use holochain::prelude::kitsune_p2p::dependencies::kitsune_p2p_types::config::tuning_params_struct::KitsuneP2pTuningParams;
-use holochain::prelude::kitsune_p2p::dependencies::url2::Url2;
+use kitsune_p2p_types::config::{KitsuneP2pTuningParams, KitsuneP2pConfig, NetworkType, TransportConfig};
+use kitsune_p2p_types::dependencies::url2::Url2;
 use holochain::prelude::{
-    ExternIO, HoloHash, InstallAppPayload, KitsuneP2pConfig, NetworkType, Signal,
-    Signature, Timestamp, TransportConfig, ZomeCallResponse, ZomeCallUnsigned
+    ExternIO, HoloHash, InstallAppPayload, Signal,
+    Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned
 };
 use holochain::test_utils::itertools::Either;
 use holochain_types::dna::ValidatedDnaManifest;
@@ -307,23 +307,23 @@ impl HolochainService {
             let config = ConductorConfig::load_yaml(&conductor_yaml_path)?;
             config
         } else {
-            let mut config = ConductorConfig::default();
+        let mut config = ConductorConfig::default();
             config.environment_path = PathBuf::from(local_config.conductor_path.clone()).into();
             config.admin_interfaces = None;
 
             let mut kitsune_config = KitsuneP2pConfig::default();
-            // let mut tuning_params = KitsuneP2pTuningParams::default();
+            let mut tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
 
-            // // How long should we hold off talking to a peer
-            // // we've previously gotten errors speaking to.
-            // // [Default: 5 minute; now updated to 2 minutes]
-            // tuning_params.gossip_peer_on_error_next_gossip_delay_ms = 1000 * 60 * 2;
+            // How long should we hold off talking to a peer
+            // we've previously gotten errors speaking to.
+            // [Default: 5 minute; now updated to 2 minutes]
+            tuning_params.gossip_peer_on_error_next_gossip_delay_ms = 1000 * 60 * 2;
             
-            // // How often should we update and publish our agent info?
-            // // [Default: 5 minutes; now updated to 2 minutes]
-            // tuning_params.gossip_agent_info_update_interval_ms = 1000 * 60 * 2;
+            // How often should we update and publish our agent info?
+            // [Default: 5 minutes; now updated to 2 minutes]
+            tuning_params.gossip_agent_info_update_interval_ms = 1000 * 60 * 2;
 
-            // kitsune_config.tuning_params = Arc::new(tuning_params);
+            kitsune_config.tuning_params = Arc::new(tuning_params);
 
             if local_config.use_bootstrap {
                 kitsune_config.bootstrap_service = Some(Url2::parse(local_config.bootstrap_url));
@@ -348,6 +348,8 @@ impl HolochainService {
                 ];
             }
             config.network = Some(kitsune_config);
+
+            println!("wow 1 {:?}", config);
 
             config
         };
