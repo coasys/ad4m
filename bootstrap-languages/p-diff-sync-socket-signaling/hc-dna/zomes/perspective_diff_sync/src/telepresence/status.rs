@@ -64,8 +64,8 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
     debug!("PerspectiveDiffSync.create_did_pub_key_link({:?})", did);
     let agent_key = agent_info()?.agent_latest_pubkey;
     debug!("PerspectiveDiffSync.create_did_pub_key_link() agent_key: {:?}", agent_key);
-    //let input = GetLinksInputBuilder::try_new(agent_key.clone(), LinkTypes::DidLink).unwrap().build();
-    let did_links = get_links(agent_key.clone(), LinkTypes::DidLink, None)?;
+    let input = GetLinksInputBuilder::try_new(agent_key.clone(), LinkTypes::DidLink).unwrap().build();
+    let did_links = get_links(input)?;
     debug!("PerspectiveDiffSync.create_did_pub_key_link() did_links: {:?}", did_links);
     if did_links.len() == 0 {
 
@@ -89,13 +89,13 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
 }
 
 pub fn get_my_did() -> SocialContextResult<Option<String>> {
-    // let input = GetLinksInputBuilder::try_new(
-    //     agent_info()?.agent_latest_pubkey,
-    //     LinkTypes::DidLink
-    // )
-    // .unwrap()
-    // .build();
-    let mut did_links = get_links(agent_info()?.agent_latest_pubkey, LinkTypes::DidLink, None)?;
+    let input = GetLinksInputBuilder::try_new(
+        agent_info()?.agent_latest_pubkey,
+        LinkTypes::DidLink
+    )
+    .unwrap()
+    .build();
+    let mut did_links = get_links(input)?;
     if did_links.len() > 0 {
         let did = get(
             did_links
@@ -122,13 +122,13 @@ pub fn get_my_did() -> SocialContextResult<Option<String>> {
 pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey>> {
     let did_entry = Anchor(did);
     let did_entry_hash = hash_entry(EntryTypes::Anchor(did_entry.clone()))?;
-    // let input = GetLinksInputBuilder::try_new(
-    //     did_entry_hash,
-    //     LinkTypes::DidLink
-    // )
-    // .unwrap()
-    // .build();
-    let did_links = get_links(did_entry_hash, LinkTypes::DidLink, None)?;
+    let input = GetLinksInputBuilder::try_new(
+        did_entry_hash,
+        LinkTypes::DidLink
+    )
+    .unwrap()
+    .build();
+    let did_links = get_links(input)?;
     debug!("PerspectiveDiffSync.get_dids_agent_key() did_links: {:?}", did_links);
     if did_links.len() > 0 {
         let entry: EntryHash = did_links[0].target.clone().try_into().unwrap();
@@ -139,13 +139,13 @@ pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey
 }
 
 pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<String>> {
-    // let input = GetLinksInputBuilder::try_new(
-    //     agent,
-    //     LinkTypes::DidLink
-    // )
-    // .unwrap()
-    // .build();
-    let mut did_links = get_links(agent, LinkTypes::DidLink, None)?;
+    let input = GetLinksInputBuilder::try_new(
+        agent,
+        LinkTypes::DidLink
+    )
+    .unwrap()
+    .build();
+    let mut did_links = get_links(input)?;
     if did_links.len() > 0 {
         let did = get(
             did_links
