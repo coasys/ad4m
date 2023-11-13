@@ -13,7 +13,7 @@ pub(crate) fn get_latest_link(base: EntryHash, tag: Option<LinkTag>) -> ExternRe
     .unwrap()
     .tag_prefix(tag.unwrap())
     .build();
-    
+
     let profile_info = get_links(input)?;
 
     // Find the latest
