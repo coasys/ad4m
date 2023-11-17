@@ -35,5 +35,5 @@ colour = "0.7.0"
 syntect = "5.0"
 ctrlc = "3.4.0"
 
-llm = { git = "https://github.com/lucksus/llm", features = ["metal"] }
+llm = { git = "https://github.com/lucksus/llm", branch = "gguf", features = ["metal"] }
 serde_cbor = "0.11"
