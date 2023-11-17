@@ -48,7 +48,7 @@ export interface Language {
     /** Interface for Languages that implement a query return a Perspective (snapshot)
      * Used for back-links and wrapping of APIs that implement queries.
      */
-    readonly pespectiveQuery?: PerspectiveQueryAdapter;
+    readonly pespectiveQueryAdapter?: PerspectiveQueryAdapter;
 
     /** Additional Interface of LinkLanguages that support telepresence features, 
      * that is: 
