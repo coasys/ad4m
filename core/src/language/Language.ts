@@ -42,8 +42,9 @@ export interface Language {
     /** Interface for getting UI/web components for rendering Expressions of this Language */
     readonly expressionUI?: ExpressionUI;
 
+    // TODO: Rename linksAdapter to perspectiveSyncAdapter needs a lot of changes elsewhere...
     /** Interface of LinkLanguages for the core implementation of Neighbourhoods */
-    readonly linksAdapter?: LinkSyncAdapter;
+    readonly perspectiveSyncAdapter?: PerspectiveSyncAdapter;
 
     /** Interface for Languages that implement a query return a Perspective (snapshot)
      * Used for back-links and wrapping of APIs that implement queries.
@@ -162,11 +163,11 @@ export type SyncStateChangeObserver = (state: PerspectiveState)=>void;
  * The assumption is that every version of the shared Perspective
  * is labeled with a unique revision string.
  * Changes are committed and retrieved through diffs.
- * Think of a LinkSyncAdapter as a git branch to which agents commit
+ * Think of a PerspectiveSyncAdapter as a git branch to which agents commit
  * their changes to and pull diffs from their current revision
  * to the latest one.
  */
-export interface LinkSyncAdapter {
+export interface PerspectiveSyncAdapter {
     writable(): boolean;
     public(): boolean;
     others(): Promise<DID[]>;
