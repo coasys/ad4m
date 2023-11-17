@@ -1,6 +1,5 @@
 
 use std::io::Write;
-use ad4m_client::perspectives::snapshot;
 use llm::Model;
 use llm::InferenceResponse;
 use std::convert::Infallible;
@@ -31,7 +30,7 @@ by wrapping the code to commit with "WRITE-SDNA:" and ":ANDS-ETIRW"`
 "##;
         
         
-const HISTORY: &str = r##"
+const HISTORY1: &str = r##"
 Eve: Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
 User: Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
 Eve: Sure. I have made-up a "todo" ADAM Language to use in the predicates of this Subject class definition.
@@ -57,8 +56,9 @@ collection_adder(cjdotdng, "comments", '[{action: "addLink", source: "this", pre
 collection_setter(cjdotdng, "comments", '[{action: "collectionSetter", source: "this", predicate: "todo://comment", target: "value"}]').
 :ANDS
 
-What icon should it have in the toolbar? (You can choose from the "Bootstrap" icon set) 
+What icon should it have in the toolbar? (You can choose from the "Bootstrap" icon set)"##;
 
+const HISTORY2: &str = r##"
 User: The "check" icon. Render todos as circles with the color depending on the state. Also, please add options for the state property, being Ready, Doing and Done.
 Eve: Ok, I have this now:
 
@@ -92,7 +92,8 @@ p3_instance_color(cjdotdng, Instance, "#FFFF00") :- property_getter(c, Instance,
 p3_instance_color(cjdotdng, Instance, "#00FF00") :- property_getter(c, Instance, "state", "todo://done").
 :ANDS
 
-Anything else?            
+Anything else?"##;
+const HISTORY3: &str = r##"            
 User: No, that's it. Please write this to the SDNA.`
 Eve: Ok.. 
 WRITE-SDNA:
@@ -196,20 +197,23 @@ pub async fn run(command: EveCommands) -> Result<()> {
             // use the model to generate text from a prompt
             let mut session = llama.start_session(Default::default());
             
-            session.feed_prompt(
-                &llama,
-                format!("{SYSTEM}\n{REDUCED}").as_str(),
-                &mut Default::default(),
-                llm::feed_prompt_callback(|resp| match resp {
-                    llm::InferenceResponse::PromptToken(t)
-                    | llm::InferenceResponse::InferredToken(t) => {
-                        print_token(t);
-
-                        Ok::<llm::InferenceFeedback, Infallible>(llm::InferenceFeedback::Continue)
-                    }
-                    _ => Ok(llm::InferenceFeedback::Continue),
-                }),
-            ).unwrap_or_else(|err| panic!("Failed to feed prompt: {err}"));
+            for p in vec![SYSTEM, HISTORY1, HISTORY2] {
+                session.feed_prompt(
+                    &llama,
+                    p,
+                    &mut Default::default(),
+                    llm::feed_prompt_callback(|resp| match resp {
+                        llm::InferenceResponse::PromptToken(t)
+                        | llm::InferenceResponse::InferredToken(t) => {
+                            print_token(t);
+    
+                            Ok::<llm::InferenceFeedback, Infallible>(llm::InferenceFeedback::Continue)
+                        }
+                        _ => Ok(llm::InferenceFeedback::Continue),
+                    }),
+                ).unwrap_or_else(|err| panic!("Failed to feed prompt: {err}"));
+            }
+            
 
             println!("\n\nTraining done. Ready!");
             
