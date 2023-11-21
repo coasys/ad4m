@@ -229,7 +229,7 @@ fn main() {
             config.app_data_path = Some(String::from(data_path().to_str().unwrap()));
             config.gql_port = Some(free_port);
             config.network_bootstrap_seed = None;
-            config.run_dapp_server = Some(false);
+            config.run_dapp_server = Some(true);
             config.hc_use_bootstrap = Some(true);
             config.hc_use_mdns = Some(false);
             config.hc_use_proxy = Some(true);
