@@ -12,3 +12,9 @@ packages:
   - 'dapp'
   # exclude packages that are inside test directories
   - '!**/test/**'
+
+packageOverrides:
+    - 'core':
+      hoist: false
+    - 'dapp':
+      hoist: false
