@@ -348,7 +348,7 @@ export class PerspectiveProxy {
 
         const sdnaLinks: any[] = []
 
-        if (links.length > 0) {
+        if (links.length === 0) {
             sdnaLinks.push(new Link({
                 source: "ad4m://self",
                 predicate,
