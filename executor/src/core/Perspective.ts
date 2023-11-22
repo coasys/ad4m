@@ -897,7 +897,11 @@ export default class Perspective {
         }
 
         seenSubjectClasses.forEach(({ code, type }, key) => {
-            lines = lines.concat(code.split('\n'))
+            let sdna = code;
+            try {
+                sdna = Literal.fromUrl(code).get();
+            } catch (e) {}
+            lines = lines.concat(sdna.split('\n'))
         })
 
         return lines
