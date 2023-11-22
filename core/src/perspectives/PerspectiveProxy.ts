@@ -580,12 +580,32 @@ export class PerspectiveProxy {
      * If there is no such class, it gets the JS class's SDNA by calling its
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
-    async ensureSDNASubjectClass(jsClass: any): Promise<void> {
-        if((await this.subjectClassesByTemplate(new jsClass)).length > 0) {
-            return
-        }
+    async ensureSDNASubjectClass(jsClass: any, options?: { override: boolean }): Promise<void> {
+        const subjectClass = await this.subjectClassesByTemplate(new jsClass)
+        if (!options?.override) {
+            if(subjectClass.length > 0) {
+                return
+            }
 
-        await this.addSdna(jsClass.generateSDNA())
+            await this.addSdna(jsClass.generateSDNA())
+        } else {
+            let links = await this.get(new LinkQuery({
+                source: "ad4m://self",
+                predicate: "ad4m://has_zome"
+            }))
+
+            const link = links.find(l => {
+                if (l.data.target.includes(subjectClass[0])) {
+                    return true
+                }
+
+                return false;
+            })
+
+            await this.remove(link);
+
+            await this.addSdna(jsClass.generateSDNA())
+        }
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
