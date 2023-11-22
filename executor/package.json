@@ -56,7 +56,8 @@
     "faker": "^5.1.0",
     "mocha": "*",
     "sinon": "*",
-    "ts-mocha": "*"
+    "ts-mocha": "*",
+    "patch-package": "^8.0.0"
   },
   "dependencies": {
     "@holochain/client": "perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",

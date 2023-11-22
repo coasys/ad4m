@@ -1,0 +1,23 @@
+diff --git a/.npmignore b/.npmignore
+deleted file mode 100644
+index 1ca957177f035203810612d1d93a66b08caff296..0000000000000000000000000000000000000000
+diff --git a/index.js b/index.js
+index 9a0fff4d2eb9610545b2042a32bbf28ccf1643af..142664649a9cfbd3849b0522d85494340bd63504 100644
+--- a/index.js
++++ b/index.js
+@@ -1,5 +1,7 @@
+ var r;
+ 
++import crypto from 'node:crypto';
++
+ module.exports = function rand(len) {
+   if (!r)
+     r = new Rand(null);
+@@ -53,7 +55,6 @@ if (typeof self === 'object') {
+ } else {
+   // Node.js or Web worker with no crypto support
+   try {
+-    var crypto = require('crypto');
+     if (typeof crypto.randomBytes !== 'function')
+       throw new Error('Not supported');
+ 

@@ -1,7 +1,7 @@
-diff --git a/node_modules/@peculiar/webcrypto/build/webcrypto.js b/node_modules/@peculiar/webcrypto/build/webcrypto.js
-index 5fa3589..7d39c7b 100644
---- a/node_modules/@peculiar/webcrypto/build/webcrypto.js
-+++ b/node_modules/@peculiar/webcrypto/build/webcrypto.js
+diff --git a/build/webcrypto.js b/build/webcrypto.js
+index 5fa3589075174f5b52d6e5ef81e632377aedd396..7d39c7bc08f95e04a3e1ef3472d8d22eefd91f9d 100644
+--- a/build/webcrypto.js
++++ b/build/webcrypto.js
 @@ -5,8 +5,9 @@
  'use strict';
  

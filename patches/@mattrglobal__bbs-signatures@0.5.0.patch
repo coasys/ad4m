@@ -1,19 +1,10 @@
-diff --git a/node_modules/@mattrglobal/bbs-signatures/lib/wasm_asm.js b/node_modules/@mattrglobal/bbs-signatures/lib/wasm_asm.js
-index 1f61267..d9071be 100644
---- a/node_modules/@mattrglobal/bbs-signatures/lib/wasm_asm.js
-+++ b/node_modules/@mattrglobal/bbs-signatures/lib/wasm_asm.js
-@@ -52,6 +52,7 @@
- // import { __wbindgen_memory } from '__wbindgen_placeholder__';
- // import { __wbindgen_closure_wrapper424 } from '__wbindgen_placeholder__';
- 
-+import { Buffer } from 'node:buffer'
- 
-   var scratchBuffer = new ArrayBuffer(16);
-   var i32ScratchView = new Int32Array(scratchBuffer);
-diff --git a/node_modules/@mattrglobal/bbs-signatures/lib/wasm_wasm.js b/node_modules/@mattrglobal/bbs-signatures/lib/wasm_wasm.js
-index f71603d..9944683 100644
---- a/node_modules/@mattrglobal/bbs-signatures/lib/wasm_wasm.js
-+++ b/node_modules/@mattrglobal/bbs-signatures/lib/wasm_wasm.js
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+deleted file mode 100644
+index 9c60a4643dd2611430b464c462fcc292ae400a63..0000000000000000000000000000000000000000
+diff --git a/lib/wasm_wasm.js b/lib/wasm_wasm.js
+index f71603df733aec1190ef555885f686a7c7af8d0a..9944683bb8512c9bc5d700fb75122e3e60f939df 100644
+--- a/lib/wasm_wasm.js
++++ b/lib/wasm_wasm.js
 @@ -1,2 +1,2 @@
 -
 +import { Buffer } from 'node:buffer'

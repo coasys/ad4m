@@ -1,7 +1,7 @@
-diff --git a/node_modules/inherits/inherits.js b/node_modules/inherits/inherits.js
-index f71f2d9..c973372 100644
---- a/node_modules/inherits/inherits.js
-+++ b/node_modules/inherits/inherits.js
+diff --git a/inherits.js b/inherits.js
+index f71f2d93294a67ad5d9300aae07973e259f26068..c973372c5ffebb244d24b9f773d14d76774438bf 100644
+--- a/inherits.js
++++ b/inherits.js
 @@ -1,5 +1,5 @@
  try {
 -  var util = require('util');

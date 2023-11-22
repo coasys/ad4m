@@ -1,7 +1,7 @@
-diff --git a/node_modules/node-gyp-build/node-gyp-build.js b/node_modules/node-gyp-build/node-gyp-build.js
-index 61b398e..73b5fea 100644
---- a/node_modules/node-gyp-build/node-gyp-build.js
-+++ b/node_modules/node-gyp-build/node-gyp-build.js
+diff --git a/node-gyp-build.js b/node-gyp-build.js
+index 61b398efcbf3d504a8a2f8ecfdf1c21481cc3243..73b5fead993f1f55475f9da69447bec011d79d3c 100644
+--- a/node-gyp-build.js
++++ b/node-gyp-build.js
 @@ -1,6 +1,6 @@
 -var fs = require('fs')
 -var path = require('path')
