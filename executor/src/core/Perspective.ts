@@ -862,28 +862,37 @@ export default class Perspective {
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
             if (linkExpression.proof.valid && authorAgents.includes(link.author)) {
-
-            }
-            if (this.isSDNALink(link)) {
-                const name = Literal.fromUrl(link.target).get();
-
-                seenSubjectClasses.set(name, {
-                    type: link.predicate,
-                    ...seenSubjectClasses.get(name)
-                });
-            }
-
-            if (link.predicate === "ad4m://sdna") {
-                const name = Literal.fromUrl(link.source).get();
-                let code = Literal.fromUrl(link.target).get()
-
-                const subjectClass = seenSubjectClasses.get(name);
-
-                seenSubjectClasses.set(name, {
-                    code,
-                    timestamp:  (new Date(linkExpression?.timestamp).getTime() > new Date(subjectClass?.timestamp).getTime()) ? linkExpression.timestamp : subjectClass?.timestamp,
-                    ...seenSubjectClasses.get(name)
-                })
+                if (this.isSDNALink(link)) {
+                    const name = Literal.fromUrl(link.target).get();
+    
+                    seenSubjectClasses.set(name, {
+                        type: link.predicate,
+                        ...seenSubjectClasses.get(name)
+                    });
+                }
+    
+                if (link.predicate === "ad4m://sdna") {
+                    const name = Literal.fromUrl(link.source).get();
+                    let code = Literal.fromUrl(link.target).get()
+    
+                    const subjectClass = seenSubjectClasses.get(name);
+    
+                    if (subjectClass && subjectClass?.code) {
+                        if ((new Date(linkExpression?.timestamp).getTime() > new Date(subjectClass?.timestamp).getTime())) {
+                            seenSubjectClasses.set(name, {
+                                code,
+                                timestamp:  linkExpression.timestamp,
+                                ...seenSubjectClasses.get(name)
+                            })
+                        } 
+                    } else {
+                        seenSubjectClasses.set(name, {
+                            code,
+                            timestamp:  linkExpression.timestamp,
+                            ...seenSubjectClasses.get(name)
+                        })
+                    }
+                }
             }
         }
 
