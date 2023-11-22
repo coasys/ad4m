@@ -784,11 +784,11 @@ export default class Perspective {
     }
 
     isSDNALink(link: LinkExpression): boolean {
-        return link.source == 'ad4m://self' && link.predicate == 'ad4m://has_zome'
+        return link.source == 'ad4m://self' && ['ad4m://has_subject_class', 'ad4m://has_flow', "ad4m://has_custom_sdna"].includes(link.predicate)
     }
 
     async initEngineFacts(): Promise<string[]> {
-        let lines = []
+        let lines: string[] = []
 
         const allLinks = await this.getLinks(new LinkQuery({}))
         //-------------------
@@ -857,27 +857,39 @@ export default class Perspective {
 
         lines.push(":- use_module(library(lists)).");
 
-        let seenSubjectClasses = new Set()
+        let seenSubjectClasses = new Map()
+        const authorAgents = [this.#agent.agent?.did, this.neighbourhood?.author];
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
-            if(this.isSDNALink(link)) {
-                try {
-                    let code = Literal.fromUrl(link.target).get()
-                    let subjectClassMatch = code.match(/subject_class\("(.+?)",/);
-                    if (subjectClassMatch) {
-                        let subjectClassName = subjectClassMatch[1];
-                        if (!seenSubjectClasses.has(subjectClassName)) {
-                            seenSubjectClasses.add(subjectClassName);
-                            lines = lines.concat(code.split('\n'))
-                        }
-                    } else {
-                        lines = lines.concat(code.split('\n'))
-                    }
-                } catch {
-                    console.error("Perspective.initEngineFacts: Error loading SocialDNA link target as literal... Ignoring SocialDNA link.");
-                }
+            if (linkExpression.proof.valid && authorAgents.includes(link.author)) {
+
+            }
+            if (this.isSDNALink(link)) {
+                const name = Literal.fromUrl(link.target).get();
+
+                seenSubjectClasses.set(name, {
+                    type: link.predicate,
+                    ...seenSubjectClasses.get(name)
+                });
+            }
+
+            if (link.predicate === "ad4m://sdna") {
+                const name = Literal.fromUrl(link.source).get();
+                let code = Literal.fromUrl(link.target).get()
+
+                const subjectClass = seenSubjectClasses.get(name);
+
+                seenSubjectClasses.set(name, {
+                    code,
+                    timestamp:  (new Date(linkExpression?.timestamp).getTime() > new Date(subjectClass?.timestamp).getTime()) ? linkExpression.timestamp : subjectClass?.timestamp,
+                    ...seenSubjectClasses.get(name)
+                })
             }
         }
+
+        seenSubjectClasses.forEach(({ code, type }, key) => {
+            lines = lines.concat(code.split('\n'))
+        })
 
         return lines
     }

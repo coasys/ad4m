@@ -320,36 +320,49 @@ export class PerspectiveProxy {
         await this.executeAction(action, exprAddr, undefined)
     }
 
-    /** Set the perspective's Social DNA code to the given string.
-     * This will replace all previous SDNA code elements with the new one.
-     */
-    async setSdna(sdnaCode: string) {
-        await this.setSingleTarget(new Link({
-            source: "ad4m://self",
-            predicate: "ad4m://has_zome",
-            target: Literal.from(sdnaCode).toUrl()
-        }), 'shared')
-    }
-
     /** Returns the perspective's Social DNA code
      * This will return all SDNA code elements in an array.
      */
     async getSdna(): Promise<string[]> {
         let links = await this.get(new LinkQuery({
-            source: "ad4m://self",
-            predicate: "ad4m://has_zome"
+            predicate: "ad4m://sdna"
         }))
 
         return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
     }
 
     /** Adds the given Social DNA code to the perspective's SDNA code */
-    async addSdna(sdnaCode: string) {
-        await this.add(new Link({
+    async addSdna(name: string, sdnaCode: string, type: "subject_class" | "flow" | "custom") {
+        let predicate = "ad4m://has_custom_sdna";
+
+        if (type === 'subject_class') predicate = "ad4m://has_subject_class"
+        else if (type === 'flow') predicate = "ad4m://has_flow"
+
+        const literalName = Literal.from(name).toUrl();
+
+        const links = await this.get(new LinkQuery({
             source: "ad4m://self",
-            predicate: "ad4m://has_zome",
+            predicate,
+            target: literalName
+        }))
+
+        const sdnaLinks: any[] = []
+
+        if (links.length > 0) {
+            sdnaLinks.push(new Link({
+                source: "ad4m://self",
+                predicate,
+                target: literalName
+            }));
+        }
+
+        sdnaLinks.push(new Link({
+            source: literalName,
+            predicate: "ad4m://sdna",
             target: Literal.from(sdnaCode).toUrl()
         }))
+
+        await this.addLinks(sdnaLinks);
     }
 
     /** Returns all the Subject classes defined in this perspectives SDNA */
@@ -580,32 +593,15 @@ export class PerspectiveProxy {
      * If there is no such class, it gets the JS class's SDNA by calling its
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
-    async ensureSDNASubjectClass(jsClass: any, options?: { override: boolean }): Promise<void> {
+    async ensureSDNASubjectClass(jsClass: any): Promise<void> {
         const subjectClass = await this.subjectClassesByTemplate(new jsClass)
-        if (!options?.override) {
-            if(subjectClass.length > 0) {
-                return
-            }
-
-            await this.addSdna(jsClass.generateSDNA())
-        } else {
-            let links = await this.get(new LinkQuery({
-                source: "ad4m://self",
-                predicate: "ad4m://has_zome"
-            }))
-
-            const link = links.find(l => {
-                if (l.data.target.includes(subjectClass[0])) {
-                    return true
-                }
-
-                return false;
-            })
-
-            await this.remove(link);
-
-            await this.addSdna(jsClass.generateSDNA())
+        if(subjectClass.length > 0) {
+            return
         }
+
+        const { name, sdna } = jsClass.generateSDNA();
+
+        await this.addSdna(name, sdna, 'subject_class');
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
