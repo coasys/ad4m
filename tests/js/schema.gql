@@ -12,6 +12,7 @@ type InteractionMeta {
 type Neighbourhood {
   linkLanguage: String!
   meta: Perspective!
+  author: String!
 }
 
 input InteractionCall {

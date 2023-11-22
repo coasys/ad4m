@@ -325,6 +325,7 @@ pub struct LinkQuery {
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
+    pub author: String,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

@@ -47,6 +47,7 @@ export class NeighbourhoodClient {
                     state
                     neighbourhood { 
                         linkLanguage 
+                        author
                         meta { 
                             links
                                 {

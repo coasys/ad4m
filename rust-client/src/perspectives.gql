@@ -5,6 +5,7 @@ query All {
     sharedUrl
     neighbourhood {
       linkLanguage
+      author
       meta {
         links {
           author

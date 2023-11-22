@@ -12,6 +12,9 @@ export class Neighbourhood {
     @Field()
     meta: Perspective
 
+    @Field()
+    author: string;
+
     constructor(linkLanguage: string, meta: Perspective) {
         this.linkLanguage = linkLanguage;
         this.meta = meta;

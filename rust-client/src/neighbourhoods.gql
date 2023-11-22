@@ -16,7 +16,8 @@ mutation JoinFromUrl($url: String!) {
         name
         sharedUrl
         neighbourhood { 
-            linkLanguage 
+            linkLanguage
+            author 
             meta { 
                 links
                     {

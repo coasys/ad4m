@@ -260,6 +260,7 @@ export default class Ad4mCore {
         const perspectiveID = this.#perspectivesController!.perspective(uuid).plain()
 
         const neighbourhood = new Neighbourhood(linkLanguage, meta);
+        neighbourhood.author = this.#agentService.agent?.did!;
         let language = await this.#languageController!.installLanguage(linkLanguage, null)
         if (!language!.linksAdapter) {
             throw Error("Language used is not a link language");
@@ -287,8 +288,9 @@ export default class Ad4mCore {
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
-        console.log("Core.installNeighbourhood(): Got neighbourhood", neighbourHoodExp);
+        console.log("Core.installNeighbourhood(): Got neighbourhood", JSON.stringify(neighbourHoodExp));
         let neighbourhood: Neighbourhood = neighbourHoodExp.data;
+        neighbourhood.author = neighbourHoodExp.author;
         let state = PerspectiveState.NeighbourhoodJoinInitiated;
 
         try {
