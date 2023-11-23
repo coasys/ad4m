@@ -16,7 +16,7 @@
   "type": "module",
   "types": "lib/main.d.ts",
   "scripts": {
-    "build": "deno run --allow-all esbuild.ts",
+    "build": "deno run --allow-all esbuild.ts && deno run --allow-all replaceBufferImport.ts",
     "bundle": "deno run --allow-all esbuild.ts",
     "test": "yarn run test-perspective && yarn test-db && yarn run test-auth-unit",
     "test-perspective": "ts-mocha -p tsconfig.json --exit src/core/Perspective.test.ts",
