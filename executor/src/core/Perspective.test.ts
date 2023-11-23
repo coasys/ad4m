@@ -170,7 +170,8 @@ describe('Perspective', () => {
             perspective!.neighbourhood = {
                 linkLanguage: sharingLanguage,
                 perspective: new Ad4mPerspective([]),
-                meta: new Ad4mPerspective()
+                meta: new Ad4mPerspective(),
+                author: agentService.agent.did
             } as Neighbourhood
             //@ts-ignore
             linksAdapter = new LinksAdapter()
@@ -241,7 +242,8 @@ describe('Perspective', () => {
                 perspective!.neighbourhood = {
                     linkLanguage: sharingLanguage,
                     perspective: new Ad4mPerspective([]),
-                    meta: new Ad4mPerspective()
+                    meta: new Ad4mPerspective(),
+                    author: agentService.agent.did
                 } as Neighbourhood
 
                 await perspective!.syncWithSharingAdapter()
