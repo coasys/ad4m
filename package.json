@@ -67,8 +67,6 @@
       "graphql@15.7.2": "patches/graphql@15.7.2.patch",
       "inherits@2.0.4": "patches/inherits@2.0.4.patch",
       "iso-url@0.4.7": "patches/iso-url@0.4.7.patch",
-      "safe-buffer@5.2.1": "patches/safe-buffer@5.2.1.patch",
-      "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch",
       "sha256@0.2.0": "patches/sha256@0.2.0.patch",
       "node-gyp-build@4.7.0": "patches/node-gyp-build@4.7.0.patch",
       "@peculiar/webcrypto@1.4.3": "patches/@peculiar__webcrypto@1.4.3.patch",
