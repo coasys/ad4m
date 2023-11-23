@@ -18,7 +18,7 @@
   "scripts": {
     "build": "deno run --allow-all esbuild.ts && deno run --allow-all replaceBufferImport.ts",
     "bundle": "deno run --allow-all esbuild.ts",
-    "test": "yarn run test-perspective && yarn test-db && yarn run test-auth-unit",
+    "test": "pnm run test-perspective && pnm test-db && pnm run test-auth-unit",
     "test-perspective": "ts-mocha -p tsconfig.json --exit src/core/Perspective.test.ts",
     "test-db": "ts-mocha -p tsconfig.json --exit src/core/db.test.ts",
     "test-prolog": "ts-mocha -p tsconfig.json --exit src/core/PrologInstance.test.ts",

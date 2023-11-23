@@ -19,12 +19,12 @@ It exposes functions for core AD4M Operations via: [`GraphQL.ts`](https://github
 ## Building
 
 ```
-yarn install
-yarn run build
+pnpm install
+pnpm run build
 ```
 
 ## Testing
 
 ```
-yarn run test
+pnpm run test
 ```

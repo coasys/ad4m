@@ -51,25 +51,25 @@ In October/November 2022, these componentes were collected into a mono-repo agai
 - Install Deno by visiting [here](https://deno.land/manual@v1.36.4/getting_started/installation)
 - Install Go by visiting [here](https://go.dev/doc/install) (ADAM Layer currently uses go version: go1.18)
 - Install Node by visiting [here](https://nodejs.org/en/download)
-- Install Yarn / Node by visiting [here](https://classic.yarnpkg.com/lang/en/docs/install/)
+- Install PNPM by visiting [here](https://pnpm.io/installation)
 
-### Build:
-
-```
-yarn install
-yarn run build
-```
-
-## Testing
+### Build (CLI & Libs):
 
 ```
-yarn install
-yarn test
+pnpm install
+pnpm run build
+```
+
+## Testing (Full test run of all packages)
+
+```
+pnpm install
+pnpm test
 ```
 
 ## Building ad4m launcher
 
 ```
-yarn install
-yarn run package-ad4m
+pnpm install
+pnpm run package-ad4m
 ```
