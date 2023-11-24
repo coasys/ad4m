@@ -747,8 +747,8 @@ importers:
   executor:
     dependencies:
       '@holochain/client':
-        specifier: perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b
-        version: git@github.com+perspect3vism/holochain-client-js/2f3a436b6d28344b0aca883ef3dc229cd042c04b(ws@8.13.0)
+        specifier: coasys/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b
+        version: github.com/coasys/holochain-client-js/2f3a436b6d28344b0aca883ef3dc229cd042c04b(ws@8.13.0)
       '@msgpack/msgpack':
         specifier: 3.0.0-beta2
         version: 3.0.0-beta2
@@ -25504,9 +25504,9 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
     dev: false
 
-  git@github.com+perspect3vism/holochain-client-js/2f3a436b6d28344b0aca883ef3dc229cd042c04b(ws@8.13.0):
-    resolution: {commit: 2f3a436b6d28344b0aca883ef3dc229cd042c04b, repo: git@github.com:perspect3vism/holochain-client-js.git, type: git}
-    id: git@github.com+perspect3vism/holochain-client-js/2f3a436b6d28344b0aca883ef3dc229cd042c04b
+  github.com/coasys/holochain-client-js/2f3a436b6d28344b0aca883ef3dc229cd042c04b(ws@8.13.0):
+    resolution: {tarball: https://codeload.github.com/coasys/holochain-client-js/tar.gz/2f3a436b6d28344b0aca883ef3dc229cd042c04b}
+    id: github.com/coasys/holochain-client-js/2f3a436b6d28344b0aca883ef3dc229cd042c04b
     name: '@holochain/client'
     version: 0.12.5
     engines: {node: ^14.13.1 || >=16.0.0 || >=18.0.0}
