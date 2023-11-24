@@ -68,22 +68,11 @@ impl PerspectiveProxy {
             .await
     }
 
-    pub async fn set_dna(&self, dna: String) -> Result<()> {
-        let literal = Literal::from_string(dna);
-        self.set_single_target(
-            "ad4m://self".into(),
-            "ad4m://has_zome".into(),
-            literal.to_url()?,
-        )
-        .await?;
-        Ok(())
-    }
-
     pub async fn get_dna(&self) -> Result<Vec<String>> {
         self.get(
-            Some("ad4m://self".into()),
+            Some("ad4m://sdna".into()),
             None,
-            Some("ad4m://has_zome".into()),
+            None,
             None,
             None,
             None,
