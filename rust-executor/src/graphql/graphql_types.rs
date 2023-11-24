@@ -325,7 +325,15 @@ pub struct LinkQuery {
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NeighbourhoodExpression {
     pub author: String,
+    pub data: Neighbourhood,
+    pub proof: ExpressionProof,
+    pub timestamp: String,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -354,7 +362,7 @@ pub struct PerspectiveExpression {
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveHandle {
     pub name: Option<String>,
-    pub neighbourhood: Option<Neighbourhood>,
+    pub neighbourhood: Option<NeighbourhoodExpression>,
     pub shared_url: Option<String>,
     pub state: String,
     pub uuid: String,

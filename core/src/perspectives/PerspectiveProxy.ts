@@ -1,7 +1,6 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
-import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
@@ -9,6 +8,7 @@ import { Subject } from "../subject/Subject";
 import { ExpressionRendered } from "../expression/Expression";
 import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../subject/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
+import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
@@ -113,7 +113,7 @@ export class PerspectiveProxy {
     }
 
     /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
-    get neighbourhood(): Neighbourhood|void {
+    get neighbourhood(): NeighbourhoodExpression|void {
         return this.#handle.neighbourhood
     }
 

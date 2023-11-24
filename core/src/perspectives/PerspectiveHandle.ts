@@ -1,5 +1,5 @@
 import { Field, ObjectType } from "type-graphql";
-import { Neighbourhood } from "../neighbourhood/Neighbourhood";
+import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 
 export enum PerspectiveState {
     Private = "Private",
@@ -24,8 +24,8 @@ export class PerspectiveHandle {
     @Field(type => String, {nullable: true})
     sharedUrl?: string
 
-    @Field(type => Neighbourhood, {nullable: true})
-    neighbourhood?: Neighbourhood
+    @Field(type => NeighbourhoodExpression, {nullable: true})
+    neighbourhood?: NeighbourhoodExpression
 
     constructor(uuid?: string, name?: string, state?: PerspectiveState) {
         this.uuid = uuid

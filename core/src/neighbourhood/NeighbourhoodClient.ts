@@ -39,24 +39,26 @@ export class NeighbourhoodClient {
 
     async joinFromUrl(url: string): Promise<PerspectiveHandle> {
         const { neighbourhoodJoinFromUrl } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`    mutation neighbourhoodJoinFromUrl($url: String!) {
+            mutation: gql`mutation neighbourhoodJoinFromUrl($url: String!) {
                 neighbourhoodJoinFromUrl(url: $url) {
                     uuid
                     name
                     sharedUrl
                     state
                     neighbourhood { 
-                        linkLanguage 
+                        data {
+                            linkLanguage 
+                            meta { 
+                                links
+                                    {
+                                        author
+                                        timestamp
+                                        data { source, predicate, target }
+                                        proof { valid, invalid, signature, key }
+                                    }  
+                            } 
+                        }
                         author
-                        meta { 
-                            links
-                                {
-                                    author
-                                    timestamp
-                                    data { source, predicate, target }
-                                    proof { valid, invalid, signature, key }
-                                }  
-                        } 
                     }
                 }
             }`,

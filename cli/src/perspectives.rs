@@ -117,13 +117,13 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             if let Some(nh) = perspective.neighbourhood {
                 println!(
                     "\x1b[36mNeighbourhood Link-Language: \x1b[97m{}",
-                    nh.link_language
+                    nh.data.link_language
                 );
-                if nh.meta.links.is_empty() {
+                if nh.data.meta.links.is_empty() {
                     println!("\x1b[36mNeughbourhood meta: \x1b[90m<empty>");
                 } else {
                     println!("\x1b[36mNeughbourhood meta:");
-                    for link in nh.meta.links {
+                    for link in nh.data.meta.links {
                         print_link(link.into());
                     }
                 }

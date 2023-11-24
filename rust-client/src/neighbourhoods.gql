@@ -16,17 +16,19 @@ mutation JoinFromUrl($url: String!) {
         name
         sharedUrl
         neighbourhood { 
-            linkLanguage
-            author 
-            meta { 
-                links
-                    {
-                        author
-                        timestamp
-                        data { source, predicate, target }
-                        proof { valid, invalid, signature, key }
-                    }  
-            } 
+            data {
+                linkLanguage
+                meta { 
+                    links
+                        {
+                            author
+                            timestamp
+                            data { source, predicate, target }
+                            proof { valid, invalid, signature, key }
+                        }  
+                } 
+            }
+            author
         }
     }
 }
