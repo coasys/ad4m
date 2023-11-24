@@ -208,7 +208,7 @@ export default class Perspective {
             //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return undefined;
         }
-        const address = this.neighbourhood!.linkLanguage;
+        const address = this.neighbourhood!.data.linkLanguage;
 
         try {
             if (this.state === PerspectiveState.LinkLanguageFailedToInstall) {
@@ -858,7 +858,7 @@ export default class Perspective {
         lines.push(":- use_module(library(lists)).");
 
         let seenSubjectClasses = new Map()
-        const authorAgents = [this.#agent.agent?.did, this.neighbourhood?.author];
+        const authorAgents = [this.#agent.agent?.did, this.neighbourhood?.data.author];
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
             if (linkExpression.proof.valid && authorAgents.includes(link.author)) {
