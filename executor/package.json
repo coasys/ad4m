@@ -57,7 +57,8 @@
     "mocha": "*",
     "sinon": "*",
     "ts-mocha": "*",
-    "patch-package": "^8.0.0"
+    "patch-package": "^8.0.0",
+    "ts-node": "^10.8.0"
   },
   "dependencies": {
     "@holochain/client": "coasys/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",
