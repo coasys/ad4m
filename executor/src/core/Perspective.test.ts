@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Neighbourhood, LinkQuery, PerspectiveHandle, PerspectiveState } from '@perspect3vism/ad4m'
+import { Neighbourhood, LinkQuery, PerspectiveHandle, PerspectiveState, NeighbourhoodExpression } from '@perspect3vism/ad4m'
 import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
 import path from "path";
 import { fileURLToPath } from 'url';
@@ -168,10 +168,20 @@ describe('Perspective', () => {
     describe('with link sharing language', () => {
         beforeEach(() => {
             perspective!.neighbourhood = {
-                linkLanguage: sharingLanguage,
-                perspective: new Ad4mPerspective([]),
-                meta: new Ad4mPerspective()
-            } as Neighbourhood
+                data: {
+                    linkLanguage: sharingLanguage,
+                    perspective: new Ad4mPerspective([]),
+                    meta: new Ad4mPerspective(),
+                },
+                author: agentService.agent.did,
+                timestamp: Date.now(),
+                proof: {
+                    signature: '',
+                    key: '',
+                    valid: true
+                }
+            } as NeighbourhoodExpression;
+            
             //@ts-ignore
             linksAdapter = new LinksAdapter()
         })
@@ -239,10 +249,19 @@ describe('Perspective', () => {
                 const linkExpression = await perspective!.addLink(link)
     
                 perspective!.neighbourhood = {
-                    linkLanguage: sharingLanguage,
-                    perspective: new Ad4mPerspective([]),
-                    meta: new Ad4mPerspective()
-                } as Neighbourhood
+                    data: {
+                        linkLanguage: sharingLanguage,
+                        perspective: new Ad4mPerspective([]),
+                        meta: new Ad4mPerspective(),
+                    },
+                    author: agentService.agent.did,
+                    timestamp: Date.now(),
+                    proof: {
+                        signature: '',
+                        key: '',
+                        valid: true
+                    }
+                } as NeighbourhoodExpression
 
                 await perspective!.syncWithSharingAdapter()
 
