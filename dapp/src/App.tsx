@@ -1,19 +1,24 @@
-import React from 'react';
-import { WagmiConfig, createConfig, mainnet } from 'wagmi'
-import { createPublicClient, http } from 'viem'
-import { useAccount, useConnect, useDisconnect } from 'wagmi'
-import { InjectedConnector } from 'wagmi/connectors/injected'
-import { signMessage } from '@wagmi/core'
+import React, { useEffect, useState } from "react";
+import { WagmiConfig, createConfig, configureChains, mainnet } from "wagmi";
+import { useAccount, useConnect, useDisconnect } from "wagmi";
+import { InjectedConnector } from "wagmi/connectors/injected";
+import { signMessage } from "@wagmi/core";
 import Ad4mConnectUI from "@perspect3vism/ad4m-connect";
-import { Ad4mClient } from '@perspect3vism/ad4m';
+import { Ad4mClient } from "@perspect3vism/ad4m";
+import Logo from "./Logo";
+import { publicProvider } from "wagmi/providers/public";
+import ConnectAnimation from "./ConnectAnimation";
+
+const { chains, publicClient, webSocketPublicClient } = configureChains(
+  [mainnet],
+  [publicProvider()]
+);
 
 const config = createConfig({
   autoConnect: true,
-  publicClient: createPublicClient({
-    chain: mainnet,
-    transport: http()
-  }),
-})
+  publicClient,
+  webSocketPublicClient,
+});
 
 const ui = Ad4mConnectUI({
   appName: "ADAM 🔗 Web3",
@@ -25,69 +30,169 @@ const ui = Ad4mConnectUI({
 
 function App() {
   return (
-    <div className="App">
-      <header className="App-header">
-        AD4M 🔗 Web3
-      </header>
-      <br/>
-      <WagmiConfig config={config}><Profile/></WagmiConfig>
-    </div>
+    <WagmiConfig config={config}>
+      <Main />
+    </WagmiConfig>
   );
 }
- 
-function Profile() {
-  const { address, isConnected } = useAccount()
-  const { connect } = useConnect({
-    connector: new InjectedConnector(),
-  })
-  const { disconnect } = useDisconnect()
-  const [ client, setClient] = React.useState<Ad4mClient | null>(null);
 
-  const connectToAd4m = async () => {
-    const client = await ui.connect();
-    setClient(client);
-  };
+function Main() {
+  const [isSigning, setIsSigning] = useState(false);
+  const [proofs, setProofs] = useState([]);
+  const { address, isConnected, isConnecting } = useAccount();
+
+  const hasProved = proofs.some(
+    (p: any) => p.deviceKey.toLowerCase() === address?.toLowerCase()
+  );
+
+  const [client, setClient] = React.useState<Ad4mClient | null>(null);
+
+  const { connect, isError: hasConnectionError } = useConnect({
+    connector: new InjectedConnector(),
+    onSuccess: () => {
+      if (!hasProved) {
+        sign();
+      }
+    },
+  });
+
+  useEffect(() => {
+    ui.connect();
+  }, []);
+
+  useEffect(() => {
+    async function cb(e: any) {
+      if (e.detail === "authenticated") {
+        const client = ui.getAd4mClient();
+        setClient(client);
+
+        const proofs: any = await client.agent.getEntanglementProofs();
+
+        setProofs(proofs);
+
+        connect();
+      }
+    }
+
+    ui.addEventListener("authstatechange", cb);
+
+    return () => {
+      ui.removeEventListener("authstatechange", cb);
+    };
+  }, [address]);
 
   const sign = async () => {
     if (client && address) {
-      const me = (await client?.agent.me())!.did;
-      const signature = await signMessage({
-        message: me,
-      });
-      console.log("Got signature", signature);
+      setIsSigning(true);
+      try {
+        const { did } = await client.agent.me();
+        const signature = await signMessage({
+          message: did,
+        });
 
-      const entanglementPreFlight = await client.agent.entanglementProofPreFlight(address, "ethereum");
-      //Add the signed did to the proof
-      entanglementPreFlight.didSignedByDeviceKey = signature;
-      //@ts-ignore
-      delete entanglementPreFlight["__typename"];
-      console.log("Sending", entanglementPreFlight);
-      //Save proof into ad4m
+        client.agent.getEntanglementProofs();
 
-      //@ts-ignore
-      const addProof = await client.agent.addEntanglementProofs([entanglementPreFlight]);
-      console.log("Added EP with result", addProof);
+        const entanglementPreFlight =
+          await client.agent.entanglementProofPreFlight(address, "ethereum");
+
+        entanglementPreFlight.didSignedByDeviceKey = signature;
+
+        const addProof = await client.agent.addEntanglementProofs([
+          //@ts-ignore
+          entanglementPreFlight,
+        ]);
+
+        setHasProved(true);
+      } catch (e) {
+        console.log(e);
+      } finally {
+        setIsSigning(false);
+      }
     }
   };
 
-  if (client) {
+  function ViewComp() {
+    if (hasConnectionError) {
+      return (
+        <>
+          <h1 className="title">Couldn't connect to wallet!</h1>
+          <p className="paragraph">Are you sure you have a wallet installed?</p>
+          <button className="button" onClick={() => connect()}>
+            {isSigning ? "Connecting..." : "Try again"}
+          </button>
+        </>
+      );
+    }
+
+    if (hasProved)
+      return (
+        <>
+          <h1 className="title">Ownership proved!</h1>
+          <p className="paragraph">
+            Your wallet ownership is proved and connected with ADAM.
+          </p>
+        </>
+      );
+
+    if (isConnected)
+      return (
+        <>
+          <h1 className="title">Sign this message to prove wallet ownership</h1>
+          <button className="button" onClick={() => sign()}>
+            {isSigning ? "Signing..." : "Prove ownership"}
+          </button>
+        </>
+      );
+
     return (
-      <div>
-        <h3>Connected to AD4M</h3>
-        <button className="button" onClick={() => sign()}>Sign</button>
-      </div>
-    )
+      <>
+        <h1 className="title">
+          <span className="accent">ADAM</span> wants to connect to your Web3
+          wallet
+        </h1>
+        <button className="button" onClick={() => connect()}>
+          {isSigning ? "Connecting..." : "Connect wallet"}
+        </button>
+      </>
+    );
   }
- 
-  if (isConnected)
-    return (
-      <div>
-        Connected to {address}
-        <button className="button" onClick={() => disconnect()}>Disconnect</button>
-        <button className="button" onClick={() => connectToAd4m()}>Connect to AD4M</button>
+
+  let viewState = "ready";
+  if (isConnected) viewState = "sign";
+  if (hasProved) viewState = "done";
+
+  return (
+    <div className="App">
+      <div className="connect">
+        <div className="block">
+          <Logo></Logo>
+        </div>
+        <ConnectAnimation
+          done={hasProved}
+          connecting={isSigning || isConnecting}
+        ></ConnectAnimation>
+        <div className="block">
+          <WalletIcon></WalletIcon>
+        </div>
       </div>
-    )
-  return <button className="button" onClick={() => connect()}>Connect</button>
+      <ViewComp></ViewComp>
+    </div>
+  );
+}
+
+function WalletIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      fill="currentColor"
+      viewBox="0 0 16 16"
+    >
+      <path
+        fill="url(#gradient)"
+        d="M0 3a2 2 0 0 1 2-2h13.5a.5.5 0 0 1 0 1H15v2a1 1 0 0 1 1 1v8.5a1.5 1.5 0 0 1-1.5 1.5h-12A2.5 2.5 0 0 1 0 12.5zm1 1.732V12.5A1.5 1.5 0 0 0 2.5 14h12a.5.5 0 0 0 .5-.5V5H2a1.99 1.99 0 0 1-1-.268M1 3a1 1 0 0 0 1 1h12V2H2a1 1 0 0 0-1 1"
+      />
+    </svg>
+  );
 }
 
 export default App;

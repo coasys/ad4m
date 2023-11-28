@@ -1,31 +1,105 @@
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: "DM Sans", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background-color: black;
 }
 
 code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
     monospace;
 }
 
+html {
+  box-sizing: border-box;
+}
+*,
+*:before,
+*:after {
+  box-sizing: inherit;
+}
+
+:root {
+  --start-color: #a4adff;
+  --end-color: #d273ff;
+}
+
 .App {
-  background-color: black;
-  color: white;
+  color: #a9a9a9;
   text-align: center;
-  font-family: Arial, Helvetica, sans-serif;
   display: grid;
   place-items: center;
   place-content: center;
   height: 100vh;
   width: 100vw;
+  max-width: 600px;
+  margin: 0 auto;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
+.block {
+  display: block;
+  border-radius: 50%;
+  width: 5rem;
+  height: 5rem;
+  color: black;
+  background: rgb(36, 36, 36);
+  padding: 1.2rem;
+}
+
+.connect {
+  display: grid;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: 16rem;
+  margin: 0 auto;
+  grid-template-columns: 1fr 1fr 1fr;
+  margin-bottom: 3rem;
+  place-items: center;
+}
+
+.connect svg {
+  width: 100%;
+}
+
+.image {
+  height: 50vh;
+  max-height: 500px;
+  margin: 0 auto;
+  margin-bottom: 5rem;
+}
+
+.title {
+  font-size: 2.6rem;
+  margin-top: 0;
+  margin-bottom: 2rem;
+}
+
+.paragraph {
+  margin-top: 0;
+  font-size: 1.3rem;
+  margin-bottom: 3.5rem;
+}
+
+.white {
+  color: white;
+}
+
+.accent {
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    var(--start-color),
+    var(--end-color)
+  );
 }
 
 .button {
-  background-color: white;
+  background: white;
+  cursor: pointer;
   color: black;
   border: none;
   border-radius: 4px;
@@ -33,5 +107,7 @@ code {
   text-align: center;
   text-decoration: none;
   display: inline-block;
-  font-size: 16px;
+  font-size: 1.2rem;
+  font-weight: 500;
+  font-family: inherit;
 }
