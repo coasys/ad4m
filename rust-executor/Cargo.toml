@@ -22,8 +22,8 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-deno_core = "0.218.0"
-deno_runtime = "0.128.0"
+deno_core = "0.230.0"
+deno_runtime = "0.132.0"
 tokio = { version = "1.25.0", features = ["full"] }
 url = "2.3.1"
 futures = "0.3.28"
@@ -71,7 +71,7 @@ holochain_cli_bundle = { version = "0.2.2" }
 holochain_types = { version = "0.2.2" }
 holochain_cli_run_local_services = { version = "0.2.2" }
 
-scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", rev = "941a349165539aed1637e54cdc40417096424021", features = ["multi_thread"] }
+scryer-prolog = { version = "0.9.3", git = "https://github.com/mthom/scryer-prolog", rev = "b8ef36782416577f4e560a5f1d76a83a96ab0f79"}
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 [dev-dependencies]
