@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use deno_core::{error::AnyError, include_js_files, op, Extension, Op, anyhow::anyhow};
+use deno_core::{error::AnyError, include_js_files, op2, Extension, Op, anyhow::anyhow};
 use holochain::{
     conductor::api::AppInfo,
     prelude::{
@@ -21,13 +21,13 @@ const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 
 const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
-#[op]
-async fn start_holochain_conductor(config: LocalConductorConfig) -> Result<(), AnyError> {
+#[op2(async)]
+async fn start_holochain_conductor(#[serde] config: LocalConductorConfig) -> Result<(), AnyError> {
     HolochainService::init(config).await?;
     Ok(())
 }
 
-#[op]
+#[op2(async)]
 async fn log_dht_status() -> Result<(), AnyError> {
     let res = timeout(
         TIMEOUT_DURATION, 
@@ -45,8 +45,9 @@ async fn log_dht_status() -> Result<(), AnyError> {
     }
 }
 
-#[op]
-async fn install_app(install_app_payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
+#[op2(async)]
+#[serde]
+async fn install_app(#[serde] install_app_payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
     timeout(
         APP_INSTALL_TIMEOUT_DURATION,
         async {
@@ -56,8 +57,9 @@ async fn install_app(install_app_payload: InstallAppPayload) -> Result<AppInfo, 
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
-async fn get_app_info(app_id: String) -> Result<Option<AppInfo>, AnyError> {
+#[op2(async)]
+#[serde]
+async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, AnyError> {
     timeout(
         TIMEOUT_DURATION,
         async {
@@ -69,13 +71,14 @@ async fn get_app_info(app_id: String) -> Result<Option<AppInfo>, AnyError> {
 
 //TODO
 //Have install app use lair to generate the membrane proof
-#[op]
+#[op2(async)]
+#[serde]
 async fn call_zome_function(
-    app_id: String,
-    cell_name: String,
-    zome_name: String,
-    fn_name: String,
-    payload: Option<ExternIO>,
+    #[string] app_id: String,
+    #[string] cell_name: String,
+    #[string] zome_name: String,
+    #[string] fn_name: String,
+    #[serde] payload: Option<ExternIO>,
 ) -> Result<ZomeCallResponse, AnyError> {
     timeout(
         TIMEOUT_DURATION,
@@ -86,7 +89,8 @@ async fn call_zome_function(
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
+#[op2(async)]
+#[serde]
 async fn agent_infos() -> Result<Vec<AgentInfoSigned>, AnyError> {
     timeout(
         TIMEOUT_DURATION,
@@ -97,8 +101,8 @@ async fn agent_infos() -> Result<Vec<AgentInfoSigned>, AnyError> {
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
-async fn add_agent_infos(agent_infos_payload: Vec<AgentInfoSigned>) -> Result<(), AnyError> {
+#[op2(async)]
+async fn add_agent_infos(#[serde] agent_infos_payload: Vec<AgentInfoSigned>) -> Result<(), AnyError> {
     timeout(
         TIMEOUT_DURATION,
         async {
@@ -108,8 +112,8 @@ async fn add_agent_infos(agent_infos_payload: Vec<AgentInfoSigned>) -> Result<()
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
-async fn remove_app(app_id: String) -> Result<(), AnyError> {
+#[op2(async)]
+async fn remove_app(#[string] app_id: String) -> Result<(), AnyError> {
     timeout(
         TIMEOUT_DURATION,
         async {
@@ -119,8 +123,9 @@ async fn remove_app(app_id: String) -> Result<(), AnyError> {
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
-async fn sign_string(data: String) -> Result<Signature, AnyError> {
+#[op2(async)]
+#[serde]
+async fn sign_string(#[string] data: String) -> Result<Signature, AnyError> {
     timeout(
         TIMEOUT_DURATION,
         async {
@@ -130,7 +135,7 @@ async fn sign_string(data: String) -> Result<Signature, AnyError> {
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
+#[op2(async)]
 async fn shutdown() -> Result<(), AnyError> {
     timeout(
         TIMEOUT_DURATION,
@@ -141,7 +146,8 @@ async fn shutdown() -> Result<(), AnyError> {
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
+#[op2(async)]
+#[serde]
 async fn get_agent_key() -> Result<HoloHash<Agent>, AnyError> {
     timeout(
         TIMEOUT_DURATION,
@@ -152,8 +158,9 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyError> {
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
-async fn pack_dna(path: String) -> Result<String, AnyError> {
+#[op2(async)]
+#[string]
+async fn pack_dna(#[string] path: String) -> Result<String, AnyError> {
     timeout(
         TIMEOUT_DURATION,
         async {
@@ -163,8 +170,9 @@ async fn pack_dna(path: String) -> Result<String, AnyError> {
     ).await.map_err(|_| anyhow!("Timeout error"))?
 }
 
-#[op]
-async fn unpack_dna(path: String) -> Result<String, AnyError> {
+#[op2(async)]
+#[string]
+async fn unpack_dna(#[string] path: String) -> Result<String, AnyError> {
     timeout(
         TIMEOUT_DURATION,
         async {
