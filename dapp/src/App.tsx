@@ -142,6 +142,8 @@ function Main() {
           //@ts-ignore
           entanglementPreFlight,
         ]);
+        // @ts-ignore
+        setProofs(addProof);
       } catch (e) {
         console.log(e);
       } finally {
