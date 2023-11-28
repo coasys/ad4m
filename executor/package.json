@@ -18,7 +18,7 @@
   "scripts": {
     "build": "deno run --allow-all esbuild.ts && deno run --allow-all replaceBufferImport.ts",
     "bundle": "deno run --allow-all esbuild.ts",
-    "test": "pnm run test-perspective && pnm test-db && pnm run test-auth-unit",
+    "test": "pnpm run test-perspective && pnpm test-db && pnpm run test-auth-unit",
     "test-perspective": "ts-mocha -p tsconfig.json --exit src/core/Perspective.test.ts",
     "test-db": "ts-mocha -p tsconfig.json --exit src/core/db.test.ts",
     "test-prolog": "ts-mocha -p tsconfig.json --exit src/core/PrologInstance.test.ts",
@@ -52,12 +52,14 @@
     "@types/sha256": "^0.2.0",
     "@types/sinon": "*",
     "@types/uuid": "^8.3.1",
+    "@types/lodash": "*",
     "chai": "*",
     "faker": "^5.1.0",
     "mocha": "*",
     "sinon": "*",
     "ts-mocha": "*",
-    "patch-package": "^8.0.0"
+    "patch-package": "^8.0.0",
+    "ts-node": "^10.8.0"
   },
   "dependencies": {
     "@holochain/client": "coasys/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",
