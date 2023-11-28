@@ -3,7 +3,7 @@ import { WagmiConfig, createConfig, configureChains, mainnet } from "wagmi";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { InjectedConnector } from "wagmi/connectors/injected";
 import { signMessage } from "@wagmi/core";
-import Ad4mConnectUI from "@perspect3vism/ad4m-connect";
+import Ad4mConnect from "@perspect3vism/ad4m-connect/core";
 import { Ad4mClient } from "@perspect3vism/ad4m";
 import Logo from "./Logo";
 import { publicProvider } from "wagmi/providers/public";
@@ -20,13 +20,65 @@ const config = createConfig({
   webSocketPublicClient,
 });
 
-const ui = Ad4mConnectUI({
+const ad4mConnect = new Ad4mConnect({
   appName: "ADAM 🔗 Web3",
   appDesc: "This is a builtin app to connect ADAM Agents with Web3 wallets.",
   appDomain: "ad4m.dev",
   appIconPath: "https://icons.getbootstrap.com/assets/icons/wallet.svg",
   capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+  token: localStorage.getItem("token") || "",
 });
+
+function useAdamConnect() {
+  const [client, setClient] = useState<Ad4mClient | null>(null);
+  const [isLocked, setIsLocked] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [verificationRequired, setVerificationRequired] = useState(false);
+
+  useEffect(() => {
+    ad4mConnect.on("authstatechange", (event: any) => {
+      if (event === "authenticated") {
+        setIsConnected(true);
+        setIsLocked(false);
+      }
+      if (event === "locked") {
+        setIsLocked(true);
+      }
+      if (event === "unauthenticated") {
+        setIsConnected(false);
+        setIsLocked(false);
+      }
+    });
+  }, []);
+
+  async function connect() {
+    const client = await ad4mConnect.connect();
+    setClient(client);
+    if (ad4mConnect.authState !== "authenticated") {
+      requestCapability();
+    }
+  }
+
+  async function requestCapability() {
+    await ad4mConnect.requestCapability(true);
+    setVerificationRequired(true);
+  }
+
+  async function verifyCode(code: string) {
+    const jwt = await ad4mConnect.verifyCode(code);
+    localStorage.setItem("token", jwt);
+    setVerificationRequired(false);
+  }
+
+  return {
+    connect,
+    client,
+    verificationRequired,
+    verifyCode,
+    isConnected,
+    isLocked,
+  };
+}
 
 function App() {
   return (
@@ -40,12 +92,17 @@ function Main() {
   const [isSigning, setIsSigning] = useState(false);
   const [proofs, setProofs] = useState([]);
   const { address, isConnected, isConnecting } = useAccount();
+  const {
+    isConnected: isConnectedToADAM,
+    connect: connectToADAM,
+    client,
+    verificationRequired,
+    verifyCode,
+  } = useAdamConnect();
 
   const hasProved = proofs.some(
     (p: any) => p.deviceKey.toLowerCase() === address?.toLowerCase()
   );
-
-  const [client, setClient] = React.useState<Ad4mClient | null>(null);
 
   const { connect, isError: hasConnectionError } = useConnect({
     connector: new InjectedConnector(),
@@ -57,29 +114,13 @@ function Main() {
   });
 
   useEffect(() => {
-    ui.connect();
-  }, []);
-
-  useEffect(() => {
-    async function cb(e: any) {
-      if (e.detail === "authenticated") {
-        const client = ui.getAd4mClient();
-        setClient(client);
-
-        const proofs: any = await client.agent.getEntanglementProofs();
-
-        setProofs(proofs);
-
-        connect();
-      }
+    if (client && isConnectedToADAM) {
+      // @ts-ignore
+      client.agent.getEntanglementProofs().then(setProofs);
+    } else {
+      setProofs([]);
     }
-
-    ui.addEventListener("authstatechange", cb);
-
-    return () => {
-      ui.removeEventListener("authstatechange", cb);
-    };
-  }, [address]);
+  }, [isConnectedToADAM]);
 
   const sign = async () => {
     if (client && address) {
@@ -101,8 +142,6 @@ function Main() {
           //@ts-ignore
           entanglementPreFlight,
         ]);
-
-        setHasProved(true);
       } catch (e) {
         console.log(e);
       } finally {
@@ -112,6 +151,38 @@ function Main() {
   };
 
   function ViewComp() {
+    if (!isConnectedToADAM) {
+      return (
+        <>
+          <h1 className="title">
+            <span className="accent">ADAM</span> wants to connect to your Web3
+            wallet
+          </h1>
+          {verificationRequired ? (
+            <>
+              <input
+                placeholder="Enter code"
+                type="tel"
+                className="input"
+                onChange={(e) => {
+                  if (e.target.value.length === 6) {
+                    verifyCode(e.target.value);
+                  }
+                }}
+              ></input>
+              <button className="link" onClick={() => connectToADAM()}>
+                Try again
+              </button>
+            </>
+          ) : (
+            <button className="button" onClick={() => connectToADAM()}>
+              Connect to ADAM
+            </button>
+          )}
+        </>
+      );
+    }
+
     if (hasConnectionError) {
       return (
         <>
@@ -157,9 +228,7 @@ function Main() {
     );
   }
 
-  let viewState = "ready";
-  if (isConnected) viewState = "sign";
-  if (hasProved) viewState = "done";
+  const showConnecting = isSigning || isConnecting || verificationRequired;
 
   return (
     <div className="App">
@@ -169,7 +238,7 @@ function Main() {
         </div>
         <ConnectAnimation
           done={hasProved}
-          connecting={isSigning || isConnecting}
+          connecting={showConnecting}
         ></ConnectAnimation>
         <div className="block">
           <WalletIcon></WalletIcon>
