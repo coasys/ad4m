@@ -278,6 +278,24 @@ importers:
         specifier: ^4.2.4
         version: 4.9.5
 
+  bootstrap-languages/eas:
+    devDependencies:
+      '@perspect3vism/ad4m':
+        specifier: '*'
+        version: link:../../core
+      '@types/node':
+        specifier: ^18.0.0
+        version: 18.11.10
+      tslib:
+        specifier: ^2.0.0
+        version: 2.6.2
+      typescript:
+        specifier: ^4.2.4
+        version: 4.9.5
+      xmlhttprequest:
+        specifier: ^1.8.0
+        version: 1.8.0
+
   bootstrap-languages/file-storage:
     devDependencies:
       '@perspect3vism/ad4m':
