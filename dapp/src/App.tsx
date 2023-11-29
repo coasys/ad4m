@@ -4,7 +4,7 @@ import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { InjectedConnector } from "wagmi/connectors/injected";
 import { signMessage } from "@wagmi/core";
 import Ad4mConnect from "@perspect3vism/ad4m-connect/core";
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient, EntanglementProof } from "@perspect3vism/ad4m";
 import Logo from "./Logo";
 import { publicProvider } from "wagmi/providers/public";
 import ConnectAnimation from "./ConnectAnimation";
@@ -29,7 +29,11 @@ const ad4mConnect = new Ad4mConnect({
   token: localStorage.getItem("token") || "",
 });
 
-function useAdamConnect() {
+type ConnectOptions = {
+  autoConnect?: boolean;
+};
+
+function useAdamConnect(options?: ConnectOptions) {
   const [client, setClient] = useState<Ad4mClient | null>(null);
   const [isLocked, setIsLocked] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
@@ -49,6 +53,12 @@ function useAdamConnect() {
         setIsLocked(false);
       }
     });
+  }, []);
+
+  useEffect(() => {
+    if (options?.autoConnect) {
+      connect();
+    }
   }, []);
 
   async function connect() {
@@ -91,6 +101,7 @@ function App() {
 function Main() {
   const [isSigning, setIsSigning] = useState(false);
   const [proofs, setProofs] = useState([]);
+  const { disconnect } = useDisconnect();
   const { address, isConnected, isConnecting } = useAccount();
   const {
     isConnected: isConnectedToADAM,
@@ -153,17 +164,28 @@ function Main() {
   };
 
   function ViewComp() {
+    if (hasConnectionError) {
+      return (
+        <>
+          <h1 className="title">Couldn't connect to wallet</h1>
+          <p className="paragraph">
+            Check if your Web3 wallet is installed and active.
+          </p>
+          <button className="button" onClick={() => connect()}>
+            {isSigning ? "Connecting..." : "Try again"}
+          </button>
+        </>
+      );
+    }
+
     if (!isConnectedToADAM) {
       return (
         <>
-          <h1 className="title">
-            <span className="accent">ADAM</span> wants to connect to your Web3
-            wallet
-          </h1>
+          <h1 className="title">Prove your Web3 wallet ownership</h1>
           {verificationRequired ? (
             <>
               <input
-                placeholder="Enter code"
+                placeholder="Enter Verification Code"
                 type="tel"
                 className="input"
                 onChange={(e) => {
@@ -185,47 +207,69 @@ function Main() {
       );
     }
 
-    if (hasConnectionError) {
+    if (isConnected && !hasProved)
       return (
         <>
-          <h1 className="title">Couldn't connect to wallet!</h1>
-          <p className="paragraph">Are you sure you have a wallet installed?</p>
-          <button className="button" onClick={() => connect()}>
-            {isSigning ? "Connecting..." : "Try again"}
-          </button>
-        </>
-      );
-    }
-
-    if (hasProved)
-      return (
-        <>
-          <h1 className="title">Ownership proved!</h1>
-          <p className="paragraph">
-            Your wallet ownership is proved and connected with ADAM.
-          </p>
-        </>
-      );
-
-    if (isConnected)
-      return (
-        <>
-          <h1 className="title">Sign this message to prove wallet ownership</h1>
+          <h1 className="title">Prove wallet ownership</h1>
           <button className="button" onClick={() => sign()}>
             {isSigning ? "Signing..." : "Prove ownership"}
           </button>
         </>
       );
 
+    // Map to dedupe array
+    const seen = new Set<string>();
+
     return (
       <>
         <h1 className="title">
-          <span className="accent">ADAM</span> wants to connect to your Web3
-          wallet
+          {hasProved ? (
+            <span>Successfully Verified</span>
+          ) : (
+            <span>Almost There!</span>
+          )}
         </h1>
-        <button className="button" onClick={() => connect()}>
-          {isSigning ? "Connecting..." : "Connect wallet"}
-        </button>
+        {!hasProved && (
+          <button className="button" onClick={() => connect()}>
+            {isSigning ? "Connecting..." : "Connect wallet"}
+          </button>
+        )}
+        {proofs.length > 0 && <p>Verified Wallets:</p>}
+        <p>
+          {proofs
+            .filter((p: EntanglementProof) => {
+              if (seen.has(p.deviceKey)) {
+                return false;
+              } else {
+                seen.add(p.deviceKey);
+                return true;
+              }
+            })
+            .map((p: EntanglementProof) => {
+              return (
+                <div className="wallet-proof">
+                  <span
+                    style={{
+                      width: "1.5rem",
+                      height: "1.5rem",
+                      display: "inline-block",
+                    }}
+                  >
+                    <WalletIcon></WalletIcon>
+                  </span>
+                  {shortenETHAddress(p.deviceKey)}
+                  {p.deviceKey === address && (
+                    <span
+                      className="dot"
+                      style={{
+                        right: "-4px",
+                      }}
+                    ></span>
+                  )}
+                </div>
+              );
+            })}
+        </p>
       </>
     );
   }
@@ -236,6 +280,7 @@ function Main() {
     <div className="App">
       <div className="connect">
         <div className="block">
+          {isConnectedToADAM && <span className="dot"></span>}
           <Logo></Logo>
         </div>
         <ConnectAnimation
@@ -243,6 +288,7 @@ function Main() {
           connecting={showConnecting}
         ></ConnectAnimation>
         <div className="block">
+          {isConnected && <span className="dot"></span>}
           <WalletIcon></WalletIcon>
         </div>
       </div>
@@ -264,6 +310,29 @@ function WalletIcon() {
       />
     </svg>
   );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      fill="currentColor"
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+    >
+      <path d="M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29.756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757.757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425a.247.247 0 0 1 .02-.022" />
+    </svg>
+  );
+}
+
+function shortenETHAddress(address: string) {
+  if (!address || address.length !== 42 || !address.startsWith("0x")) {
+    return "Invalid ETH Address";
+  }
+  return `${address.substring(0, 8)}...${address.substring(
+    address.length - 4
+  )}`;
 }
 
 export default App;
