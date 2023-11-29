@@ -1,6 +1,6 @@
 body {
   margin: 0;
-  font-family: "DM Sans", sans-serif;
+  font-family: "DM Sans", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: black;
@@ -40,6 +40,7 @@ html {
 }
 
 .block {
+  position: relative;
   display: block;
   border-radius: 50%;
   width: 5rem;
@@ -47,6 +48,29 @@ html {
   color: black;
   background: rgb(36, 36, 36);
   padding: 1.2rem;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #3fda74;
+  box-shadow: 0px 0px 10px 2px #3fda74;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  animation: 0.5s ease fade-in forwards;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0px);
+  }
 }
 
 .connect {
@@ -73,12 +97,12 @@ html {
 
 .input {
   width: 100%;
-  max-width: 400px;
+  max-width: 300px;
   margin: 0 auto;
   padding: 1.5rem 1.5rem;
   font-size: 1.3rem;
   font-family: inherit;
-  background: rgb(36, 36, 36);
+  background: rgb(30, 30, 30);
   color: white;
   border-radius: 4px;
   border: 0;
@@ -100,6 +124,7 @@ html {
   font-size: 2.6rem;
   margin-top: 0;
   margin-bottom: 2rem;
+  text-wrap: balance;
 }
 
 .paragraph {
@@ -110,6 +135,16 @@ html {
 
 .white {
   color: white;
+}
+
+.wallet-proof {
+  position: relative;
+  display: flex;
+  gap: 1rem;
+  padding: 1rem;
+  background: rgba(30, 30, 30);
+  margin-bottom: 1rem;
+  border-radius: 4px;
 }
 
 .accent {
@@ -135,4 +170,5 @@ html {
   font-size: 1.2rem;
   font-weight: 500;
   font-family: inherit;
+  margin-bottom: 2rem;
 }
