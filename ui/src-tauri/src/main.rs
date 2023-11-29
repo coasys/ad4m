@@ -47,13 +47,12 @@ mod commands;
 use tauri::Manager;
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
-use crate::commands::app::{close_application, close_main_window, clear_state, open_tray, open_tray_message};
+use crate::commands::app::{close_application, close_main_window, clear_state, open_tray, open_tray_message, open_dapp};
 use crate::config::data_path;
 use crate::config::log_path;
 use crate::util::create_tray_message_windows;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
-use crate::util::has_processes_running;
 use crate::util::{create_main_window, save_executor_port};
 
 
@@ -209,7 +208,8 @@ fn main() {
             close_main_window,
             clear_state,
             open_tray,
-            open_tray_message
+            open_tray_message,
+            open_dapp
         ])
         .setup(move |app| {
             // Hides the dock icon
