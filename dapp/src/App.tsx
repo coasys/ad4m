@@ -3,6 +3,7 @@ import { WagmiConfig, createConfig, configureChains, mainnet } from "wagmi";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { InjectedConnector } from "wagmi/connectors/injected";
 import { signMessage } from "@wagmi/core";
+// @ts-ignore
 import Ad4mConnect from "@perspect3vism/ad4m-connect/core";
 import { Ad4mClient, EntanglementProof } from "@perspect3vism/ad4m";
 import Logo from "./Logo";
