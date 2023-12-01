@@ -67,7 +67,7 @@ pub async fn start_publishing(
 
     let agent = ad4m_client
         .agent
-        .unlock(passphrase)
+        .unlock(passphrase, true)
         .await
         .expect("could not unlock agent");
 
