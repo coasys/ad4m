@@ -264,6 +264,7 @@ export default class LanguageController {
 
         const customSettings = this.getSettings(hash)
         const storageDirectory = this.getLanguageStoragePath(hash)
+
         const Holochain = this.#holochainService?.getDelegateForLanguage(hash)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.#pubSub});
@@ -458,7 +459,7 @@ export default class LanguageController {
             console.error(e)
             //fs.rmdirSync(languagePath, {recursive: true})
             //@ts-ignore
-            throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
+            // throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
         }
     }
 
