@@ -30,6 +30,7 @@ const Login = (props: any) => {
   const [usernameError, setUsernameError] = useState<string | null>(null);
   let [passwordError, setPasswordError] = useState<string | null>(null);
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
+  const [holochain, setHolochain] = useState(true);
 
   if (hasLoginError) {
     passwordError = "Invalid password";
@@ -55,7 +56,7 @@ const Login = (props: any) => {
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") {
       if (isInitialized) {
-        unlockAgent(password);
+        unlockAgent(password, holochain);
       } else {
         generate();
       }
@@ -429,13 +430,23 @@ const Login = (props: any) => {
               >
                 Reset agent
               </j-button>
+              <j-box px="100" >          
+              <j-toggle
+                checked={holochain}
+                onChange={(e) => {
+                  setHolochain(e.target.checked);
+                }}
+              >
+                {`Turn ${holochain ? 'off' : "on"} Holochain`}
+              </j-toggle>
+            </j-box>
               <j-button
                 full
                 size="lg"
                 class="full-button"
                 variant="primary"
                 style={{ alignSelf: "center" }}
-                onClick={() => unlockAgent(password)}
+                onClick={() => unlockAgent(password, holochain)}
                 loading={loading}
               >
                 Unlock Agent

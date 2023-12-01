@@ -264,7 +264,7 @@ export default class LanguageController {
 
         const customSettings = this.getSettings(hash)
         const storageDirectory = this.getLanguageStoragePath(hash)
-        const Holochain = this.#holochainService.getDelegateForLanguage(hash)
+        const Holochain = this.#holochainService?.getDelegateForLanguage(hash)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.#pubSub});
         const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
@@ -313,7 +313,7 @@ export default class LanguageController {
         }
         const customSettings = this.getSettings(hash)
         const storageDirectory = this.getLanguageStoragePath(hash)
-        const Holochain = this.#holochainService.getDelegateForLanguage(hash)
+        const Holochain = this.#holochainService?.getDelegateForLanguage(hash)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: this.#pubSub});
         //@ts-ignore
@@ -473,7 +473,7 @@ export default class LanguageController {
         this.#languages.delete(hash as string);
         this.#languageConstructors.delete(hash as string);
         try {
-            await this.#holochainService.removeDnaForLang(hash as string);
+            await this.#holochainService?.removeDnaForLang(hash as string);
         } catch(e) {
             console.log("No DNA found for language installed");
         }
@@ -628,7 +628,7 @@ export default class LanguageController {
             //Unpack the DNA
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             console.log("LanguageController.readAndTemplateHolochainDNA: unpacking DNA");
-            let unpackPath = (await this.#holochainService.unpackDna(tempDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
+            let unpackPath = (await this.#holochainService?.unpackDna(tempDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
             fs.unlinkSync(tempDnaPath);
             //TODO: are all dna's using the same dna.yaml?
             const dnaYamlPath = path.join(unpackPath, "dna.yaml");
@@ -664,7 +664,7 @@ export default class LanguageController {
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             console.log("LanguageController.readAndTemplateHolochainDNA: packing DNA");
-            let packPath = (await this.#holochainService.packDna(unpackPath)).replace(/(\r\n|\n|\r)/gm, "");
+            let packPath = (await this.#holochainService?.packDna(unpackPath)).replace(/(\r\n|\n|\r)/gm, "");
             const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
 
             //Cleanup temp directory
