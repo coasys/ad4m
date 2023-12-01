@@ -151,7 +151,7 @@ mod prolog_test {
 
         assert_eq!(
             result,
-            Err(String::from("error(existence_error(procedure,non_existant_predicate/3),non_existant_predicate/3)."))
+            Err(String::from("error existence_error procedure / non_existant_predicate 3 / non_existant_predicate 3"))
         );    
     
     }
