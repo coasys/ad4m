@@ -1,6 +1,6 @@
 body {
   margin: 0;
-  font-family: "DM Sans", system-ui, sans-serif;
+  font-family: system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: black;
@@ -25,8 +25,12 @@ html {
   --end-color: #d273ff;
 }
 
+a {
+  color: currentColor;
+}
+
 .App {
-  color: #a9a9a9;
+  color: white;
   text-align: center;
   display: grid;
   place-items: center;
@@ -137,14 +141,43 @@ html {
   color: white;
 }
 
+.wallets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  justify-content: center;
+}
+
 .wallet-proof {
   position: relative;
   display: flex;
-  gap: 1rem;
-  padding: 1rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.3rem;
+  padding: 1.5rem;
   background: rgba(30, 30, 30);
   margin-bottom: 1rem;
   border-radius: 4px;
+}
+
+.wallet-address {
+  color: white;
+}
+
+.wallet-proof button {
+  border: 0;
+  cursor: pointer;
+  background: none;
+  color: var(--end-color);
+  padding: 0.5rem;
+  border-radius: 4px;
+  font-size: inherit;
+  font-family: inherit;
+}
+
+.wallet-proof button:hover {
+  text-decoration: underline;
 }
 
 .accent {

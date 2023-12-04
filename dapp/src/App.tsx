@@ -1,15 +1,26 @@
 import React, { useEffect, useState } from "react";
-import { WagmiConfig, createConfig, configureChains, mainnet } from "wagmi";
+import {
+  WagmiConfig,
+  createConfig,
+  configureChains,
+  mainnet,
+  useConfig,
+} from "wagmi";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { InjectedConnector } from "wagmi/connectors/injected";
 import { signMessage } from "@wagmi/core";
 // @ts-ignore
-import Ad4mConnect from "@perspect3vism/ad4m-connect/core";
-// @ts-ignore
-import { Ad4mClient, EntanglementProof } from "@perspect3vism/ad4m";
+import { EntanglementProof } from "@perspect3vism/ad4m";
 import Logo from "./Logo";
 import { publicProvider } from "wagmi/providers/public";
 import ConnectAnimation from "./ConnectAnimation";
+import {
+  getProfileProofs,
+  publishProofToProfile,
+  removeProofFromProfile,
+  shortenETHAddress,
+} from "./helpers";
+import { useAdamConnect } from "./helpers/useAd4mConnect";
 
 const { chains, publicClient, webSocketPublicClient } = configureChains(
   [mainnet],
@@ -19,78 +30,9 @@ const { chains, publicClient, webSocketPublicClient } = configureChains(
 const config = createConfig({
   autoConnect: true,
   publicClient,
+  connectors: [new InjectedConnector()],
   webSocketPublicClient,
 });
-
-const ad4mConnect = new Ad4mConnect({
-  appName: "ADAM 🔗 Web3",
-  appDesc: "This is a builtin app to connect ADAM Agents with Web3 wallets.",
-  appDomain: "ad4m.dev",
-  appIconPath: "https://icons.getbootstrap.com/assets/icons/wallet.svg",
-  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
-  token: localStorage.getItem("token") || "",
-});
-
-type ConnectOptions = {
-  autoConnect?: boolean;
-};
-
-function useAdamConnect(options?: ConnectOptions) {
-  const [client, setClient] = useState<Ad4mClient | null>(null);
-  const [isLocked, setIsLocked] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
-  const [verificationRequired, setVerificationRequired] = useState(false);
-
-  useEffect(() => {
-    ad4mConnect.on("authstatechange", (event: any) => {
-      if (event === "authenticated") {
-        setIsConnected(true);
-        setIsLocked(false);
-      }
-      if (event === "locked") {
-        setIsLocked(true);
-      }
-      if (event === "unauthenticated") {
-        setIsConnected(false);
-        setIsLocked(false);
-      }
-    });
-  }, []);
-
-  useEffect(() => {
-    if (options?.autoConnect) {
-      connect();
-    }
-  }, []);
-
-  async function connect() {
-    const client = await ad4mConnect.connect();
-    setClient(client);
-    if (ad4mConnect.authState !== "authenticated") {
-      requestCapability();
-    }
-  }
-
-  async function requestCapability() {
-    await ad4mConnect.requestCapability(true);
-    setVerificationRequired(true);
-  }
-
-  async function verifyCode(code: string) {
-    const jwt = await ad4mConnect.verifyCode(code);
-    localStorage.setItem("token", jwt);
-    setVerificationRequired(false);
-  }
-
-  return {
-    connect,
-    client,
-    verificationRequired,
-    verifyCode,
-    isConnected,
-    isLocked,
-  };
-}
 
 function App() {
   return (
@@ -102,12 +44,14 @@ function App() {
 
 function Main() {
   const [isSigning, setIsSigning] = useState(false);
-  const [proofs, setProofs] = useState([]);
-  const { disconnect } = useDisconnect();
+  const [profileProofs, setProfileProofs] = useState<EntanglementProof[]>([]);
+  const [proofs, setProofs] = useState<EntanglementProof[]>([]);
+  const { connectors } = useConfig();
   const { address, isConnected, isConnecting } = useAccount();
   const {
     isConnected: isConnectedToADAM,
     connect: connectToADAM,
+    hasConnectionError: hasADAMConnectionError,
     client,
     verificationRequired,
     verifyCode,
@@ -118,13 +62,25 @@ function Main() {
   );
 
   const { connect, isError: hasConnectionError } = useConnect({
-    connector: new InjectedConnector(),
+    connector: connectors[0],
     onSuccess: () => {
       if (!hasProved) {
         sign();
       }
     },
   });
+
+  function loadProfileProofs() {
+    if (client) {
+      getProfileProofs(client).then(setProfileProofs);
+    }
+  }
+
+  useEffect(() => {
+    if (client && proofs.length > 0) {
+      loadProfileProofs();
+    }
+  }, [proofs.length, client]);
 
   useEffect(() => {
     if (client && isConnectedToADAM) {
@@ -166,6 +122,24 @@ function Main() {
   };
 
   function ViewComp() {
+    if (hasADAMConnectionError) {
+      return (
+        <>
+          <h1 className="title">Couldn't connect to ADAM</h1>
+          <p className="paragraph">
+            Make sure you have ADAM{" "}
+            <a href="https://ad4m.dev/download" target="_blank">
+              downloaded
+            </a>{" "}
+            and running.
+          </p>
+          <button className="button" onClick={() => connectToADAM()}>
+            Try again
+          </button>
+        </>
+      );
+    }
+
     if (hasConnectionError) {
       return (
         <>
@@ -226,7 +200,7 @@ function Main() {
       <>
         <h1 className="title">
           {hasProved ? (
-            <span>Successfully Verified</span>
+            <span>Successfully Verified!</span>
           ) : (
             <span>Almost There!</span>
           )}
@@ -236,8 +210,7 @@ function Main() {
             {isSigning ? "Connecting..." : "Connect wallet"}
           </button>
         )}
-        {proofs.length > 0 && <p>Verified Wallets:</p>}
-        <p>
+        <div className="wallets">
           {proofs
             .filter((p: EntanglementProof) => {
               if (seen.has(p.deviceKey)) {
@@ -259,19 +232,36 @@ function Main() {
                   >
                     <WalletIcon></WalletIcon>
                   </span>
-                  {shortenETHAddress(p.deviceKey)}
-                  {p.deviceKey === address && (
-                    <span
-                      className="dot"
-                      style={{
-                        right: "-4px",
-                      }}
-                    ></span>
+                  <span className="wallet-address">
+                    {shortenETHAddress(p.deviceKey)}
+                  </span>
+                  {profileProofs.some(
+                    (profileProof) => profileProof.deviceKey === p.deviceKey
+                  ) ? (
+                    <button
+                      onClick={() =>
+                        client &&
+                        removeProofFromProfile(client, p).then(
+                          loadProfileProofs
+                        )
+                      }
+                    >
+                      Remove from profile
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() =>
+                        client &&
+                        publishProofToProfile(client, p).then(loadProfileProofs)
+                      }
+                    >
+                      Publish to profile
+                    </button>
                   )}
                 </div>
               );
             })}
-        </p>
+        </div>
       </>
     );
   }
@@ -312,29 +302,6 @@ function WalletIcon() {
       />
     </svg>
   );
-}
-
-function CheckIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      fill="currentColor"
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-    >
-      <path d="M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29.756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757.757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425a.247.247 0 0 1 .02-.022" />
-    </svg>
-  );
-}
-
-function shortenETHAddress(address: string) {
-  if (!address || address.length !== 42 || !address.startsWith("0x")) {
-    return "Invalid ETH Address";
-  }
-  return `${address.substring(0, 8)}...${address.substring(
-    address.length - 4
-  )}`;
 }
 
 export default App;
