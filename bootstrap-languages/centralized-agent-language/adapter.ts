@@ -13,7 +13,7 @@ export default class ExpressionAdapterImpl implements ExpressionAdapter {
   async get(did: Address): Promise<Expression> {
     console.log("Getting expression with did", did);
 
-    const data = await axiod.get("http://localhost:3000/agent", {
+    const data = await axiod.get("https://socket.ad4m.dev/agent", {
       params: {
         did
       }
@@ -49,7 +49,7 @@ class Sharing implements PublicSharing {
 
     const expression = this.#agent.createSignedExpression(agent);
     
-    await axiod.post("http://localhost:3000/agent", {
+    await axiod.post("https://socket.ad4m.dev/agent", {
       data: {
         did: agent.did,
         expression
