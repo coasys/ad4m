@@ -18,6 +18,11 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
+    "build-dapp": {
+      "dependsOn": ["@perspect3vism/ad4m#build", "@perspect3vism/ad4m-connect#build", "@perspect3vism/dapp#build"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+
     "ad4m-launcher#package-ad4m": {
       "dependsOn": ["build-libs"],
       "outputs": ["dist/**"]
