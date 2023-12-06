@@ -60,7 +60,7 @@ impl Ad4mConfig {
             self.hc_proxy_url = Some("ws://207.148.16.17:42697".to_string());
         }
         if self.hc_bootstrap_url.is_none() {
-            self.hc_bootstrap_url = Some("ws://207.148.16.17:38245".to_string());
+            self.hc_bootstrap_url = Some("http://207.148.16.17:38245".to_string());
         }
         if self.hc_use_bootstrap.is_none() {
             self.hc_use_bootstrap = Some(true);
