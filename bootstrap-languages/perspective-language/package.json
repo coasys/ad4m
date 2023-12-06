@@ -7,8 +7,8 @@
     "test-disabled": "echo \"No perspective language integration tests\"",
     "rollup-icons": "rollup -c rollup.config.icons.js",
     "rollup-expression-ui": "rollup -c rollup.config.expression-ui.js",
-    "build": "yarn run build:common",
-    "build:common": "yarn rollup-icons && yarn rollup-expression-ui && deno run --allow-all esbuild.ts"
+    "build": "pnpm run build:common",
+    "build:common": "pnpm rollup-icons && pnpm rollup-expression-ui && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",

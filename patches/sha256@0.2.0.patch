@@ -1,0 +1,13 @@
+diff --git a/.npmignore b/.npmignore
+deleted file mode 100644
+index e2473e4c0fbd5abcc72e83bc3ec2f0a66a0d019b..0000000000000000000000000000000000000000
+diff --git a/lib/nodecrypto.js b/lib/nodecrypto.js
+index 1929ad29ab00fc26e87d6228165836ea0048796d..7ca127abc96f47c995cd7907fc98e9df743ac5a7 100644
+--- a/lib/nodecrypto.js
++++ b/lib/nodecrypto.js
+@@ -1,4 +1,4 @@
+-var crypto = require('crypto');
++import crypto from 'node:crypto';
+ 
+ // Node.js has its own Crypto function that can handle this natively
+ var sha256 = module.exports = function(message, options) {

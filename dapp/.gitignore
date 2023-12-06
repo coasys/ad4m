@@ -1,2 +1,3 @@
-bundle.js
-bundle.cjs
+build
+public/bundle.cjs
+dist

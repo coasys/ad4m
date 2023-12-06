@@ -30,9 +30,9 @@
     "build": "vite build",
     "change-ui-version": "powershell -ExecutionPolicy Bypass -File ./scripts/patch-prerelease-tags.ps1",
     "package-ad4m": "run-script-os",
-    "package-ad4m:windows": "cargo clean && powershell -ExecutionPolicy Bypass -File ./scripts/patch-prerelease-tags.ps1 && yarn run build && yarn tauri build --verbose && powershell -ExecutionPolicy Bypass -File ./scripts/reverse-patch-prerelease-tags.ps1",
-    "package-ad4m:macos": "yarn run build && yarn tauri build --verbose",
-    "package-ad4m:linux": "yarn run build && ./scripts/patch-safe-buffer.sh && yarn tauri build --verbose && ./scripts/reverse-patch-safe-buffer.sh"
+    "package-ad4m:windows": "cargo clean && powershell -ExecutionPolicy Bypass -File ./scripts/patch-prerelease-tags.ps1 && pnpm run build && pnpm tauri build --verbose && powershell -ExecutionPolicy Bypass -File ./scripts/reverse-patch-prerelease-tags.ps1",
+    "package-ad4m:macos": "pnpm run build && pnpm tauri build --verbose",
+    "package-ad4m:linux": "pnpm run build && ./scripts/patch-safe-buffer.sh && pnpm tauri build --verbose && ./scripts/reverse-patch-safe-buffer.sh"
   },
   "eslintConfig": {
     "extends": [
