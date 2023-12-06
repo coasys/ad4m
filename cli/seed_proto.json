@@ -74,6 +74,15 @@
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/file-storage/build/bundle.js"
+        },
+        {
+            "meta": {
+                "name": "easLanguage", 
+                "description": "EAS fetching language", 
+                "sourceCodeLink": "https://github.com/perspect3vism/file-storage-language",
+                "possibleTemplateParams": []
+            },
+            "resource": "../bootstrap-languages/eas/build/bundle.js"
         }
     ]
 }

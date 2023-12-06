@@ -1,0 +1,51 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+deleted file mode 100644
+index 0e0b03beac67ccb30ec10d4dcc17efed6a0a2592..0000000000000000000000000000000000000000
+diff --git a/src/decoder.js b/src/decoder.js
+index 5100dc35b96b97e68b862c9513af9009fa583e11..5e12a891b93729e8b640dde48205090d4760a371 100644
+--- a/src/decoder.js
++++ b/src/decoder.js
+@@ -1,6 +1,6 @@
+ 'use strict'
+ 
+-const { Buffer } = require('buffer')
++import { Buffer } from 'node:buffer'
+ const ieee754 = require('ieee754')
+ const Bignumber = require('bignumber.js').BigNumber
+ 
+diff --git a/src/diagnose.js b/src/diagnose.js
+index c65abde4050422e0e587fb82e737b637f1393e73..964a623a47cd658fbecfea6d2d871b7979647a01 100644
+--- a/src/diagnose.js
++++ b/src/diagnose.js
+@@ -1,6 +1,6 @@
+ 'use strict'
+ 
+-const { Buffer } = require('buffer')
++import { Buffer } from 'node:buffer'
+ const Decoder = require('./decoder')
+ const utils = require('./utils')
+ 
+diff --git a/src/encoder.js b/src/encoder.js
+index 4b7ef5b4edfc57fcb871befd372cc7d6f60ceebc..a5f77436814e99344c6f246e4eee41c236ae575a 100644
+--- a/src/encoder.js
++++ b/src/encoder.js
+@@ -1,6 +1,6 @@
+ 'use strict'
+ 
+-const { Buffer } = require('buffer')
++import { Buffer } from 'node:buffer'
+ const { URL } = require('iso-url')
+ const Bignumber = require('bignumber.js').BigNumber
+ 
+diff --git a/src/utils.js b/src/utils.js
+index 7219bf130c79f17eebfa30bbf7229aaeabe5193a..fd5e40ce419ec10655873b7bff2a00b0e6aa464b 100644
+--- a/src/utils.js
++++ b/src/utils.js
+@@ -1,6 +1,6 @@
+ 'use strict'
+ 
+-const { Buffer } = require('buffer')
++import { Buffer } from 'node:buffer'
+ const Bignumber = require('bignumber.js').BigNumber
+ 
+ const constants = require('./constants')

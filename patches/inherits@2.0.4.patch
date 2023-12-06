@@ -1,0 +1,11 @@
+diff --git a/inherits.js b/inherits.js
+index f71f2d93294a67ad5d9300aae07973e259f26068..c973372c5ffebb244d24b9f773d14d76774438bf 100644
+--- a/inherits.js
++++ b/inherits.js
+@@ -1,5 +1,5 @@
+ try {
+-  var util = require('util');
++  var util = require('node:util');
+   /* istanbul ignore next */
+   if (typeof util.inherits !== 'function') throw '';
+   module.exports = util.inherits;

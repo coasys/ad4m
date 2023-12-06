@@ -1,0 +1,11 @@
+diff --git a/index.js b/index.js
+index f3e22109a31cb7c32d5242cad18dd8feb547030f..cb560436a0192946f80ccf1c4cfe5397443b7bc4 100644
+--- a/index.js
++++ b/index.js
+@@ -1,5 +1,5 @@
+ 'use strict';
+-const net = require('net');
++import net from 'node:net';
+ 
+ class Locked extends Error {
+ 	constructor(port) {
