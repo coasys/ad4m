@@ -24,16 +24,19 @@ name
 sharedUrl
 state
 neighbourhood {
-    linkLanguage
-    meta {
-        links
-            {
-                author
-                timestamp
-                data { source, predicate, target }
-                proof { valid, invalid, signature, key }
-            }
+    data {
+        linkLanguage
+        meta {
+            links
+                {
+                    author
+                    timestamp
+                    data { source, predicate, target }
+                    proof { valid, invalid, signature, key }
+                }
+        }
     }
+    author
 }
 `
 

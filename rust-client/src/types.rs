@@ -217,10 +217,10 @@ impl From<LinkExpression> for LinkExpressionInput {
     }
 }
 
-use crate::perspectives::all::AllPerspectivesNeighbourhoodMetaLinks;
+use crate::perspectives::all::AllPerspectivesNeighbourhoodDataMetaLinks;
 
-impl From<AllPerspectivesNeighbourhoodMetaLinks> for LinkExpression {
-    fn from(link: AllPerspectivesNeighbourhoodMetaLinks) -> Self {
+impl From<AllPerspectivesNeighbourhoodDataMetaLinks> for LinkExpression {
+    fn from(link: AllPerspectivesNeighbourhoodDataMetaLinks) -> Self {
         Self {
             author: link.author,
             timestamp: link.timestamp,

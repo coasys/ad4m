@@ -323,7 +323,10 @@ export function SDNAClass(opts: SDNAClassOptions) {
             sdna += "\n"
             sdna += collectionsCode.join("\n")
 
-            return sdna
+            return {
+                sdna,
+                name: subjectName
+            }
         }
 
         Object.defineProperty(target, 'type', {configurable: true});
