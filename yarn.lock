@@ -1900,7 +1900,7 @@
     lodash-es "^4.17.21"
     ws "^8.13.0"
 
-"@holochain/client@perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b":
+"@holochain/client@github:perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b", "@holochain/client@perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b":
   version "0.12.5"
   resolved "https://codeload.github.com/perspect3vism/holochain-client-js/tar.gz/2f3a436b6d28344b0aca883ef3dc229cd042c04b"
   dependencies:
@@ -2760,8 +2760,31 @@
     tslib "^2.5.0"
     webcrypto-core "^1.7.7"
 
+"@perspect3vism/ad4m-executor@*":
+  version "0.7.1"
+  resolved "https://registry.yarnpkg.com/@perspect3vism/ad4m-executor/-/ad4m-executor-0.7.1.tgz#b6e95963a05c4bea830b9c20ae6966b81816f6af"
+  integrity sha512-9jEt5nAQTyjolLM38RKVSRNkahfSMLRYw41x52d/pMEQZB+iACx0BIIrLz8o4MuhmopaSmQeGza4CkXNEwhSyw==
+  dependencies:
+    "@holochain/client" perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b
+    "@msgpack/msgpack" "3.0.0-beta2"
+    "@noble/secp256k1" "^1.7.0"
+    "@perspect3vism/ad4m" "link:../../../Library/Caches/Yarn/v6/npm-@perspect3vism-ad4m-executor-0.7.1-b6e95963a05c4bea830b9c20ae6966b81816f6af-integrity/node_modules/@perspect3vism/core"
+    "@transmute/did-key.js" "^0.2.1-unstable.29"
+    "@types/json-stable-stringify" "^1.0.33"
+    "@types/mocha" "^10.0.0"
+    aloedb-node "^1.1.1"
+    async-mutex "^0.3.2"
+    get-port "5.1.1"
+    js-yaml "^4.1.0"
+    json-stable-stringify "^1.0.1"
+    linkedom "^0.14.26"
+    lodash "^4.17.21"
+    sha256 "^0.2.0"
+    tmp "^0.2.1"
+    uuid "*"
+
 "@perspect3vism/ad4m-executor@link:core":
-  version "0.7.0"
+  version "0.8.0-prerelease"
   dependencies:
     "@apollo/client" "3.7.10"
     "@apollo/server" "^4.9.4"
@@ -2773,8 +2796,63 @@
     reflect-metadata "^0.1.13"
     type-graphql "1.1.1"
 
+"@perspect3vism/ad4m-test@*":
+  version "0.7.1"
+  resolved "https://registry.yarnpkg.com/@perspect3vism/ad4m-test/-/ad4m-test-0.7.1.tgz#28be76af5fd9eb58ed56415482b4ed69445a3073"
+  integrity sha512-sudI9REyCS+wXfLg7Jy7F74acMANdyTDf+BzOzkSuAtkhkiXbPrqynKyI1wKtrYXFJFbancsZORRmHRpUya6ag==
+  dependencies:
+    "@apollo/client" "3.7.10"
+    "@perspect3vism/ad4m" "*"
+    "@types/fs-extra" "^9.0.13"
+    "@types/node" "^18.0.0"
+    "@types/node-fetch" "^2.6.1"
+    "@types/unzipper" "^0.10.5"
+    "@types/ws" "8.5.4"
+    "@types/yargs" "^17.0.8"
+    appdata-path perspect3vism/appdata-path
+    chalk "4.1.2"
+    esm "^3.2.25"
+    esmify "^2.1.1"
+    express "4.18.2"
+    find-process "^1.4.7"
+    fs-extra "^10.0.1"
+    get-port "5.1.1"
+    glob "^7.2.0"
+    graphql "15.7.2"
+    graphql-ws "5.12.0"
+    node-fetch "2"
+    node-wget-js "^1.0.1"
+    subscriptions-transport-ws "^0.11.0"
+    tree-kill "^1.2.2"
+    ts-node "^10.5.0"
+    typescript "^4.6.2"
+    unzipper "^0.10.11"
+    uuid "^8.3.2"
+    wget-improved "^3.3.0"
+    ws "8.13.0"
+    yargs "^17.3.1"
+
+"@perspect3vism/ad4m@*":
+  version "0.7.1"
+  resolved "https://registry.yarnpkg.com/@perspect3vism/ad4m/-/ad4m-0.7.1.tgz#ab73bb4b2379615099bb53d7c22ea04c14829fcf"
+  integrity sha512-gGvRckU+Ois4ZsjeaBPNdFX76uuj5MZcYAaVU76deW5WOqS+A+gV4DRqB9cU/9tgbhCswDlaqMb4JOWE+1NGKA==
+  dependencies:
+    "@apollo/client" "3.7.10"
+    "@apollo/server" "^4.9.4"
+    "@holochain/client" "0.16.0"
+    "@types/jest" "^26.0.14"
+    class-validator "^0.13.1"
+    express "4.18.2"
+    graphql "15.7.2"
+    reflect-metadata "^0.1.13"
+    type-graphql "1.1.1"
+
+"@perspect3vism/ad4m@link:../core":
+  version "0.0.0"
+  uid ""
+
 "@perspect3vism/ad4m@link:core":
-  version "0.7.0"
+  version "0.8.0-prerelease"
   dependencies:
     "@apollo/client" "3.7.10"
     "@apollo/server" "^4.9.4"
@@ -5140,7 +5218,7 @@ apollo-utilities@1.3.4, apollo-utilities@^1.3.0, apollo-utilities@^1.3.4:
     ts-invariant "^0.4.0"
     tslib "^1.10.0"
 
-appdata-path@perspect3vism/appdata-path:
+"appdata-path@github:perspect3vism/appdata-path", appdata-path@perspect3vism/appdata-path:
   version "1.0.0"
   resolved "https://codeload.github.com/perspect3vism/appdata-path/tar.gz/6304ea16cbfebc98749c33941d643c3046b45985"
 
