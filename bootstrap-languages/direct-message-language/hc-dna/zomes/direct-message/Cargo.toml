@@ -15,7 +15,7 @@ serde_json = "1"
 chrono = { version = "0.4.31", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 hex = "0.4.3"
 
-hdk = "0.3.0-beta-dev.18"
-holo_hash = "0.3.0-beta-dev.11"
+hdk = { version = "0.3.0-beta-dev.21", git = "https://github.com/coasys/holochain.git", rev = "3ff5fdc012f1d94f70796ee2f19e48aa555bba7a"}
+holo_hash = { version = "0.3.0-beta-dev.13", git = "https://github.com/coasys/holochain.git", rev = "3ff5fdc012f1d94f70796ee2f19e48aa555bba7a"}
 
 direct-message-integrity = { path = "../direct-message-integrity" }
