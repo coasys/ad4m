@@ -32,12 +32,11 @@
     }
   },
   "scripts": {
-    "prepare": "run-s build:*",
     "release": "np --no-2fa --no-tests --tag=latest",
     "release:beta": "np --no-2fa --no-tests --tag=beta --any-branch",
     "dev": "NODE_ENV=dev && vite dev",
     "serve": "npx serve",
-    "build": "yarn run build:core && yarn run build:web && yarn run build:electron && yarn run build:utils && tsc",
+    "build": "pnpm run build:core && pnpm run build:web && pnpm run build:electron && pnpm run build:utils && tsc",
     "build:core": "tsc --project tsconfig.json && node scripts/esbuild.js",
     "build:web": "tsc --project tsconfig.json && node scripts/esbuild_web.js",
     "build:utils": "tsc --project tsconfig.json && node scripts/esbuild_utils.js",
@@ -56,7 +55,8 @@
     "np": "^7.6.2",
     "npm-run-all": "^4.1.5",
     "typescript": "^4.6.2",
-    "vite": "^4.1.1"
+    "vite": "^4.1.1",
+    "@types/node": "^16.11.11"
   },
   "dependencies": {
     "@undecaf/barcode-detector-polyfill": "^0.9.15",

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "next dev",
     "start": "next start",
-    "build": "yarn run typedoc && next build",
+    "build": "pnpm run typedoc && next build",
     "typedoc": "typedoc --options typedoc.json ../core/src"
   },
   "dependencies": {

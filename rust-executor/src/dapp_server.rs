@@ -14,7 +14,8 @@ pub(crate) async fn serve_dapp(port: u16) -> Result<(), Box<dyn std::error::Erro
     .configure(&config)
     .mount("/", FileServer::from(relative!("dapp")))
     
-    .launch();
+    .launch()
+    .await;
 
     Ok(())
 }

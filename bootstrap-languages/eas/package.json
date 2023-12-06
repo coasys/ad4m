@@ -1,0 +1,21 @@
+{
+  "name": "@perspect3vism/eas",
+  "version": "0.7.1",
+  "description": "AD4M Language implementation for fetching of EAS attestation records",
+  "main": "index.js",
+  "scripts": {
+    "test-disabled": "echo \"No agent language integration tests\"",
+    "build": "deno run --allow-all esbuild.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@perspect3vism/ad4m": "*",
+    "@types/node": "^18.0.0",
+    "tslib": "^2.0.0",
+    "typescript": "^4.2.4",
+    "xmlhttprequest": "^1.8.0"
+  },
+  "dependencies": {
+  }
+}
