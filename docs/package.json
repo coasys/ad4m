@@ -1,13 +1,13 @@
 {
   "name": "@perspect3vism/ad4m-docs",
-  "version": "0.7.1",
+  "version": "0.8.0-prerelease",
   "description": "Documentation for AD4M",
   "license": "CAL-1.0",
   "homepage": "./",
   "scripts": {
     "dev": "next dev",
     "start": "next start",
-    "build": "yarn run typedoc && next build",
+    "build": "pnpm run typedoc && next build",
     "typedoc": "typedoc --options typedoc.json ../core/src"
   },
   "dependencies": {

@@ -6,6 +6,7 @@ use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
+use hyper::header::HeaderValue;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use log::info;
@@ -18,18 +19,26 @@ struct Asset;
 
 
 async fn serve_file(req: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-    let path = req.uri().path();
-    let path_clone = path.clone().replace("/", "");
-    let mut base = path_clone.as_str();
+    let mut path = req.uri().path()[1..].to_string();
 
-    if base == "" {
-        base = "index.html";
+    if path == "" {
+        path = String::from("index.html");
     }
 
-    match Asset::get(base) {
+    match Asset::get(&path) {
         Some(content) => {
-            let response = Response::new(Full::new(Bytes::from(content.data.into_owned())));
-            Ok(response)
+            if path != String::from("index.html") && path != String::from("favicon.ico") && !path.contains(".css") {
+                let mut response = Response::new(Full::new(Bytes::from(content.data.into_owned())));
+                response.headers_mut().insert("Content-Type", HeaderValue::from_static("application/javascript"));
+                Ok(response)
+            } else if path.contains(".css") {
+                let mut response = Response::new(Full::new(Bytes::from(content.data.into_owned())));
+                response.headers_mut().insert("Content-Type", HeaderValue::from_static("text/css"));
+                Ok(response)
+            } else {
+                let response = Response::new(Full::new(Bytes::from(content.data.into_owned())));
+                Ok(response)
+            }
         },
         None => {
             let response = Response::new(Full::new(Bytes::from("File not found")));

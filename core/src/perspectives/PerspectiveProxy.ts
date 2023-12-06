@@ -1,7 +1,6 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
-import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
@@ -9,6 +8,7 @@ import { Subject } from "../subject/Subject";
 import { ExpressionRendered } from "../expression/Expression";
 import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../subject/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
+import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
@@ -113,7 +113,7 @@ export class PerspectiveProxy {
     }
 
     /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
-    get neighbourhood(): Neighbourhood|void {
+    get neighbourhood(): NeighbourhoodExpression|void {
         return this.#handle.neighbourhood
     }
 
@@ -320,36 +320,49 @@ export class PerspectiveProxy {
         await this.executeAction(action, exprAddr, undefined)
     }
 
-    /** Set the perspective's Social DNA code to the given string.
-     * This will replace all previous SDNA code elements with the new one.
-     */
-    async setSdna(sdnaCode: string) {
-        await this.setSingleTarget(new Link({
-            source: "ad4m://self",
-            predicate: "ad4m://has_zome",
-            target: Literal.from(sdnaCode).toUrl()
-        }), 'shared')
-    }
-
     /** Returns the perspective's Social DNA code
      * This will return all SDNA code elements in an array.
      */
     async getSdna(): Promise<string[]> {
         let links = await this.get(new LinkQuery({
-            source: "ad4m://self",
-            predicate: "ad4m://has_zome"
+            predicate: "ad4m://sdna"
         }))
 
         return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
     }
 
     /** Adds the given Social DNA code to the perspective's SDNA code */
-    async addSdna(sdnaCode: string) {
-        await this.add(new Link({
+    async addSdna(name: string, sdnaCode: string, type: "subject_class" | "flow" | "custom") {
+        let predicate = "ad4m://has_custom_sdna";
+
+        if (type === 'subject_class') predicate = "ad4m://has_subject_class"
+        else if (type === 'flow') predicate = "ad4m://has_flow"
+
+        const literalName = Literal.from(name).toUrl();
+
+        const links = await this.get(new LinkQuery({
             source: "ad4m://self",
-            predicate: "ad4m://has_zome",
+            predicate,
+            target: literalName
+        }))
+
+        const sdnaLinks: any[] = []
+
+        if (links.length === 0) {
+            sdnaLinks.push(new Link({
+                source: "ad4m://self",
+                predicate,
+                target: literalName
+            }));
+        }
+
+        sdnaLinks.push(new Link({
+            source: literalName,
+            predicate: "ad4m://sdna",
             target: Literal.from(sdnaCode).toUrl()
         }))
+
+        await this.addLinks(sdnaLinks);
     }
 
     /** Returns all the Subject classes defined in this perspectives SDNA */
@@ -581,11 +594,14 @@ export class PerspectiveProxy {
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
     async ensureSDNASubjectClass(jsClass: any): Promise<void> {
-        if((await this.subjectClassesByTemplate(new jsClass)).length > 0) {
+        const subjectClass = await this.subjectClassesByTemplate(new jsClass)
+        if(subjectClass.length > 0) {
             return
         }
 
-        await this.addSdna(jsClass.generateSDNA())
+        const { name, sdna } = jsClass.generateSDNA();
+
+        await this.addSdna(name, sdna, 'subject_class');
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {

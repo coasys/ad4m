@@ -1,4 +1,4 @@
-import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language  } from '@perspect3vism/ad4m'
+import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language, NeighbourhoodExpression  } from '@perspect3vism/ad4m'
 import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@perspect3vism/ad4m'
 
 import * as Config from './Config'
@@ -269,11 +269,13 @@ export default class Ad4mCore {
         const neighbourhoodAddress = await (this.languageController.getNeighbourhoodLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
         const neighbourhoodUrl = `${Config.neighbourhoodLanguageAlias}://${neighbourhoodAddress}`
 
+        let neighbourHoodExp: NeighbourhoodExpression = await this.languageController.getPerspective(neighbourhoodAddress);
+
         //Add shared perspective to original perpspective and then update controller
         perspectiveID.sharedUrl = neighbourhoodUrl
-        perspectiveID.neighbourhood = neighbourhood;
+        perspectiveID.neighbourhood = neighbourHoodExp;
         perspectiveID.state = PerspectiveState.Synced;
-        await this.#perspectivesController!.replace(perspectiveID, neighbourhood, false, PerspectiveState.Synced)
+        await this.#perspectivesController!.replace(perspectiveID, neighbourHoodExp, false, PerspectiveState.Synced)
         return neighbourhoodUrl
     }
 
@@ -287,17 +289,15 @@ export default class Ad4mCore {
         if (neighbourHoodExp == null) {
             throw Error(`Could not find neighbourhood with URL ${url}`);
         };
-        console.log("Core.installNeighbourhood(): Got neighbourhood", neighbourHoodExp);
-        let neighbourhood: Neighbourhood = neighbourHoodExp.data;
+        console.log("Core.installNeighbourhood(): Got neighbourhood", JSON.stringify(neighbourHoodExp));
+        let neighbourhood: NeighbourhoodExpression = neighbourHoodExp;
         let state = PerspectiveState.NeighbourhoodJoinInitiated;
-
         try {
-            await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
+            await this.languageController.languageByRef({address: neighbourhood.data.linkLanguage} as LanguageRef)
             state = PerspectiveState.LinkLanguageInstalledButNotSynced;
         } catch (e) {
             state = PerspectiveState.LinkLanguageFailedToInstall;
         }
-
         console.log("Core.installNeighbourhood(): Creating perspective", url, neighbourhood, state);
         return await this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }

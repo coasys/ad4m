@@ -49,6 +49,10 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
 
+    - uses: pnpm/action-setup@v2
+      with:
+        version: 8
+
     - name: Install Deno
       uses: denoland/setup-deno@v1
       with:
@@ -62,11 +66,11 @@ jobs:
     - name: Install HC
       run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
 
-    - name: Yarn Install
-      run: yarn install
+    - name: pnpm Install
+      run: pnpm install
 
-    - name: Yarn Build (builds entire workspace)
-      run: yarn build
+    - name: pnpm Build (builds entire workspace)
+      run: pnpm build
 
     - name: Run binaries test script
       run: ./tests/bats/bin/bats tests/binaries.bats || cat ~/Library/Logs/DiagnosticReports/*

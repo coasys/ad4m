@@ -1,6 +1,6 @@
 [package]
 name = "rust-executor"
-version = "0.7.1"
+version = "0.8.0-prerelease"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]
 description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
@@ -77,7 +77,7 @@ holochain_types = { version = "0.3.0-beta-dev.20" }
 holochain_cli_run_local_services = { version = "0.3.0-beta-dev.13" }
 kitsune_p2p_types = { version = "0.3.0-beta-dev.12" }
 
-scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", rev = "0e90381eee2d455bf34be0209ef29996daf51c65", features = ["multi_thread"] }
+scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", rev = "941a349165539aed1637e54cdc40417096424021", features = ["multi_thread"] }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 [dev-dependencies]

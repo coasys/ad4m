@@ -1,0 +1,16 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+deleted file mode 100644
+index d2e69532faf05093f93a2b45b180f602a4cbbdfd..0000000000000000000000000000000000000000
+diff --git a/dist/index.js b/dist/index.js
+index a7cfb6ace3eef70791fb07acc30b071699777f64..de5f8297419ea3b258a4ed195cfc0bc6cd3a9e60 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,7 +1,7 @@
+ 
+ 'use strict'
+ 
+-if (process.env.NODE_ENV === 'production') {
++if (true) {
+   module.exports = require('./did-key-web-crypto.cjs.production.min.js')
+ } else {
+   module.exports = require('./did-key-web-crypto.cjs.development.js')

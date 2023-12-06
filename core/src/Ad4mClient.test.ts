@@ -557,7 +557,7 @@ describe('Ad4mClient', () => {
             expect(p1.uuid).toBe('00001')
             expect(p2.uuid).toBe('00002')
             expect(p2.sharedUrl).toBe('neighbourhood://Qm12345')
-            expect(p2.neighbourhood.linkLanguage).toBe("language://Qm12345")
+            expect(p2.neighbourhood.data.linkLanguage).toBe("language://Qm12345")
         })
 
         it('byUUID() smoke test', async () => {
