@@ -3,6 +3,7 @@ import { AgentContext } from "../context/AgentContext";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { useNavigate } from "react-router-dom";
 import Logo from "./Logo";
+import { invoke } from "@tauri-apps/api";
 
 const Login = (props: any) => {
   const {
@@ -11,7 +12,7 @@ const Login = (props: any) => {
   } = useContext(AgentContext);
 
   const {
-    state: { isInitialized, isUnlocked, connected, connectedLaoding },
+    state: { isInitialized, isUnlocked, connected, connectedLaoding, client },
     methods: { resetEndpoint },
   } = useContext(Ad4minContext);
 
@@ -28,10 +29,19 @@ const Login = (props: any) => {
   const [opened, setOpened] = useState(false);
   const [usernameError, setUsernameError] = useState<string | null>(null);
   let [passwordError, setPasswordError] = useState<string | null>(null);
+  const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
 
   if (hasLoginError) {
     passwordError = "Invalid password";
   }
+
+  const clearAgent = async () => {
+    let agentStatus = await client?.agent.status();
+    
+    if (!agentStatus?.isUnlocked) {
+      await invoke("clear_state");
+    }
+  };
 
   const generate = () => {
     checkUsernamePassword();
@@ -413,6 +423,13 @@ const Login = (props: any) => {
                 </j-button>
               </j-input>
               <j-button
+                size="sm"
+                variant="link"
+                onClick={() => setClearAgentModalOpen(true)}
+              >
+                Reset agent
+              </j-button>
+              <j-button
                 full
                 size="lg"
                 class="full-button"
@@ -426,6 +443,34 @@ const Login = (props: any) => {
             </j-flex>
           </div>
         </div>
+      )}
+      {clearAgentModalOpen && (
+        <j-modal
+          open={clearAgentModalOpen}
+          onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Reset agent
+              </j-text>
+            </j-box>
+            <j-text>
+              Warning: by clearing the agent you will loose all the data and
+              will have to start with a fresh agent
+            </j-text>
+            <j-box p="200"></j-box>
+            <j-flex>
+              <j-button
+                variant="primary"
+                onClick={() => clearAgent(password)}
+                loading={loading}
+              >
+                Delete Agent
+              </j-button>
+            </j-flex>
+          </j-box>
+        </j-modal>
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-import { Agent, Expression, Neighbourhood, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkStatus, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent } from "@perspect3vism/ad4m"
+import { Agent, Expression, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkStatus, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent, NeighbourhoodExpression } from "@perspect3vism/ad4m"
 import { Link, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
@@ -19,7 +19,7 @@ export default class Perspective {
     uuid?: string;
     author?: Agent;
     timestamp?: string;
-    neighbourhood?: Neighbourhood;
+    neighbourhood?: NeighbourhoodExpression;
     sharedUrl?: string;
     createdFromJoin: boolean;
     isFastPolling: boolean;
@@ -40,7 +40,7 @@ export default class Perspective {
     #prologMutex: Mutex
     #isTeardown: boolean = false;
 
-    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState) {
+    constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: NeighbourhoodExpression, createdFromJoin?: boolean, state?: PerspectiveState) {
         this.updateFromId(id)
         this.createdFromJoin = false;
         this.isFastPolling = false;
@@ -204,11 +204,11 @@ export default class Perspective {
     }
 
     private async getLinksAdapter(): Promise<LinkSyncAdapter | undefined> {
-        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+        if(!this.neighbourhood || !this.neighbourhood.data.linkLanguage) {
             //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return undefined;
         }
-        const address = this.neighbourhood!.linkLanguage;
+        const address = this.neighbourhood!.data.linkLanguage;
 
         try {
             if (this.state === PerspectiveState.LinkLanguageFailedToInstall) {
@@ -233,7 +233,7 @@ export default class Perspective {
     }
 
     private renderLinksAdapter(): Promise<Ad4mPerspective> {
-        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+        if(!this.neighbourhood || !this.neighbourhood.data.linkLanguage) {
             //console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve(new Ad4mPerspective([]))
         }
@@ -260,7 +260,7 @@ export default class Perspective {
 
     //@ts-ignore
     private callLinksAdapter(functionName: string, ...args): Promise<PerspectiveDiff> {
-        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+        if(!this.neighbourhood || !this.neighbourhood.data.linkLanguage) {
             console.warn("Perspective.callLinksAdapter: Did not find neighbourhood or linkLanguage for neighbourhood on perspective, returning empty array")
             return Promise.resolve({
                 additions: [],
@@ -297,7 +297,7 @@ export default class Perspective {
     }
 
     private getCurrentRevision(): Promise<string | null> {
-        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+        if(!this.neighbourhood || !this.neighbourhood.data.linkLanguage) {
             return Promise.resolve(null)
         }
 
@@ -338,7 +338,7 @@ export default class Perspective {
     }
 
     private async commit(diff: PerspectiveDiff): Promise<PerspectiveDiff | null> {
-        if(!this.neighbourhood || !this.neighbourhood.linkLanguage) {
+        if(!this.neighbourhood || !this.neighbourhood.data.linkLanguage) {
             return null;
         }
 
@@ -784,11 +784,11 @@ export default class Perspective {
     }
 
     isSDNALink(link: LinkExpression): boolean {
-        return link.source == 'ad4m://self' && link.predicate == 'ad4m://has_zome'
+        return link.source == 'ad4m://self' && ['ad4m://has_subject_class', 'ad4m://has_flow', "ad4m://has_custom_sdna"].includes(link.predicate)
     }
 
     async initEngineFacts(): Promise<string[]> {
-        let lines = []
+        let lines: string[] = []
 
         const allLinks = await this.getLinks(new LinkQuery({}))
         //-------------------
@@ -857,27 +857,52 @@ export default class Perspective {
 
         lines.push(":- use_module(library(lists)).");
 
-        let seenSubjectClasses = new Set()
+        let seenSubjectClasses = new Map()
+        const authorAgents = [this.#agent.agent?.did, this.neighbourhood?.data.author];
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
-            if(this.isSDNALink(link)) {
-                try {
+            if (linkExpression.proof.valid && authorAgents.includes(link.author)) {
+                if (this.isSDNALink(link)) {
+                    const name = Literal.fromUrl(link.target).get();
+    
+                    seenSubjectClasses.set(name, {
+                        type: link.predicate,
+                        ...seenSubjectClasses.get(name)
+                    });
+                }
+    
+                if (link.predicate === "ad4m://sdna") {
+                    const name = Literal.fromUrl(link.source).get();
                     let code = Literal.fromUrl(link.target).get()
-                    let subjectClassMatch = code.match(/subject_class\("(.+?)",/);
-                    if (subjectClassMatch) {
-                        let subjectClassName = subjectClassMatch[1];
-                        if (!seenSubjectClasses.has(subjectClassName)) {
-                            seenSubjectClasses.add(subjectClassName);
-                            lines = lines.concat(code.split('\n'))
-                        }
+    
+                    const subjectClass = seenSubjectClasses.get(name);
+    
+                    if (subjectClass && subjectClass?.code) {
+                        if ((new Date(linkExpression?.timestamp).getTime() > new Date(subjectClass?.timestamp).getTime())) {
+                            seenSubjectClasses.set(name, {
+                                code,
+                                timestamp:  linkExpression.timestamp,
+                                ...seenSubjectClasses.get(name)
+                            })
+                        } 
                     } else {
-                        lines = lines.concat(code.split('\n'))
+                        seenSubjectClasses.set(name, {
+                            code,
+                            timestamp:  linkExpression.timestamp,
+                            ...seenSubjectClasses.get(name)
+                        })
                     }
-                } catch {
-                    console.error("Perspective.initEngineFacts: Error loading SocialDNA link target as literal... Ignoring SocialDNA link.");
                 }
             }
         }
+
+        seenSubjectClasses.forEach(({ code, type }, key) => {
+            let sdna = code;
+            try {
+                sdna = Literal.fromUrl(code).get();
+            } catch (e) {}
+            lines = lines.concat(sdna.split('\n'))
+        })
 
         return lines
     }

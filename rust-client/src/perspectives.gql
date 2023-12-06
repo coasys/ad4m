@@ -4,25 +4,28 @@ query All {
     name
     sharedUrl
     neighbourhood {
-      linkLanguage
-      meta {
-        links {
-          author
-          timestamp
-          data {
-            source
-            predicate
-            target
+      data {
+        linkLanguage
+        meta {
+          links {
+            author
+            timestamp
+            data {
+              source
+              predicate
+              target
+            }
+            proof {
+              valid
+              invalid
+              signature
+              key
+            }
+            status
           }
-          proof {
-            valid
-            invalid
-            signature
-            key
-          }
-          status
         }
       }
+      author
     }
   }
 }
