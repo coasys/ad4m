@@ -599,7 +599,8 @@ export class PerspectiveProxy {
             return
         }
 
-        const { name, sdna } = jsClass.generateSDNA();
+        const sdna = jsClass.generateSDNA();
+        const name = jsClass.className;
 
         await this.addSdna(name, sdna, 'subject_class');
     }
