@@ -875,7 +875,7 @@ importers:
     devDependencies:
       '@apollo/client':
         specifier: 3.7.10
-        version: 3.7.10(graphql@15.7.2)(react@17.0.2)
+        version: 3.7.10(graphql-ws@5.14.2)(graphql@15.7.2)(react@17.0.2)
       '@peculiar/webcrypto':
         specifier: ^1.1.7
         version: 1.4.3(patch_hash=bbuork7btorjpwgh5cqtzopbca)
@@ -900,6 +900,9 @@ importers:
       '@types/js-yaml':
         specifier: ^4.0.2
         version: 4.0.9
+      '@types/json-stable-stringify':
+        specifier: ^1.0.36
+        version: 1.0.36
       '@types/lowdb':
         specifier: ^1.0.11
         version: 1.0.15
@@ -915,6 +918,12 @@ importers:
       '@types/sinon':
         specifier: '*'
         version: 17.0.2
+      '@types/uuid':
+        specifier: ^8.3.0
+        version: 8.3.4
+      '@types/ws':
+        specifier: ^7.4.0
+        version: 7.4.7
       chai:
         specifier: '*'
         version: 4.3.10
@@ -927,6 +936,12 @@ importers:
       fs-extra:
         specifier: 11.2.0
         version: 11.2.0
+      graphql-ws:
+        specifier: ^5.14.2
+        version: 5.14.2(graphql@15.7.2)
+      json-stable-stringify:
+        specifier: ^1.1.0
+        version: 1.1.0
       kill-process-by-name:
         specifier: ^1.0.5
         version: 1.0.5
@@ -1147,7 +1162,7 @@ packages:
       tslib: 2.6.2
       zen-observable-ts: 1.2.5
 
-  /@apollo/client@3.7.10(graphql@15.7.2)(react@17.0.2):
+  /@apollo/client@3.7.10(graphql-ws@5.14.2)(graphql@15.7.2)(react@17.0.2):
     resolution: {integrity: sha512-/k1MfrqPKYiPNdHcOzdxg9cEx96vhAGxAcSorzfBvV29XtFQcYW2cPNQOTjK/fpSMtqVo8UNmu5vwQAWD1gfCg==}
     peerDependencies:
       graphql: ^14.0.0 || ^15.0.0 || ^16.0.0
@@ -1171,6 +1186,7 @@ packages:
       '@wry/trie': 0.3.2
       graphql: 15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)
       graphql-tag: 2.12.6(graphql@15.7.2)
+      graphql-ws: 5.14.2(graphql@15.7.2)
       hoist-non-react-statics: 3.3.2
       optimism: 0.16.2
       prop-types: 15.8.1
@@ -6298,7 +6314,6 @@ packages:
 
   /@types/json-stable-stringify@1.0.36:
     resolution: {integrity: sha512-b7bq23s4fgBB76n34m2b3RBf6M369B0Z9uRR8aHTMd8kZISRkmDEpPD8hhpYvDFzr3bJCPES96cm3Q6qRNDbQw==}
-    dev: false
 
   /@types/json5@0.0.29:
     resolution: {integrity: sha512-dRLjCWHYg4oaA77cxO64oO+7JwCwnIzkZPdrrC71jQmQtlhM556pwKo5bUzqvZndkVbeFLIIi+9TC40JNF5hNQ==}
@@ -6539,7 +6554,6 @@ packages:
     resolution: {integrity: sha512-JQbbmxZTZehdc2iszGKs5oC3NFnjeay7mtAWrdt7qNtAVK0g19muApzAy4bm9byz79xa2ZnO/BOBC2R8RC5Lww==}
     dependencies:
       '@types/node': 16.18.64
-    dev: false
 
   /@types/ws@8.5.10:
     resolution: {integrity: sha512-vmQSUcfalpIq0R9q7uTo2lXs6eGIpt9wtnLdMv9LVpIjCA/+ufZRozlVoVelIYixx1ugCBKDhn89vnsEGOCx9A==}
@@ -13464,6 +13478,15 @@ packages:
       graphql: '>=0.11 <=16'
     dependencies:
       graphql: 15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)
+
+  /graphql-ws@5.14.2(graphql@15.7.2):
+    resolution: {integrity: sha512-LycmCwhZ+Op2GlHz4BZDsUYHKRiiUz+3r9wbhBATMETNlORQJAaFlAgTFoeRh6xQoQegwYwIylVD1Qns9/DA3w==}
+    engines: {node: '>=10'}
+    peerDependencies:
+      graphql: '>=0.11 <=16'
+    dependencies:
+      graphql: 15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)
+    dev: true
 
   /graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q):
     resolution: {integrity: sha512-AnnKk7hFQFmU/2I9YSQf3xw44ctnSFCfp3zE0N6W174gqe9fWG/2rKaKxROK7CcI3XtERpjEKFqts8o319Kf7A==}
