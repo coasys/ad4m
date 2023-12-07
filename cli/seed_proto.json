@@ -77,6 +77,15 @@
         },
         {
             "meta": {
+                "name": "centralizedFileStorageLanguage", 
+                "description": "Cloudflare based language for storing files", 
+                "sourceCodeLink": "https://github.com/coasys/ad4m",
+                "possibleTemplateParams": ["uid", "name", "description"]
+            },
+            "resource": "../bootstrap-languages/centralized-file-storage/build/bundle.js"
+        },
+        {
+            "meta": {
                 "name": "easLanguage", 
                 "description": "EAS fetching language", 
                 "sourceCodeLink": "https://github.com/perspect3vism/file-storage-language",
