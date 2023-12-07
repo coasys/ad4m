@@ -114,6 +114,7 @@ export async function startExecutor(dataPath: string,
 }
 
 export function apolloClient(port: number, token?: string): ApolloClient<any> {
+    //@ts-ignore
     const wsLink = new GraphQLWsLink(createClient({
         url: `ws://127.0.0.1:${port}/graphql`,
         webSocketImpl: Websocket,

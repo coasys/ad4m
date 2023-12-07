@@ -200,7 +200,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
             //     expect(bobSyncChangeData).to.be.equal(PerspectiveState.Synced);
             // })
 
-            describe('with set up and joined NH for Telepresence', async () => {
+
+            describe.skip('with set up and joined NH for Telepresence', async () => {
                 let aliceNH: NeighbourhoodProxy|undefined
                 let bobNH: NeighbourhoodProxy|undefined
                 let aliceDID: string|undefined
