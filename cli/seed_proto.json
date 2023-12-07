@@ -36,7 +36,7 @@
             "sourceCodeLink": "https://github.com/perspect3vism/agent-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "../bootstrap-languages/agent-language/build//bundle.js"
+        "resource": "../bootstrap-languages/centralized-agent-language/build/bundle.js"
     },
     "directMessageLanguage": {
         "meta": {
