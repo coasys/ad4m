@@ -69,7 +69,7 @@ jobs:
       run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
 
     - name: Install dependencies
-      run: pnpm install
+      run: pnpm install --no-frozen-lockfile
 
     - name: Build the workspace
       run: pnpm run build
