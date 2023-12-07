@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use rocket::fs::{FileServer, relative};
-use rocket::{Rocket, Config};
+use rocket::Config;
 
 pub(crate) async fn serve_dapp(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config {
@@ -10,12 +10,11 @@ pub(crate) async fn serve_dapp(port: u16) -> Result<(), Box<dyn std::error::Erro
         ..Config::debug_default()
     };
 
-    let rocket = rocket::build()
-    .configure(&config)
-    .mount("/", FileServer::from(relative!("dapp")))
-    
-    .launch()
-    .await;
+    rocket::build()
+        .configure(&config)
+        .mount("/", FileServer::from(relative!("dapp")))
+        .launch()
+        .await?;
 
     Ok(())
 }
