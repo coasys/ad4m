@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/ad4m-executor",
-  "version": "0.7.1",
+  "version": "0.8.0-prerelease",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -16,9 +16,9 @@
   "type": "module",
   "types": "lib/main.d.ts",
   "scripts": {
-    "build": "deno run --allow-all esbuild.ts",
+    "build": "deno run --allow-all esbuild.ts && deno run --allow-all replaceBufferImport.ts",
     "bundle": "deno run --allow-all esbuild.ts",
-    "test": "yarn run test-perspective && yarn test-db && yarn run test-auth-unit",
+    "test": "pnpm run test-perspective && pnpm test-db && pnpm run test-auth-unit",
     "test-perspective": "ts-mocha -p tsconfig.json --exit src/core/Perspective.test.ts",
     "test-db": "ts-mocha -p tsconfig.json --exit src/core/db.test.ts",
     "test-prolog": "ts-mocha -p tsconfig.json --exit src/core/PrologInstance.test.ts",
@@ -52,14 +52,17 @@
     "@types/sha256": "^0.2.0",
     "@types/sinon": "*",
     "@types/uuid": "^8.3.1",
+    "@types/lodash": "*",
     "chai": "*",
     "faker": "^5.1.0",
     "mocha": "*",
     "sinon": "*",
-    "ts-mocha": "*"
+    "ts-mocha": "*",
+    "patch-package": "^8.0.0",
+    "ts-node": "^10.8.0"
   },
   "dependencies": {
-    "@holochain/client": "perspect3vism/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",
+    "@holochain/client": "coasys/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b",
     "@msgpack/msgpack": "3.0.0-beta2",
     "@noble/secp256k1": "^1.7.0",
     "@perspect3vism/ad4m": "link:../core",

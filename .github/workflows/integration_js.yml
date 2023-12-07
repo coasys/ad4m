@@ -34,7 +34,10 @@ jobs:
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
-        cache: 'yarn'
+
+    - uses: pnpm/action-setup@v2
+      with:
+        version: 8
 
     - name: Cache cargo
       id: cache-cargo
@@ -66,10 +69,10 @@ jobs:
       run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
 
     - name: Install dependencies
-      run: yarn install
+      run: pnpm install --no-frozen-lockfile
 
     - name: Build the workspace
-      run: yarn run build
+      run: pnpm run build
 
     - uses: actions/cache/save@v3
       if: always()
@@ -83,10 +86,10 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
       
     - name: Run the tests
-      run: yarn test
+      run: pnpm test
 
-    # - name: Run integration tests
-    #   run: cd ./tests/js && yarn run test-main
+    - name: Run integration tests
+      run: cd ./tests/js && pnpm run test-main
 
   # test-windows:
   #   name: JS Ad4mClient <> AD4M Executor - Windows
@@ -120,7 +123,7 @@ jobs:
   #       uses: actions/setup-node@v2
   #       with:
   #         node-version: ${{ matrix.node-version }}
-  #         cache: 'yarn'
+  #         cache: 'pnpm'
 
   #     - name: Install Deno
   #       uses: denoland/setup-deno@v1
@@ -128,10 +131,10 @@ jobs:
   #         deno-version: v1.32.4
 
   #     - name: Install dependencies
-  #       run: yarn install
+  #       run: pnpm install
 
   #     - name: Build the workspace
-  #       run: yarn run build
+  #       run: pnpm run build
       
   #     - uses: actions/cache/save@v3
   #       if: always()
@@ -148,7 +151,7 @@ jobs:
   #       run: |
   #         choco install swi-prolog
   #         $env:path += ";C:\Program Files\swipl\bin"
-  #         yarn run test:windows
+  #         pnpm run test:windows
 
   # test-macos:
   #   name: JS Ad4mClient <> AD4M Executor - MacOS
@@ -166,7 +169,7 @@ jobs:
   #     uses: actions/setup-node@v2
   #     with:
   #       node-version: ${{ matrix.node-version }}
-  #       cache: 'yarn'
+  #       cache: 'pnpm'
 
   #   - name: Cache cargo
   #     id: cache-cargo
@@ -190,10 +193,10 @@ jobs:
   #       deno-version: v1.32.4
 
   #   - name: Install dependencies
-  #     run: yarn install
+  #     run: pnpm install
 
   #   - name: Build the workspace
-  #     run: yarn run build
+  #     run: pnpm run build
 
   #   - uses: actions/cache/save@v3
   #     if: always()
@@ -207,4 +210,4 @@ jobs:
   #       key: $${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
       
   #   - name: Run the tests
-  #     run: yarn test
+  #     run: pnpm test

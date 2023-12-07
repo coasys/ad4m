@@ -1,0 +1,13 @@
+diff --git a/dist/index.js b/dist/index.js
+index 99c9cf9c6b4c906bb43214c575ab562a76e28490..81db4a1558b7436869a42e011c681268ff826954 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,7 +1,7 @@
+ 
+ 'use strict'
+ 
+-if (process.env.NODE_ENV === 'production') {
++if (true) {
+   module.exports = require('./web-crypto-key-pair.cjs.production.min.js')
+ } else {
+   module.exports = require('./web-crypto-key-pair.cjs.development.js')

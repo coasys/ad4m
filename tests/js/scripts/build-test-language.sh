@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# cd languages/test-language
-# yarn install
-# yarn run build
+cd languages/test-language
+pnpm i
+pnpm run build
 
-# cd ../note-store
-# yarn install
-# yarn run build
+cd ../note-store
+pnpm i
+pnpm run build
