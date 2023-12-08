@@ -65,6 +65,10 @@ jobs:
       with:
         deno-version: v1.32.4
 
+    - uses: pnpm/action-setup@v2
+      with:
+        version: 8
+
     - name: install dependencies (ubuntu only)
       if: matrix.platform == 'GH-hosted-ubuntu'
       run: |
@@ -103,10 +107,6 @@ jobs:
       uses: actions/setup-node@v1
       with:
         node-version: ${{ matrix.node-version }}
-
-    - uses: pnpm/action-setup@v2
-      with:
-        version: 8
 
     - name: Install GO
       uses: actions/setup-go@v4
@@ -398,6 +398,10 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: '1.18'
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
 
       - name: Install Linux Deps
         run: |
