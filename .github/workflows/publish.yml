@@ -71,9 +71,6 @@ jobs:
       with:
         go-version: '1.20.6'
 
-    - name: Install HC
-      run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-
     - name: Install Deno
       uses: denoland/setup-deno@v1
       with:
