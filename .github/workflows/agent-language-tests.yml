@@ -56,6 +56,6 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: pnpm install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.3.0-beta-dev.27 || echo "hc already installed"
     - run: pnpm run build-languages
     - run: cd bootstrap-languages/agent-language/hc-dna/zomes/tests && pnpm install && pnpm run test

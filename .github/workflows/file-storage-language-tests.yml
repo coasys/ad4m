@@ -105,6 +105,6 @@ jobs:
 
     - run: rustup target add wasm32-unknown-unknown
     - run: pnpm install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
+    - run: cargo install holochain_cli --version 0.3.0-beta-dev.27 || echo "hc already installed"
     - run: pnpm run build
     - run: cd bootstrap-languages/file-storage && pnpm run integration-test
