@@ -8,10 +8,10 @@
     "rollup-icons": "rollup -c rollup.config.icons.js",
     "rollup-expression-ui": "rollup -c rollup.config.expression-ui.js",
     "build": "run-script-os",
-    "build:linux": "yarn build:common",
-    "build:macos": "yarn build:common",
-    "build:windows": "yarn build:common",
-    "build:common": "yarn rollup-icons && yarn rollup-expression-ui && deno run --allow-all esbuild.ts"
+    "build:linux": "pnpm run build:common",
+    "build:macos": "pnpm run build:common",
+    "build:windows": "pnpm run build:common",
+    "build:common": "pnpm run rollup-icons && pnpm run rollup-expression-ui && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",
