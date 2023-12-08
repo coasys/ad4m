@@ -1,0 +1,12 @@
+*.dna
+hc-dna/zomes/tests/node_modules
+hc-dna/.cargo
+hc-dna/target
+build/*
+
+*.js
+*.js.map
+!rollup.config.js
+!dna.js
+
+node_modules

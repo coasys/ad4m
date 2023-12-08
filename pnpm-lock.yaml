@@ -171,6 +171,81 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
 
+  bootstrap-languages/centralized-agent-language:
+    dependencies:
+      email-validator:
+        specifier: ^2.0.4
+        version: 2.0.4
+      md5:
+        specifier: ^2.3.0
+        version: 2.3.0
+      postcss:
+        specifier: ^8.2.1
+        version: 8.4.31
+    devDependencies:
+      '@perspect3vism/ad4m':
+        specifier: '*'
+        version: link:../../core
+      '@perspect3vism/rollup-plugin-dna':
+        specifier: ^0.0.2
+        version: 0.0.2
+      '@rollup/plugin-commonjs':
+        specifier: ^17.0.0
+        version: 17.1.0(rollup@2.79.1)
+      '@rollup/plugin-json':
+        specifier: ^4.1.0
+        version: 4.1.0(rollup@2.79.1)
+      '@rollup/plugin-node-resolve':
+        specifier: ^8.0.0
+        version: 8.4.0(rollup@2.79.1)
+      '@rollup/plugin-typescript':
+        specifier: ^11.1.0
+        version: 11.1.5(rollup@2.79.1)(tslib@2.6.2)(typescript@4.9.5)
+      '@tsconfig/svelte':
+        specifier: ^1.0.0
+        version: 1.0.13
+      '@types/node':
+        specifier: ^18.0.0
+        version: 18.11.10
+      rollup:
+        specifier: ^2.3.4
+        version: 2.79.1
+      rollup-plugin-postcss:
+        specifier: ^4.0.0
+        version: 4.0.2(postcss@8.4.31)
+      rollup-plugin-string:
+        specifier: ^3.0.0
+        version: 3.0.0
+      rollup-plugin-svelte:
+        specifier: ^6.0.0
+        version: 6.1.1(rollup@2.79.1)(svelte@3.59.2)
+      rollup-plugin-terser:
+        specifier: ^7.0.0
+        version: 7.0.2(rollup@2.79.1)
+      run-script-os:
+        specifier: ^1.1.6
+        version: 1.1.6
+      svelte:
+        specifier: ^3.0.0
+        version: 3.59.2
+      svelte-check:
+        specifier: ^1.0.0
+        version: 1.6.0(postcss@8.4.31)(svelte@3.59.2)
+      svelte-preprocess:
+        specifier: ^4.0.0
+        version: 4.10.7(postcss@8.4.31)(svelte@3.59.2)(typescript@4.9.5)
+      tslib:
+        specifier: ^2.0.0
+        version: 2.6.2
+      typescript:
+        specifier: ^4.2.4
+        version: 4.9.5
+      xmlhttprequest:
+        specifier: ^1.8.0
+        version: 1.8.0
+
+  bootstrap-languages/centralized-file-storage: {}
+
   bootstrap-languages/centralized-p-diff-sync:
     dependencies:
       '@perspect3vism/ad4m':
@@ -14350,7 +14425,7 @@ packages:
     requiresBuild: true
     dependencies:
       ansi-escapes: 3.2.0
-      chalk: 2.1.0
+      chalk: 2.4.2
       cli-cursor: 2.1.0
       cli-width: 2.2.1
       external-editor: 2.2.0

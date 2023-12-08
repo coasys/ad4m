@@ -36,7 +36,7 @@
             "sourceCodeLink": "https://github.com/perspect3vism/agent-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "../bootstrap-languages/agent-language/build//bundle.js"
+        "resource": "../bootstrap-languages/centralized-agent-language/build/bundle.js"
     },
     "directMessageLanguage": {
         "meta": {
@@ -74,6 +74,15 @@
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/file-storage/build/bundle.js"
+        },
+        {
+            "meta": {
+                "name": "centralizedFileStorageLanguage", 
+                "description": "Cloudflare based language for storing files", 
+                "sourceCodeLink": "https://github.com/coasys/ad4m",
+                "possibleTemplateParams": ["uid", "name", "description"]
+            },
+            "resource": "../bootstrap-languages/centralized-file-storage/build/bundle.js"
         },
         {
             "meta": {

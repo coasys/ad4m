@@ -1,0 +1,45 @@
+{
+  "name": "@perspect3vism/centralized-agent-language",
+  "version": "0.7.1",
+  "description": "AD4M Language implementation for Holochain profile DNA",
+  "main": "index.js",
+  "scripts": {
+    "test-disabled": "echo \"No agent language integration tests\"",
+    "rollup-icons": "rollup -c rollup.config.icons.js",
+    "rollup-expression-ui": "rollup -c rollup.config.expression-ui.js",
+    "build": "run-script-os",
+    "build:linux": "pnpm run build:common",
+    "build:macos": "pnpm run build:common",
+    "build:windows": "pnpm run build:common",
+    "build:common": "pnpm run rollup-icons && pnpm run rollup-expression-ui && deno run --allow-all esbuild.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@perspect3vism/ad4m": "*",
+    "@perspect3vism/rollup-plugin-dna": "^0.0.2",
+    "@rollup/plugin-commonjs": "^17.0.0",
+    "@rollup/plugin-json": "^4.1.0",
+    "@rollup/plugin-node-resolve": "^8.0.0",
+    "@rollup/plugin-typescript": "^11.1.0",
+    "@tsconfig/svelte": "^1.0.0",
+    "@types/node": "^18.0.0",
+    "rollup": "^2.3.4",
+    "rollup-plugin-postcss": "^4.0.0",
+    "rollup-plugin-string": "^3.0.0",
+    "rollup-plugin-svelte": "^6.0.0",
+    "rollup-plugin-terser": "^7.0.0",
+    "run-script-os": "^1.1.6",
+    "svelte": "^3.0.0",
+    "svelte-check": "^1.0.0",
+    "svelte-preprocess": "^4.0.0",
+    "tslib": "^2.0.0",
+    "typescript": "^4.2.4",
+    "xmlhttprequest": "^1.8.0"
+  },
+  "dependencies": {
+    "email-validator": "^2.0.4",
+    "md5": "^2.3.0",
+    "postcss": "^8.2.1"
+  }
+}

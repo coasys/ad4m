@@ -201,7 +201,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
             // })
 
 
-            describe.skip('with set up and joined NH for Telepresence', async () => {
+            describe('with set up and joined NH for Telepresence', async () => {
                 let aliceNH: NeighbourhoodProxy|undefined
                 let bobNH: NeighbourhoodProxy|undefined
                 let aliceDID: string|undefined
