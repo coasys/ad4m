@@ -15,7 +15,7 @@
         "@perspect3vism/language-language#build", "@perspect3vism/neighbourhood-language#build",
         "@perspect3vism/file-storage#build", "@perspect3vism/perspective-diff-sync-socket-signaling#build",
         "@perspect3vism/centralized-perspective-diff-sync#build", "@perspect3vism/centralized-agent-language#build",
-        "@perspect3vism/centralized-file-storage#build"],
+        "@perspect3vism/centralized-file-storage#build", "@perspect3vism/eas#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
