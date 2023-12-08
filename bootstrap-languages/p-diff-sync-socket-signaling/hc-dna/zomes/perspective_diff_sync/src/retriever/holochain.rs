@@ -100,13 +100,13 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
     fn latest_revision() -> SocialContextResult<Option<HashReference>> {
         let latest_root_entry = get_latest_revision_anchor();
         let latest_root_entry_hash = hash_entry(latest_root_entry.clone())?;
-        // let input = GetLinksInputBuilder::try_new(
-        //     latest_root_entry_hash,
-        //     LinkTypes::Index
-        // )
-        // .unwrap()
-        // .build();
-        let mut latest_revision_links = get_links(latest_root_entry_hash, LinkTypes::Index, None)?;
+        let input = GetLinksInputBuilder::try_new(
+            latest_root_entry_hash,
+            LinkTypes::Index
+        )
+        .unwrap()
+        .build();
+        let mut latest_revision_links = get_links(input)?;
 
         latest_revision_links.sort_by(|link_a, link_b| {
             let link_a_str = std::str::from_utf8(&link_a.tag.0).unwrap();
@@ -169,14 +169,14 @@ pub fn get_active_agent_anchor() -> Anchor {
 }
 
 pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
-    // let input = GetLinksInputBuilder::try_new(
-    //     hash_entry(get_active_agent_anchor())?,
-    //     LinkTypes::Index
-    // )
-    // .unwrap()
-    // .tag_prefix(LinkTag::new("active_agent"))
-    // .build();
-    let recent_agents = get_links(hash_entry(get_active_agent_anchor())?, LinkTypes::Index, Some(LinkTag::new("active_agent")))?;
+    let input = GetLinksInputBuilder::try_new(
+        hash_entry(get_active_agent_anchor())?,
+        LinkTypes::Index
+    )
+    .unwrap()
+    .tag_prefix(LinkTag::new("active_agent"))
+    .build();
+    let recent_agents = get_links(input)?;
 
     let recent_agents = recent_agents
         .into_iter()
