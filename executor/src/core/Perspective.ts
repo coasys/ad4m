@@ -399,7 +399,7 @@ export default class Perspective {
         if(!this.getLinksAdapter()) {
             return null;
         }
-        const address = this.neighbourhood!.linkLanguage;
+        const address = this.neighbourhood!.data.linkLanguage;
         const telepresenceAdapter = await this.#languageController!.getTelepresenceAdapter({address} as LanguageRef);
         return telepresenceAdapter
     }
