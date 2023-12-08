@@ -496,8 +496,8 @@ export class Ad4mConnectElement extends LitElement {
     this.loadFont();
   }
 
-  private async unlockAgent(passcode) {
-    await this._client.ad4mClient.agent.unlock(passcode);
+  private async unlockAgent(passcode, holochain = true) {
+    await this._client.ad4mClient.agent.unlock(passcode, holochain);
   }
 
   private verifyCode(code) {

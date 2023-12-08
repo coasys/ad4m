@@ -13,7 +13,7 @@ type State = {
 type ContextProps = {
   state: State;
   methods: {
-    unlockAgent: (str: string) => void,
+    unlockAgent: (str: string, holochain: boolean) => void,
     lockAgent: (str: string) => void,
     generateAgent: (username: string, firstName: string, lastName: string, password: string) => void,
   };
@@ -106,10 +106,11 @@ export function AgentProvider({ children }: any) {
     navigate('/apps');
   };
 
-  const unlockAgent = async (password: string) => {
+  const unlockAgent = async (password: string, holochain: boolean) => {
+    console.log("wow", password, holochain)
     setLoading(true)
     
-    let agentStatus = await client?.agent.unlock(password);
+    let agentStatus = await client?.agent.unlock(password, holochain);
 
     setLoading(false);
 

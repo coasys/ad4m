@@ -46,13 +46,17 @@ jobs:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
 
+    - uses: pnpm/action-setup@v2
+      with:
+        version: 8
+
     - name: Install Deno
       uses: denoland/setup-deno@v1
       with:
         deno-version: v1.32.4
 
     - run: rustup target add wasm32-unknown-unknown
-    - run: yarn install
+    - run: pnpm install
     - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: yarn run build-languages
-    - run: cd bootstrap-languages/agent-language/hc-dna/zomes/tests && yarn install && yarn run test
+    - run: pnpm run build-languages
+    - run: cd bootstrap-languages/agent-language/hc-dna/zomes/tests && pnpm install && pnpm run test

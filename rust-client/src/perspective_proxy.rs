@@ -68,12 +68,43 @@ impl PerspectiveProxy {
             .await
     }
 
-    pub async fn set_dna(&self, dna: String) -> Result<()> {
+    pub async fn add_dna(&self, name: String, dna: String, dna_type: String) -> Result<()> {
+        let mut predicate = "ad4m://has_custom_dna";
+
+        if dna_type == "subject_class" {
+            predicate = "ad4m://has_subject_class"
+        } else if dna_type == "flow" {
+            predicate = "ad4m://has_flow"
+        }
+
+        let literal_name = Literal::from_string(name);
+
+        let links = self.get(
+            Some("ad4m://self".into()),
+            Some(literal_name.to_url().unwrap()),
+            Some(predicate.into()),
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+        if links.len() == 0 {
+            self.set_single_target(
+                "ad4m://self".into(),
+                predicate.into(),
+                literal_name.to_url().unwrap(),
+            )
+            .await?;
+        }
+
         let literal = Literal::from_string(dna);
-        self.set_single_target(
-            "ad4m://self".into(),
-            "ad4m://has_zome".into(),
-            literal.to_url()?,
+
+        self.add_link(
+            literal_name.to_url().unwrap(),
+            literal.to_url().unwrap(),
+            Some("ad4m://sdna".into()),
+            Some("shared".to_string())
         )
         .await?;
         Ok(())
@@ -81,9 +112,9 @@ impl PerspectiveProxy {
 
     pub async fn get_dna(&self) -> Result<Vec<String>> {
         self.get(
-            Some("ad4m://self".into()),
+            Some("ad4m://sdna".into()),
             None,
-            Some("ad4m://has_zome".into()),
+            None,
             None,
             None,
             None,

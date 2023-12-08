@@ -524,6 +524,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentUnlock: async (args, context) => {
+                
                 checkCapability(context.capabilities, Auth.AGENT_UNLOCK_CAPABILITY)
                 try {
                     await core.agentService.unlock(args.passphrase)
@@ -540,8 +541,9 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     } catch (e) {
                         // @ts-ignore
                         const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
-    
-                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
+                        if (args.holochain === "true") {
+                            await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
+                        }
                         await core.waitForAgent();
                         core.initControllers()
                         await core.initLanguages()

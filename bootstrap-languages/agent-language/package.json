@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/agent-language",
-  "version": "0.7.1-prerelease",
+  "version": "0.8.0-prerelease",
   "description": "AD4M Language implementation for Holochain profile DNA",
   "main": "index.js",
   "scripts": {
@@ -11,10 +11,10 @@
     "compile-dna": "cd hc-dna && ./build.sh && cd ..",
     "compile-dna-windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd ..",
     "build": "run-script-os",
-    "build:linux": "yarn compile-dna && yarn build:common",
-    "build:macos": "yarn compile-dna && yarn build:common",
-    "build:windows": "yarn compile-dna-windows && yarn build:common",
-    "build:common": "yarn rollup-dna && yarn rollup-icons && yarn rollup-expression-ui && deno run --allow-all esbuild.ts"
+    "build:linux": "pnpm compile-dna && pnpm build:common",
+    "build:macos": "pnpm compile-dna && pnpm build:common",
+    "build:windows": "pnpm compile-dna-windows && pnpm build:common",
+    "build:common": "pnpm rollup-dna && pnpm rollup-icons && pnpm rollup-expression-ui && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",

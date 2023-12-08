@@ -159,7 +159,7 @@ describe('Ad4mClient', () => {
         })
 
         it('unlock() smoke test', async () => {
-            const agentStatus = await ad4mClient.agent.unlock('secret')
+            const agentStatus = await ad4mClient.agent.unlock('secret', false)
             expect(agentStatus.did).toBe("did:ad4m:test")
             expect(agentStatus.isUnlocked).toBe(true)
         })
@@ -557,7 +557,7 @@ describe('Ad4mClient', () => {
             expect(p1.uuid).toBe('00001')
             expect(p2.uuid).toBe('00002')
             expect(p2.sharedUrl).toBe('neighbourhood://Qm12345')
-            expect(p2.neighbourhood.linkLanguage).toBe("language://Qm12345")
+            expect(p2.neighbourhood.data.linkLanguage).toBe("language://Qm12345")
         })
 
         it('byUUID() smoke test', async () => {
@@ -949,7 +949,7 @@ describe('Ad4mClient', () => {
     
                 ad4mClientWithoutSubscription.agent.subscribeAgentStatusChanged()
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
-                await ad4mClientWithoutSubscription.agent.unlock("test");
+                await ad4mClientWithoutSubscription.agent.unlock("test", false);
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
             })
 
@@ -1030,7 +1030,7 @@ describe('Ad4mClient', () => {
                 expect(agentStatusChangedCallback).toBeCalledTimes(0)
     
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
-                await ad4mClientWithSubscription.agent.unlock("test");
+                await ad4mClientWithSubscription.agent.unlock("test", false);
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
             })
 

@@ -1,6 +1,6 @@
 import { Arg, Mutation, PubSub, Query, Resolver, Subscription } from "type-graphql";
 import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkExpressionUpdated, LinkInput, LinkMutations } from "../links/Links";
-import { Neighbourhood } from "../neighbourhood/Neighbourhood";
+import { Neighbourhood, NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { LinkStatus } from "./PerspectiveProxy";
@@ -37,7 +37,16 @@ export default class PerspectiveResolver {
         p2.name = 'test-perspective-2'
         p2.uuid = '00002'
         p2.sharedUrl = 'neighbourhood://Qm12345'
-        p2.neighbourhood = new Neighbourhood("language://Qm12345", new Perspective())
+        const neighbourhood = new NeighbourhoodExpression();
+        neighbourhood.data = new Neighbourhood("language://Qm12345", new Perspective());
+        neighbourhood.author = "did:ad4m:test"
+        neighbourhood.timestamp = Date.now()
+        neighbourhood.proof = {
+            signature: '',
+            key: '',
+            valid: true
+        }
+        p2.neighbourhood = neighbourhood
         p2.state = PerspectiveState.Synced
         return [p1, p2]
     }

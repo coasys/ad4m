@@ -1,6 +1,6 @@
 {
   "name": "@perspect3vism/neighbourhood-language",
-  "version": "0.7.1-prerelease",
+  "version": "0.8.0-prerelease",
   "description": "This is a Language for storing AD4M neighbourhood objects",
   "main": "index.js",
   "scripts": {

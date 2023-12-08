@@ -70,7 +70,7 @@ describe("Prolog + Literals", () => {
             expect(classes.length).to.equal(0)
 
             let sdna = readFileSync("./sdna/subject.pl").toString()
-            await perspective.setSdna(sdna)
+            await perspective.addSdna("Todo", sdna, "subject_class")
 
             let retrievedSdna = await perspective.getSdna()
             expect(retrievedSdna).to.deep.equal([sdna])
@@ -363,7 +363,7 @@ describe("Prolog + Literals", () => {
 
             it("should generate correct SDNA from a JS class", async () => {
                 // @ts-ignore
-                let sdna = Todo.generateSDNA()
+                const { name, sdna } = Todo.generateSDNA();
 
                 const regExp = /\("Todo", ([^)]+)\)/;
                 const matches = regExp.exec(sdna);
@@ -496,7 +496,8 @@ describe("Prolog + Literals", () => {
             describe("with Message subject class registered", () => {
                 before(async () => {
                     // @ts-ignore
-                    perspective!.addSdna(Message.generateSDNA())
+                    const { name, sdna } = Message.generateSDNA();
+                    perspective!.addSdna(name, sdna, "subject_class")
                 })
 
                 it("can find instances through the exact flag link", async() => {
@@ -589,7 +590,8 @@ describe("Prolog + Literals", () => {
 
                 before(async () => {
                     // @ts-ignore
-                    perspective!.addSdna(Recipe.generateSDNA())
+                    const { name, sdna } = Recipe.generateSDNA();
+                    perspective!.addSdna(name, sdna, 'subject_class')
                 })
 
                 it("save() & get()", async () => {
@@ -669,6 +671,16 @@ describe("Prolog + Literals", () => {
 
                     expect(links!.length).to.equal(1)
                     expect(links![0].status).to.equal('LOCAL')
+                })
+
+                it("query()", async () => {
+                    let recipes = await Recipe.query(perspective!, { page: 1, size: 2 });
+
+                    expect(recipes.length).to.equal(2)
+
+                    recipes = await Recipe.query(perspective!, { page: 2, size: 1 });
+
+                    expect(recipes.length).to.equal(1)
                 })
 
                 it("delete()", async () => {

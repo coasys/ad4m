@@ -8,12 +8,27 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Added
 
 ### Changed
+ - Used pnpm as main package manager for project [#421](https://github.com/coasys/ad4m/pull/421)
  
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+ - DApp server now works and has functioning UI [#421](https://github.com/coasys/ad4m/pull/421)
+
+## [0.7.1] - 20/10/2023
+
+### Added
+
+### Changed
+ 
+### Deprecated
+
+### Removed
+
+### Fixed
+ - Fix CI release workflows
 
 ## [0.7.0] - 20/10/2023
 
