@@ -386,7 +386,6 @@ jobs:
       - uses: actions/setup-node@v3
         with:
           node-version: '16.x'
-          cache: 'pnpm'
 
       - name: Cache cargo
         id: cache-cargo
