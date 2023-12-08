@@ -79,6 +79,10 @@ jobs:
       with:
         deno-version: v1.32.4
 
+    - uses: pnpm/action-setup@v2
+      with:
+        version: 8
+
     - name: install dependencies (ubuntu only)
       if: matrix.platform == 'GH-hosted-ubuntu'
       run: |
@@ -117,10 +121,6 @@ jobs:
       uses: actions/setup-node@v1
       with:
         node-version: ${{ matrix.node-version }}
-
-    - uses: pnpm/action-setup@v2
-      with:
-        version: 8
 
     - name: pnpm Install
       run: pnpm install
@@ -378,6 +378,10 @@ jobs:
         with:
           go-version: '1.18'
 
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
       - name: Install Linux Deps
         run: |
           sudo apt-get update
@@ -386,7 +390,6 @@ jobs:
       - uses: actions/setup-node@v3
         with:
           node-version: '16.x'
-          cache: 'pnpm'
 
       - name: Cache cargo
         id: cache-cargo
