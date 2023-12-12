@@ -30,7 +30,7 @@ const Login = (props: any) => {
   const [usernameError, setUsernameError] = useState<string | null>(null);
   let [passwordError, setPasswordError] = useState<string | null>(null);
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
-  const [holochain, setHolochain] = useState(false);
+  const [holochain, setHolochain] = useState(true);
 
   if (hasLoginError) {
     passwordError = "Invalid password";
