@@ -5,6 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::thread::sleep;
 use tokio::sync::Mutex as TokioMutex;
 
 pub struct EventLoopFuture {
@@ -21,6 +22,7 @@ impl Future for EventLoopFuture {
     type Output = Result<(), AnyError>; // You can customize the output type.
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        sleep(std::time::Duration::from_millis(1));
         let worker = self.worker.try_lock();
         if let Ok(mut worker) = worker {
             let res = worker.poll_event_loop(cx, false);
