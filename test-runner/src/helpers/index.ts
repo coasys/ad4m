@@ -1,4 +1,4 @@
-import { Ad4mClient, Link, LinkExpression, LinkQuery } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkExpression, LinkQuery } from "@coasys/ad4m";
 import getPort from "get-port";
 import { startServer } from "../cli.js";
 import { buildAd4mClient } from "../client.js";

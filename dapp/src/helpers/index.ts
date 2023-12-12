@@ -3,7 +3,7 @@ import {
   EntanglementProof,
   Link,
   Literal,
-} from "@perspect3vism/ad4m";
+} from "@coasys/ad4m";
 
 export async function removeProofFromProfile(
   client: Ad4mClient,

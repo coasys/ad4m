@@ -3,7 +3,7 @@ import {
   Link,
   Perspective,
   PerspectiveProxy,
-} from "@perspect3vism/ad4m";
+} from "@coasys/ad4m";
 import { useContext, useEffect, useMemo, useState } from "react";
 import { sanitizeLink } from "../util";
 import { cardStyle, listStyle } from "./styles";

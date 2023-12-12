@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/agent-language",
+  "name": "@coasys/agent-language",
   "description": "AD4M Language implementation for Holochain profile DNA",
   "main": "index.js",
   "scripts": {
@@ -18,7 +18,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@perspect3vism/ad4m": "*",
+    "@coasys/ad4m": "*",
     "@perspect3vism/rollup-plugin-dna": "^0.0.2",
     "@rollup/plugin-commonjs": "^17.0.0",
     "@rollup/plugin-json": "^4.1.0",

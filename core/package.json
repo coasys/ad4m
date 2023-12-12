@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/ad4m",
+  "name": "@coasys/ad4m",
   "description": "*The Agent-Centric Distributed Application Meta-ontology*  or just:  *Agent-Centric DApp Meta-ontology*  * A new meta-ontology for interoperable, decentralized application design * A spanning-layer to enable seamless integration between Holochain DNAs, blockchains, linked-data structures/ontologies and centralized back-ends * The basis for turning distinct, monolithic and siloed apps into a global, open and interoperable sense-making network",
   "main": "lib/index.cjs",
   "module": "lib/index.js",

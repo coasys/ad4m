@@ -2,9 +2,9 @@ import {
     Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta, 
     PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, 
     parseExprUrl, Literal, TelepresenceAdapter, PerspectiveState
-} from '@perspect3vism/ad4m';
-import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
-import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
+} from '@coasys/ad4m';
+import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@coasys/ad4m';
+import { ExceptionInfo } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
 import fs from 'node:fs'
 import path from 'node:path'
 import * as Config from './Config'

@@ -1,4 +1,4 @@
-import { Expression } from "@perspect3vism/ad4m";
+import { Expression } from "@coasys/ad4m";
 import faker from 'faker'
 
 export function createMockExpression(did: string, data: object): Expression {

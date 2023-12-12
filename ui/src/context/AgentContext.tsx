@@ -1,4 +1,4 @@
-import { Link, Literal } from "@perspect3vism/ad4m";
+import { Link, Literal } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api";
 import { createContext, useContext, useState } from "react";
 import { useNavigate } from "react-router-dom";

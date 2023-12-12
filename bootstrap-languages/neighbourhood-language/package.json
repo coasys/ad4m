@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/neighbourhood-language",
+  "name": "@coasys/neighbourhood-language",
   "description": "This is a Language for storing AD4M neighbourhood objects",
   "main": "index.js",
   "scripts": {

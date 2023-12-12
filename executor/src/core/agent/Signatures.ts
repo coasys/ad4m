@@ -1,4 +1,4 @@
-import type { Expression } from "@perspect3vism/ad4m"
+import type { Expression } from "@coasys/ad4m"
 import sha256 from 'sha256'
 import stringify from 'json-stable-stringify'
 export default class Signatures {

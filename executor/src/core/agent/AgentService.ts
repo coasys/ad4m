@@ -7,13 +7,13 @@ import {
   PublicSharing,
   ReadOnlyLanguage,
   ExceptionType,
-} from "@perspect3vism/ad4m";
-import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@perspect3vism/ad4m";
+} from "@coasys/ad4m";
+import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@coasys/ad4m";
 import Signatures from "./Signatures";
 import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
 import { v4 as uuidv4 } from "uuid";
-import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
+import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import {
   ALL_CAPABILITY,
   AuthInfo,

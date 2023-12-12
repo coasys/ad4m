@@ -1,7 +1,7 @@
 import fs from 'fs-extra'
 import path from 'path'
 import { isProcessRunning, sleep } from "../utils/utils";
-import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@perspect3vism/ad4m";
+import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
 import { startExecutor, apolloClient, runHcLocalServices } from "../utils/utils";

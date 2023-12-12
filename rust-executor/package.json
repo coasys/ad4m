@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/rust-ad4m-executor",
+  "name": "@coasys/rust-ad4m-executor",
   "description": "Rust built version of the ad4m-executor, exposing GraphQL methods for AD4M",
   "main": "",
   "files": [],
@@ -28,7 +28,7 @@
     "url": "https://github.com/perspect3vism/ad4m/issues"
   },
   "devDependencies": {
-    "@perspect3vism/ad4m-executor": "link:../core"
+    "@coasys/ad4m-executor": "link:../core"
   },
   "dependencies": {},
   "version": "0.8.0"

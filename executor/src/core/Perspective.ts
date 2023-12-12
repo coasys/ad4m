@@ -1,5 +1,5 @@
-import { Agent, Expression, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkStatus, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent, NeighbourhoodExpression } from "@perspect3vism/ad4m"
-import { Link, LinkQuery, PerspectiveState } from "@perspect3vism/ad4m";
+import { Agent, Expression, LinkExpression, LinkExpressionInput, LinkInput, LanguageRef, PerspectiveHandle, Literal, PerspectiveDiff, parseExprUrl, Perspective as Ad4mPerspective, LinkStatus, LinkMutations, LinkExpressionMutations, Language, LinkSyncAdapter, TelepresenceAdapter, OnlineAgent, NeighbourhoodExpression } from "@coasys/ad4m"
+import { Link, LinkQuery, PerspectiveState } from "@coasys/ad4m";
 import type AgentService from "./agent/AgentService";
 import type LanguageController from "./LanguageController";
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
@@ -7,7 +7,7 @@ import type PerspectiveContext from "./PerspectiveContext"
 import PrologInstance from "./PrologInstance";
 import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
-import { DID } from "@perspect3vism/ad4m/lib/src/DID";
+import { DID } from "@coasys/ad4m/lib/src/DID";
 import { Ad4mDb } from "./db";
 import { getPubSub } from "./utils";
 

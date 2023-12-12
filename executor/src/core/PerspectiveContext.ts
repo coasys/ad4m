@@ -1,4 +1,4 @@
-import { PerspectiveState } from "@perspect3vism/ad4m"
+import { PerspectiveState } from "@coasys/ad4m"
 import type AgentService from "./agent/AgentService"
 import { MainConfig } from "./Config"
 import type LanguageController from "./LanguageController"

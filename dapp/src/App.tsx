@@ -10,7 +10,7 @@ import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { InjectedConnector } from "wagmi/connectors/injected";
 import { signMessage } from "@wagmi/core";
 // @ts-ignore
-import { EntanglementProof } from "@perspect3vism/ad4m";
+import { EntanglementProof } from "@coasys/ad4m";
 import Logo from "./Logo";
 import { publicProvider } from "wagmi/providers/public";
 import ConnectAnimation from "./ConnectAnimation";

@@ -1,4 +1,4 @@
-import { Ad4mClient, LinkExpression } from "@perspect3vism/ad4m";
+import { Ad4mClient, LinkExpression } from "@coasys/ad4m";
 import { ApolloClient, InMemoryCache } from "@apollo/client/core";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { invoke } from "@tauri-apps/api";

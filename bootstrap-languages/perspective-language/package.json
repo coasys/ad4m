@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/perspective-language",
+  "name": "@coasys/perspective-language",
   "description": "An AD4M Language for perspective snapshot expressions stored on IPFS",
   "main": "index.js",
   "scripts": {
@@ -12,7 +12,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@perspect3vism/ad4m": "*",
+    "@coasys/ad4m": "*",
     "@rollup/plugin-commonjs": "^14.0.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^8.0.0",

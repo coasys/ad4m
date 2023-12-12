@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/file-storage",
+  "name": "@coasys/file-storage",
   "version": "0.0.1",
   "description": "An AD4M Language for file storage leveraging a holochain DNA",
   "main": "index.js",
@@ -20,7 +20,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@perspect3vism/ad4m": "*",
+    "@coasys/ad4m": "*",
     "@perspect3vism/rollup-plugin-dna": "^0.0.2",
     "@rollup/plugin-commonjs": "^14.0.0",
     "@rollup/plugin-node-resolve": "^8.0.0",

@@ -1,7 +1,7 @@
 # AD4M client library in Rust
 
 This is a library for interacting with the AD4M executor / agent,
-analogous to https://www.npmjs.com/package/@perspect3vism/ad4m.
+analogous to https://www.npmjs.com/package/@coasys/ad4m.
 
 ## Usage
 

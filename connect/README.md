@@ -8,7 +8,7 @@ This package makes it easy for AD4M apps to connect to a local or remote AD4M ex
 
 ## Installation
 
-`npm install -s @perspect3vism/ad4m-connect`
+`npm install -s @coasys/ad4m-connect`
 
 ## Properties
 
@@ -30,7 +30,7 @@ This package makes it easy for AD4M apps to connect to a local or remote AD4M ex
 ## In the Browser
 
 ```js
-import Ad4mConnectUI from "@perspect3vism/ad4m-connect";
+import Ad4mConnectUI from "@coasys/ad4m-connect";
 
 const ui = Ad4mConnect({
   appName: "Example",
@@ -57,7 +57,7 @@ ui.connect().then((client) => {
 Call ad4mConnect with parameters of your app:
 
 ```js
-const { ad4mConnect } = require("@perspect3vism/ad4m-connect/electron");
+const { ad4mConnect } = require("@coasys/ad4m-connect/electron");
 
 ad4mConnect({
   // Provide the name of your app to be displayed in the dialog
