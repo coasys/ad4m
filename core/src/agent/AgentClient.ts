@@ -183,7 +183,7 @@ export class AgentClient {
     return new AgentStatus(agentLock);
   }
 
-  async unlock(passphrase: string, holochain: boolean): Promise<AgentStatus> {
+  async unlock(passphrase: string, holochain = true): Promise<AgentStatus> {
     const { agentUnlock } = unwrapApolloResult(
       await this.#apolloClient.mutate({
         mutation: gql`mutation agentUnlock($passphrase: String!, $holochain: Boolean!) {
