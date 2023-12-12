@@ -437,7 +437,7 @@ const Login = (props: any) => {
                   setHolochain(e.target.checked);
                 }}
               >
-                {`Turn ${holochain ? 'off' : "on"} Holochain`}
+                {`Enable Holochain`}
               </j-toggle>
             </j-box>
               <j-button
