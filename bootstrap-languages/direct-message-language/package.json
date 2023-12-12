@@ -1,6 +1,5 @@
 {
   "name": "@coasys/direct-message-language",
-  "version": "0.8.0-prerelease",
   "description": "A templateable AD4M Language for personal, per-agent direct message Languages",
   "main": "index.js",
   "type": "module",
@@ -35,5 +34,6 @@
   },
   "dependencies": {
     "@types/node": "^18.0.0"
-  }
+  },
+  "version": "0.8.0"
 }

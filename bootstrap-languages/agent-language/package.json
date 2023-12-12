@@ -1,6 +1,5 @@
 {
   "name": "@coasys/agent-language",
-  "version": "0.8.0-prerelease",
   "description": "AD4M Language implementation for Holochain profile DNA",
   "main": "index.js",
   "scripts": {
@@ -44,5 +43,6 @@
     "email-validator": "^2.0.4",
     "md5": "^2.3.0",
     "postcss": "^8.2.1"
-  }
+  },
+  "version": "0.8.0"
 }

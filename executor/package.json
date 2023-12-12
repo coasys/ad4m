@@ -1,6 +1,5 @@
 {
   "name": "@coasys/ad4m-executor",
-  "version": "0.8.0-prerelease",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "main": "lib/main.js",
   "files": [
@@ -79,5 +78,6 @@
     "sha256": "^0.2.0",
     "tmp": "^0.2.1",
     "uuid": "*"
-  }
+  },
+  "version": "0.8.0"
 }
