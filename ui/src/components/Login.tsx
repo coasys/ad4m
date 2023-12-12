@@ -430,15 +430,17 @@ const Login = (props: any) => {
               >
                 Reset agent
               </j-button>
-              <j-box px="100" >          
-              <j-toggle
-                checked={holochain}
-                onChange={(e) => {
-                  setHolochain(e.target.checked);
-                }}
-              >
-                {`Enable Holochain`}
-              </j-toggle>
+              <j-box px="100" >
+              <j-tooltip title="This ADAM release includes a new unstable Holochain release for testing. Regular use of ADAM will work without Holochain and our centralized testing Languages.">          
+                <j-toggle
+                  checked={holochain}
+                  onChange={(e) => {
+                    setHolochain(e.target.checked);
+                  }}
+                >
+                  {`Enable Holochain`}
+                </j-toggle>
+              </j-tooltip>
             </j-box>
               <j-button
                 full
