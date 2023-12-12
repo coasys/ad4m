@@ -1,0 +1,13 @@
+diff --git a/dist/index.js b/dist/index.js
+index 614d3eb7ba036479a0b457fabf36afc901c6223c..73a266656a3bb1e5437ba6e2eec0d09d596ef10c 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,7 +1,7 @@
+ 
+ 'use strict'
+ 
+-if (process.env.NODE_ENV === 'production') {
++if (true) {
+   module.exports = require('./ld-key-pair.cjs.production.min.js')
+ } else {
+   module.exports = require('./ld-key-pair.cjs.development.js')

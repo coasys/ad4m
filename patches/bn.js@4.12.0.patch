@@ -1,0 +1,18 @@
+diff --git a/lib/bn.js b/lib/bn.js
+index 3a4371ea29688d216480d68af653c52b8b7beb10..78c7ff669adbc2d4632740c33214a8f4d361fbd3 100644
+--- a/lib/bn.js
++++ b/lib/bn.js
+@@ -1,3 +1,4 @@
++import { Buffer as NodeBuffer } from 'node:buffer'
+ (function (module, exports) {
+   'use strict';
+ 
+@@ -53,7 +54,7 @@
+     if (typeof window !== 'undefined' && typeof window.Buffer !== 'undefined') {
+       Buffer = window.Buffer;
+     } else {
+-      Buffer = require('buffer').Buffer;
++      Buffer = NodeBuffer;
+     }
+   } catch (e) {
+   }

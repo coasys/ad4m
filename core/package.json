@@ -1,6 +1,5 @@
 {
-  "name": "@perspect3vism/ad4m",
-  "version": "0.7.1",
+  "name": "@coasys/ad4m",
   "description": "*The Agent-Centric Distributed Application Meta-ontology*  or just:  *Agent-Centric DApp Meta-ontology*  * A new meta-ontology for interoperable, decentralized application design * A spanning-layer to enable seamless integration between Holochain DNAs, blockchains, linked-data structures/ontologies and centralized back-ends * The basis for turning distinct, monolithic and siloed apps into a global, open and interoperable sense-making network",
   "main": "lib/index.cjs",
   "module": "lib/index.js",
@@ -8,11 +7,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "patch-package && tsc && yarn run buildSchema && yarn run bundle",
+    "build": "patch-package && tsc && pnpm run buildSchema && pnpm run bundle",
     "buildSchema": "node --es-module-specifier-resolution=node lib/src/buildSchema.js",
     "bundle": "rollup -c rollup.config.js",
-    "test": "jest --forceExit",
-    "postinstall": "patch-package"
+    "test": "jest --forceExit"
   },
   "repository": {
     "type": "git",
@@ -35,7 +33,6 @@
   "homepage": "https://ad4m.dev",
   "dependencies": {
     "@apollo/client": "3.7.10",
-    "@apollo/server": "^4.9.4",
     "@holochain/client": "0.16.0",
     "@types/jest": "^26.0.14",
     "class-validator": "^0.13.1",
@@ -48,6 +45,7 @@
     "@rollup/plugin-alias": "^3.1.5",
     "@rollup/plugin-commonjs": "^20.0.0",
     "@rollup/plugin-node-resolve": "^13.0.4",
+    "@apollo/server": "^4.9.4",
     "concat-md": "^0.5.0",
     "cross-fetch": "^3.1.4",
     "graphql-ws": "5.12.0",
@@ -59,9 +57,5 @@
     "typescript": "^4.6.2",
     "ws": "8.13.0"
   },
-  "workspaces": {
-    "nohoist": [
-      "**"
-    ]
-  }
+  "version": "0.8.0"
 }

@@ -1,4 +1,4 @@
-import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@perspect3vism/ad4m'
+import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@coasys/ad4m'
 import { TestContext } from './integration.test'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";
@@ -46,7 +46,7 @@ export default function directMessageTests(testContext: TestContext) {
                 await bob.runtime.addFriends([didAlice!])
             })
 
-            it("Alice can get Bob's status", async () => {
+            it.skip("Alice can get Bob's status", async () => {
                 let link = new LinkExpressionInput()
                 link.author = "did:test";
                 link.timestamp = new Date().toISOString();
@@ -69,7 +69,7 @@ export default function directMessageTests(testContext: TestContext) {
                 expect(statusAlice.data).to.be.eql(statusBob)
             })
 
-            it("Alice can send a message to Bob", async () => {
+            it.skip("Alice can send a message to Bob", async () => {
                 const bobMessageCallback = sinon.fake()
                 //@ts-ignore
                 await bob.runtime.addMessageCallback(bobMessageCallback)

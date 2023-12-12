@@ -1,4 +1,4 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@perspect3vism/ad4m";
+import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
 import fs from "fs";
@@ -40,8 +40,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 const perspective = await ad4mClient.perspective.byUUID(create.uuid);
                 expect(perspective?.neighbourhood).not.to.be.undefined;
-                expect(perspective?.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
-                expect(perspective?.neighbourhood!.meta.links.length).to.be.equal(1);
+                expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
+                expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
                 expect(perspective?.state).to.be.equal(PerspectiveState.Synced);
             })
 
@@ -53,16 +53,16 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob"}));
                 expect(socialContext.name).to.be.equal("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
-
+                
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
-
+                
                 await testContext.makeAllNodesKnown()
                 
                 expect(bobP1!.name).not.to.be.undefined;
                 expect(bobP1!.sharedUrl).to.be.equal(neighbourhoodUrl)
                 expect(bobP1!.neighbourhood).not.to.be.undefined;;
-                expect(bobP1!.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
-                expect(bobP1!.neighbourhood!.meta.links.length).to.be.equal(0);
+                expect(bobP1!.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
+                expect(bobP1!.neighbourhood!.data.meta.links.length).to.be.equal(0);
             })
             
             it('shared link created by Alice received by Bob', async () => {
@@ -199,6 +199,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
             //     expect(bobSyncChangeCalls).to.be.equal(1);
             //     expect(bobSyncChangeData).to.be.equal(PerspectiveState.Synced);
             // })
+
 
             describe('with set up and joined NH for Telepresence', async () => {
                 let aliceNH: NeighbourhoodProxy|undefined

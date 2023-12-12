@@ -78,6 +78,7 @@ export default class AgentResolver {
   @Mutation((returns) => AgentStatus)
   agentUnlock(
     @Arg("passphrase") passphrase: string,
+    @Arg("holochain") holochain: boolean,
     @PubSub() pubSub: any
   ): AgentStatus {
     const status = new AgentStatus({

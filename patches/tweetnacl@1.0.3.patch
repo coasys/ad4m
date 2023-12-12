@@ -1,0 +1,23 @@
+diff --git a/nacl-fast.js b/nacl-fast.js
+index 7ea5fb5883289b49f8d543f2d48af7132c3c6a6d..81673dd433561d1135f1d78e6050a8512514a512 100644
+--- a/nacl-fast.js
++++ b/nacl-fast.js
+@@ -1,3 +1,5 @@
++import nodeCrypto from 'node:crypto';
++
+ (function(nacl) {
+ 'use strict';
+ 
+@@ -2377,10 +2379,9 @@ nacl.setPRNG = function(fn) {
+     });
+   } else if (typeof require !== 'undefined') {
+     // Node.js.
+-    crypto = require('crypto');
+-    if (crypto && crypto.randomBytes) {
++    if (nodeCrypto && nodeCrypto.randomBytes) {
+       nacl.setPRNG(function(x, n) {
+-        var i, v = crypto.randomBytes(n);
++        var i, v = nodeCrypto.randomBytes(n);
+         for (i = 0; i < n; i++) x[i] = v[i];
+         cleanup(v);
+       });

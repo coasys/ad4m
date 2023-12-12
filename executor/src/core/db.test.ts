@@ -1,7 +1,7 @@
 import { Ad4mDb } from './db'
 import { v4 as uuidv4 } from 'uuid';
 import { expect } from "chai";
-import { LinkExpressionInput, PerspectiveDiff } from '@perspect3vism/ad4m';
+import { LinkExpressionInput, PerspectiveDiff } from '@coasys/ad4m';
 import faker from 'faker'
 
 function constructDummyLinkExpression(): LinkExpressionInput {

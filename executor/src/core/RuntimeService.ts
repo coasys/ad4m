@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { PerspectiveExpression } from '@perspect3vism/ad4m';
+import { PerspectiveExpression } from '@coasys/ad4m';
 import { MainConfig } from './Config';
 
 const TRUSTED_AGENTS_FILE = "trustedAgents.json"

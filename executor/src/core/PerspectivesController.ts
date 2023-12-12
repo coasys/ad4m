@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression, NeighbourhoodExpression } from '@coasys/ad4m'
 import Perspective from './Perspective'
 import { getPubSub, sleep } from './utils';
 
@@ -34,13 +34,13 @@ export default class PerspectivesController {
                 let createdFromJoin = fileObject[k].createdFromJoin;
                 console.log(`PerspectivesController: Found existing perspective:`);
                 console.dir(perspectiveHandle, {depth: null});  
-                this.#perspectiveInstances.set(k, new Perspective(perspectiveHandle, this.#context, perspectiveHandle.neighbourhood as Neighbourhood, createdFromJoin, perspectiveHandle.state))
+                this.#perspectiveInstances.set(k, new Perspective(perspectiveHandle, this.#context, perspectiveHandle.neighbourhood, createdFromJoin, perspectiveHandle.state))
                 this.#perspectiveHandles.set(k, perspectiveHandle)
             })
         }
 
         this.#context.languageController!.addLinkObserver(async (diff: PerspectiveDiff, lang: LanguageRef) => {
-            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
+            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.data?.linkLanguage === lang.address);
             if (perspective) {
                 await perspective.populateLocalLinks(diff.additions, diff.removals);
 
@@ -68,7 +68,7 @@ export default class PerspectivesController {
         })
 
         this.#context.languageController!.addTelepresenceSignalObserver(async (signal: PerspectiveExpression, lang: LanguageRef) => {
-            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
+            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.data?.linkLanguage === lang.address);
             if (perspective) {
                 await this.#pubSub.publish(PubSubDefinitions.NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC, {
                     signal: signal,
@@ -82,7 +82,7 @@ export default class PerspectivesController {
         this.#context.languageController!.addSyncStateChangeObserver(async (state: PerspectiveState, lang: LanguageRef) => {
             console.log("PerspectiveController: sync state change");
             console.dir(state, {depth: null});
-            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.linkLanguage === lang.address);
+            let perspective = Array.from(this.#perspectiveInstances.values()).find((perspective: Perspective) => perspective.neighbourhood?.data?.linkLanguage === lang.address);
             let perspectiveHandle = Array.from(this.#perspectiveHandles.values()).find((p) => p.uuid === perspective?.uuid);
             if (perspective) {
                 if (perspectiveHandle!.state !== state) {
@@ -138,7 +138,7 @@ export default class PerspectivesController {
         return new Ad4mPerspective(await perspective.getLinks({} as LinkQuery));
     }
 
-    async add(name: string, sharedUrl?: string, neighbourhood?: Neighbourhood, createdFromJoin?: boolean, state?: PerspectiveState): Promise<PerspectiveHandle> {
+    async add(name: string, sharedUrl?: string, neighbourhood?: NeighbourhoodExpression, createdFromJoin?: boolean, state?: PerspectiveState): Promise<PerspectiveHandle> {
         let perspective = {
             uuid: uuidv4(),
             name,
@@ -153,7 +153,7 @@ export default class PerspectivesController {
         return perspective
     }
 
-    async replace(perspectiveHandle: PerspectiveHandle, neighbourhood: Neighbourhood, createdFromJoin: boolean, state: PerspectiveState) {
+    async replace(perspectiveHandle: PerspectiveHandle, neighbourhood: NeighbourhoodExpression, createdFromJoin: boolean, state: PerspectiveState) {
         await this.#pubSub.publish(PubSubDefinitions.PERSPECTIVE_UPDATED_TOPIC, perspectiveHandle);
 
         this.#perspectiveHandles.set(perspectiveHandle.uuid, perspectiveHandle);
@@ -174,7 +174,7 @@ export default class PerspectivesController {
             if (perspective) {
                 perspective.clearPolling();
                 if (perspective.neighbourhood) {
-                    await this.#context.languageController?.languageRemove(perspective.neighbourhood.linkLanguage);
+                    await this.#context.languageController?.languageRemove(perspective.neighbourhood.data.linkLanguage);
                 }
                 perspective = undefined;
                 this.#perspectiveHandles.delete(uuid)

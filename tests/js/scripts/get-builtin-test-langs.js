@@ -1,6 +1,6 @@
 import fs from "https://esm.sh/fs-extra@11.1.1";
-import wget from "node-wget-js";
-import unzipper from "unzipper";
+import wget from "https://esm.sh/node-wget-js@1.0.1";
+import unzipper from "https://esm.sh/unzipper@0.10.14";
 import path from "node:path";
 import os from "node:os";
 
@@ -9,10 +9,10 @@ const languages = {
     bundle: "../../bootstrap-languages/agent-language/build/bundle.js",
   },
   languages: {
-    bundle: "https://github.com/perspect3vism/local-language-persistence/releases/download/0.0.9/bundle.js",
+    bundle: "../../bootstrap-languages/local-language-persistence-0.0.9.js",
   },
   "neighbourhood-store": {
-    bundle: "https://github.com/perspect3vism/local-neighbourhood-persistence/releases/download/0.0.6/bundle.js",
+    bundle: "../../bootstrap-languages/local-neighbourhood-persistence-0.0.6.js",
   },
   "perspective-diff-sync": {
     bundle: "../../bootstrap-languages/p-diff-sync/build/bundle.js",
@@ -39,7 +39,7 @@ async function main() {
         if (os.platform() == "win32") url = url.replace(/\//g, "\\");
         fs.copyFileSync(path.join(Deno.cwd(), url), dest);
       } else {
-        wget({ url, dest });
+        await wget({ url, dest });
       }
     }
 
@@ -47,7 +47,7 @@ async function main() {
     if (languages[lang].dna) {
       url = languages[lang].dna;
       dest = dir + `/${languages[lang].targetDnaName}.dna`;
-      wget({ url, dest });
+      await wget({ url, dest });
     }
 
     if (languages[lang].zipped) {
@@ -77,6 +77,7 @@ async function main() {
       );
     }
   }
+  Deno.exit(0);
 }
 
 main();

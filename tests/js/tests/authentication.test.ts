@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, AuthInfoInput, CapabilityInput } from "@perspect3vism/ad4m";
+import { Ad4mClient, AuthInfoInput, CapabilityInput } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";

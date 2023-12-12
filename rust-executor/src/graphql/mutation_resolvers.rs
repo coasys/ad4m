@@ -251,15 +251,16 @@ impl Mutation {
         &self,
         context: &RequestContext,
         passphrase: String,
+        holochain: bool
     ) -> FieldResult<AgentStatus> {
         let capabilities =
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}" }}, {{ capabilities: {} }})
+                await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }}, {{ capabilities: {} }})
             )"#,
-            passphrase, capabilities
+            passphrase, holochain, capabilities
         );
         let result = js.execute(script).await?;
         let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;

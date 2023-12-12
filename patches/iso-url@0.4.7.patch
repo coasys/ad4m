@@ -1,0 +1,15 @@
+diff --git a/changelog.md b/changelog.md
+deleted file mode 100644
+index 1d751d7f6d18c429b04d7f08c4974cea5ab286ac..0000000000000000000000000000000000000000
+diff --git a/src/url.js b/src/url.js
+index a57894b1d538fb8c8d40374666e460b1fbf31b8c..3bd218e1c05a8ae2022e1622b4c4768f3e3398ae 100644
+--- a/src/url.js
++++ b/src/url.js
+@@ -1,6 +1,6 @@
+ 'use strict';
+ 
+-const { URL, URLSearchParams, format } = require('url');
++import { URL, URLSearchParams, format } from 'node:url';
+ 
+ // https://github.com/nodejs/node/issues/12682
+ const defaultBase = 'http://localhost';

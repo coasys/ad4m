@@ -1,0 +1,16 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+deleted file mode 100644
+index eb5e0ca6cbd7d3f4456287aa12e91fb2b2595728..0000000000000000000000000000000000000000
+diff --git a/dist/index.js b/dist/index.js
+index f32c58ecd8bb5069695c33775e438af5a5a854b4..b82b0757f697c33c031a8bd57d5b6a3506a5c348 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,7 +1,7 @@
+ 
+ 'use strict'
+ 
+-if (process.env.NODE_ENV === 'production') {
++if (true) {
+   module.exports = require('./did-key-common.cjs.production.min.js')
+ } else {
+   module.exports = require('./did-key-common.cjs.development.js')

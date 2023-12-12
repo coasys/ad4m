@@ -15,6 +15,29 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Fixed
 
+## [0.8.0] - 12/12/2023
+
+### Added
+ - Toggle on startup to enable/disable Holochain [#425](https://github.com/coasys/ad4m/pull/425)
+ - New EAS Expression language (Ethereum Attestation Service) [#421](https://github.com/coasys/ad4m/pull/421)
+ - Simple SDNA Governance to ensure multiple SDNAS cannot be set in the same neighbourhood [#422](https://github.com/coasys/ad4m/pull/422)
+ - Ability to wipe agent on login incase password was forgotten [#420](https://github.com/coasys/ad4m/pull/420)
+ - Query method to SubjectEntity to enable pagination [#417](https://github.com/coasys/ad4m/pull/417)
+ - Added override option to ensureSDNASubjectClass [#417](https://github.com/coasys/ad4m/pull/417)
+
+### Changed
+ - Used pnpm as main package manager for project [#421](https://github.com/coasys/ad4m/pull/421)
+ - Upgrade to Holochain 0.3.0-dev.27 [#427](https://github.com/coasys/ad4m/pull/428)
+ - Agent & File storage boostrap languages now use centralized backend by default [#430](https://github.com/coasys/ad4m/pull/430)
+ 
+### Deprecated
+
+### Removed
+
+### Fixed
+ - DApp server now works and has functioning UI [#421](https://github.com/coasys/ad4m/pull/421)
+ - Reduced CPU consumption of AD4M by up to 90% [#433](https://github.com/coasys/ad4m/pull/433)
+
 ## [0.7.1] - 20/10/2023
 
 ### Added

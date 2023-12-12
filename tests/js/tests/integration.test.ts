@@ -1,7 +1,7 @@
 import fs from 'fs-extra'
 import path from 'path'
 import { isProcessRunning, sleep } from "../utils/utils";
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
 import { startExecutor, apolloClient, runHcLocalServices } from "../utils/utils";
@@ -158,6 +158,15 @@ describe("Integration tests", function () {
 
           expect(status.isInitialized).to.be.true;
           expect(status.isUnlocked).to.be.true;
+
+          let link = new LinkExpression();
+          link.author = "did:test";
+          link.timestamp = new Date().toISOString();
+          link.data = new Link({source: "src", target: "target", predicate: "pred"});
+          link.proof = new ExpressionProof("sig", "key")
+
+          await testContext.bob.agent.updatePublicPerspective(new Perspective([link]))
+
           //await testContext.makeAllNodesKnown()
         })
 
@@ -172,8 +181,8 @@ describe("Integration tests", function () {
         })
 
         describe('Agent Language', agentLanguageTests(testContext))
-        describe('Direct Messages', directMessageTests(testContext))
         describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
+        describe('Direct Messages', directMessageTests(testContext))
     })
 })

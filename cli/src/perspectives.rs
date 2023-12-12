@@ -63,7 +63,7 @@ pub enum PerspectiveFunctions {
     Repl { id: String },
 
     /// Set Social DNA of given perspective with SDNA code from file
-    SetDna { id: String, file: String },
+    AddDna { id: String, name: String, file: String, dna_type: String },
 
     /// Get all defined Subject classes
     SubjectClasses { id: String },
@@ -117,13 +117,13 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             if let Some(nh) = perspective.neighbourhood {
                 println!(
                     "\x1b[36mNeighbourhood Link-Language: \x1b[97m{}",
-                    nh.link_language
+                    nh.data.link_language
                 );
-                if nh.meta.links.is_empty() {
+                if nh.data.meta.links.is_empty() {
                     println!("\x1b[36mNeughbourhood meta: \x1b[90m<empty>");
                 } else {
                     println!("\x1b[36mNeughbourhood meta:");
-                    for link in nh.meta.links {
+                    for link in nh.data.meta.links {
                         print_link(link.into());
                     }
                 }
@@ -196,11 +196,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             //let _ = perspectives::run_watch(cap_token, id);
             repl_loop(ad4m_client.perspectives.get(id).await?).await?;
         }
-        PerspectiveFunctions::SetDna { id, file } => {
+        PerspectiveFunctions::AddDna { id, file, name, dna_type} => {
             let dna = std::fs::read_to_string(file.clone())
                 .with_context(|| anyhow!("Could not read provided SDNA file {}", file))?;
             let perspective = ad4m_client.perspectives.get(id).await?;
-            perspective.set_dna(dna).await?;
+            perspective.add_dna(name, dna, dna_type).await?;
             println!("SDNA set successfully");
         }
         PerspectiveFunctions::SubjectClasses { id } => {

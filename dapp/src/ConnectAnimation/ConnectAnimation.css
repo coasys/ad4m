@@ -1,0 +1,52 @@
+.load {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.check {
+  color: rgb(79, 181, 79);
+  animation: 0.5s forwards 0s check;
+}
+
+@keyframes check {
+  0% {
+    opacity: 0;
+    transform: rotate(90deg);
+  }
+  100% {
+    opacity: 1;
+    transform: rotate(360deg);
+  }
+}
+
+.line {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 7px;
+  background: linear-gradient(90deg, var(--start-color), var(--end-color));
+}
+
+.load.connecting .line:nth-last-child(1) {
+  animation: 1s infinite 0s loadingB;
+}
+
+.load.connecting .line:nth-last-child(2) {
+  animation: 1s infinite 0.5s loadingB;
+}
+
+.load.connecting .line:nth-last-child(3) {
+  animation: 1s infinite 0s loadingB;
+}
+
+@keyframes loadingB {
+  0% {
+    width: 7px;
+  }
+  50% {
+    width: 14px;
+  }
+  100% {
+    width: 7px;
+  }
+}
