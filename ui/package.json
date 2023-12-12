@@ -1,6 +1,5 @@
 {
   "name": "ad4m-launcher",
-  "version": "0.8.0-prerelease",
   "private": true,
   "type": "module",
   "dependencies": {
@@ -71,5 +70,6 @@
   },
   "resolutions": {
     "react-error-overlay": "6.0.9"
-  }
+  },
+  "version": "0.8.0"
 }

@@ -1,6 +1,5 @@
 {
   "name": "@perspect3vism/ad4m-connect",
-  "version": "0.8.0-prerelease",
   "description": "Lib for handling everything needed to setup a connection to a local or remote ad4m-executor",
   "license": "CAL-1.0",
   "main": "dist/web.js",
@@ -66,5 +65,6 @@
     "esbuild-plugin-copy": "^2.1.1",
     "esbuild-plugin-replace": "^1.4.0",
     "lit": "^2.3.1"
-  }
+  },
+  "version": "0.8.0"
 }

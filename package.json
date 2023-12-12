@@ -1,6 +1,5 @@
 {
   "name": "ad4m-monorepo",
-  "version": "0.8.0-prerelease",
   "workspaces": [
     "core",
     "docs",
@@ -84,5 +83,6 @@
       "@transmute/web-crypto-key-pair@0.6.1-unstable.37": "patches/@transmute__web-crypto-key-pair@0.6.1-unstable.37.patch",
       "tweetnacl@1.0.3": "patches/tweetnacl@1.0.3.patch"
     }
-  }
+  },
+  "version": "0.8.0"
 }
