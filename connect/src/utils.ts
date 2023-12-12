@@ -1,4 +1,4 @@
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient } from "@coasys/ad4m";
 import { AuthStates } from "./core";
 
 // @ts-ignore

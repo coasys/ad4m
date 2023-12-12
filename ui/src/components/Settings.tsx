@@ -1,4 +1,4 @@
-import { Agent, Literal } from "@perspect3vism/ad4m";
+import { Agent, Literal } from "@coasys/ad4m";
 import { useContext, useEffect, useState } from "react";
 import {
   PREDICATE_FIRSTNAME,

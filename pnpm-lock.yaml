@@ -110,7 +110,7 @@ importers:
         specifier: ^8.2.1
         version: 8.4.31
     devDependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@perspect3vism/rollup-plugin-dna':
@@ -183,7 +183,7 @@ importers:
         specifier: ^8.2.1
         version: 8.4.31
     devDependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@perspect3vism/rollup-plugin-dna':
@@ -248,7 +248,7 @@ importers:
 
   bootstrap-languages/centralized-p-diff-sync:
     dependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@perspect3vism/rollup-plugin-dna':
@@ -316,7 +316,7 @@ importers:
         specifier: ^18.0.0
         version: 18.11.10
     devDependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@perspect3vism/rollup-plugin-dna':
@@ -355,7 +355,7 @@ importers:
 
   bootstrap-languages/eas:
     devDependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@types/node':
@@ -373,7 +373,7 @@ importers:
 
   bootstrap-languages/file-storage:
     devDependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@perspect3vism/rollup-plugin-dna':
@@ -449,7 +449,7 @@ importers:
 
   bootstrap-languages/p-diff-sync:
     dependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@perspect3vism/rollup-plugin-dna':
@@ -513,7 +513,7 @@ importers:
 
   bootstrap-languages/p-diff-sync-socket-signaling:
     dependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@perspect3vism/rollup-plugin-dna':
@@ -577,7 +577,7 @@ importers:
 
   bootstrap-languages/perspective-language:
     devDependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../../core
       '@rollup/plugin-commonjs':
@@ -631,7 +631,7 @@ importers:
 
   cli:
     devDependencies:
-      '@perspect3vism/ad4m-executor':
+      '@coasys/ad4m-executor':
         specifier: '*'
         version: link:../executor
 
@@ -662,7 +662,7 @@ importers:
       '@apollo/client':
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.12.0)(graphql@15.7.2)(react-dom@18.2.0)(react@18.2.0)
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../core
       '@types/node':
@@ -762,10 +762,10 @@ importers:
 
   dapp:
     dependencies:
-      '@perspect3vism/ad4m':
+      '@coasys/ad4m':
         specifier: '*'
         version: link:../core
-      '@perspect3vism/ad4m-connect':
+      '@coasys/ad4m-connect':
         specifier: '*'
         version: link:../connect
       '@types/node':
@@ -839,6 +839,9 @@ importers:
 
   executor:
     dependencies:
+      '@coasys/ad4m':
+        specifier: link:../core
+        version: link:../core
       '@holochain/client':
         specifier: coasys/holochain-client-js#2f3a436b6d28344b0aca883ef3dc229cd042c04b
         version: github.com/coasys/holochain-client-js/2f3a436b6d28344b0aca883ef3dc229cd042c04b(ws@8.13.0)
@@ -848,9 +851,6 @@ importers:
       '@noble/secp256k1':
         specifier: ^1.7.0
         version: 1.7.1
-      '@perspect3vism/ad4m':
-        specifier: link:../core
-        version: link:../core
       '@transmute/did-key.js':
         specifier: ^0.2.1-unstable.29
         version: 0.2.1-unstable.42(patch_hash=yak4sespbovyvaboedzatyy2ha)
@@ -942,7 +942,7 @@ importers:
 
   rust-executor:
     devDependencies:
-      '@perspect3vism/ad4m-executor':
+      '@coasys/ad4m-executor':
         specifier: link:../core
         version: link:../core
 
@@ -955,12 +955,12 @@ importers:
       '@apollo/client':
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.14.2)(graphql@15.7.2)(react@17.0.2)
+      '@coasys/ad4m':
+        specifier: link:../../core
+        version: link:../../core
       '@peculiar/webcrypto':
         specifier: ^1.1.7
         version: 1.4.3(patch_hash=bbuork7btorjpwgh5cqtzopbca)
-      '@perspect3vism/ad4m':
-        specifier: link:../../core
-        version: link:../../core
       '@types/chai':
         specifier: '*'
         version: 4.3.11
@@ -1063,12 +1063,12 @@ importers:
       '@apollo/client':
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.12.0)(graphql@15.7.2)(react-dom@18.2.0)(react@18.2.0)
+      '@coasys/ad4m':
+        specifier: link:../core
+        version: link:../core
       '@junto-foundation/junto-elements':
         specifier: ^0.5.5
         version: 0.5.5
-      '@perspect3vism/ad4m':
-        specifier: link:../core
-        version: link:../core
       '@preact/preset-vite':
         specifier: ^2.4.0
         version: 2.7.0(@babel/core@7.23.3)(preact@10.19.2)(vite@4.5.0)

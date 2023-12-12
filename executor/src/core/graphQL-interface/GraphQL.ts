@@ -1,5 +1,5 @@
-import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
-import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveState, PerspectiveUnsignedInput } from '@coasys/ad4m'
+import { exprRef2String, parseExprUrl, LanguageMeta } from '@coasys/ad4m'
 import type Ad4mCore from '../Ad4mCore'
 import * as PubSubDefinitions from './SubscriptionDefinitions'
 import { ad4mExecutorVersion } from '../Config';

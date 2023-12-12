@@ -6,7 +6,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     subjectCollection, subjectFlag,
     SDNAClass,
     SubjectEntity,
-} from "@perspect3vism/ad4m";
+} from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
 import path from "path";

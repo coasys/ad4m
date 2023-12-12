@@ -1,7 +1,7 @@
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient } from "@coasys/ad4m";
 import { useState, useEffect } from "react";
 // @ts-ignore
-import Ad4mConnect from "@perspect3vism/ad4m-connect/core";
+import Ad4mConnect from "@coasys/ad4m-connect/core";
 
 const ad4mConnect = new Ad4mConnect({
   appName: "ADAM 🔗 Web3",

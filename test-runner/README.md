@@ -8,11 +8,11 @@ This is a testing library for testing languages for ad4m. This package internall
 
 npm:
 
-`npm install @perspect3vism/ad4m-test`
+`npm install @coasys/ad4m-test`
 
 yarn:
 
-`yarn add @perspect3vism/ad4m-test`
+`yarn add @coasys/ad4m-test`
 
 ### Write tests
 
@@ -21,7 +21,7 @@ You can write tests like you would with any other testing framework. You can use
 **example**
 
 ```js
-const { spawnExpressionAgent, spawnLinkAgent } = require('@perspect3vism/ad4m-test/helpers')
+const { spawnExpressionAgent, spawnLinkAgent } = require('@coasys/ad4m-test/helpers')
 
 describe("Expression", () => {
   it("Create Expression", async () => {

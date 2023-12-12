@@ -1,8 +1,8 @@
 <svelte:options tag={null}/>
 
 <script lang="ts">
-    import type { Expression } from "@perspect3vism/ad4m";
-    import { Literal, Perspective } from "@perspect3vism/ad4m";
+    import type { Expression } from "@coasys/ad4m";
+    import { Literal, Perspective } from "@coasys/ad4m";
     import emailValidator from 'email-validator'
     import md5 from 'md5'
 

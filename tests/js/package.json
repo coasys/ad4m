@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/ad4m-integration-tests",
+  "name": "@coasys/ad4m-integration-tests",
   "version": "0.8.0-prerelease",
   "description": "Node.js package that allows the running/interfacing of AD4M Languages & Perspectives.",
   "type": "module",
@@ -24,7 +24,7 @@
   "devDependencies": {
     "@apollo/client": "3.7.10",
     "@peculiar/webcrypto": "^1.1.7",
-    "@perspect3vism/ad4m": "link:../../core",
+    "@coasys/ad4m": "link:../../core",
     "@types/chai": "*",
     "@types/chai-as-promised": "*",
     "@types/expect": "*",

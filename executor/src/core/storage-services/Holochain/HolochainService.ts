@@ -2,7 +2,7 @@ import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallApp
 import path from 'node:path'
 import fs from 'node:fs'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
-import type { Dna } from '@perspect3vism/ad4m'
+import type { Dna } from '@coasys/ad4m'
 import { AsyncQueue } from './Queue'
 import { decode, encode } from "@msgpack/msgpack"
 

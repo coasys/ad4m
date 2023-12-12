@@ -1,5 +1,5 @@
-import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language, NeighbourhoodExpression  } from '@perspect3vism/ad4m'
-import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@perspect3vism/ad4m'
+import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language, NeighbourhoodExpression  } from '@coasys/ad4m'
+import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@coasys/ad4m'
 
 import * as Config from './Config'
 import * as Db from './db'

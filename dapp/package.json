@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/dapp",
+  "name": "@coasys/dapp",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,8 +14,8 @@
     "wagmi": "^1.4.7",
     "@wagmi/core": "^1.4.7",
     "web-vitals": "^2.1.0",
-    "@perspect3vism/ad4m-connect": "*",
-    "@perspect3vism/ad4m": "*"
+    "@coasys/ad4m-connect": "*",
+    "@coasys/ad4m": "*"
   },
   "devDependencies": {
     "vite": "^5.0.0",

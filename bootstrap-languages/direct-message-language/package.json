@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/direct-message-language",
+  "name": "@coasys/direct-message-language",
   "version": "0.8.0-prerelease",
   "description": "A templateable AD4M Language for personal, per-agent direct message Languages",
   "main": "index.js",
@@ -20,7 +20,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@perspect3vism/ad4m": "*",
+    "@coasys/ad4m": "*",
     "@perspect3vism/rollup-plugin-dna": "^0.0.2",
     "@rollup/plugin-commonjs": "^14.0.0",
     "@rollup/plugin-node-resolve": "^8.0.0",

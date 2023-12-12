@@ -1,6 +1,6 @@
 import { html } from "lit";
 import Logo from "./Logo";
-import { capSentence } from "@perspect3vism/ad4m";
+import { capSentence } from "@coasys/ad4m";
 
 export default function CapNotMatchedFirst({
   capabilities,

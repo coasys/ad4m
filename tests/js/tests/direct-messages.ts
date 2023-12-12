@@ -1,4 +1,4 @@
-import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@perspect3vism/ad4m'
+import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@coasys/ad4m'
 import { TestContext } from './integration.test'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";

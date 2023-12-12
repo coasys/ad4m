@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/centralized-file-storage",
+  "name": "@coasys/centralized-file-storage",
   "version": "0.7.1",
   "description": "This is a Language for storing AD4M file objects",
   "main": "index.js",

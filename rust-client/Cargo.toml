@@ -2,7 +2,7 @@
 name = "ad4m-client"
 version = "0.8.0-prerelease"
 edition = "2021"
-authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]
+authors = ["Nicolas Luck <nicolas@coasys.org>"]
 description = "Client library wrapping AD4M's GraphQL interface"
 keywords = ["ad4m", "perspect3vism", "cli"]
 license = "CAL-1.0"

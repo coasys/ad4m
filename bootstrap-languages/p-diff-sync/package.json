@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/perspective-diff-sync",
+  "name": "@coasys/perspective-diff-sync",
   "version": "0.8.0-prerelease",
   "description": "An AD4M language for syncing mutations to a share perspective",
   "main": "index.js",
@@ -16,7 +16,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@perspect3vism/ad4m": "*",
+    "@coasys/ad4m": "*",
     "@perspect3vism/rollup-plugin-dna": "^0.0.2",
     "@rollup/plugin-commonjs": "^14.0.0",
     "@rollup/plugin-json": "^4.1.0",

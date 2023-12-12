@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Neighbourhood, LinkQuery, PerspectiveHandle, PerspectiveState, NeighbourhoodExpression } from '@perspect3vism/ad4m'
-import { Perspective as Ad4mPerspective, LinkExpression } from '@perspect3vism/ad4m'
+import { Neighbourhood, LinkQuery, PerspectiveHandle, PerspectiveState, NeighbourhoodExpression } from '@coasys/ad4m'
+import { Perspective as Ad4mPerspective, LinkExpression } from '@coasys/ad4m'
 import path from "path";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";

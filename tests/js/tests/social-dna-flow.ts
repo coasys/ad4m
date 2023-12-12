@@ -1,4 +1,4 @@
-import { Link, LinkQuery, Literal } from "@perspect3vism/ad4m";
+import { Link, LinkQuery, Literal } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { expect } from "chai";
 

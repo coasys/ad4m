@@ -1,4 +1,4 @@
-import Ad4mConnectUI from "@perspect3vism/ad4m-connect";
+import Ad4mConnectUI from "@coasys/ad4m-connect";
 
 const ui = Ad4mConnectUI({
   appName: "ad4m-connect-example",

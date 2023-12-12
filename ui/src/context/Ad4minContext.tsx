@@ -1,5 +1,5 @@
-import { Ad4mClient, ExceptionType } from "@perspect3vism/ad4m";
-import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
+import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
+import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { createContext, useCallback, useEffect, useState } from "react";
 import {
   buildAd4mClient,

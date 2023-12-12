@@ -22,7 +22,7 @@ The main core documentation for AD4M exists [here](https://docs.ad4m.dev)
 
 This is a mono-repository with all components making up a whole ADAM Layer implementation.
 
-- `core`: Holds the core ontology types, the `Ad4mClient` and the GraphQL schema build automatically from the core types. This package gets published as https://www.npmjs.com/package/@perspect3vism/ad4m and is thus holding most of the app/UI facing coding.
+- `core`: Holds the core ontology types, the `Ad4mClient` and the GraphQL schema build automatically from the core types. This package gets published as https://www.npmjs.com/package/@coasys/ad4m and is thus holding most of the app/UI facing coding.
 - `bootstrap-languages`: Holds all the core Languages used to make the ADAM Layer operate. These languages can be thought of as the mainnet configuration for the ADAM Layer.
 - `executor`: Holds the core JS code, which manages an Agents ADAM Layer state. Their Perspectives, Languages and Expressions.
 - `rust-executor`: Rust binary & library which facilitates the running of a GraphQL server, spawning of Deno runtime to execute the `executor` JS code. Running and communication with in built holochain conductor. Running and communication with Scryer Prolog engine to facilitate Prolog queries over Perspective data.

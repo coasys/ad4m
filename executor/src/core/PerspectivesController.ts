@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression, NeighbourhoodExpression } from '@perspect3vism/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression, NeighbourhoodExpression } from '@coasys/ad4m'
 import Perspective from './Perspective'
 import { getPubSub, sleep } from './utils';
 
