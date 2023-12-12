@@ -48,7 +48,7 @@ pub fn init(
     if !compare.matches(&last_seen_version) {
         // Agents old ad4m version is too old, lets clean their state
         warn!("Agents old ad4m version is too old, lets clean their state");
-        clean_ad4m_data(&app_data_path, OLDEST_VERSION.clear_state, true)?;
+        clean_ad4m_data(&app_data_path, OLDEST_VERSION.clear_state, false)?;
         //Create the last seen version file
         fs::write(last_seen_file, AD4M_VERSION.to_string())?;
     }
