@@ -359,6 +359,7 @@ jobs:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: core/package.json
           tag: ${{ env.NPM_TAG }}
+          access: public
 
       - name: Publish connect
         uses: JS-DevTools/npm-publish@v1
@@ -366,6 +367,7 @@ jobs:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: connect/package.json
           tag: ${{ env.NPM_TAG }}
+          access: public
 
       - name: Publish executor
         uses: JS-DevTools/npm-publish@v1
@@ -373,6 +375,7 @@ jobs:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: executor/package.json
           tag: ${{ env.NPM_TAG }}
+          access: public
 
       - name: Publish Test runner
         uses: JS-DevTools/npm-publish@v1
@@ -380,6 +383,7 @@ jobs:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: test-runner/package.json
           tag: ${{ env.NPM_TAG }}
+          access: public
 
 
   crates-publish:
