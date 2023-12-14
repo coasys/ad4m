@@ -283,6 +283,15 @@ export class PerspectiveClient {
         }))
     }
 
+    async addSdna(uuid: string,  name: string, sdnaCode: string, type: "subject_class" | "flow" | "custom"): Promise<boolean> {
+        return unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $type: String!) {
+                perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, type: $type)
+            }`,
+            variables: { uuid, name, sdnaCode, type }
+        })).perspectiveAddSdna
+    }
+
     // ExpressionClient functions, needed for Subjects:
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {
         return await this.#expressionClient.get(expressionURI)

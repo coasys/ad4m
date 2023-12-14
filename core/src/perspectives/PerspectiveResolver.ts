@@ -181,6 +181,11 @@ export default class PerspectiveResolver {
         pubSub.publish(LINK_REMOVED_TOPIC)
         return true
     }
+    
+    @Mutation(returns => Boolean)
+    perspectiveAddSdna(@Arg('uuid') uuid: string, @Arg('name') name: string, @Arg('sdnaCode') sdnaCode: string, @Arg('type') type: string, @PubSub() pubSub: any): Boolean {
+        return true
+    }
 
     @Subscription({topics: PERSPECTIVE_ADDED_TOPIC, nullable: true})
     perspectiveAdded(): PerspectiveHandle {
