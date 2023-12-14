@@ -881,6 +881,12 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.updateLink(oldLink, newLink)
             },
+            perspectiveAddSdna: async (args, context) => {
+                const { uuid, name, sdnaCode, type } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
+                const perspective = core.perspectivesController.perspective(uuid)
+                return await perspective.addSdna(name, sdnaCode, type)
+            }
             //@ts-ignore
             runtimeOpenLink: (args) => {
                 const { url } = args
