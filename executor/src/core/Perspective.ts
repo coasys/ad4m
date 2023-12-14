@@ -39,6 +39,7 @@ export default class Perspective {
     #pendingDiffPollingInterval: any
     #prologMutex: Mutex
     #isTeardown: boolean = false;
+    #sdnaChangeMutex: Mutex;
 
     constructor(id: PerspectiveHandle, context: PerspectiveContext, neighbourhood?: NeighbourhoodExpression, createdFromJoin?: boolean, state?: PerspectiveState) {
         this.updateFromId(id)
@@ -92,6 +93,7 @@ export default class Perspective {
         }
 
         this.#prologMutex = new Mutex()
+        this.#sdnaChangeMutex = new Mutex()
     }
 
     async updatePerspectiveState(state: PerspectiveState) {
@@ -690,6 +692,51 @@ export default class Perspective {
         }
 
         return values;
+    }
+
+    /** Adds the given Social DNA code to the perspective's SDNA code */
+    async addSdna(name: string, sdnaCode: string, type: "subject_class" | "flow" | "custom") {
+        let added = false
+        await this.#sdnaChangeMutex.runExclusive(async () => {
+            let predicate = "ad4m://has_custom_sdna";
+
+            if (type === 'subject_class') predicate = "ad4m://has_subject_class"
+            else if (type === 'flow') predicate = "ad4m://has_flow"
+    
+            const literalName = Literal.from(name).toUrl();
+    
+            const links = await this.getLinks(new LinkQuery({
+                source: "ad4m://self",
+                predicate,
+                target: literalName
+            }))
+    
+            const sdnaLinks: any[] = []
+
+            try {
+                Literal.fromUrl(sdnaCode)
+            } catch(e) {
+                sdnaCode = Literal.from(sdnaCode).toUrl()
+            }
+            
+            if (links.length === 0) {
+                sdnaLinks.push(new Link({
+                    source: "ad4m://self",
+                    predicate,
+                    target: literalName
+                }));
+    
+                sdnaLinks.push(new Link({
+                    source: literalName,
+                    predicate: "ad4m://sdna",
+                    target: sdnaCode
+                }))
+
+                await this.addLinks(sdnaLinks);  
+                added = true
+            }
+        })
+        return added
     }
 
     tripleFact(l: LinkExpression): string {

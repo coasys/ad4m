@@ -84,5 +84,5 @@
       "tweetnacl@1.0.3": "patches/tweetnacl@1.0.3.patch"
     }
   },
-  "version": "0.8.0"
+  "version": "0.8.1"
 }

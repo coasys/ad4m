@@ -1,7 +1,9 @@
 import { ApolloQueryResult, FetchResult } from "@apollo/client/core"
 
 export default function unwrapApolloResult(result: ApolloQueryResult<any> | FetchResult<any>) {
-    //console.debug('GQL result:', result)
+    if(!result) {
+        throw "Got no result from Apollo"
+    }
     //@ts-ignore
     if(result.error) {
         //@ts-ignore
