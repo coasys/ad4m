@@ -25,6 +25,21 @@ interface Parameter {
  * a reference to the PerspectiveClient object that created it.
  */
 export class PerspectiveProxy {
+    /** Unique ID of the perspective */
+    uuid: string;
+
+    /** Given name of the perspective */
+    name: string;
+
+    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood URL */
+    sharedUrl: string|null;
+
+    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
+    neighbourhood: NeighbourhoodExpression|null;
+
+    /** Returns the state of the perspective **/
+    state: PerspectiveState|null;
+
     #handle: PerspectiveHandle
     #client: PerspectiveClient
     #perspectiveLinkAddedCallbacks: LinkCallback[]
@@ -39,6 +54,11 @@ export class PerspectiveProxy {
         this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
+        this.uuid = this.#handle.uuid;
+        this.name = this.#handle.name;
+        this.sharedUrl = this.#handle.sharedUrl;
+        this.neighbourhood = this.#handle.neighbourhood;
+        this.state = this.#handle.state;
         this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
         this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
         this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
@@ -95,31 +115,6 @@ export class PerspectiveProxy {
                     break;
             }
         }
-    }
-
-    /** Unique ID of the perspective */
-    get uuid(): string {
-        return this.#handle.uuid
-    }
-
-    /** Given name of the perspective */
-    get name(): string {
-        return this.#handle.name
-    }
-
-    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood URL */
-    get sharedUrl(): string|void {
-        return this.#handle.sharedUrl
-    }
-
-    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
-    get neighbourhood(): NeighbourhoodExpression|void {
-        return this.#handle.neighbourhood
-    }
-
-    /** Returns the state of the perspective **/
-    get state(): PerspectiveState {
-        return this.#handle.state
     }
 
     /** Returns all the links of this perspective that matches the LinkQuery */
