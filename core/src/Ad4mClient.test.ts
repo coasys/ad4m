@@ -787,6 +787,11 @@ describe('Ad4mClient', () => {
             const r = await ad4mClient.perspective.removeLink('00001', {author: '', timestamp: '', proof: {signature: '', key: ''}, data:{source: 'root', target: 'none'}})
             expect(r).toBeTruthy()
         })
+
+        it('addSdna() smoke test', async () => {
+            const r = await ad4mClient.perspective.addSdna('00001', "Test", 'subject_class("Test", test)', 'subject_class');
+            expect(r).toBeTruthy()
+        })
     })
 
     describe('.runtime', () => {

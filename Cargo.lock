@@ -10798,6 +10798,7 @@ dependencies = [
 name = "rust-executor"
 version = "0.8.1-prerelease"
 dependencies = [
+ "ad4m-client",
  "argon2",
  "base64 0.21.5",
  "chrono",

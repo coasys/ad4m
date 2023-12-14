@@ -332,37 +332,8 @@ export class PerspectiveProxy {
     }
 
     /** Adds the given Social DNA code to the perspective's SDNA code */
-    async addSdna(name: string, sdnaCode: string, type: "subject_class" | "flow" | "custom") {
-        let predicate = "ad4m://has_custom_sdna";
-
-        if (type === 'subject_class') predicate = "ad4m://has_subject_class"
-        else if (type === 'flow') predicate = "ad4m://has_flow"
-
-        const literalName = Literal.from(name).toUrl();
-
-        const links = await this.get(new LinkQuery({
-            source: "ad4m://self",
-            predicate,
-            target: literalName
-        }))
-
-        const sdnaLinks: any[] = []
-
-        if (links.length === 0) {
-            sdnaLinks.push(new Link({
-                source: "ad4m://self",
-                predicate,
-                target: literalName
-            }));
-        }
-
-        sdnaLinks.push(new Link({
-            source: literalName,
-            predicate: "ad4m://sdna",
-            target: Literal.from(sdnaCode).toUrl()
-        }))
-
-        await this.addLinks(sdnaLinks);
+    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom") {
+        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType)
     }
 
     /** Returns all the Subject classes defined in this perspectives SDNA */
