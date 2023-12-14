@@ -1,13 +1,14 @@
 {
   "trustedAgents": [
+    "did:key:z6MkgtBC3UaxNLt5SFJmxHtzFUUeJLCxLiP8DTqJgwF9uCkv",
     "did:key:z6MkvPpWxwXAnLtMcoc9sX7GEoJ96oNnQ3VcQJRLspNJfpE7"
   ],
   "knownLinkLanguages": [
-    "QmzSYwdbqYjNe9NmhkRmSL5EJ1yaXFnUaMw7DEn5QUKGNunzHR1",
-    "QmzSYwdnfQH4XNUi6rcDAPnfFqes2YWEHP5oxET2vJ7YafXnaSk",
-    "QmzSYwdeC5L6ZyzwgEEVxKPm17UKwPttyXnmNHakjm3EweWq52W"
+    "QmzSYwdg8JYEkFbcaV1XizduGxGyPt4dPjeJ4DdzAKajSqdckBj",
+    "QmzSYwdox6uFm5D93VyDTqs7aGjQr5UHzhpRi7yPbAEhwCXFiju",
+    "QmzSYwdnHrRH8MmuPWKKrDvFoVyW5CophNpT1ipQUCcenPVTQnd"
   ],
-  "directMessageLanguage": "QmzSYwdf86wKbE4HCV4Hn2A24QEKb31rdYJWws5BActVtSuesSY",
+  "directMessageLanguage": "QmzSYwdhTvszHze6xSojgaDmm9iPGr78iSbvVnQ1SgXo7t62PA9",
   "agentLanguage": "QmzSYwdZDdgxiyE8crozqbxoBP52h6ocMdDq2S2mg4ScjzVLWKQ",
   "perspectiveLanguage": "QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS",
   "neighbourhoodLanguage": "QmzSYwdo2a6E4XghRHrN5eCReyYRDeRE8VnRbvqgoWZsr9B4pxV",
