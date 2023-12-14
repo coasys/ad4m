@@ -5,7 +5,7 @@ use log::debug;
 use super::graphql_types::*;
 use super::utils::get_capabilies;
 use super::RequestContext;
-
+use ad4m_client::literal::Literal;
 pub struct Mutation;
 
 #[graphql_object(context = RequestContext)]
@@ -988,6 +988,34 @@ impl Mutation {
         );
         let result = js.execute(script).await?;
         let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
+    }
+
+    async fn perspective_add_sdna(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        name: String,
+        sdna_code: String,
+        sdna_type: String,
+    ) -> FieldResult<bool> {
+        let capabilities =
+            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        let mut js = context.js_handle.clone();
+        let sdna_literal = Literal::from_string(sdna_code).to_url()?;
+        let script = format!(
+            r#"JSON.stringify(
+                await core.callResolver(
+                    "Mutation",
+                    "perspectiveAddSdna",
+                    {{ uuid: "{}", name: "{}", sdnaCode: "{}", sdnaType: "{}" }},
+                    {{ capabilities: {} }}
+                )
+            )"#,
+            uuid, name, sdna_literal, sdna_type, capabilities
+        );
+        let result = js.execute(script).await?;
+        let result: JsResultType<bool> = serde_json::from_str(&result)?;
         result.get_graphql_result()
     }
 

@@ -283,12 +283,12 @@ export class PerspectiveClient {
         }))
     }
 
-    async addSdna(uuid: string,  name: string, sdnaCode: string, type: "subject_class" | "flow" | "custom"): Promise<boolean> {
+    async addSdna(uuid: string,  name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom"): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $type: String!) {
-                perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, type: $type)
+            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $sdnaType: String!) {
+                perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType)
             }`,
-            variables: { uuid, name, sdnaCode, type }
+            variables: { uuid, name, sdnaCode, sdnaType }
         })).perspectiveAddSdna
     }
 

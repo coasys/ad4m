@@ -332,8 +332,8 @@ export class PerspectiveProxy {
     }
 
     /** Adds the given Social DNA code to the perspective's SDNA code */
-    async addSdna(name: string, sdnaCode: string, type: "subject_class" | "flow" | "custom") {
-        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, type)
+    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom") {
+        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType)
     }
 
     /** Returns all the Subject classes defined in this perspectives SDNA */

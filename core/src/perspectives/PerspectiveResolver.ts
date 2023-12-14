@@ -183,7 +183,7 @@ export default class PerspectiveResolver {
     }
     
     @Mutation(returns => Boolean)
-    perspectiveAddSdna(@Arg('uuid') uuid: string, @Arg('name') name: string, @Arg('sdnaCode') sdnaCode: string, @Arg('type') type: string, @PubSub() pubSub: any): Boolean {
+    perspectiveAddSdna(@Arg('uuid') uuid: string, @Arg('name') name: string, @Arg('sdnaCode') sdnaCode: string, @Arg('sdnaType') sdnaType: string, @PubSub() pubSub: any): Boolean {
         return true
     }
 
