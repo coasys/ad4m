@@ -696,6 +696,7 @@ export default class Perspective {
 
     /** Adds the given Social DNA code to the perspective's SDNA code */
     async addSdna(name: string, sdnaCode: string, type: "subject_class" | "flow" | "custom") {
+        let added = false
         await this.#sdnaChangeMutex.runExclusive(async () => {
             let predicate = "ad4m://has_custom_sdna";
 
@@ -711,7 +712,13 @@ export default class Perspective {
             }))
     
             const sdnaLinks: any[] = []
-    
+
+            try {
+                Literal.fromUrl(sdnaCode)
+            } catch(e) {
+                sdnaCode = Literal.from(sdnaCode).toUrl()
+            }
+            
             if (links.length === 0) {
                 sdnaLinks.push(new Link({
                     source: "ad4m://self",
@@ -722,12 +729,14 @@ export default class Perspective {
                 sdnaLinks.push(new Link({
                     source: literalName,
                     predicate: "ad4m://sdna",
-                    target: Literal.from(sdnaCode).toUrl()
+                    target: sdnaCode
                 }))
+
+                await this.addLinks(sdnaLinks);  
+                added = true
             }
-    
-            await this.addLinks(sdnaLinks);  
         })
+        return added
     }
 
     tripleFact(l: LinkExpression): string {
