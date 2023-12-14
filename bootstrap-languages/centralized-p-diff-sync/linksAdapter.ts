@@ -51,7 +51,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         // }
 
         let serverRecordTimestamp = signal.serverRecordTimestamp;
-        if (!this.myCurrentTime|| this.myCurrentTime < serverRecordTimestamp) {
+        if (this.myCurrentTime && this.myCurrentTime < serverRecordTimestamp) {
           //console.log("Returning that live signal to executor");
           this.myCurrentTime = serverRecordTimestamp;
           this.updateServerSyncState();
