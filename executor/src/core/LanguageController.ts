@@ -1005,7 +1005,7 @@ export default class LanguageController {
                 address = await putAdapter.addressOf(content);
             }
         } catch (e) {
-            throw new Error(`Incompatible putAdapter in Languge ${JSON.stringify(lang)}\nError was: ${e}`)
+            throw new Error(`Incompatible putAdapter in Languge ${JSON.stringify(lang)}\nError was: ${JSON.stringify(e)}`)
         }
 
         // This makes sure that Expression references used in Links (i.e. in Perspectives) use the aliased Language schemas.
