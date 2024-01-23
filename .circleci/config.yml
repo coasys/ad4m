@@ -40,6 +40,7 @@ jobs:
               cd crates/hc
               cargo build --release
               cd ../../target/release
+              mkdir -p $HOME/.cargo/bin
               cp hc $HOME/.cargo/bin
             fi
       - save_cache:
