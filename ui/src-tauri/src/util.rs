@@ -42,7 +42,7 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
     let _ = new_ad4m_window.build();
 
     let tray_window = app.get_window("AD4M").unwrap();
-    let _ = tray_window.set_decorations(false);
+    let _ = tray_window.set_decorations(true);
     let _ = tray_window.set_always_on_top(true);
     //let _ = tray_window.move_window(Position::TrayCenter);
 

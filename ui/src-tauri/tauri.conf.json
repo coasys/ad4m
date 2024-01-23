@@ -80,7 +80,7 @@
         "center": true,
         "focus": true,
         "visible": true,
-        "decorations": false,
+        "decorations": true,
         "url": "/splashscreen"
       }
     ],
