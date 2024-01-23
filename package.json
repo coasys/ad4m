@@ -81,7 +81,8 @@
       "@transmute/did-key.js@0.2.1-unstable.42": "patches/@transmute__did-key.js@0.2.1-unstable.42.patch",
       "@transmute/ld-key-pair@0.6.1-unstable.37": "patches/@transmute__ld-key-pair@0.6.1-unstable.37.patch",
       "@transmute/web-crypto-key-pair@0.6.1-unstable.37": "patches/@transmute__web-crypto-key-pair@0.6.1-unstable.37.patch",
-      "tweetnacl@1.0.3": "patches/tweetnacl@1.0.3.patch"
+      "tweetnacl@1.0.3": "patches/tweetnacl@1.0.3.patch",
+      "@mattrglobal/node-bbs-signatures@0.11.0": "patches/@mattrglobal__node-bbs-signatures@0.11.0.patch"
     }
   },
   "version": "0.8.1"

@@ -1,0 +1,42 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+deleted file mode 100644
+index 559b8418cf48dc9281b539bcc6b74969b80964f3..0000000000000000000000000000000000000000
+diff --git a/lib/bbsSignature.js b/lib/bbsSignature.js
+index 165b67d5bcf10ab920e61f9234ea883b4f7b6fda..5e8712b55b3e67f2db1b5a9af55324b2ee45e29d 100644
+--- a/lib/bbsSignature.js
++++ b/lib/bbsSignature.js
+@@ -54,7 +54,7 @@ var bls12381toBbs_1 = require("./bls12381toBbs");
+  * @ignore
+  */
+ // eslint-disable-next-line @typescript-eslint/no-var-requires
+-var path = require("path");
++import path from "node:path"
+ // eslint-disable-next-line @typescript-eslint/no-var-requires
+ var bbs = require(path.resolve(path.join(__dirname, "../native/index.node")));
+ /**
+diff --git a/lib/bls12381.js b/lib/bls12381.js
+index d216914596a056173ad393a1aaebf65076ac8a4f..c8bf836873e6a6a6592b4266544f417067927727 100644
+--- a/lib/bls12381.js
++++ b/lib/bls12381.js
+@@ -53,7 +53,7 @@ exports.generateBlindedBls12381G2KeyPair = exports.generateBls12381G2KeyPair = e
+  * @ignore
+  */
+ // eslint-disable-next-line @typescript-eslint/no-var-requires
+-var path = require("path");
++import path from "node:path"
+ // eslint-disable-next-line @typescript-eslint/no-var-requires
+ var bbs = require(path.resolve(path.join(__dirname, "../native/index.node")));
+ /**
+diff --git a/lib/bls12381toBbs.js b/lib/bls12381toBbs.js
+index 9293a30e10871aa1292e8f38f49bb43ac5b3a6e7..48ac33d7d70ab7926325ed1203163dd9beea2e5a 100644
+--- a/lib/bls12381toBbs.js
++++ b/lib/bls12381toBbs.js
+@@ -53,7 +53,7 @@ exports.bls12381toBbs = void 0;
+  * @ignore
+  */
+ // eslint-disable-next-line @typescript-eslint/no-var-requires
+-var path = require("path");
++import path from "node:path"
+ // eslint-disable-next-line @typescript-eslint/no-var-requires
+ var bbs = require(path.resolve(path.join(__dirname, "../native/index.node")));
+ /**
