@@ -1,0 +1,64 @@
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+      body {
+        background: black;
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
+          "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+    
+    /* Add your styles here */
+    #splashscreenContainer {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      color: white;
+    }
+
+    .splashscreen-container {
+      padding: 10px 20px;
+    }
+
+    .splashscreen-text {
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="splashscreenContainer" class="splashscreen-container">
+  <div id="splashscreenText" class="splashscreen-text">
+    <p id="message" style="font-size: 14px;">
+      Ad4m launcher is minimized, click on the tray icon to open it.
+    </p>
+    <p id="countdown" style="font-size: 12px;">
+      This popup will automatically close in <span id="count">5</span> seconds.
+    </p>
+  </div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const countdownElement = document.getElementById('count');
+    let count = 5;
+
+    const interval = setInterval(function () {
+      if (count === 0) {
+        clearInterval(interval);
+      } else {
+        count -= 1;
+        countdownElement.innerText = count;
+      }
+    }, 1000);
+  });
+</script>
+
+</body>
+</html>
