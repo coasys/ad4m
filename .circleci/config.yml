@@ -34,7 +34,13 @@ jobs:
           name: Install HC
           command: |
             if [ ! -f "$HOME/.cargo/bin/hc" ]; then
-              cargo install holochain_cli --version 0.3.0-beta-dev.27
+              git clone https://github.com/holochain/holochain.git
+              cd holochain
+              git checkout holochain-0.3.0-beta-dev.27
+              cd crates/hc
+              cargo build --release
+              cd ../../target/release
+              cp hc $HOME/.cargo/bin
             fi
       - save_cache:
           key: hc-0.3.0-beta-dev.27
