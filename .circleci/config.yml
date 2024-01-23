@@ -55,12 +55,10 @@ jobs:
       - run:
           name: Build the workspace
           command: pnpm run build
-
       - persist_to_workspace:
           root: .
           paths:
             - .
-
 
   unit-tests:
     docker:
@@ -69,8 +67,8 @@ jobs:
       - attach_workspace:
           at: .
       - run:
-        name: Root tests
-        command: pnpm test
+          name: Root tests
+          command: pnpm test
 
   integration-tests-js:
     docker:
@@ -88,12 +86,12 @@ jobs:
     steps:
       - attach_workspace:
           at: .
-
-      - name: Run binaries test script
-        run: ./tests/bats/bin/bats tests/binaries.bats || cat ~/Library/Logs/DiagnosticReports/*
-
-      - name: Run integration test script
-        run: ./tests/bats/bin/bats tests/integration.bats || cat ~/Library/Logs/DiagnosticReports/*
+      - run:
+          name: Run binaries test script
+          command: ./tests/bats/bin/bats tests/binaries.bats || cat ~/Library/Logs/DiagnosticReports/*
+      - run:
+          name: Run integration test script
+          command: ./tests/bats/bin/bats tests/integration.bats || cat ~/Library/Logs/DiagnosticReports/*
 
 workflows:
   version: 2
@@ -109,4 +107,3 @@ workflows:
       - integration-tests-cli:
           requires:
             - build
-          
