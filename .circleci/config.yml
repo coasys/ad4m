@@ -49,7 +49,7 @@ workflows:
       - test-linux:
           matrix:
             parameters:
-              node-version: ["16.x"]
+              node-version: ["16.20.2"]
 
 
 
