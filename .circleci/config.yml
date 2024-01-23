@@ -6,7 +6,7 @@ orbs:
   rust: circleci/rust@1.6.1
 
 jobs:
-  test-linux:
+  build:
     parameters:
       node-version:
         type: string
@@ -49,18 +49,58 @@ jobs:
       - run:
           name: Build the workspace
           command: pnpm run build
+
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+
+  unit-tests:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - attach_workspace:
+          at: .
       - run:
-          name: Run the tests
-          command: pnpm test
+        name: Root tests
+        command: pnpm test
+
+  integration-tests-js:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - attach_workspace:
+          at: .
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
+
+  integration-tests-cli:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - attach_workspace:
+          at: .
+
+      - name: Run binaries test script
+        run: ./tests/bats/bin/bats tests/binaries.bats || cat ~/Library/Logs/DiagnosticReports/*
+
+      - name: Run integration test script
+        run: ./tests/bats/bin/bats tests/integration.bats || cat ~/Library/Logs/DiagnosticReports/*
 
 workflows:
   version: 2
   build-and-test:
     jobs:
-      - test-linux:
-          matrix:
-            parameters:
-              node-version: ["16.20.2"]
+      - build
+      - unit-tests:
+          requires:
+            - build
+      - integration-tests-js:
+          requires:
+            - build
+      - integration-tests-cli:
+          requires:
+            - build
+          
