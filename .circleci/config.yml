@@ -28,23 +28,25 @@ jobs:
             sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
       - restore_cache:
           keys:
-            - hc-0.3.0-beta-dev.27
+            - hc-0.3.0-beta-dev.27-v2
             - hc-
       - run:
           name: Install HC
           command: |
+            ls -la $HOME/.cargo/bin
             if [ ! -f "$HOME/.cargo/bin/hc" ]; then
               git clone https://github.com/holochain/holochain.git
               cd holochain
               git checkout holochain-0.3.0-beta-dev.27
               cd crates/hc
               cargo build --release
-              cd ../../target/release
               mkdir -p $HOME/.cargo/bin
+              cd ../../target/release
               cp hc $HOME/.cargo/bin
             fi
+            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
       - save_cache:
-          key: hc-0.3.0-beta-dev.27
+          key: hc-0.3.0-beta-dev.27-v2
           paths:
             - "$HOME/.cargo/bin/hc"
 
@@ -52,8 +54,8 @@ jobs:
           name: Install Deno
           command: |
             curl -fsSL https://deno.land/install.sh | sh
-            export DENO_INSTALL="$HOME/.deno"
-            export PATH="$DENO_INSTALL/bin:$PATH"
+            echo 'export DENO_INSTALL="$HOME/.deno"' >> $BASH_ENV
+            echo 'export PATH="$DENO_INSTALL/bin:$PATH"' >> $BASH_ENV
       - run:
           name: Install pnpm
           command: npm install -g pnpm
