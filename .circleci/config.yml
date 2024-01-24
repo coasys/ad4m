@@ -31,7 +31,7 @@ jobs:
           command: rustup target add wasm32-unknown-unknown
       - restore_cache:
           keys:
-            - hc-0.3.0-beta-dev.27-v2
+            - hc-0.3.0-beta-dev-27-v3
             - hc-
             - rust-cache-{{ checksum "Cargo.lock" }}
             - rust-cache-
@@ -58,7 +58,7 @@ jobs:
             fi
             echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
       - save_cache:
-          key: hc-0.3.0-beta-dev.27-v2
+          key: hc-0.3.0-beta-dev-27-v3
           paths:
             - "$HOME/.cargo/bin/hc"
 
