@@ -33,6 +33,8 @@ jobs:
           keys:
             - hc-0.3.0-beta-dev.27-v2
             - hc-
+            - rust-cache-{{ checksum "Cargo.lock" }}
+            - rust-cache-
       - run:
           name: Install HC
           command: |
@@ -75,6 +77,12 @@ jobs:
       - run:
           name: Build the workspace
           command: pnpm run build
+      - save_cache:
+          key: rust-cache-{{ checksum "Cargo.lock" }}
+          paths:
+            - ./target
+            - ~/.cargo/registry
+            - ~/.cargo/git
       - persist_to_workspace:
           root: .
           paths:
