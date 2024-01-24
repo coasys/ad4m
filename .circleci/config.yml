@@ -26,6 +26,9 @@ jobs:
           command: |
             sudo apt-get update
             sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
+      - run:
+          name: Install Rust WASM toolchain
+          command: rustup target add wasm32-unknown-unknown
       - restore_cache:
           keys:
             - hc-0.3.0-beta-dev.27-v2
@@ -40,9 +43,16 @@ jobs:
               git checkout holochain-0.3.0-beta-dev.27
               cd crates/hc
               cargo build --release
+              pwd
+              ls -la 
               mkdir -p $HOME/.cargo/bin
               cd ../../target/release
-              cp hc $HOME/.cargo/bin
+              pwd
+              ls -lah
+              cp hc $HOME/.cargo/bin/hc
+              ls -la $HOME/.cargo/bin
+              cd $HOME/.cargo/bin
+              ./hc --version
             fi
             echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
       - save_cache:
