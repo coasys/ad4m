@@ -13,6 +13,7 @@ jobs:
         default: "16.20.2"
     docker:
       - image: cimg/base:edge-22.04
+    resource_class: large
     steps:
       - checkout
       - rust/install:
@@ -31,7 +32,7 @@ jobs:
           command: rustup target add wasm32-unknown-unknown
       - restore_cache:
           keys:
-            - hc-0.3.0-beta-dev-27-v4
+            - hc-0.3.0-beta-dev-27-v5
             - hc-
             - rust-cache-{{ checksum "Cargo.lock" }}
             - rust-cache-
@@ -58,9 +59,9 @@ jobs:
             fi
             echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
       - save_cache:
-          key: hc-0.3.0-beta-dev-27-v4
+          key: hc-0.3.0-beta-dev-27-v5
           paths:
-            - "$HOME/.cargo/bin"
+            - .cargo/bin/hc
 
       - run:
           name: Install Deno
