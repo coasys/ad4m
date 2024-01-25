@@ -61,7 +61,7 @@ jobs:
       - save_cache:
           key: hc-0.3.0-beta-dev-27-v5
           paths:
-            - .cargo/bin/hc
+            - .cargo/bin
 
       - run:
           name: Install Deno
@@ -72,6 +72,10 @@ jobs:
       - run:
           name: Install pnpm
           command: npm install -g pnpm
+      - restore_cache:
+          keys:
+            - rust-cache-{{ checksum "Cargo.lock" }}
+            - rust-cache-
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
@@ -85,6 +89,7 @@ jobs:
             - ~/.cargo/registry
             - ~/.cargo/git
       - persist_to_workspace:
+          no-output-timeout: 30m
           root: .
           paths:
             - .
