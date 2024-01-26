@@ -96,6 +96,10 @@ jobs:
             - .
 
   unit-tests:
+    parameters:
+      node-version:
+        type: string
+        default: "16.20.2"  
     docker:
       - image: cimg/base:stable
     steps:
@@ -111,6 +115,10 @@ jobs:
           command: pnpm test
 
   integration-tests-js:
+    parameters:
+      node-version:
+        type: string
+        default: "16.20.2"
     docker:
       - image: cimg/base:stable
     steps:
