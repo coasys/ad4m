@@ -57,5 +57,9 @@
     "typescript": "^4.6.2",
     "ws": "8.13.0"
   },
+  "patchedDependencies": {
+    "node-gyp-build@4.7.0": "patches/node-gyp-build@4.7.0.patch",
+    "@peculiar/webcrypto@1.4.3": "patches/@peculiar__webcrypto@1.4.3.patch"
+  },
   "version": "0.8.1"
 }
