@@ -54,4 +54,4 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 USER circleci
 
 # Set the PATH environment variable
-ENV PATH="/home/circleci/.npm-global/bin:$PATH"
+ENV PATH="/home/circleci/.cargo/bin:/home/circleci/.deno/bin:/home/circleci/.npm-global/bin:$PATH"

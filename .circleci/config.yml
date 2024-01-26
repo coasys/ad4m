@@ -8,7 +8,7 @@ orbs:
 jobs:
   build:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:8063f1a3f71ef5e610fa2c4c64ae9ad7a30b5b5c377e7276710373a0145f5352
+      - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
     resource_class: large
     steps:
       - checkout
@@ -69,7 +69,7 @@ jobs:
 
   unit-tests:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:8063f1a3f71ef5e610fa2c4c64ae9ad7a30b5b5c377e7276710373a0145f5352
+      - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
     steps:
       - attach_workspace:
           at: .
@@ -79,7 +79,7 @@ jobs:
 
   integration-tests-js:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:8063f1a3f71ef5e610fa2c4c64ae9ad7a30b5b5c377e7276710373a0145f5352
+      - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
     steps:
       - attach_workspace:
           at: .
@@ -89,7 +89,7 @@ jobs:
 
   integration-tests-cli:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:8063f1a3f71ef5e610fa2c4c64ae9ad7a30b5b5c377e7276710373a0145f5352
+      - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
     steps:
       - attach_workspace:
           at: .
