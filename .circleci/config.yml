@@ -95,10 +95,10 @@ jobs:
           at: .
       - run:
           name: Run binaries test script
-          command: ./tests/bats/bin/bats tests/binaries.bats || cat ~/Library/Logs/DiagnosticReports/*
+          command: ./tests/bats/bin/bats tests/binaries.bats
       - run:
           name: Run integration test script
-          command: ./tests/bats/bin/bats tests/integration.bats || cat ~/Library/Logs/DiagnosticReports/*
+          command: ./tests/bats/bin/bats tests/integration.bats
 
 workflows:
   version: 2
