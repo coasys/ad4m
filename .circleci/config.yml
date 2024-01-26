@@ -100,6 +100,11 @@ jobs:
     steps:
       - attach_workspace:
           at: .
+      - node/install:
+          node-version: << parameters.node-version >>
+      - run:
+          name: Install pnpm
+          command: npm install -g pnpm
       - run:
           name: Root tests
           command: pnpm test
@@ -110,6 +115,11 @@ jobs:
     steps:
       - attach_workspace:
           at: .
+      - node/install:
+          node-version: << parameters.node-version >>
+      - run:
+          name: Install pnpm
+          command: npm install -g pnpm        
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
