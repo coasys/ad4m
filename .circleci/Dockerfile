@@ -39,7 +39,7 @@ RUN echo 'export PATH="/home/circleci/.deno/bin:$PATH"' >> /home/circleci/.bashr
 # Configure npm to use a directory in the circleci user's home for global packages
 RUN mkdir ~/.npm-global \
     && npm config set prefix '~/.npm-global' \
-    && echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> /home/circleci/.bashrc
+    && echo 'export PATH="~/.npm-global/bin:$PATH"' >> /home/circleci/.bashrc
 
 # Install pnpm
 RUN npm install -g pnpm
@@ -52,4 +52,6 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Switch back to the circleci user for any non-root actions
 USER circleci
-RUN source ~/.bashrc
+
+# Set the PATH environment variable
+ENV PATH="/home/circleci/.npm-global/bin:$PATH"
