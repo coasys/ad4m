@@ -29,7 +29,6 @@ RUN echo 'export PATH="/usr/local/bin:$PATH"' >> $HOME/.bashrc
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 RUN echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /home/circleci/.bashrc
-RUN source ~/.bashrc
 RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
 
 # Install Deno
@@ -40,8 +39,7 @@ RUN echo 'export PATH="/home/circleci/.deno/bin:$PATH"' >> /home/circleci/.bashr
 # Configure npm to use a directory in the circleci user's home for global packages
 RUN mkdir ~/.npm-global \
     && npm config set prefix '~/.npm-global' \
-    && echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> $HOME/.bashrc
-
+    && echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> /home/circleci/.bashrc
 
 # Install pnpm
 RUN npm install -g pnpm
@@ -54,3 +52,4 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Switch back to the circleci user for any non-root actions
 USER circleci
+RUN source ~/.bashrc
