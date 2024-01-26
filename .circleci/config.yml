@@ -81,8 +81,8 @@ jobs:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
-          name: Build the workspace
-          command: pnpm run build
+          name: Build the ADAM (without bootstrap languages)
+          command: pnpm run build-libs
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}
           paths:
