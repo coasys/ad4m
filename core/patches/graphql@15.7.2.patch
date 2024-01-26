@@ -1,0 +1,39 @@
+diff --git a/jsutils/instanceOf.js b/jsutils/instanceOf.js
+index 709809415e672ef9fc2d8be060129fd832844ce9..99ba91717b9cc12c55e2d2854903f3e45b1f3e96 100644
+--- a/jsutils/instanceOf.js
++++ b/jsutils/instanceOf.js
+@@ -13,7 +13,7 @@ function _typeof(obj) { "@babel/helpers - typeof"; if (typeof Symbol === "functi
+ 
+ // See: https://expressjs.com/en/advanced/best-practice-performance.html#set-node_env-to-production
+ // See: https://webpack.js.org/guides/production/
+-var _default = process.env.NODE_ENV === 'production' ? // istanbul ignore next (See: 'https://github.com/graphql/graphql-js/issues/2317')
++var _default = true ? // istanbul ignore next (See: 'https://github.com/graphql/graphql-js/issues/2317')
+ // eslint-disable-next-line no-shadow
+ function instanceOf(value, constructor) {
+   return value instanceof constructor;
+diff --git a/jsutils/instanceOf.js.flow b/jsutils/instanceOf.js.flow
+index 58faa02c8b490cb5caeccfb6b7ffc1faf3277554..8d476bfa2d0e772d5d0e6f74eb39824df89c455d 100644
+--- a/jsutils/instanceOf.js.flow
++++ b/jsutils/instanceOf.js.flow
+@@ -12,7 +12,7 @@ declare function instanceOf(
+ 
+ // See: https://expressjs.com/en/advanced/best-practice-performance.html#set-node_env-to-production
+ // See: https://webpack.js.org/guides/production/
+-export default process.env.NODE_ENV === 'production'
++export default true
+   ? // istanbul ignore next (See: 'https://github.com/graphql/graphql-js/issues/2317')
+     // eslint-disable-next-line no-shadow
+     function instanceOf(value: mixed, constructor: mixed): boolean {
+diff --git a/jsutils/instanceOf.mjs b/jsutils/instanceOf.mjs
+index ff46fcaf4c187eed1523fc923d5b67697ff2d793..5a1f7a2ad87cb0dad8a7b47a9a09b49286022b88 100644
+--- a/jsutils/instanceOf.mjs
++++ b/jsutils/instanceOf.mjs
+@@ -8,7 +8,7 @@ import inspect from "./inspect.mjs";
+ 
+ // See: https://expressjs.com/en/advanced/best-practice-performance.html#set-node_env-to-production
+ // See: https://webpack.js.org/guides/production/
+-export default process.env.NODE_ENV === 'production' ? // istanbul ignore next (See: 'https://github.com/graphql/graphql-js/issues/2317')
++export default true ? // istanbul ignore next (See: 'https://github.com/graphql/graphql-js/issues/2317')
+ // eslint-disable-next-line no-shadow
+ function instanceOf(value, constructor) {
+   return value instanceof constructor;
