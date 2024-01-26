@@ -83,6 +83,9 @@ jobs:
     steps:
       - attach_workspace:
           at: .
+      - run: Build bootstrap languages
+          name: Build bootstrap languages
+          command: pnpm run build-languages
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
@@ -93,6 +96,12 @@ jobs:
     steps:
       - attach_workspace:
           at: .
+      - run:
+          name: PWD
+          command: pwd
+      - run:
+          name: CD
+          command: cd /home/circleci/project
       - run:
           name: Run binaries test script
           command: ./tests/bats/bin/bats tests/binaries.bats
