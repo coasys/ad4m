@@ -7,29 +7,11 @@ orbs:
 
 jobs:
   build:
-    parameters:
-      node-version:
-        type: string
-        default: "16.20.2"
     docker:
-      - image: cimg/base:edge-22.04
+      - image: coasys/ad4m-ci-linux
     resource_class: large
     steps:
       - checkout
-      - rust/install:
-          version: "1.73.0"
-      - go/install:
-          version: "1.20"
-      - node/install:
-          node-version: << parameters.node-version >>
-      - run:
-          name: Install system dependencies
-          command: |
-            sudo apt-get update
-            sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
-      - run:
-          name: Install Rust WASM toolchain
-          command: rustup target add wasm32-unknown-unknown
       - restore_cache:
           keys:
             - hc-0.3.0-beta-dev-27-v7
@@ -63,16 +45,6 @@ jobs:
           key: hc-0.3.0-beta-dev-27-v7
           paths:
             - /home/circleci/.cargo/bin
-
-      - run:
-          name: Install Deno
-          command: |
-            curl -fsSL https://deno.land/install.sh | sh
-            echo 'export DENO_INSTALL="$HOME/.deno"' >> $BASH_ENV
-            echo 'export PATH="$DENO_INSTALL/bin:$PATH"' >> $BASH_ENV
-      - run:
-          name: Install pnpm
-          command: npm install -g pnpm
       - restore_cache:
           keys:
             - rust-cache-{{ checksum "Cargo.lock" }}
@@ -81,7 +53,7 @@ jobs:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
-          name: Build the ADAM (without bootstrap languages)
+          name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}
@@ -96,46 +68,28 @@ jobs:
             - .
 
   unit-tests:
-    parameters:
-      node-version:
-        type: string
-        default: "16.20.2"  
     docker:
-      - image: cimg/base:stable
+      - image: coasys/ad4m-ci-linux
     steps:
       - attach_workspace:
           at: .
-      - node/install:
-          node-version: << parameters.node-version >>
-      - run:
-          name: Install pnpm
-          command: npm install -g pnpm
       - run:
           name: Root tests
           command: pnpm test
 
   integration-tests-js:
-    parameters:
-      node-version:
-        type: string
-        default: "16.20.2"
     docker:
-      - image: cimg/base:stable
+      - image: coasys/ad4m-ci-linux
     steps:
       - attach_workspace:
           at: .
-      - node/install:
-          node-version: << parameters.node-version >>
-      - run:
-          name: Install pnpm
-          command: npm install -g pnpm        
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
 
   integration-tests-cli:
     docker:
-      - image: cimg/base:stable
+      - image: coasys/ad4m-ci-linux
     steps:
       - attach_workspace:
           at: .
