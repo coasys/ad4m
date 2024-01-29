@@ -96,27 +96,17 @@ jobs:
           command: pnpm run build-languages
       - run:
           name: Run integration tests
-          command: cd ./tests/js && pnpm run test-main
+          command: cd ./tests/js && pnpm install && pnpm run test-main
 
   integration-tests-cli:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
     steps:
-      - checkout
       - attach_workspace:
           at: .
       - run:
-          name: PWD
-          command: pwd
-      - run:
-          name: CD
-          command: cd /home/circleci/project
-      - run:
-          name: LS
-          command: ls -la
-      - run:
-          name: LS tests
-          command: ls -la tests
+          name: git submodule
+          command: git submodule update --init --recursive
       - run:
           name: Run binaries test script
           command: ./tests/bats/bin/bats tests/binaries.bats
