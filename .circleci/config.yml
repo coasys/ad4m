@@ -92,11 +92,14 @@ jobs:
             - rust-cache-{{ checksum "Cargo.lock" }}-v2
             - rust-cache-
       - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
       - run:
           name: Run integration tests
-          command: cd ./tests/js && pnpm install && pnpm run test-main
+          command: cd ./tests/js && pnpm run test-main
 
   integration-tests-cli:
     docker:
@@ -107,6 +110,9 @@ jobs:
       - run:
           name: git submodule
           command: git submodule update --init --recursive
+      - run:
+          name: Install killall
+          command: sudo apt-get install psmisc
       - run:
           name: Run binaries test script
           command: ./tests/bats/bin/bats tests/binaries.bats
