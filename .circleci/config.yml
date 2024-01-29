@@ -47,7 +47,7 @@ jobs:
             - /home/circleci/.cargo/bin
       - restore_cache:
           keys:
-            - rust-cache-{{ checksum "Cargo.lock" }}
+            - rust-cache-{{ checksum "Cargo.lock" }}-v2
             - rust-cache-
       - run:
           name: Install dependencies
@@ -56,7 +56,7 @@ jobs:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
       - save_cache:
-          key: rust-cache-{{ checksum "Cargo.lock" }}
+          key: rust-cache-{{ checksum "Cargo.lock" }}-v2
           paths:
             - ./target
             - ~/.cargo/registry
@@ -83,6 +83,14 @@ jobs:
     steps:
       - attach_workspace:
           at: .
+      - restore_cache:
+          keys:
+            - hc-0.3.0-beta-dev-27-v7
+            - hc-
+      - restore_cache:
+          keys:
+            - rust-cache-{{ checksum "Cargo.lock" }}-v2
+            - rust-cache-
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
@@ -94,6 +102,7 @@ jobs:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
     steps:
+      - checkout
       - attach_workspace:
           at: .
       - run:
@@ -102,6 +111,12 @@ jobs:
       - run:
           name: CD
           command: cd /home/circleci/project
+      - run:
+          name: LS
+          command: ls -la
+      - run:
+          name: LS tests
+          command: ls -la tests
       - run:
           name: Run binaries test script
           command: ./tests/bats/bin/bats tests/binaries.bats
