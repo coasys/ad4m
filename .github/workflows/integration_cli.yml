@@ -28,6 +28,11 @@ jobs:
         override: true
         toolchain: 1.73.0
 
+    - name: Use Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
     - name: Install protobuf & cmake
       run: brew install protobuf cmake
 
@@ -77,4 +82,3 @@ jobs:
 
     - name: Run integration test script
       run: ./tests/bats/bin/bats tests/integration.bats || cat ~/Library/Logs/DiagnosticReports/*
-    
