@@ -83,7 +83,7 @@ jobs:
     steps:
       - attach_workspace:
           at: .
-      - run: Build bootstrap languages
+      - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
       - run:
