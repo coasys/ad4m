@@ -8,7 +8,7 @@ orbs:
 jobs:
   build:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
+      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     resource_class: large
     steps:
       - checkout
@@ -69,7 +69,7 @@ jobs:
 
   unit-tests:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
+      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     steps:
       - attach_workspace:
           at: .
@@ -79,7 +79,7 @@ jobs:
 
   integration-tests-js:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
+      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     steps:
       - attach_workspace:
           at: .
@@ -103,16 +103,13 @@ jobs:
 
   integration-tests-cli:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:d9376adce03b42bb466927ad0bdd382f7f9810f82079c43edeff00f9bb5a63c4
+      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     steps:
       - attach_workspace:
           at: .
       - run:
           name: git submodule
           command: git submodule update --init --recursive
-      - run:
-          name: Install killall
-          command: sudo apt-get install psmisc
       - run:
           name: Run binaries test script
           command: ./tests/bats/bin/bats tests/binaries.bats

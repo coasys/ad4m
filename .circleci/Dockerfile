@@ -55,3 +55,8 @@ USER circleci
 
 # Set the PATH environment variable
 ENV PATH="/home/circleci/.cargo/bin:/home/circleci/.deno/bin:/home/circleci/.npm-global/bin:$PATH"
+
+# We need killall for the CLI tests
+USER root
+RUN apt-get update && apt-get install psmisc
+USER circleci
