@@ -89,10 +89,6 @@ jobs:
             - hc-
       - restore_cache:
           keys:
-            - rust-cache-{{ checksum "Cargo.lock" }}-v2
-            - rust-cache-
-      - restore_cache:
-          keys:
             - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
             - agent-language-rust-cache-
       - restore_cache:
@@ -118,17 +114,21 @@ jobs:
           paths:
             - ./bootstrap-languages/agent-language/hc-dna/target
       - save_cache:
-          key: direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-languages/hc-dna/Cargo.lock" }}
+          key: direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
           paths:
             - ./bootstrap-languages/direct-message-language/hc-dna/target
       - save_cache:
-          key: file-storage-language-rust-cache-{{ checksum "bootstrap-languages/file-storage-languages/hc-dna/Cargo.lock" }}
+          key: file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
           paths:
             - ./bootstrap-languages/file-storage-language/hc-dna/target
       - save_cache:
-          key: p-diff-sync-storage-language-rust-cache-{{ checksum "bootstrap-languages/file-storage-languages/hc-dna/Cargo.lock" }}
+          key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
           paths:
             - ./bootstrap-languages/p-diff-sync/hc-dna/target
+      - save_cache:
+          key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
