@@ -1,7 +1,6 @@
 ---
 manifest_version: "1"
 name: "agent-store"
-description: "DNA for storing AD4M agent expressions"
 
 integrity:
   network_seed: 00000000-0000-0000-0000-000000000000

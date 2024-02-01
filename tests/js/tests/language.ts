@@ -2,7 +2,7 @@ import { TestContext } from './integration.test'
 import path from "path";
 import fs from "fs";
 import { sleep } from '../utils/utils';
-import { Ad4mClient, LanguageMetaInput, LanguageRef } from '@perspect3vism/ad4m';
+import { Ad4mClient, LanguageMetaInput, LanguageRef } from '@coasys/ad4m';
 import { expect } from "chai";
 import { fileURLToPath } from 'url';
 import stringify from 'json-stable-stringify'

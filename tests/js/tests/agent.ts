@@ -1,4 +1,4 @@
-import { Perspective, LinkExpression, Link, ExpressionProof, EntanglementProofInput } from "@perspect3vism/ad4m";
+import { Perspective, LinkExpression, Link, ExpressionProof, EntanglementProofInput } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";

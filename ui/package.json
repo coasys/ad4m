@@ -1,12 +1,11 @@
 {
   "name": "ad4m-launcher",
-  "version": "0.7.1",
   "private": true,
   "type": "module",
   "dependencies": {
     "@apollo/client": "3.7.10",
     "@junto-foundation/junto-elements": "^0.5.5",
-    "@perspect3vism/ad4m": "link:../core",
+    "@coasys/ad4m": "link:../core",
     "@preact/preset-vite": "^2.4.0",
     "@tauri-apps/api": "^1.4.0",
     "apollo-boost": "^0.4.9",
@@ -30,9 +29,9 @@
     "build": "vite build",
     "change-ui-version": "powershell -ExecutionPolicy Bypass -File ./scripts/patch-prerelease-tags.ps1",
     "package-ad4m": "run-script-os",
-    "package-ad4m:windows": "cargo clean && powershell -ExecutionPolicy Bypass -File ./scripts/patch-prerelease-tags.ps1 && yarn run build && yarn tauri build --verbose && powershell -ExecutionPolicy Bypass -File ./scripts/reverse-patch-prerelease-tags.ps1",
-    "package-ad4m:macos": "yarn run build && yarn tauri build --verbose",
-    "package-ad4m:linux": "yarn run build && ./scripts/patch-safe-buffer.sh && yarn tauri build --verbose && ./scripts/reverse-patch-safe-buffer.sh"
+    "package-ad4m:windows": "cargo clean && pnpm run build && pnpm tauri build --verbose",
+    "package-ad4m:macos": "pnpm run build && pnpm tauri build --verbose",
+    "package-ad4m:linux": "pnpm run build && pnpm tauri build --verbose"
   },
   "eslintConfig": {
     "extends": [
@@ -71,5 +70,6 @@
   },
   "resolutions": {
     "react-error-overlay": "6.0.9"
-  }
+  },
+  "version": "0.8.1"
 }

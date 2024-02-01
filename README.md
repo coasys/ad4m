@@ -22,7 +22,7 @@ The main core documentation for AD4M exists [here](https://docs.ad4m.dev)
 
 This is a mono-repository with all components making up a whole ADAM Layer implementation.
 
-- `core`: Holds the core ontology types, the `Ad4mClient` and the GraphQL schema build automatically from the core types. This package gets published as https://www.npmjs.com/package/@perspect3vism/ad4m and is thus holding most of the app/UI facing coding.
+- `core`: Holds the core ontology types, the `Ad4mClient` and the GraphQL schema build automatically from the core types. This package gets published as https://www.npmjs.com/package/@coasys/ad4m and is thus holding most of the app/UI facing coding.
 - `bootstrap-languages`: Holds all the core Languages used to make the ADAM Layer operate. These languages can be thought of as the mainnet configuration for the ADAM Layer.
 - `executor`: Holds the core JS code, which manages an Agents ADAM Layer state. Their Perspectives, Languages and Expressions.
 - `rust-executor`: Rust binary & library which facilitates the running of a GraphQL server, spawning of Deno runtime to execute the `executor` JS code. Running and communication with in built holochain conductor. Running and communication with Scryer Prolog engine to facilitate Prolog queries over Perspective data.
@@ -51,25 +51,25 @@ In October/November 2022, these componentes were collected into a mono-repo agai
 - Install Deno by visiting [here](https://deno.land/manual@v1.36.4/getting_started/installation)
 - Install Go by visiting [here](https://go.dev/doc/install) (ADAM Layer currently uses go version: go1.18)
 - Install Node by visiting [here](https://nodejs.org/en/download)
-- Install Yarn / Node by visiting [here](https://classic.yarnpkg.com/lang/en/docs/install/)
+- Install PNPM by visiting [here](https://pnpm.io/installation)
 
-### Build:
-
-```
-yarn install
-yarn run build
-```
-
-## Testing
+### Build (CLI & Libs):
 
 ```
-yarn install
-yarn test
+pnpm install
+pnpm run build
+```
+
+## Testing (Full test run of all packages)
+
+```
+pnpm install
+pnpm test
 ```
 
 ## Building ad4m launcher
 
 ```
-yarn install
-yarn run package-ad4m
+pnpm install
+pnpm run package-ad4m
 ```

@@ -8,7 +8,7 @@
     "test-link": "ad4m-test --test ./link.test.js --bundle \"languages/social-context.js\" --meta '{\"name\":\"social-context\",\"description\":\"Shortform expression for flux application\",\"sourceCodeLink\":\"https://github.com/juntofoundation/ad4m-languages\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'"
   },
   "dependencies": {
-    "@perspect3vism/ad4m-test": "../"
+    "@coasys/ad4m-test": "../"
   },
   "author": "",
   "license": "ISC"

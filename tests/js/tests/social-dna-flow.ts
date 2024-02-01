@@ -1,4 +1,4 @@
-import { Link, LinkQuery, Literal } from "@perspect3vism/ad4m";
+import { Link, LinkQuery, Literal } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { expect } from "chai";
 
@@ -32,7 +32,7 @@ export default function socialDNATests(testContext: TestContext) {
                 const perspective = await ad4mClient.perspective.add("sdna-test");
                 expect(perspective.name).to.be.equal("sdna-test");
 
-                await perspective.addSdna("Todo", Literal.from(sdna.join('\n')).toUrl(), "flow");
+                await perspective.addSdna("Todo", sdna.join('\n'), "flow");
                 
 
                 let sDNAFacts = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "ad4m://self", predicate: "ad4m://has_flow"}));

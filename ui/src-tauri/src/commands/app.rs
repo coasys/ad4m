@@ -69,3 +69,10 @@ pub fn clear_state(app_handle: tauri::AppHandle) {
 
     app_handle.restart();
 }
+
+#[tauri::command]
+pub fn open_dapp() {
+    if webbrowser::open("http://localhost:8080/").is_err() {
+        println!("Failed to open URL");
+    }
+}

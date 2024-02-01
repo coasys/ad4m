@@ -1,23 +1,21 @@
 {
-  "name": "@perspect3vism/perspective-diff-sync",
-  "version": "0.7.1",
+  "name": "@coasys/perspective-diff-sync",
   "description": "An AD4M language for syncing mutations to a share perspective",
   "main": "index.js",
   "scripts": {
     "build-dna": "cd hc-dna && ./build.sh && cd ..",
     "build": "run-script-os",
-    "build:linux": "yarn run build-dna && yarn run build-common",
-    "build:macos": "yarn run build-dna && yarn run build-common",
-    "build:windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && yarn run build-common",
+    "build:linux": "pnpm run build-dna && pnpm run build-common",
+    "build:macos": "pnpm run build-dna && pnpm run build-common",
+    "build:windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd .. && pnpm run build-common",
     "rollup-dna": "rollup -c rollup.config.hc-dna.js",
-    "build-common": "yarn run rollup-dna && deno run --allow-all esbuild.ts",
+    "build-common": "pnpm run rollup-dna && deno run --allow-all esbuild.ts",
     "integration-test": "node ../../test-runner/build/cli.js --test ./integration-test.js --bundle \"./build/bundle.js\" --meta '{\"name\":\"p-diff-sync\",\"description\":\"Holochain based language for sharing Perspectives\",\"sourceCodeLink\":\"https://github.com/perspect3vism/perspective-diff-sync\",\"possibleTemplateParams\":[\"uid\",\"name\"]}'"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@perspect3vism/ad4m": "*",
-    "@perspect3vism/ad4m-test": "*",
+    "@coasys/ad4m": "*",
     "@perspect3vism/rollup-plugin-dna": "^0.0.2",
     "@rollup/plugin-commonjs": "^14.0.0",
     "@rollup/plugin-json": "^4.1.0",
@@ -39,5 +37,6 @@
   },
   "devDependencies": {
     "run-script-os": "^1.1.6"
-  }
+  },
+  "version": "0.8.1"
 }

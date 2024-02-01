@@ -9,6 +9,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@perspect3vism/ad4m-connect": "*"
+    "@coasys/ad4m-connect": "*"
   }
 }

@@ -1,7 +1,7 @@
 import { Database } from 'aloedb-node'
 import path from 'node:path'
 import fs from 'node:fs';
-import type { Expression, LinkExpression, LinkStatus, PerspectiveDiff } from "@perspect3vism/ad4m";  
+import type { Expression, LinkExpression, LinkStatus, PerspectiveDiff } from "@coasys/ad4m";  
 
 interface LinkSchema {
     perspective: string,

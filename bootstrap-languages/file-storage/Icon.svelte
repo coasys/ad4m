@@ -1,7 +1,7 @@
 <svelte:options tag={null}/>
 
 <script lang="ts">
-    import type Expression from "@perspect3vism/ad4m/Expression";
+    import type Expression from "@coasys/ad4m/Expression";
     export let expression: Expression
     let string
     $: if(expression && expression.data) string = JSON.parse(expression.data)

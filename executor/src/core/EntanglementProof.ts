@@ -2,7 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import AgentService from "./agent/AgentService";
 
-import { EntanglementProof } from '@perspect3vism/ad4m';
+import { EntanglementProof } from '@coasys/ad4m';
 
 export default class EntanglementProofController {
     #entanglementProofsFile: string

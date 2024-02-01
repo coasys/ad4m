@@ -5,7 +5,7 @@ import {
 } from "@apollo/client/core";
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
-import { Ad4mClient, CapabilityInput } from "@perspect3vism/ad4m";
+import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
 import { checkPort, connectWebSocket } from "./utils";
 import autoBind from "auto-bind";
 

@@ -6,15 +6,21 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-libs": {
-      "dependsOn": ["@perspect3vism/ad4m#build", "@perspect3vism/ad4m-connect#build", "@perspect3vism/ad4m-executor#build", "@perspect3vism/ad4m-test#build", "@perspect3vism/ad4m-cli#build", "@perspect3vism/dapp#build"],
+      "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/ad4m-executor#build", "@coasys/ad4m-cli#build", "@coasys/dapp#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-languages": {
-      "dependsOn": ["@perspect3vism/perspective-diff-sync#build", "@perspect3vism/agent-language#build", 
-        "@perspect3vism/direct-message-language#build", "@perspect3vism/perspective-language#build", 
-        "@perspect3vism/language-language#build", "@perspect3vism/neighbourhood-language#build",
-        "@perspect3vism/file-storage#build", "@perspect3vism/perspective-diff-sync-socket-signaling#build",
-        "@perspect3vism/centralized-perspective-diff-sync#build"],
+      "dependsOn": ["@coasys/perspective-diff-sync#build", "@coasys/agent-language#build", 
+        "@coasys/direct-message-language#build", "@coasys/perspective-language#build", 
+        "@coasys/language-language#build", "@coasys/neighbourhood-language#build",
+        "@coasys/file-storage#build", "@coasys/perspective-diff-sync-socket-signaling#build",
+        "@coasys/centralized-perspective-diff-sync#build", "@coasys/centralized-agent-language#build",
+        "@coasys/centralized-file-storage#build", "@coasys/eas#build"],
+      "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+
+    "build-dapp": {
+      "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/dapp#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 

@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/ad4m-cli",
+  "name": "@coasys/ad4m-cli",
   "version": "0.3.4",
   "description": "AD4M cli for starting an AD4M agent, and querying the executor",
   "main": "",
@@ -29,7 +29,7 @@
     "url": "https://github.com/perspect3vism/ad4m/issues"
   },
   "devDependencies": {
-    "@perspect3vism/ad4m-executor": "*"
+    "@coasys/ad4m-executor": "*"
   },
   "dependencies": {
   }

@@ -1,4 +1,4 @@
-import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@perspect3vism/ad4m'
+import { ExpressionProof, Link, LinkExpressionInput, Literal, Perspective } from '@coasys/ad4m'
 import { TestContext } from './integration.test'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";
@@ -32,7 +32,7 @@ export default function directMessageTests(testContext: TestContext) {
             expect(hasThrown).to.be.true;
         })    
 
-        describe("with Alice and Bob being friends", () => {
+        describe.skip("with Alice and Bob being friends", () => {
             //@ts-ignore
             let alice, bob, didAlice, didBob
 

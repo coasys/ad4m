@@ -159,7 +159,7 @@ describe('Ad4mClient', () => {
         })
 
         it('unlock() smoke test', async () => {
-            const agentStatus = await ad4mClient.agent.unlock('secret')
+            const agentStatus = await ad4mClient.agent.unlock('secret', false)
             expect(agentStatus.did).toBe("did:ad4m:test")
             expect(agentStatus.isUnlocked).toBe(true)
         })
@@ -787,6 +787,11 @@ describe('Ad4mClient', () => {
             const r = await ad4mClient.perspective.removeLink('00001', {author: '', timestamp: '', proof: {signature: '', key: ''}, data:{source: 'root', target: 'none'}})
             expect(r).toBeTruthy()
         })
+
+        it('addSdna() smoke test', async () => {
+            const r = await ad4mClient.perspective.addSdna('00001', "Test", 'subject_class("Test", test)', 'subject_class');
+            expect(r).toBeTruthy()
+        })
     })
 
     describe('.runtime', () => {
@@ -949,7 +954,7 @@ describe('Ad4mClient', () => {
     
                 ad4mClientWithoutSubscription.agent.subscribeAgentStatusChanged()
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
-                await ad4mClientWithoutSubscription.agent.unlock("test");
+                await ad4mClientWithoutSubscription.agent.unlock("test", false);
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
             })
 
@@ -1030,7 +1035,7 @@ describe('Ad4mClient', () => {
                 expect(agentStatusChangedCallback).toBeCalledTimes(0)
     
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
-                await ad4mClientWithSubscription.agent.unlock("test");
+                await ad4mClientWithSubscription.agent.unlock("test", false);
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
             })
 

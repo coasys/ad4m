@@ -1,4 +1,4 @@
-import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, PerspectiveState } from "@perspect3vism/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, PerspectiveState } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { expect } from "chai";
 import * as sinon from "sinon";

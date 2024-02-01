@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
-import { Ad4mClient } from "@perspect3vism/ad4m";
+import { Ad4mClient } from "@coasys/ad4m";
 import { startExecutor, apolloClient, sleep } from "../utils/utils";
 import path from "path";
 import fetch from 'node-fetch'

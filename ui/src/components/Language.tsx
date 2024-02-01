@@ -1,4 +1,4 @@
-import { LanguageMeta } from "@perspect3vism/ad4m";
+import { LanguageMeta } from "@coasys/ad4m";
 import { useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { isSystemLanguage } from "../util";

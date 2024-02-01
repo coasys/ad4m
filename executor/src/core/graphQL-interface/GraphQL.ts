@@ -1,5 +1,5 @@
-import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveState, PerspectiveUnsignedInput } from '@perspect3vism/ad4m'
-import { exprRef2String, parseExprUrl, LanguageMeta } from '@perspect3vism/ad4m'
+import { Agent, Expression, InteractionCall, Language, LanguageRef, PerspectiveExpression, PerspectiveState, PerspectiveUnsignedInput } from '@coasys/ad4m'
+import { exprRef2String, parseExprUrl, LanguageMeta } from '@coasys/ad4m'
 import type Ad4mCore from '../Ad4mCore'
 import * as PubSubDefinitions from './SubscriptionDefinitions'
 import { ad4mExecutorVersion } from '../Config';
@@ -524,6 +524,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentUnlock: async (args, context) => {
+                
                 checkCapability(context.capabilities, Auth.AGENT_UNLOCK_CAPABILITY)
                 try {
                     await core.agentService.unlock(args.passphrase)
@@ -540,8 +541,9 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     } catch (e) {
                         // @ts-ignore
                         const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
-    
-                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
+                        if (args.holochain === "true") {
+                            await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
+                        }
                         await core.waitForAgent();
                         core.initControllers()
                         await core.initLanguages()
@@ -878,6 +880,13 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.updateLink(oldLink, newLink)
+            },
+            //@ts-ignore
+            perspectiveAddSdna: async (args, context) => {
+                const { uuid, name, sdnaCode, sdnaType } = args
+                checkCapability(context.capabilities, Auth.perspectiveUpdateCapability([uuid]))
+                const perspective = core.perspectivesController.perspective(uuid)
+                return await perspective.addSdna(name, sdnaCode, sdnaType)
             },
             //@ts-ignore
             runtimeOpenLink: (args) => {

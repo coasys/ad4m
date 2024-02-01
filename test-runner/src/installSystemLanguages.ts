@@ -1,4 +1,4 @@
-import { LanguageMetaInput } from "@perspect3vism/ad4m"
+import { LanguageMetaInput } from "@coasys/ad4m"
 import path from "path";
 import fs from 'fs-extra';
 import { ChildProcessWithoutNullStreams, execSync, spawn } from "child_process";
