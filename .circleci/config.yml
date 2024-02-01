@@ -94,16 +94,20 @@ jobs:
             - agent-language-rust-cache-
       - restore_cache:
           keys:
-            - direct-message-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+            - direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
             - direct-message-language-rust-cache-
       - restore_cache:
           keys:
-            - file-storage-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
-            - file-storage-language-rust-cache-
+            - file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
+            - file-storage-rust-cache-
       - restore_cache:
           keys:
-            - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+            - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
             - p-diff-sync-rust-cache-
+      - restore_cache:
+          keys:
+            - p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
+            - p-diff-sync-socket-signaling-rust-cache-
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
