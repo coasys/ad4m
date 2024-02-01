@@ -281,7 +281,7 @@ impl PerspectiveProxy {
 
     pub async fn get_subject(&self, class: &String, base: &String) -> Result<SubjectProxy> {
         if self.is_subject_instance(class, base).await? {
-            Ok(SubjectProxy::new(self.clone(), class.clone(), base.clone()))
+            Ok(SubjectProxy::new(self, class.clone(), base.clone()))
         } else {
             Err(anyhow!(
                 "Expression {} is not a subject instance of class: {}",
