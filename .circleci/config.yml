@@ -91,12 +91,44 @@ jobs:
           keys:
             - rust-cache-{{ checksum "Cargo.lock" }}-v2
             - rust-cache-
+      - restore_cache:
+          keys:
+            - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+            - agent-language-rust-cache-
+      - restore_cache:
+          keys:
+            - direct-message-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+            - direct-message-language-rust-cache-
+      - restore_cache:
+          keys:
+            - file-storage-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+            - file-storage-language-rust-cache-
+      - restore_cache:
+          keys:
+            - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+            - p-diff-sync-rust-cache-
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
+      - save_cache:
+          key: agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/agent-language/hc-dna/target
+      - save_cache:
+          key: direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-languages/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/direct-message-language/hc-dna/target
+      - save_cache:
+          key: file-storage-language-rust-cache-{{ checksum "bootstrap-languages/file-storage-languages/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/file-storage-language/hc-dna/target
+      - save_cache:
+          key: p-diff-sync-storage-language-rust-cache-{{ checksum "bootstrap-languages/file-storage-languages/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/p-diff-sync/hc-dna/target
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
