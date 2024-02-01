@@ -971,6 +971,17 @@ export default class Perspective {
     }
 
     async prologQuery(query: string): Promise<any> {
+        
+        const logFilePath = "/Users/nicolasluck/prolog_test_log.txt";
+
+        const logToFile = async (prefix: string, content: string) => {
+            const logContent = `=====${prefix}\n${content}\n`;
+            //@ts-ignore
+            const logBytes = new TextEncoder().encode(logContent);
+            //@ts-ignore
+            await Deno.writeFileSync(logFilePath, logBytes,  { append: true });
+        };
+        
         await this.#prologMutex.runExclusive(async () => {
             if(!this.#prologEngine) {
                 await this.spawnPrologEngine()
@@ -980,11 +991,14 @@ export default class Perspective {
                 //console.log("Perspective.prologQuery: Making prolog query but first rebuilding facts");
                 this.#prologNeedsRebuild = false
                 const facts = await this.initEngineFacts()
+                await logToFile('consult', facts.join('\n'));
                 await this.#prologEngine!.consult(facts)
             }
         })
-        
-        return await this.#prologEngine!.query(query)
+        await logToFile('query', query+".");
+        const result = await this.#prologEngine!.query(query);
+        await logToFile('result', JSON.stringify(result));
+        return result
     }
 
     clearPolling() {
