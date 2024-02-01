@@ -24,9 +24,6 @@ export class Subject {
 
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property(C, Property)`)
         let properties = results.map(result => result.Property)
-        //console.log("Subject properties: " + properties)
-
-        console.log('wow 1', results, properties)
         
 
         for(let p of properties) {
@@ -34,14 +31,9 @@ export class Subject {
             Object.defineProperty(this, p, {
                 configurable: true,
                 get: async () => {
-                    console.log('lul 1', p, resolveExpressionURI, `subject_class("${this.#subjectClass}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
-                    let results = await this.#perspective.infer(`property_getter(C, Base, "${p}", Value)`)
-                    console.log('lul 2', p, results)
-                    let results1 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, Base, "${p}", Value)`)
-                    console.log('lul 3', p, results1)
+                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
                     if(results && results.length > 0) {
                         let expressionURI = results[0].Value
-                        console.log("kkkk", p, results)
                         if(resolveExpressionURI) {
                             try {
                                 if (expressionURI) {
