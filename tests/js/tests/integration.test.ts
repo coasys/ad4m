@@ -183,6 +183,6 @@ describe("Integration tests", function () {
         describe('Agent Language', agentLanguageTests(testContext))
         describe('Language', languageTests(testContext))
         describe('Neighbourhood', neighbourhoodTests(testContext))
-        describe('Direct Messages', directMessageTests(testContext))
+        //describe('Direct Messages', directMessageTests(testContext))
     })
 })

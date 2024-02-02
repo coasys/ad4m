@@ -1,15 +1,16 @@
 use std::borrow::Cow;
 
 use cid::Cid;
-use deno_core::{error::AnyError, include_js_files, op, Extension, Op};
+use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
 use log::{error, info, debug, warn};
 
 use super::JS_CORE_HANDLE;
 
-#[op]
-fn hash(data: String) -> Result<String, AnyError> {
+#[op2]
+#[string]
+fn hash(#[string] data: String) -> Result<String, AnyError> {
     // Compute the SHA-256 multihash
     let multihash = Code::Sha2_256.digest(data.as_bytes());
 
@@ -22,36 +23,41 @@ fn hash(data: String) -> Result<String, AnyError> {
     Ok(format!("Qm{}", encoded_cid))
 }
 
-#[op]
-fn console_log(data: String) -> Result<String, AnyError> {
+#[op2]
+#[string]
+fn console_log(#[string] data: String) -> Result<String, AnyError> {
     info!("[JSCORE]: {:?}", data);
 
     Ok(String::from("temp"))
 }
 
-#[op]
-fn console_debug(data: String) -> Result<String, AnyError> {
+#[op2]
+#[string]
+fn console_debug(#[string] data: String) -> Result<String, AnyError> {
     debug!("[JSCORE]: {:?}", data);
 
     Ok(String::from("temp"))
 }
 
-#[op]
-fn console_error(data: String) -> Result<String, AnyError> {
+#[op2]
+#[string]
+fn console_error(#[string] data: String) -> Result<String, AnyError> {
     error!("[JSCORE]: {:?}", data);
 
     Ok(String::from("temp"))
 }
 
-#[op]
-fn console_warn(data: String) -> Result<String, AnyError> {
+#[op2]
+#[string]
+fn console_warn(#[string] data: String) -> Result<String, AnyError> {
     warn!("[JSCORE]: {:?}", data);
 
     Ok(String::from("temp"))
 }
 
-#[op]
-async fn load_module(path: String) -> Result<String, AnyError> {
+#[op2(async)]
+#[string]
+async fn load_module(#[string] path: String) -> Result<String, AnyError> {
     info!("Trying to load module: {}", path);
 
     let mut js_core_handle = JS_CORE_HANDLE.lock().await;
