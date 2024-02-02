@@ -54,6 +54,10 @@ export default function Start({
             </p>
           </div>`}
 
+      <p style="height: 10px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
+        Please make sure your ad4m launcher is working and there no browser restrictions blocking you to connect to ad4m.
+      </p>
+
       <div class="text-center">
         <a class="button button--link" _target="blank" href="https://ad4m.dev"
           >Learn more about AD4M</a
