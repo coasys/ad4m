@@ -92,7 +92,7 @@ jobs:
       run: pnpm test
 
     - name: Run integration tests
-      run: cd ./tests/js && pnpm run test-main
+      run: cd ./tests/js && yarn run test-main
 
   # test-windows:
   #   name: JS Ad4mClient <> AD4M Executor - Windows

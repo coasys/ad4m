@@ -1,6 +1,6 @@
 use std::{time::{SystemTime, UNIX_EPOCH}, borrow::Cow};
 
-use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension, Op};
+use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op2, Extension, Op};
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
@@ -45,12 +45,13 @@ struct Claims {
     capabilities: AuthInfo,
 }
 
-#[op]
+#[op2(async)]
+#[string]
 async fn generate_jwt(
-    issuer: String,
-    audience: String,
-    expiration_time: u64,
-    capabilities: AuthInfo,
+    #[string] issuer: String,
+    #[string] audience: String,
+    #[smi] expiration_time: u64,
+    #[serde] capabilities: AuthInfo,
 ) -> Result<String, AnyError> {
     // Get the private key
     let wallet = Wallet::instance();
@@ -85,8 +86,9 @@ async fn generate_jwt(
     Ok(token)
 }
 
-#[op]
-async fn verify_jwt(token: String) -> Result<Claims, AnyError> {
+#[op2(async)]
+#[serde]
+async fn verify_jwt(#[string] token: String) -> Result<Claims, AnyError> {
     //Get the private key
     let wallet = Wallet::instance();
     let wallet_lock = wallet.lock().expect("wallet lock");

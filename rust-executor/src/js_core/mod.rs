@@ -158,7 +158,7 @@ impl JsCore {
             .worker
             .lock()
             .await;
-        worker.bootstrap(&BootstrapOptions::default());
+        worker.bootstrap(BootstrapOptions::default());
         worker
             .execute_main_module(&main_module_url())
             .await

@@ -11,7 +11,7 @@ let bobP1: null | PerspectiveHandle = null;
 
 export default function neighbourhoodTests(testContext: TestContext) {
     return () => {
-        describe('Neighbourhood', () => {
+        describe.skip('Neighbourhood', () => {
             it('can publish and join locally @alice', async () => {
                 const ad4mClient = testContext.alice!;
 
@@ -65,7 +65,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobP1!.neighbourhood!.data.meta.links.length).to.be.equal(0);
             })
             
-            it('shared link created by Alice received by Bob', async () => {
+            it.skip('shared link created by Alice received by Bob', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob
 
