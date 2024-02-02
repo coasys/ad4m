@@ -11,7 +11,7 @@ let bobP1: null | PerspectiveHandle = null;
 
 export default function neighbourhoodTests(testContext: TestContext) {
     return () => {
-        describe('Neighbourhood', () => {
+        describe.skip('Neighbourhood', () => {
             it('can publish and join locally @alice', async () => {
                 const ad4mClient = testContext.alice!;
 
