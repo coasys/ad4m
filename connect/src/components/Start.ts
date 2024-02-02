@@ -46,21 +46,22 @@ export default function Start({
             </div>`
         : html`<div class="text-center">
             <a class="button" target="_blank" @click=${() => connect()}>
-              Connect to AD4M
+              Connect to ADAM
             </a>
             <p>
-              Please connect to AD4M once you have downloaded and setup your
-              AD4M agent
+              Please connect to ADAM once you have downloaded and setup your
+              ADAM agent
             </p>
           </div>`}
 
       <p style="height: 10px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
-        Please make sure your ad4m launcher is working and there no browser restrictions blocking you to connect to ad4m.
+        Please make sure you have the ADAM Launcher running on your computer and there are no browser restrictions ("Shields") blocking your connection to ADAM on localhost.
+        (Safari users: please use a different browser for now. Safari is very strict about this and we are working on a solution.)
       </p>
 
       <div class="text-center">
         <a class="button button--link" _target="blank" href="https://ad4m.dev"
-          >Learn more about AD4M</a
+          >Learn more about ADAM</a
         >
       </div>
     </div>
