@@ -904,6 +904,34 @@ export default class Perspective {
 
         lines.push(":- use_module(library(lists)).");
 
+        let lib = `
+:- discontiguous(paginate/4).
+paginate(Data, PageNumber, PageSize, PageData) :-
+    PageNumber > 0,
+    PageSize > 0,
+    length(Data, DataLength),
+    MaxSkip is max(0, DataLength - PageSize),
+    SkipCount is min((PageNumber - 1) * PageSize, MaxSkip),
+    skipN(Data, SkipCount, SkippedData),
+    takeN(SkippedData, PageSize, PageData).
+
+:- discontiguous(skipN/3).
+skipN(Data, 0, Data).
+skipN([_|Rest], N, SkippedData) :-
+    N > 0,
+    NextN is N - 1,
+    skipN(Rest, NextN, SkippedData).
+
+:- discontiguous(takeN/3).
+takeN(_, 0, []).
+takeN([Item|Rest], N, [Item|PageRest]) :-
+    N > 0,
+    NextN is N - 1,
+    takeN(Rest, NextN, PageRest).        
+        `
+        
+        lines = lines.concat(lib.split('\n'))
+
         let seenSubjectClasses = new Map()
         const authorAgents = [this.#agent.agent?.did, this.neighbourhood?.data.author];
         for(let linkExpression of allLinks) {

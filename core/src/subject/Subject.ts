@@ -24,7 +24,6 @@ export class Subject {
 
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property(C, Property)`)
         let properties = results.map(result => result.Property)
-        //console.log("Subject properties: " + properties)
         
 
         for(let p of properties) {
@@ -37,11 +36,15 @@ export class Subject {
                         let expressionURI = results[0].Value
                         if(resolveExpressionURI) {
                             try {
-                                const expression = await this.#perspective.getExpression(expressionURI)
-                                try {
-                                    return JSON.parse(expression.data)
-                                } catch(e) {
-                                    return expression.data
+                                if (expressionURI) {
+                                    const expression = await this.#perspective.getExpression(expressionURI)
+                                    try {
+                                        return JSON.parse(expression.data)
+                                    } catch(e) {
+                                        return expression.data
+                                    }
+                                } else {
+                                    return expressionURI
                                 }
                             } catch (err) {
                                 return expressionURI

@@ -1,18 +1,18 @@
 use std::borrow::Cow;
 
-use deno_core::{error::AnyError, include_js_files, op, Extension, anyhow::bail, Op};
+use deno_core::{error::AnyError, include_js_files, op2, Extension, anyhow::bail, Op};
 use scryer_prolog::machine::parsed_results::{Value, QueryMatch, QueryResolution};
 
 use super::get_prolog_service;
 
-#[op]
-async fn spawn_engine(engine_name: String) -> Result<(), AnyError> {
+#[op2(async)]
+async fn spawn_engine(#[string] engine_name: String) -> Result<(), AnyError> {
     let mut service = get_prolog_service().await;
     service.spawn_engine(engine_name).await
 }
 
-#[op]
-async fn remove_engine(engine_name: String) -> Result<(), AnyError> {
+#[op2(async)]
+async fn remove_engine(#[string] engine_name: String) -> Result<(), AnyError> {
     let mut service = get_prolog_service().await;
     service.remove_engine(engine_name).await
 }
@@ -75,8 +75,9 @@ fn prolog_match_to_json_string(query_match: &QueryMatch) -> String {
     string_result
 }
 
-#[op]
-async fn run_query(engine_name: String, query: String) -> Result<String, AnyError> {
+#[op2(async)]
+#[string]
+async fn run_query(#[string] engine_name: String, #[string] query: String) -> Result<String, AnyError> {
     let service = get_prolog_service().await;
     let result = service
         .run_query(engine_name, query)
@@ -99,11 +100,11 @@ async fn run_query(engine_name: String, query: String) -> Result<String, AnyErro
     }
 }
 
-#[op]
+#[op2(async)]
 async fn load_module_string(
-    engine_name: String,
-    module_name: String,
-    program_lines: Vec<String>,
+    #[string] engine_name: String,
+    #[string] module_name: String,
+    #[serde] program_lines: Vec<String>,
 ) -> Result<(), AnyError> {
     let service = get_prolog_service().await;
     service
