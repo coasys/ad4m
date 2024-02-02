@@ -10,7 +10,7 @@ function Timeout() {
   return controller;
 }
 
-export async function connectWebSocket(url, timeout = 5000) {
+export async function connectWebSocket(url, timeout = 10000) {
   return Promise.race([
     new Promise((resolve, reject) => {
       const websocket = new WebSocket(url);
