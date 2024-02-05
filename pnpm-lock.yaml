@@ -68,12 +68,6 @@ patchedDependencies:
   node-gyp-build@4.8.0:
     hash: tidq6bjknpovdjep75bj5ccgke
     path: patches/node-gyp-build@4.8.0.patch
-  safe-buffer@5.2.1:
-    hash: kot2kwtvgmbbxrgceazbukpqru
-    path: patches/safe-buffer@5.2.1.patch
-  safer-buffer@2.1.2:
-    hash: iyp5jr6gsy26j2hfb6rzhjo3oa
-    path: patches/safer-buffer@2.1.2.patch
   sha256@0.2.0:
     hash: jjvpbxfwv27brspghlwzrzih2u
     path: patches/sha256@0.2.0.patch
@@ -4797,6 +4791,7 @@ packages:
     dependencies:
       is-glob: 4.0.3
       micromatch: 4.0.5
+      napi-wasm: 1.1.0
     dev: false
     bundledDependencies:
       - napi-wasm
@@ -8215,12 +8210,12 @@ packages:
       bn.js: 4.12.0(patch_hash=mdjtmbbjulugflauukpfkw6p4q)
       inherits: 2.0.4
       minimalistic-assert: 1.0.1
-      safer-buffer: 2.1.2(patch_hash=iyp5jr6gsy26j2hfb6rzhjo3oa)
+      safer-buffer: 2.1.2
 
   /asn1@0.2.6:
     resolution: {integrity: sha512-ix/FxPn0MDjeyJ7i/yoHGFt/EX6LyNbxSEhPPXODPL+KB0VPk86UYfL0lMdy+KCnv+fmvIzySwaK5COwqVbWTQ==}
     dependencies:
-      safer-buffer: 2.1.2(patch_hash=iyp5jr6gsy26j2hfb6rzhjo3oa)
+      safer-buffer: 2.1.2
     dev: true
 
   /asn1js@3.0.5:
@@ -8569,7 +8564,7 @@ packages:
   /base-x@3.0.9:
     resolution: {integrity: sha512-H7JU6iBHTal1gp56aKoaa//YUxEaAOUiydvrV/pILqIHXTtqxSkATOnDA2u+jZ/61sD+L/412+7kzXRtWukhpQ==}
     dependencies:
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: false
 
   /base64-js@1.5.1:
@@ -8808,7 +8803,7 @@ packages:
       JSONStream: 1.3.5
       combine-source-map: 0.8.0
       defined: 1.0.1
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
       through2: 2.0.5
       umd: 3.0.3
     dev: true
@@ -8834,7 +8829,7 @@ packages:
       create-hash: 1.2.0
       evp_bytestokey: 1.0.3
       inherits: 2.0.4
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /browserify-cipher@1.0.1:
@@ -8851,7 +8846,7 @@ packages:
       cipher-base: 1.0.4
       des.js: 1.1.0
       inherits: 2.0.4
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /browserify-rsa@4.1.0:
@@ -8873,7 +8868,7 @@ packages:
       inherits: 2.0.4
       parse-asn1: 5.1.6
       readable-stream: 3.6.2
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /browserify-zlib@0.2.0:
@@ -9426,7 +9421,7 @@ packages:
     resolution: {integrity: sha512-Kkht5ye6ZGmwv40uUDZztayT2ThLQGfnj/T71N/XzeZeo3nf8foyW7zGTsPYkEya3m5f3cAypH+qe7YOrM1U2Q==}
     dependencies:
       inherits: 2.0.4
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /citty@0.1.5:
@@ -9837,7 +9832,7 @@ packages:
     resolution: {integrity: sha512-FveZTNuGw04cxlAiWbzi6zTAL/lhehaWbTtgluJh4/E95DqMwTmha3KZN1aAWA8cFIhHzMZUvLevkw5Rqk+tSQ==}
     engines: {node: '>= 0.6'}
     dependencies:
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
 
   /content-type@1.0.5:
     resolution: {integrity: sha512-nTjqfcBFEipKdXCv4YDQWCfmcLZKm81ldF0pAopTvyrFGVbcR6P/VAAd5G7N+0tTr8QqiU0tFadD6FK4NtJwOA==}
@@ -10000,7 +9995,7 @@ packages:
       create-hash: 1.2.0
       inherits: 2.0.4
       ripemd160: 2.0.2
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
       sha.js: 2.4.11
     dev: true
 
@@ -11311,7 +11306,7 @@ packages:
     resolution: {integrity: sha512-eh9O+hwRHNbG4BLTjEl3nw044CkGm5X6LoaCf7LPp7UU8Qrt47JYNi6nPX8xjW97TKGKm1ouctg0QSpZe9qrnw==}
     dependencies:
       jsbn: 0.1.1
-      safer-buffer: 2.1.2(patch_hash=iyp5jr6gsy26j2hfb6rzhjo3oa)
+      safer-buffer: 2.1.2
     dev: true
 
   /ee-first@1.1.1:
@@ -12492,7 +12487,7 @@ packages:
     resolution: {integrity: sha512-/f2Go4TognH/KvCISP7OUsHn85hT9nUkxxA9BEWxFn+Oj9o8ZNLm/40hdlgSLyuOimsrTKLUMEorQexp/aPQeA==}
     dependencies:
       md5.js: 1.3.5
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /exec-sh@0.3.6:
@@ -12647,7 +12642,7 @@ packages:
       proxy-addr: 2.0.7
       qs: 6.11.0
       range-parser: 1.2.1
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
       send: 0.18.0
       serve-static: 1.15.0
       setprototypeof: 1.2.0
@@ -13802,7 +13797,7 @@ packages:
     dependencies:
       inherits: 2.0.4
       readable-stream: 3.6.2
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /hash-obj@4.0.0:
@@ -14314,13 +14309,13 @@ packages:
     resolution: {integrity: sha512-v3MXnZAcvnywkTUEZomIActle7RXXeedOR31wwl7VlyoXO4Qi9arvSenNQWne1TcRwhCL1HwLI21bEqdpj8/rA==}
     engines: {node: '>=0.10.0'}
     dependencies:
-      safer-buffer: 2.1.2(patch_hash=iyp5jr6gsy26j2hfb6rzhjo3oa)
+      safer-buffer: 2.1.2
 
   /iconv-lite@0.6.3:
     resolution: {integrity: sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==}
     engines: {node: '>=0.10.0'}
     dependencies:
-      safer-buffer: 2.1.2(patch_hash=iyp5jr6gsy26j2hfb6rzhjo3oa)
+      safer-buffer: 2.1.2
 
   /icss-replace-symbols@1.1.0:
     resolution: {integrity: sha512-chIaY3Vh2mh2Q3RGXttaDIzeiPvaVXJ+C4DAh/w3c37SKZ/U6PGMmuicR2EQQp9bKG8zLMCl7I+PtIoOOPp8Gg==}
@@ -17140,7 +17135,7 @@ packages:
     dependencies:
       hash-base: 3.1.0
       inherits: 2.0.4
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /md5@2.3.0:
@@ -18166,7 +18161,7 @@ packages:
     resolution: {integrity: sha512-wxfUjg9WebH+CUDX/CdbRlh5SmfZiy/hpkxaRI16Y9W56Pa75sWgd/rvFilSgrauD9NyFymP/+JFV3KwzIsJeg==}
     requiresBuild: true
     dependencies:
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
       yallist: 3.1.1
     dev: false
     optional: true
@@ -18352,6 +18347,10 @@ packages:
     transitivePeerDependencies:
       - supports-color
     dev: true
+
+  /napi-wasm@1.1.0:
+    resolution: {integrity: sha512-lHwIAJbmLSjF9VDRm9GoVOy9AGp3aIvkjv+Kvz9h16QR3uSVYH78PNQUnT2U4X53mhlnV2M7wrhibQ3GHicDmg==}
+    dev: false
 
   /natural-compare-lite@1.4.0:
     resolution: {integrity: sha512-Tj+HTDSJJKaZnfiuw+iaF9skdPpTo2GtEly5JHnWV/hfv2Qj/9RKsGISQtLh2ox3l5EAGw487hnBee0sIJ6v2g==}
@@ -19391,7 +19390,7 @@ packages:
       browserify-aes: 1.2.0
       evp_bytestokey: 1.0.3
       pbkdf2: 3.1.2
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /parse-entities@2.0.0:
@@ -19607,7 +19606,7 @@ packages:
       create-hash: 1.2.0
       create-hmac: 1.1.7
       ripemd160: 2.0.2
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
       sha.js: 2.4.11
     dev: true
 
@@ -20955,7 +20954,7 @@ packages:
       create-hash: 1.2.0
       parse-asn1: 5.1.6
       randombytes: 2.1.0
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /pump@3.0.0:
@@ -21084,13 +21083,13 @@ packages:
   /randombytes@2.1.0:
     resolution: {integrity: sha512-vYl3iOX+4CKUWuxGi9Ukhie6fsqXqS9FE2Zaic4tNFD2N2QQaXOMFbuKK4QmDHC0JO6B1Zp41J0LpT0oR68amQ==}
     dependencies:
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
 
   /randomfill@1.0.4:
     resolution: {integrity: sha512-87lcbR8+MhcWcUiQ+9e+Rwx8MyR2P7qnt15ynUlbm3TU/fjbgz4GsvfSUDTemtCCtVCqb4ZcEFlyPNTh9bBTLw==}
     dependencies:
       randombytes: 2.1.0
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /range-parser@1.2.1:
@@ -21752,7 +21751,7 @@ packages:
       oauth-sign: 0.9.0
       performance-now: 2.1.0
       qs: 6.5.3
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
       tough-cookie: 2.5.0
       tunnel-agent: 0.6.0
       uuid: 3.4.0
@@ -22126,9 +22125,8 @@ packages:
   /safe-buffer@5.1.2:
     resolution: {integrity: sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g==}
 
-  /safe-buffer@5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru):
+  /safe-buffer@5.2.1:
     resolution: {integrity: sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==}
-    patched: true
 
   /safe-identifier@0.4.2:
     resolution: {integrity: sha512-6pNbSMW6OhAi9j+N8V+U715yBQsaWJ7eyEUaOrawX+isg5ZxhUlV1NipNtgaKHmFGiABwt+ZF04Ii+3Xjkg+8w==}
@@ -22156,9 +22154,8 @@ packages:
     engines: {node: '>=10'}
     dev: false
 
-  /safer-buffer@2.1.2(patch_hash=iyp5jr6gsy26j2hfb6rzhjo3oa):
+  /safer-buffer@2.1.2:
     resolution: {integrity: sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==}
-    patched: true
 
   /sander@0.5.1:
     resolution: {integrity: sha512-3lVqBir7WuKDHGrKRDn/1Ye3kwpXaDOMsiRP1wd6wpZW56gJhsbp5RqQpA6JG/P+pkXizygnr1dKR8vzWaVsfA==}
@@ -22479,7 +22476,7 @@ packages:
     hasBin: true
     dependencies:
       inherits: 2.0.4
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
 
   /sha256@0.2.0(patch_hash=jjvpbxfwv27brspghlwzrzih2u):
     resolution: {integrity: sha512-kTWMJUaez5iiT9CcMv8jSq6kMhw3ST0uRdcIWl3D77s6AsLXNXRp3heeqqfu5+Dyfu4hwpQnMzhqHh8iNQxw0w==}
@@ -22824,7 +22821,7 @@ packages:
       ecc-jsbn: 0.1.2
       getpass: 0.1.7
       jsbn: 0.1.1
-      safer-buffer: 2.1.2(patch_hash=iyp5jr6gsy26j2hfb6rzhjo3oa)
+      safer-buffer: 2.1.2
       tweetnacl: 0.14.5
     dev: true
 
@@ -23041,7 +23038,7 @@ packages:
   /string_decoder@1.3.0:
     resolution: {integrity: sha512-hkRX8U1WjJFd8LsDJ2yQ/wWWxaopEsABU1XfkM8A+j0+85JAGppt16cr1Whg6KIbb4okU6Mql6BOj+uup/wKeA==}
     dependencies:
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
 
   /stringify-entities@4.0.3:
     resolution: {integrity: sha512-BP9nNHMhhfcMbiuQKCqMjhDP5yBCAxsPu4pHFFzJ6Alo9dZgY4VLDPutXqIjpRiMoKdp7Av85Gr73Q5uH9k7+g==}
@@ -23479,7 +23476,7 @@ packages:
       minipass: 2.9.0
       minizlib: 1.3.3
       mkdirp: 0.5.6
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
       yallist: 3.1.1
     dev: false
     optional: true
@@ -23976,7 +23973,7 @@ packages:
   /tunnel-agent@0.6.0:
     resolution: {integrity: sha512-McnNiV1l8RYeY8tBgEpuodCC1mLUdbSN+CYBL7kJsJNInOP8UjDDEwdk6Mw60vdLLrr5NHKZhMAOSrR2NZuQ+w==}
     dependencies:
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
     dev: true
 
   /tunnel@0.0.6:
@@ -25317,7 +25314,7 @@ packages:
     engines: {node: '>=0.8.0'}
     dependencies:
       http-parser-js: 0.5.8
-      safe-buffer: 5.2.1(patch_hash=kot2kwtvgmbbxrgceazbukpqru)
+      safe-buffer: 5.2.1
       websocket-extensions: 0.1.4
 
   /websocket-extensions@0.1.4:
