@@ -84,7 +84,9 @@
       "tweetnacl@1.0.3": "patches/tweetnacl@1.0.3.patch",
       "@mattrglobal/node-bbs-signatures@0.11.0": "patches/@mattrglobal__node-bbs-signatures@0.11.0.patch",
       "node-gyp-build@4.8.0": "patches/node-gyp-build@4.8.0.patch",
-      "@peculiar/webcrypto@1.4.5": "patches/@peculiar__webcrypto@1.4.5.patch"
+      "@peculiar/webcrypto@1.4.5": "patches/@peculiar__webcrypto@1.4.5.patch",
+      "safe-buffer@5.2.1": "patches/safe-buffer@5.2.1.patch",
+      "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
   "version": "0.8.1"
