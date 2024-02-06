@@ -264,7 +264,7 @@ impl Query {
         context: &RequestContext,
         filter: Option<String>,
     ) -> FieldResult<Vec<LanguageHandle>> {
-        let filter_string = filter.map_or("null".to_string(), |f| format!("\"{}\"", f));
+        let filter_string = filter.map_or("null".to_string(), |f| format!("{}", f));
         let capabilities =
             get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
         let mut js = context.js_handle.clone();

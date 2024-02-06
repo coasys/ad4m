@@ -1,23 +1,24 @@
 import React, { useEffect, useState } from 'react'
 import { splashscreenContainer, splashscreenError, splashscreenErrorFlex } from "./styles";
 import { appWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api';
+// @ts-ignore
+// const { invoke } = window.__TAURI__.tauri;
 
 export default function TrayMessage() {
   const [count, setCount] = useState(5);
 
   useEffect(() => {
-    appWindow.listen('tray_message_open', () => {  
-      let i = 5;    
-      const interval = setInterval(() => {
+      let i = 5;
+      const interval = setInterval(async () => {
         if (count === 0) {
+            appWindow.close()
           clearInterval(interval)
-        } else {
+        } else if (i > 0){
           i -= 1;
           setCount(i)
         }
-  
       }, 1000)
-    })
   }, [])
 
   return (

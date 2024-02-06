@@ -116,6 +116,9 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-cache
 
+    - name: Install core dependencies
+      run: cd ./core && pnpm install --no-cache
+
     - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
       if: matrix.platform != 'windows-latest'
       env:
@@ -331,6 +334,9 @@ jobs:
 
       - name: Install deps
         run: pnpm install
+
+      - name: Install core dependencies
+        run: cd ./core && pnpm install
 
       - name: Install Deno
         uses: denoland/setup-deno@v1
