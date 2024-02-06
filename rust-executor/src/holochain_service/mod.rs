@@ -328,7 +328,7 @@ impl HolochainService {
             kitsune_config.tuning_params = Arc::new(tuning_params);
 
             if local_config.use_bootstrap {
-                kitsune_config.bootstrap_service = Some(Url2::parse(String::from("https://bootstrap-staging.holo.host")));
+                kitsune_config.bootstrap_service = Some(Url2::parse(String::from("https://bootstrap-dev.holohost.workers.dev")));
             } else {
                 kitsune_config.bootstrap_service = None;
             }
