@@ -5,7 +5,7 @@ use ad4m_client::Ad4mClient;
 
 use crate::{AppState, ProxyState, ProxyService};
 
-const PROXY_SERVER: &str = "https://proxy.ad4m.dev:3030";
+const PROXY_SERVER: &str = "http://140.82.10.81:3030";
 const AD4M_SERVER: &str = "http://127.0.0.1";
 
 #[tauri::command]
