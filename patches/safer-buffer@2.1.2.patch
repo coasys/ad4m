@@ -1,12 +1,13 @@
 diff --git a/safer.js b/safer.js
-index 37c7e1aa6cbd4effd94ee28bd7b0655756b80cea..07dd01a8a46325504bec4fcb01fe5c35455d5085 100644
+index 37c7e1aa6cbd4effd94ee28bd7b0655756b80cea..c2a303b058b0029f74b467cb59c8aa7ac79bf58f 100644
 --- a/safer.js
 +++ b/safer.js
-@@ -2,7 +2,6 @@
+@@ -2,7 +2,7 @@
  
  'use strict'
  
 -var buffer = require('buffer')
++import buffer from 'node:buffer'
  var Buffer = buffer.Buffer
  
  var safer = {}
