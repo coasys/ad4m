@@ -54,19 +54,23 @@ export function AgentProvider({ children }: any) {
 
   const generateAgent = async (username: string, firstName: string, lastName: string, password: string) => {
     setLoading(true);
+    console.log("Generating agent with username: ", username);
 
     let agentStatus = await client!.agent.generate(password);
 
+    console.log("generate done with: ", agentStatus);
+
     const additions = [];
 
-    additions.push(
-      new Link({
-        source: agentStatus.did!,
-        target: Literal.from(username).toUrl(),
-        predicate: PREDICATE_USERNAME
-      })
-    );
-
+    if(username) {
+      additions.push(
+        new Link({
+          source: agentStatus.did!,
+          target: Literal.from(username).toUrl(),
+          predicate: PREDICATE_USERNAME
+        })
+      );
+    }
 
     if (firstName) {
       additions.push(
@@ -88,6 +92,7 @@ export function AgentProvider({ children }: any) {
       );
     }
 
+    console.log("mutating public perspective: ", additions);
     await client?.agent.mutatePublicPerspective({
       additions,
       removals: []
@@ -107,7 +112,7 @@ export function AgentProvider({ children }: any) {
   };
 
   const unlockAgent = async (password: string, holochain: boolean) => {
-    console.log("wow", password, holochain)
+    console.log("Holochain config:", holochain)
     setLoading(true)
     
     let agentStatus = await client?.agent.unlock(password, holochain);
