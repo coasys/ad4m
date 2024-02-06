@@ -37,7 +37,7 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
         .center()
         .focused(true)
         .inner_size(1000.0, 700.0)
-        .title("AD4M");
+        .title("ADAM Launcher");
 
     let _ = new_ad4m_window.build();
 
