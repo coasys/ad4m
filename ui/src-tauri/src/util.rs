@@ -37,12 +37,12 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
         .center()
         .focused(true)
         .inner_size(1000.0, 700.0)
-        .title("AD4M");
+        .title("ADAM Launcher");
 
     let _ = new_ad4m_window.build();
 
     let tray_window = app.get_window("AD4M").unwrap();
-    let _ = tray_window.set_decorations(false);
+    let _ = tray_window.set_decorations(true);
     let _ = tray_window.set_always_on_top(true);
     //let _ = tray_window.move_window(Position::TrayCenter);
 
@@ -78,10 +78,10 @@ pub fn create_tray_message_windows(app: &AppHandle<Wry>) {
 
     let new_ad4m_window = WindowBuilder::new(app, "TrayMessage", WindowUrl::App(url.into()))
         .center()
-        .focused(false)
-        .inner_size(300.0, 80.0)
+        .focused(true)
+        .inner_size(360.0, 120.0)
         .title("TrayMessage")
-        .visible(false);
+        .visible(true);
 
     let _ = new_ad4m_window.build();
 

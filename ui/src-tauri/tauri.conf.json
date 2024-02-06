@@ -7,7 +7,8 @@
     "distDir": "../dist",
     "devPath": "http://127.0.0.1:3000",
     "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "",
+    "withGlobalTauri": true
   },
   "tauri": {
     "systemTray": {
@@ -80,7 +81,7 @@
         "center": true,
         "focus": true,
         "visible": true,
-        "decorations": false,
+        "decorations": true,
         "url": "/splashscreen"
       }
     ],

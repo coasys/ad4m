@@ -86,7 +86,7 @@ fn rlim_execute() {
         }
     }
     let rlim_max = 1000 as u64;
-    
+
     println!("Current RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
 
     // Attempt to increase the limit
@@ -120,7 +120,7 @@ fn main() {
     if log_path().exists() {
         let _ = fs::remove_file(log_path());
     }
-    
+
     let target = Box::new(File::create(log_path()).expect("Can't create file"));
 
     env_logger::Builder::new()
@@ -148,19 +148,19 @@ fn main() {
             )
         })
         .init();
- 
+
     let format = format::debug_fn(move |writer, _field, value| {
             debug!("TRACE: {:?}", value);
             write!(writer, "{:?}", value)
         });
-    
+
     let filter = EnvFilter::from_default_env();
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .fmt_fields(format)
         .finish();
-    
+
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set tracing subscriber");
 
@@ -237,22 +237,12 @@ fn main() {
             let handle = app.handle();
 
             async fn spawn_executor(config: Ad4mConfig, splashscreen_clone: Window, handle: &AppHandle) {
-                let my_closure = || {
-                    let url = app_url();
-                    info!("Executor clone on: {:?}", url);
-                    let _ = splashscreen_clone.hide();
-                    create_tray_message_windows(&handle);
-                    let main = get_main_window(&handle);
-                    main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
-                };
-
-                match rust_executor::run_with_tokio(config.clone()).await {
-                    () => {
-                        my_closure();
-
-                        info!("GraphQL server stopped.")
-                    }
-                }
+                rust_executor::run_with_tokio(config.clone()).await;
+                let url = app_url();
+                info!("Executor clone on: {:?}", url);
+                let _ = splashscreen_clone.hide();
+                let main = get_main_window(&handle);
+                main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
             }
 
             tauri::async_runtime::spawn(async move {

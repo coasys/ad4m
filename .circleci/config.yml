@@ -53,6 +53,9 @@ jobs:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
       - save_cache:
@@ -111,6 +114,9 @@ jobs:
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
