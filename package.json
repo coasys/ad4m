@@ -56,6 +56,9 @@
   "engines": {
     "node": ">=16.0.0"
   },
+  "nohoist": [
+    "core"
+  ],
   "packageManager": "pnpm@8.10.5",
   "pnpm": {
     "patchedDependencies": {
@@ -65,11 +68,8 @@
       "borc@2.1.2": "patches/borc@2.1.2.patch",
       "brorand@1.1.0": "patches/brorand@1.1.0.patch",
       "graphql@15.7.2": "patches/graphql@15.7.2.patch",
-      "inherits@2.0.4": "patches/inherits@2.0.4.patch",
       "iso-url@0.4.7": "patches/iso-url@0.4.7.patch",
       "sha256@0.2.0": "patches/sha256@0.2.0.patch",
-      "node-gyp-build@4.7.0": "patches/node-gyp-build@4.7.0.patch",
-      "@peculiar/webcrypto@1.4.3": "patches/@peculiar__webcrypto@1.4.3.patch",
       "@stablelib/random@1.0.2": "patches/@stablelib__random@1.0.2.patch",
       "@transmute/did-key-bls12381@0.2.1-unstable.42": "patches/@transmute__did-key-bls12381@0.2.1-unstable.42.patch",
       "@transmute/did-key-cipher@0.2.1-unstable.42": "patches/@transmute__did-key-cipher@0.2.1-unstable.42.patch",
@@ -81,7 +81,12 @@
       "@transmute/did-key.js@0.2.1-unstable.42": "patches/@transmute__did-key.js@0.2.1-unstable.42.patch",
       "@transmute/ld-key-pair@0.6.1-unstable.37": "patches/@transmute__ld-key-pair@0.6.1-unstable.37.patch",
       "@transmute/web-crypto-key-pair@0.6.1-unstable.37": "patches/@transmute__web-crypto-key-pair@0.6.1-unstable.37.patch",
-      "tweetnacl@1.0.3": "patches/tweetnacl@1.0.3.patch"
+      "tweetnacl@1.0.3": "patches/tweetnacl@1.0.3.patch",
+      "@mattrglobal/node-bbs-signatures@0.11.0": "patches/@mattrglobal__node-bbs-signatures@0.11.0.patch",
+      "node-gyp-build@4.8.0": "patches/node-gyp-build@4.8.0.patch",
+      "@peculiar/webcrypto@1.4.5": "patches/@peculiar__webcrypto@1.4.5.patch",
+      "safe-buffer@5.2.1": "patches/safe-buffer@5.2.1.patch",
+      "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
   "version": "0.8.1"

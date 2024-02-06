@@ -13,7 +13,7 @@ packages:
   # exclude packages that are inside test directories
   - '!**/test/**'
 hoist: false
-
+public-hoist-pattern: '!core'
 overrides:
   core:
     hoist: false

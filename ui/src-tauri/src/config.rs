@@ -22,7 +22,7 @@ pub fn app_url() -> String {
 
 #[cfg(feature = "custom-protocol")]
 pub fn app_tray_message_url() -> String {
-    "index.html/tray_message".to_string()
+    "tray.html".to_string()
 }
 
 #[cfg(not(feature = "custom-protocol"))]
