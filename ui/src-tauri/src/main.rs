@@ -237,22 +237,13 @@ fn main() {
             let handle = app.handle();
 
             async fn spawn_executor(config: Ad4mConfig, splashscreen_clone: Window, handle: &AppHandle) {
-                let my_closure = || {
-                    let url = app_url();
-                    info!("Executor clone on: {:?}", url);
-                    let _ = splashscreen_clone.hide();
-                    create_tray_message_windows(&handle);
-                    let main = get_main_window(&handle);
-                    main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
-                };
+                rust_executor::run_with_tokio(config.clone()).await;
 
-                match rust_executor::run_with_tokio(config.clone()).await {
-                    () => {
-                        my_closure();
-
-                        info!("GraphQL server stopped.")
-                    }
-                }
+                info!("Executor clone on: {:?}", url);
+                let _ = splashscreen_clone.hide();
+                create_tray_message_windows(&handle);
+                let main = get_main_window(&handle);
+                main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
             }
 
             tauri::async_runtime::spawn(async move {
