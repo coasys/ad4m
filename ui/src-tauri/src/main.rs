@@ -50,7 +50,6 @@ use crate::commands::state::{get_port, request_credential};
 use crate::commands::app::{close_application, close_main_window, clear_state, open_tray, open_tray_message, open_dapp};
 use crate::config::data_path;
 use crate::config::log_path;
-use crate::util::create_tray_message_windows;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
 use crate::util::{create_main_window, save_executor_port};

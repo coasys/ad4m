@@ -24,7 +24,7 @@ pub fn find_port(start_port: u16, end_port: u16) -> u16 {
     );
 }
 
-pub fn has_processes_running(name: &str) -> usize {
+pub fn _has_processes_running(name: &str) -> usize {
     let processes = System::new_all();
     let processes_by_name: Vec<&Process> = processes.processes_by_exact_name(name).collect();
     processes_by_name.len()
