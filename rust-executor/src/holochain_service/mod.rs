@@ -7,6 +7,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use holochain::conductor::api::{AppInfo, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
+use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
@@ -114,7 +115,7 @@ impl HolochainService {
                             match message {
                                 HolochainServiceRequest::InstallApp(payload, response) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(10), 
+                                        std::time::Duration::from_secs(10),
                                         service.install_app(payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; InstallApp call")) {
                                         Ok(result) => {
@@ -134,7 +135,7 @@ impl HolochainService {
                                     response,
                                 } => {
                                     match timeout(
-                                        std::time::Duration::from_secs(5), 
+                                        std::time::Duration::from_secs(5),
                                         service.call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; Call Zome Function")) {
                                         Ok(result) => {
@@ -147,7 +148,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(10), 
+                                        std::time::Duration::from_secs(10),
                                         service.remove_app(app_id)
                                     ).await.map_err(|_| anyhow!("Timeout error; Remove App")) {
                                         Ok(result) => {
@@ -160,7 +161,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AgentInfos(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.agent_infos()
                                     ).await.map_err(|_| anyhow!("Timeout error; AgentInfos")) {
                                         Ok(result) => {
@@ -173,7 +174,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.add_agent_infos(agent_infos)
                                     ).await.map_err(|_| anyhow!("Timeout error; AddAgentInfos")) {
                                         Ok(result) => {
@@ -186,7 +187,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::Sign(data, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.sign(data)
                                     ).await.map_err(|_| anyhow!("Timeout error; Sign")) {
                                         Ok(result) => {
@@ -199,7 +200,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::Shutdown(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.shutdown()
                                     ).await.map_err(|_| anyhow!("Timeout error Shutdown")) {
                                         Ok(result) => {
@@ -212,7 +213,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::GetAgentKey(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.get_agent_key()
                                     ).await.map_err(|_| anyhow!("Timeout error; GetAgentKey")) {
                                         Ok(result) => {
@@ -225,7 +226,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::GetAppInfo(app_id, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.get_app_info(app_id)
                                     ).await.map_err(|_| anyhow!("Timeout error; GetAppInfo")) {
                                         Ok(result) => {
@@ -238,7 +239,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::LogNetworkMetrics(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.log_network_metrics()
                                     ).await.map_err(|_| anyhow!("Timeout error; LogNetworkMetrics")) {
                                         Ok(result) => {
@@ -251,7 +252,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::PackDna(path, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         HolochainService::pack_dna(path)
                                     ).await.map_err(|_| anyhow!("Timeout error; PackDna")) {
                                         Ok(result) => {
@@ -264,7 +265,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::UnPackDna(path, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         HolochainService::unpack_dna(path)
                                     ).await.map_err(|_| anyhow!("Timeout error; UnpackDna")) {
                                         Ok(result) => {
@@ -308,7 +309,8 @@ impl HolochainService {
             config
         } else {
         let mut config = ConductorConfig::default();
-            config.environment_path = PathBuf::from(local_config.conductor_path.clone()).into();
+        let data_root_path: DataRootPath = PathBuf::from(local_config.conductor_path.clone()).into();
+            config.data_root_path = Some(data_root_path);
             config.admin_interfaces = None;
 
             let mut kitsune_config = KitsuneP2pConfig::default();
@@ -318,7 +320,7 @@ impl HolochainService {
             // we've previously gotten errors speaking to.
             // [Default: 5 minute; now updated to 2 minutes]
             // tuning_params.gossip_peer_on_error_next_gossip_delay_ms = 1000 * 60 * 2;
-            
+
             // How often should we update and publish our agent info?
             // [Default: 5 minutes; now updated to 2 minutes]
             // tuning_params.gossip_agent_info_update_interval_ms = 1000 * 60 * 2;
@@ -347,7 +349,7 @@ impl HolochainService {
                     },
                 ];
             }
-            config.network = Some(kitsune_config);
+            config.network = kitsune_config;
 
             println!("wow 1 {:?}", config);
 

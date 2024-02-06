@@ -33,7 +33,7 @@ localtunnel-client = "0.0.12"
 tokio = { version = "1.19.2", features = ["full"] }
 tauri-plugin-positioner = { version = "1.0", features = ["system-tray"] }
 remove_dir_all = "0.7.0"
-reqwest = { version = "0.11.17", features = ["json", "native-tls"] }
+reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 ad4m-client = { path = "../../rust-client" }
 rust-executor = { path = "../../rust-executor" }
 chrono = "0.4"
