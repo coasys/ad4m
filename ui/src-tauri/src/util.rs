@@ -78,10 +78,10 @@ pub fn create_tray_message_windows(app: &AppHandle<Wry>) {
 
     let new_ad4m_window = WindowBuilder::new(app, "TrayMessage", WindowUrl::App(url.into()))
         .center()
-        .focused(false)
-        .inner_size(360.0, 80.0)
+        .focused(true)
+        .inner_size(360.0, 120.0)
         .title("TrayMessage")
-        .visible(false);
+        .visible(true);
 
     let _ = new_ad4m_window.build();
 

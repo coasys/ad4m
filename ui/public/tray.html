@@ -12,7 +12,7 @@
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
     }
-    
+
     /* Add your styles here */
     #splashscreenContainer {
       display: flex;
@@ -46,11 +46,14 @@
 
 <script>
   document.addEventListener('DOMContentLoaded', function () {
+    const { invoke } = window.__TAURI__.tauri
+
     const countdownElement = document.getElementById('count');
     let count = 5;
 
     const interval = setInterval(function () {
       if (count === 0) {
+        invoke('open_tray_message')
         clearInterval(interval);
       } else {
         count -= 1;
