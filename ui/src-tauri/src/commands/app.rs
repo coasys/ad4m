@@ -1,13 +1,10 @@
 extern crate remove_dir_all;
-use std::time::{Duration, SystemTime};
-
-use crate::Payload;
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 
 use remove_dir_all::*;
 
-use tauri::{LogicalSize, Manager, window};
+use tauri::{LogicalSize, Manager};
 use tauri::Size;
 use tauri_plugin_positioner::{Position, WindowExt};
 
