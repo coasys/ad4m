@@ -157,12 +157,15 @@ export class LinkAdapter implements LinkSyncAdapter {
 
       //Only show the gossip log every 10th iteration
       if (this.gossipLogCount == 10) {
+        let others = await this.others();
         console.log(`
         ======
         GOSSIP
         --
         me: ${this.me}
         is scribe: ${is_scribe}
+        --
+        others: ${others.join(', ')}
         --
         ${Array.from(this.peers.entries()).map( ([peer, peerInfo]) => {
           //@ts-ignore
