@@ -157,7 +157,7 @@ jobs:
 
   build-macos:
     macos:
-      xcode: "12.5.1"
+      xcode: "15.2.0"
     steps:
       - checkout
       - node/install:
