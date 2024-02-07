@@ -73,9 +73,9 @@ jobs:
             - .
 
   build-windows:
-    executor:
-      name: win/default
-      size: xlarge
+    machine:
+      image: 'windows-server-2022-gui:current'
+      shell: 'powershell.exe -ExecutionPolicy Bypass'
     steps:
       - checkout
       - node/install:
@@ -380,7 +380,7 @@ jobs:
 
   integration-tests-js-macos:
     macos:
-      xcode: "12.5.1"
+      xcode: "15.2.0"
     steps:
       - attach_workspace:
           at: .
