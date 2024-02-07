@@ -80,7 +80,7 @@ jobs:
       - checkout
       - node/install:
           install-npm: false
-          version: '16.13'
+          node-version: '16.13'
       - run:
           name: Install Deno
           command: |
@@ -163,7 +163,7 @@ jobs:
       - checkout
       - node/install:
           install-npm: false
-          version: '16.13'
+          node-version: '16.13'
       - run:
           name: Install Deno
           command: |
