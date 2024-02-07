@@ -568,10 +568,11 @@ impl HolochainService {
 
     pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
         let metrics = self.conductor.dump_network_metrics(None).await?;
-        info!("Network metrics: {}", serde_json::to_string_pretty(&serde_json::Value::try_from(metrics)?)?);
+        info!("Network metrics: {}",metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
-        info!("Network stats: {}", serde_json::to_string_pretty(&serde_json::Value::try_from(stats)?)?);
+        info!("Network stats: {}", stats);
+        
         Ok(())
     }
 
