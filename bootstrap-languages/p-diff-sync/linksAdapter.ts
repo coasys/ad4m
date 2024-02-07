@@ -37,12 +37,15 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async others(): Promise<DID[]> {
     //@ts-ignore
-    return await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_others", null);
+    let others = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_others", null);
+    console.log("PerspectiveDiffSync.others(); others", others);
+    return others as DID[];
   }
 
   async currentRevision(): Promise<string> {
     //@ts-ignore
     let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "current_revision", null);
+    console.log("PerspectiveDiffSync.currentRevision(); res", res);
     return res as string;
   }
 
@@ -53,6 +56,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     try {
       //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
+      console.log("PerspectiveDiffSync.sync(); current_revision", current_revision);
       if (current_revision && Buffer.isBuffer(current_revision)) {
         this.myCurrentRevision = current_revision; 
       }
