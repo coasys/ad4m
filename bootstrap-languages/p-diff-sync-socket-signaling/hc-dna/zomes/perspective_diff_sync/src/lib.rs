@@ -27,7 +27,7 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
     let mut functions = BTreeSet::new();
     functions.insert((zome_info()?.name, "get_online_status".into()));
     //TODO; is this next function needed?
-    functions.insert((zome_info()?.name, "recv_remote_signal".into()));
+    functions.insert((zome_info()?.name, "recv_send_remote_signal".into()));
 
     let functions: GrantedFunctions = GrantedFunctions::Listed(functions);
 
@@ -97,7 +97,7 @@ pub fn update_current_revision(_hash: Hash) -> ExternResult<()> {
 /// Signal handling
 
 #[hdk_extern]
-fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
+fn recv_send_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
     //Check if its a normal diff expression signal
     match HashBroadcast::try_from(signal.clone()) {
         Ok(broadcast) => {
