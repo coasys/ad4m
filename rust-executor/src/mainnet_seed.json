@@ -1,9 +1,10 @@
 {
   "trustedAgents": [
-    "did:key:z6MkgtBC3UaxNLt5SFJmxHtzFUUeJLCxLiP8DTqJgwF9uCkv"
+    "did:key:z6MkgtBC3UaxNLt5SFJmxHtzFUUeJLCxLiP8DTqJgwF9uCkv",
+    "did:key:z6MkvPpWxwXAnLtMcoc9sX7GEoJ96oNnQ3VcQJRLspNJfpE7"
   ],
   "knownLinkLanguages": [
-    "QmzSYwddi9MyAAbh6yzzGBJEz8oKEykS8i8yFy3jsAGk8f3vvyu",
+    "QmzSYwdZTAA2FcHGj6WMVYFBqCBwznAt17jyZ7g381bDWHKVikd",
     "QmzSYwddGEumgdAgQGJhMA1uE2DfrnMEnNYMe3dn4kjdGJAmmEk",
     "QmzSYwdnHrRH8MmuPWKKrDvFoVyW5CophNpT1ipQUCcenPVTQnd"
   ],
