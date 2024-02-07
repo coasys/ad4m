@@ -66,8 +66,12 @@ const Login = (props: any) => {
   const onSignupStepOneKeyDown = (
     event: React.KeyboardEvent<HTMLInputElement>
   ) => {
+    
     if (event.key === "Enter") {
-      gotoNextSignUpStep();
+      checkPassword();
+      if (password.length > 0) {
+        setCurrentIndex(3);
+      }
     }
   };
 
@@ -84,14 +88,6 @@ const Login = (props: any) => {
       setPasswordError("Password is requied");
     } else {
       setPasswordError(null);
-    }
-  };
-
-  const gotoNextSignUpStep = () => {
-    checkUsernamePassword();
-
-    if (username.length > 0 && password.length > 0) {
-      setCurrentSignupIndex(1);
     }
   };
 
