@@ -1,6 +1,7 @@
 {
   "trustedAgents": [
-    "did:key:z6MkgtBC3UaxNLt5SFJmxHtzFUUeJLCxLiP8DTqJgwF9uCkv"
+    "did:key:z6MkgtBC3UaxNLt5SFJmxHtzFUUeJLCxLiP8DTqJgwF9uCkv",
+    "did:key:z6MkvPpWxwXAnLtMcoc9sX7GEoJ96oNnQ3VcQJRLspNJfpE7"
   ],
   "knownLinkLanguages": [
     "QmzSYwddi9MyAAbh6yzzGBJEz8oKEykS8i8yFy3jsAGk8f3vvyu",
