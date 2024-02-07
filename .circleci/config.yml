@@ -78,6 +78,29 @@ jobs:
       size: xlarge
     steps:
       - checkout
+      - node/install:
+          install-npm: false
+          version: '14'
+      - run:
+          name: Install Deno
+          command: |
+            curl -fsSL https://deno.land/x/install/install.sh | sh
+            echo 'export PATH="/Users/distiller/.deno/bin:$PATH"' >> $BASH_ENV
+      - run:
+          name: Install pnpm
+          command: npm install -g pnpm
+      - run:
+          name: Install Protobuf and CMake
+          command: brew install protobuf cmake
+      - run:
+          name: Verify installations
+          command: |
+            rustc --version
+            node --version
+            deno --version
+            pnpm --version
+            protoc --version
+            cmake --version
       - restore_cache:
           keys:
             - hc-0.3.0-beta-dev-27-v7
