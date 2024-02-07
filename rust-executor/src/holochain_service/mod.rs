@@ -328,7 +328,7 @@ impl HolochainService {
             kitsune_config.tuning_params = Arc::new(tuning_params);
 
             if local_config.use_bootstrap {
-                kitsune_config.bootstrap_service = Some(Url2::parse(String::from("https://bootstrap-dev.holohost.workers.dev")));
+                kitsune_config.bootstrap_service = Some(Url2::parse(String::from("http://207.148.16.17:38245")));
             } else {
                 kitsune_config.bootstrap_service = None;
             }
@@ -339,7 +339,7 @@ impl HolochainService {
             }
             if local_config.use_proxy {
                 kitsune_config.transport_pool = vec![TransportConfig::WebRTC {
-                    signal_url: String::from("wss://signal.holotest.net"),
+                    signal_url: String::from("ws://207.148.16.17:42697"),
                 }];
             } else {
                 kitsune_config.transport_pool = vec![
