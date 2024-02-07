@@ -79,7 +79,7 @@ jobs:
     steps:
       - checkout
       - node/install:
-          node-version: '16.13'
+          node-version: '16.14'
       - run:
           name: Install Deno
           command: |
@@ -161,7 +161,7 @@ jobs:
     steps:
       - checkout
       - node/install:
-          node-version: '16.13'
+          node-version: '16.14'
       - run:
           name: Install Rust
           command: |
