@@ -73,9 +73,9 @@ jobs:
             - .
 
   build-windows:
-    machine:
-      image: 'windows-server-2022-gui:current'
-      shell: 'powershell.exe -ExecutionPolicy Bypass'
+    executor:
+      name: win/default
+      size: xlarge
     steps:
       - checkout
       - node/install:
