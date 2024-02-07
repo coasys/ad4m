@@ -5,6 +5,7 @@ orbs:
   go: circleci/go@1.10.0
   rust: circleci/rust@1.6.1
   win: circleci/windows@2.2.0
+  mac: circleci/macos@1.1.0
 
 jobs:
   build-linux:
@@ -137,6 +138,29 @@ jobs:
       xcode: "12.5.1"
     steps:
       - checkout
+      - node/install:
+          install-npm: false
+          version: '14'
+      - run:
+          name: Install Deno
+          command: |
+            curl -fsSL https://deno.land/x/install/install.sh | sh
+            echo 'export PATH="/Users/distiller/.deno/bin:$PATH"' >> $BASH_ENV
+      - run:
+          name: Install pnpm
+          command: npm install -g pnpm
+      - run:
+          name: Install Protobuf and CMake
+          command: brew install protobuf cmake
+      - run:
+          name: Verify installations
+          command: |
+            rustc --version
+            node --version
+            deno --version
+            pnpm --version
+            protoc --version
+            cmake --version
       - restore_cache:
           keys:
             - hc-0.3.0-beta-dev-27-v7
