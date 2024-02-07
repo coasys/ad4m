@@ -79,7 +79,6 @@ jobs:
     steps:
       - checkout
       - node/install:
-          install-npm: false
           node-version: '16.13'
       - run:
           name: Install Deno
@@ -162,7 +161,6 @@ jobs:
     steps:
       - checkout
       - node/install:
-          install-npm: false
           node-version: '16.13'
       - run:
           name: Install Deno
