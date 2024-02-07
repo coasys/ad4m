@@ -294,7 +294,7 @@ workflows:
       - build-macos
       - unit-tests:
           requires:
-            - build
+            - build-linux
       - integration-tests-js:
           requires:
             - build-linux
