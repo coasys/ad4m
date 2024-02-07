@@ -8,7 +8,7 @@ import { invoke } from "@tauri-apps/api";
 const Login = (props: any) => {
   const {
     state: { loading, hasLoginError },
-    methods: { generateAgent, unlockAgent },
+    methods: { generateAgent, unlockAgent, mutateAgent },
   } = useContext(AgentContext);
 
   const {
@@ -38,7 +38,7 @@ const Login = (props: any) => {
 
   const clearAgent = async () => {
     let agentStatus = await client?.agent.status();
-    
+
     if (!agentStatus?.isUnlocked) {
       await invoke("clear_state");
     }
@@ -48,7 +48,7 @@ const Login = (props: any) => {
     checkPassword();
 
     if (password.length > 0) {
-      generateAgent(username, firstName, lastName, password);
+      generateAgent(username);
     }
   };
 
@@ -66,7 +66,6 @@ const Login = (props: any) => {
   const onSignupStepOneKeyDown = (
     event: React.KeyboardEvent<HTMLInputElement>
   ) => {
-    
     if (event.key === "Enter") {
       checkPassword();
       if (password.length > 0) {
@@ -149,7 +148,7 @@ const Login = (props: any) => {
               <j-text variant="heading">Privacy and Security</j-text>
               <j-text variant="ingress" nomargin>
                 ADAM generates keys on your device, so only you have access to
-                your account and data. 
+                your account and data.
                 <p/>
                 We will ask for a password used to encrypt your local keys.
                 Don't forget it! There is no way to recover it.
@@ -252,7 +251,7 @@ const Login = (props: any) => {
                 without depending on a central authority or a particular app.
                 <p />
                 That includes and starts with your personal profile.
-                In the next step you can add optional information about yourself 
+                In the next step you can add optional information about yourself
                 that ADAM will make available publicly to other users through any ADAM app.
               </j-text>
             </div>
@@ -290,7 +289,7 @@ const Login = (props: any) => {
                   marginBottom: "var(--j-space-500)",
                 }}
                 gradient
-              ></Logo>      
+              ></Logo>
               <j-flex direction="column" gap="500" style="width: 100%">
               <j-input
                 full
@@ -312,7 +311,6 @@ const Login = (props: any) => {
                   maxlength={30}
                   autovalidate
                   type="text"
-                  onKeyDown={onSignupStepTwoKeyDown}
                   onInput={(e: any) => setFirstName(e.target.value)}
                 ></j-input>
                 <j-input
@@ -323,7 +321,6 @@ const Login = (props: any) => {
                   maxlength={30}
                   autovalidate
                   type="text"
-                  onKeyDown={onSignupStepTwoKeyDown}
                   onInput={(e: any) => setLastName(e.target.value)}
                 ></j-input>
                 <j-button
@@ -340,10 +337,10 @@ const Login = (props: any) => {
               </j-flex>
             </div>
           </div>
-  
+
       )}
 
-       
+
       {currentIndex === 5 && (
         <div className="slider__slide">
           <div className="slider__slide-content text-center">
@@ -366,10 +363,21 @@ const Login = (props: any) => {
                 Once agent generation is done, ADAM will run on your device, in the background.
                 Open an ADAM app (like <a href="https://fluxsocial.io" target="_blank">Flux</a>) and connect it to your ADAM agent.
                 <p />
-                This window will close automatically when setup is done. 
+                This window will close automatically when setup is done.
                 To interact with ADAM, click the ADAM icon in your system tray (next to the clock).
               </j-text>
-            </div> 
+            </div>
+            <j-button
+                  class="full-button"
+                  full
+                  size="lg"
+                  variant="primary"
+                  style={{ alignSelf: "center" }}
+                  onClick={() => { mutateAgent(username, firstName, lastName) } }
+                  loading={loading}
+                >
+                  Generate Agent
+                </j-button>
           </div>
         </div>
       )}
@@ -422,7 +430,7 @@ const Login = (props: any) => {
                 Reset agent
               </j-button>
               <j-box px="100" >
-              <j-popover event="mouseover" placement="bottom">          
+              <j-popover event="mouseover" placement="bottom">
                 <j-toggle slot="trigger"
                   checked={holochain}
                   onChange={(e) => {
