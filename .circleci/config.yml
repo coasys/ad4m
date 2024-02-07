@@ -226,10 +226,6 @@ jobs:
           key: hc-0.3.0-beta-dev-27-v7
           paths:
             - /home/circleci/.cargo/bin
-      - restore_cache:
-          keys:
-            - rust-cache-{{ checksum "Cargo.lock" }}-v2
-            - rust-cache-
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
