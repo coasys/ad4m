@@ -354,7 +354,7 @@ const Login = (props: any) => {
                 No more app silos with you as the central authority.
                 <p />
                 Once agent generation is done, ADAM will run on your device, in the background.
-                Open an ADAM app (like <a href="https://fluxsocial.io" target="_blank">Flux</a>) and connect it to your ADAM agent.
+                Open an ADAM app, like <a href="https://fluxsocial.io" target="_blank" style="color: var(--end-color)">Flux</a>, and connect it to your ADAM agent.
                 <p />
                 To interact with ADAM, click the ADAM icon in your system tray (next to the clock).
               </j-text>
