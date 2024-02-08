@@ -157,7 +157,7 @@ jobs:
       - checkout
       - run:
           name: Install Node.js
-          command: choco install nodejs
+          command: choco install nodejs --version=18.17.0
       - run:
           name: Install Deno
           command: choco install deno
