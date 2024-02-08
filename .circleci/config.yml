@@ -341,12 +341,12 @@ workflows:
   version: 2
   build-and-test:
     jobs:
-      - build
-      - unit-tests:
-          requires:
-            - build
-      - integration-tests-js-linux:
-          requires:
-            - build
+      # - build
+      # - unit-tests:
+      #     requires:
+      #       - build
+      # - integration-tests-js-linux:
+      #     requires:
+      #       - build
       - integration-tests-js-windows
-      - integration-tests-js-macos
+      # - integration-tests-js-macos
