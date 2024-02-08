@@ -160,12 +160,10 @@ jobs:
           command: choco install nodejs
       - run:
           name: Install Deno
-          command: |
-            curl -fsSL https://deno.land/x/install/install.sh | sh
-            echo 'export PATH="/Users/distiller/.deno/bin:$PATH"' >> $BASH_ENV
+          command: choco install deno
       - run:
           name: Install pnpm
-          command: curl -fsSL https://get.pnpm.io/install.sh | sh -
+          command: choco install pnpm
       - run:
           name: install dependencies 
           command: choco install protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
