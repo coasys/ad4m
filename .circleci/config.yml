@@ -211,9 +211,6 @@ jobs:
           paths:
             - /home/circleci/.cargo/bin
       - run:
-          name: Install Rust
-          command: rustup-init.exe -y --default-host x86_64-pc-windows-msvc --default-toolchain stable
-      - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
