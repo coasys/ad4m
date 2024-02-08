@@ -172,7 +172,7 @@ jobs:
           command: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=User'
       - run:
           name: install dependencies 
-          command: choco install protoc curl cygwin gnuwin32-m4 msys2 make mingw python
+          command: choco install protoc curl cygwin gnuwin32-m4 msys2 make mingw python python2 visualstudio2019community
       - run:
           name: Verify installations
           command: |
