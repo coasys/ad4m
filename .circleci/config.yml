@@ -172,7 +172,7 @@ jobs:
           command: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=User'
       - run:
           name: install dependencies 
-          command: choco install protoc curl cygwin gnuwin32-m4 msys2 make mingw
+          command: choco install protoc curl cygwin gnuwin32-m4 msys2 make mingw python
       - run:
           name: Verify installations
           command: |
@@ -212,19 +212,13 @@ jobs:
             - /home/circleci/.cargo/bin
       - run:
           name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
+          command: pnpm install
       - run:
           name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
+          command: cd ./core && pnpm install
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
-      - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
