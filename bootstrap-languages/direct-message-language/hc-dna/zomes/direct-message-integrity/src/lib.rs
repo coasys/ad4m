@@ -58,16 +58,16 @@ impl Recipient {
     }
 }
 
-#[hdk_entry_defs]
+#[hdk_entry_types]
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
-    #[entry_def(visibility = "private")]
+    #[entry_type(visibility = "private")]
     StatusUpdate(StatusUpdate),
-    #[entry_def(visibility = "private")]
+    #[entry_type(visibility = "private")]
     StoredMessage(StoredMessage),
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     PublicMessage(PublicMessage),
-    #[entry_def(visibility = "private")]
+    #[entry_type(visibility = "private")]
     Recipient(Recipient),
 }
 

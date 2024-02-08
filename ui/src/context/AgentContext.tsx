@@ -15,7 +15,8 @@ type ContextProps = {
   methods: {
     unlockAgent: (str: string, holochain: boolean) => void,
     lockAgent: (str: string) => void,
-    generateAgent: (username: string, firstName: string, lastName: string, password: string) => void,
+    generateAgent: (password: string) => void,
+    mutateAgent: (username: string, firstName: string, lastName: string) => void,
   };
 }
 
@@ -28,6 +29,7 @@ const initialState: ContextProps = {
     unlockAgent: () => null,
     lockAgent: () => null,
     generateAgent: () => null,
+    mutateAgent: () => null
   }
 }
 
@@ -44,7 +46,7 @@ export function AgentProvider({ children }: any) {
 
   const [state, setState] = useState(initialState.state);
 
-  
+
   const setLoading = (loading: boolean) => {
     setState((prev) => ({
       ...prev,
@@ -52,21 +54,40 @@ export function AgentProvider({ children }: any) {
     }))
   }
 
-  const generateAgent = async (username: string, firstName: string, lastName: string, password: string) => {
+  const generateAgent = async (password: string) => {
     setLoading(true);
+    console.log("Generating agent");
 
     let agentStatus = await client!.agent.generate(password);
 
+    console.log("generate done with: ", agentStatus);
+
+    console.log("agent status in generate: ", agentStatus);
+
+    setLoading(false);
+
+    await invoke('login_proxy', { subdomain: agentStatus.did! });
+  };
+
+  const mutateAgent = async (username: string, firstName: string, lastName: string) => {
+    const agentStatus = await client!.agent.status();
+
+    handleLogin(client!, agentStatus.isUnlocked, agentStatus.did!);
+
+    await invoke('close_main_window');
+    await invoke('open_tray_message');
+
     const additions = [];
 
-    additions.push(
-      new Link({
-        source: agentStatus.did!,
-        target: Literal.from(username).toUrl(),
-        predicate: PREDICATE_USERNAME
-      })
-    );
-
+    if(username) {
+      additions.push(
+        new Link({
+          source: agentStatus.did!,
+          target: Literal.from(username).toUrl(),
+          predicate: PREDICATE_USERNAME
+        })
+      );
+    }
 
     if (firstName) {
       additions.push(
@@ -88,28 +109,19 @@ export function AgentProvider({ children }: any) {
       );
     }
 
+    console.log("mutating public perspective: ", additions);
     await client?.agent.mutatePublicPerspective({
       additions,
       removals: []
-    })
+    });
 
-    handleLogin(client!, agentStatus.isUnlocked, agentStatus.did!);
-
-    console.log("agent status in generate: ", agentStatus);
-
-    setLoading(false);
-
-    await invoke('close_main_window');
-    await invoke('open_tray_message');
-    await invoke('login_proxy', { subdomain: agentStatus.did! });
-    
     navigate('/apps');
-  };
+  }
 
   const unlockAgent = async (password: string, holochain: boolean) => {
-    console.log("wow", password, holochain)
+    console.log("Holochain config:", holochain)
     setLoading(true)
-    
+
     let agentStatus = await client?.agent.unlock(password, holochain);
 
     setLoading(false);
@@ -135,16 +147,17 @@ export function AgentProvider({ children }: any) {
     handleLogin(client!, status!.isUnlocked, status!.did!);
 
     setLoading(false);
-  } 
+  }
 
   return (
-    <AgentContext.Provider 
+    <AgentContext.Provider
       value={{
         state,
         methods: {
           generateAgent,
           unlockAgent,
           lockAgent,
+          mutateAgent
         }
       }}
     >

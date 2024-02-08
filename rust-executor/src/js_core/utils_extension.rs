@@ -26,7 +26,7 @@ fn hash(#[string] data: String) -> Result<String, AnyError> {
 #[op2]
 #[string]
 fn console_log(#[string] data: String) -> Result<String, AnyError> {
-    info!("[JSCORE]: {:?}", data);
+    info!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
 }
@@ -34,7 +34,7 @@ fn console_log(#[string] data: String) -> Result<String, AnyError> {
 #[op2]
 #[string]
 fn console_debug(#[string] data: String) -> Result<String, AnyError> {
-    debug!("[JSCORE]: {:?}", data);
+    debug!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
 }
@@ -42,7 +42,7 @@ fn console_debug(#[string] data: String) -> Result<String, AnyError> {
 #[op2]
 #[string]
 fn console_error(#[string] data: String) -> Result<String, AnyError> {
-    error!("[JSCORE]: {:?}", data);
+    error!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
 }
@@ -50,7 +50,7 @@ fn console_error(#[string] data: String) -> Result<String, AnyError> {
 #[op2]
 #[string]
 fn console_warn(#[string] data: String) -> Result<String, AnyError> {
-    warn!("[JSCORE]: {:?}", data);
+    warn!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
 }

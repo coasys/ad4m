@@ -12,7 +12,7 @@ pub fn send_signal(signal_data: SignalData) -> SocialContextResult<PerspectiveEx
     //     signal_data.remote_agent_did, agent
     // );
     match agent {
-        Some(agent) => remote_signal(signal_data.payload.clone().get_sb()?, vec![agent])?,
+        Some(agent) => send_remote_signal(signal_data.payload.clone().get_sb()?, vec![agent])?,
         None => {
             debug!("PerspectiveDiffSync.send_signal(): Could not send signal since we could not get the agents pub key from did");
         }
@@ -24,7 +24,7 @@ pub fn send_broadcast(data: PerspectiveExpression) -> SocialContextResult<Perspe
     let active_agents = get_active_agents()?;
 
     //debug!("PerspectiveDiffSync.send_broadcast() to: {:?}", active_agents);
-    remote_signal(data.clone().get_sb()?, active_agents)?;
+    send_remote_signal(data.clone().get_sb()?, active_agents)?;
 
     Ok(data)
 }
