@@ -176,8 +176,10 @@ pub fn get_active_agents(_: ()) -> ExternResult<Vec<AgentPubKey>> {
 
 #[hdk_extern]
 pub fn get_others(_: ()) -> ExternResult<Vec<String>> {
+    info!("get_others");
     let res =
         telepresence::status::get_others().map_err(|error| utils::err(&format!("{}", error)))?;
+    info!("get_others res: {:?}", res);
     Ok(res)
 }
 
