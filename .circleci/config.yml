@@ -183,7 +183,6 @@ jobs:
             pnpm --version
             protoc --version
             cmake --version
-            python --version
       - run:
           name: Set npm config
           command: |
