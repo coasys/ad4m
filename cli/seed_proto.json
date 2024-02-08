@@ -32,11 +32,11 @@
     "agentLanguage": {
         "meta": {
             "name": "agentLanguage", 
-            "description": "Holochain based expression language for storing ad4m agent expressions", 
-            "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/agent-language",
+            "description": "Centralized based expression language for storing ad4m agent expressions, using Cloudflare KV store", 
+            "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/centralized-agent-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
-        "resource": "../bootstrap-languages/agent-language/build/bundle.js"
+        "resource": "../bootstrap-languages/centralized-agent-language/build/bundle.js"
     },
     "directMessageLanguage": {
         "meta": {
