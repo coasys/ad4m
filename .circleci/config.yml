@@ -155,8 +155,9 @@ jobs:
           fingerprints:
             - "SHA256:pSp0IbmprP+NHD1iG2+k2xUeJOG1yTzEnfqRLnUCk3c"
       - checkout
-      - node/install:
-          node-version: '16.14'
+      - run:
+          name: Install Node.js
+          command: choco install nodejs
       - run:
           name: Install Deno
           command: |
