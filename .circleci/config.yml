@@ -174,9 +174,6 @@ jobs:
           name: install dependencies 
           command: choco install protoc curl cygwin gnuwin32-m4 msys2 make mingw python
       - run:
-          name: Install node-gyp
-          command: npm install -g node-gyp
-      - run:
           name: Verify installations
           command: |
             refreshenv
