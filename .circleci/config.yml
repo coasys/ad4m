@@ -165,10 +165,10 @@ jobs:
             echo 'export PATH="/Users/distiller/.deno/bin:$PATH"' >> $BASH_ENV
       - run:
           name: Install pnpm
-          command: npm install -g pnpm
+          command: curl -fsSL https://get.pnpm.io/install.sh | sh -
       - run:
-          name: Install Protobuf and CMake
-          command: brew install protobuf cmake
+          name: install dependencies 
+          command: choco install protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
       - run:
           name: Verify installations
           command: |
