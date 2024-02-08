@@ -27,12 +27,12 @@ pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
 
-#[hdk_entry_defs]
+#[hdk_entry_types]
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     Did(Did),
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     AgentExpression(AgentExpression),
 }
 

@@ -5,7 +5,7 @@
             "meta": {
                 "name": "perspectiveDiffSync",
                 "description": "Holochain based Perspective link sharing language",
-                "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
+                "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/p-diff-sync",
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/p-diff-sync/build/bundle.js"
@@ -13,8 +13,8 @@
         {
             "meta": {
                 "name": "perspectiveDiffSync",
-                "description": "Holochain based Perspective link sharing language, with revision signals sent with socket.io",
-                "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
+                "description": "Holochain based Perspective link sharing language, with revision signals sent with socket.io through a centralized server",
+                "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/p-diff-sync-socket-signaling",
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/p-diff-sync-socket-signaling/build/bundle.js"
@@ -23,7 +23,7 @@
             "meta": {
                 "name": "perspectiveDiffSync",
                 "description": "Centralized link language",
-                "sourceCodeLink": "https://github.com/perspect3vism/perspective-diff-sync",
+                "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/p-diff-sync-socket-signaling",
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/centralized-p-diff-sync/build/bundle.js"
@@ -32,8 +32,8 @@
     "agentLanguage": {
         "meta": {
             "name": "agentLanguage", 
-            "description": "Holochain based expression language for storing ad4m agent expressions", 
-            "sourceCodeLink": "https://github.com/perspect3vism/agent-language",
+            "description": "Centralized based expression language for storing ad4m agent expressions, using Cloudflare KV store", 
+            "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/centralized-agent-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
         "resource": "../bootstrap-languages/centralized-agent-language/build/bundle.js"
@@ -42,7 +42,7 @@
         "meta": {
             "name": "directMessageLanguage", 
             "description": "Holochain based language for direct messages on ad4m",
-            "sourceCodeLink": "https://github.com/perspect3vism/direct-message-language", 
+            "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/direct-message-language", 
             "possibleTemplateParams": ["recipient_did", "recipient_hc_agent_pubkey"]
         },
         "resource": "../bootstrap-languages/direct-message-language/build/bundle.js"
@@ -51,7 +51,7 @@
         "meta": {
             "name": "neighbourhoodLanguage", 
             "description": "Language for storing neighbourhood expressions that leverages StorJ",
-            "sourceCodeLink": "https://github.com/fluxsocial/neighbourhood-language", 
+            "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/neighbourhood-language", 
             "possibleTemplateParams": ["uid", "name", "description"]
         },
         "resource": "../bootstrap-languages/neighbourhood-language/build/bundle.js"
@@ -60,7 +60,7 @@
         "meta": {
             "name": "perspectiveLanguage", 
             "description": "Holochain based language for storing perspective expressions", 
-            "sourceCodeLink": "https://github.com/perspect3vism/perspective-language",
+            "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/perspective-language",
             "possibleTemplateParams": ["uid", "name", "description"]
         },
         "resource": "../bootstrap-languages/perspective-language/build/bundle.js"
@@ -70,7 +70,7 @@
             "meta": {
                 "name": "fileStorageLanguage", 
                 "description": "Holochain based language for storing files", 
-                "sourceCodeLink": "https://github.com/perspect3vism/file-storage-language",
+                "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/file-storage",
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/file-storage/build/bundle.js"
@@ -79,7 +79,7 @@
             "meta": {
                 "name": "centralizedFileStorageLanguage", 
                 "description": "Cloudflare based language for storing files", 
-                "sourceCodeLink": "https://github.com/coasys/ad4m",
+                "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/centralized-file-storage",
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/centralized-file-storage/build/bundle.js"
@@ -88,7 +88,7 @@
             "meta": {
                 "name": "easLanguage", 
                 "description": "EAS fetching language", 
-                "sourceCodeLink": "https://github.com/perspect3vism/file-storage-language",
+                "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/eass",
                 "possibleTemplateParams": []
             },
             "resource": "../bootstrap-languages/eas/build/bundle.js"

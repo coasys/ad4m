@@ -186,6 +186,8 @@ pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
         })
         .collect();
 
+    debug!("get_active_agents(): recent_agents: {:?}", recent_agents);
+
     //Dedup the agents
     let mut recent_agents = dedup(&recent_agents);
     //Remove ourself from the agents

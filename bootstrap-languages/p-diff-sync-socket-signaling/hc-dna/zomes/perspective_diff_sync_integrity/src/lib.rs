@@ -137,24 +137,24 @@ pub struct PullResult {
     pub current_revision: Option<HoloHash<holo_hash::hash_type::Action>>,
 }
 
-#[hdk_entry_defs]
+#[hdk_entry_types]
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     PerspectiveDiff(PerspectiveDiff),
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     Snapshot(Snapshot),
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     HashReference(HashReference),
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     PerspectiveDiffEntryReference(PerspectiveDiffEntryReference),
-    #[entry_def(visibility = "private")]
+    #[entry_type(visibility = "private")]
     LocalHashReference(LocalHashReference),
-    #[entry_def(visibility = "private")]
+    #[entry_type(visibility = "private")]
     LocalTimestampReference(LocalTimestampReference),
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     Anchor(Anchor),
-    #[entry_def(visibility = "private")]
+    #[entry_type(visibility = "private")]
     PrivateOnlineStatus(PerspectiveExpression),
 }
 
