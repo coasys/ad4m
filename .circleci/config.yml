@@ -349,9 +349,5 @@ workflows:
       - integration-tests-js-linux:
           requires:
             - build
-      - integration-tests-js-windows:
-          requires:
-            - build
-      - integration-tests-js-macos:
-          requires:
-            - build
+      - integration-tests-js-windows
+      - integration-tests-js-macos
