@@ -169,7 +169,7 @@ jobs:
           command: choco install pnpm
       - run:
           name: Install cmake
-          command: choco install cmake
+          command: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=User'
       - run:
           name: install dependencies 
           command: choco install protoc curl cygwin gnuwin32-m4 msys2 make mingw
