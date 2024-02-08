@@ -264,6 +264,7 @@ jobs:
             pnpm --version
             protoc --version
             cmake --version
+            python --version
       - restore_cache:
           keys:
             - hc-0.3.0-beta-dev-27-v7
