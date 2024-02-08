@@ -166,7 +166,9 @@ jobs:
           command: choco install rust
       - run:
           name: Install pnpm
-          command: npm install -g pnpm
+          command: |
+            nvm list
+            npm install -g pnpm
       - run:
           name: Install cmake
           command: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=User'
