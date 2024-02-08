@@ -46,9 +46,8 @@ const Login = (props: any) => {
 
   const generate = () => {
     checkPassword();
-
     if (password.length > 0) {
-      generateAgent(username);
+      generateAgent(password);
     }
   };
 
@@ -69,6 +68,7 @@ const Login = (props: any) => {
     if (event.key === "Enter") {
       checkPassword();
       if (password.length > 0) {
+        generate();
         setCurrentIndex(3);
       }
     }
@@ -220,10 +220,11 @@ const Login = (props: any) => {
                 size="lg"
                 variant="primary"
                 style={{ alignSelf: "center" }}
-                onClick={() => setCurrentIndex(3)}
+                onClick={() => {setCurrentIndex(3); generate();}}
                 loading={loading}
+                disabled={password.length == 0}
               >
-                Next
+                Generate Agent
               </j-button>
             </j-flex>
           </div>
@@ -257,13 +258,6 @@ const Login = (props: any) => {
             </div>
 
             <j-flex j="center" a="center" gap="500">
-              <j-button
-                variant="link"
-                size="xl"
-                onClick={() => setCurrentIndex(2)}
-              >
-                Previous
-              </j-button>
               <j-button
                 size="xl"
                 full
@@ -329,10 +323,9 @@ const Login = (props: any) => {
                   size="lg"
                   variant="primary"
                   style={{ alignSelf: "center" }}
-                  onClick={() => { setCurrentIndex(5); generate()} }
-                  loading={loading}
+                  onClick={() => setCurrentIndex(5) }
                 >
-                  Generate Agent
+                  Initialize public profile
                 </j-button>
               </j-flex>
             </div>
@@ -363,7 +356,6 @@ const Login = (props: any) => {
                 Once agent generation is done, ADAM will run on your device, in the background.
                 Open an ADAM app (like <a href="https://fluxsocial.io" target="_blank">Flux</a>) and connect it to your ADAM agent.
                 <p />
-                This window will close automatically when setup is done.
                 To interact with ADAM, click the ADAM icon in your system tray (next to the clock).
               </j-text>
             </div>
@@ -376,7 +368,7 @@ const Login = (props: any) => {
                   onClick={() => { mutateAgent(username, firstName, lastName) } }
                   loading={loading}
                 >
-                  Generate Agent
+                  Finish ADAM setup
                 </j-button>
           </div>
         </div>
