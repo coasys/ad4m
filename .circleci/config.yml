@@ -171,6 +171,7 @@ jobs:
             nvm install 20.4.0
             nvm use 20.4.0
             nvm list
+            npm install -g npm@latest
             npm install -g pnpm
       - run:
           name: Install cmake
