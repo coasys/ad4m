@@ -151,6 +151,9 @@ jobs:
       name: win/default
       size: xlarge
     steps:
+      - add_ssh_keys:
+          fingerprints:
+            - "SHA256:pSp0IbmprP+NHD1iG2+k2xUeJOG1yTzEnfqRLnUCk3c"
       - checkout
       - node/install:
           node-version: '16.14'
