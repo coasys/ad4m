@@ -187,6 +187,8 @@ jobs:
       - run:
           name: Set npm config
           command: |
+            npm cache clean --force
+            npm install -g npm@latest
             npm config set python python2.7
             npm config set msvs_version 2019
       - run:
