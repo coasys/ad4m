@@ -183,6 +183,7 @@ jobs:
             pnpm --version
             protoc --version
             cmake --version
+            python --version
       - run:
           name: Install HC
           command: |
