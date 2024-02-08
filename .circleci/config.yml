@@ -168,8 +168,8 @@ jobs:
           name: Install pnpm
           command: |
             nvm list
-            nvm install 20.4.0
-            nvm use 20.4.0
+            nvm install 18.17.0
+            nvm use 18.17.0
             nvm list
             npm install -g npm@latest
             npm install -g pnpm
