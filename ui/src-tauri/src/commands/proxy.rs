@@ -5,7 +5,7 @@ use ad4m_client::Ad4mClient;
 
 use crate::{AppState, ProxyState, ProxyService};
 
-const PROXY_SERVER: &str = "https://proxy-worker.ad4m.dev";
+const PROXY_SERVER: &str = "http://140.82.10.81:3030";
 const AD4M_SERVER: &str = "http://127.0.0.1";
 
 #[tauri::command]
@@ -59,7 +59,7 @@ pub async fn login_proxy(subdomain: String, app_state: State<'_, AppState>, prox
         endpoint: None,
         shutdown_signal: None,
     };
-    
+
     Ok(())
 }
 
@@ -121,7 +121,5 @@ pub fn stop_proxy(proxy: State<'_, ProxyState>) {
 }
 
 fn format_subdomain(subdomain: &str) -> String {
-    let subdomain = subdomain.replace("did:key:", "").to_lowercase();
-    let max_len = std::cmp::min(32, subdomain.len());
-    subdomain[0..max_len].to_string()
+    subdomain.replace("did:key:", "")
 }

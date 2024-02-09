@@ -451,7 +451,7 @@ export class Ad4mConnectElement extends LitElement {
 
   // TODO: localstorage doesnt work here
   @property({ type: String })
-  token = getForVersion("ad4murl") || "";
+  token = getForVersion("ad4mToken") || "";
 
   // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
