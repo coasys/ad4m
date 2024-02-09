@@ -31,5 +31,5 @@
     "@coasys/ad4m-executor": "link:../core"
   },
   "dependencies": {},
-  "version": "0.8.1"
+  "version": "0.8.2-prerelease"
 }
