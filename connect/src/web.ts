@@ -648,7 +648,10 @@ export class Ad4mConnectElement extends LitElement {
     if (this.uiState === "qr") {
       return ScanQRCode({
         changeState: this.changeUIState,
-        onSuccess: (url) => this._client.connect(url),
+        onSuccess: (url) => {
+          this.changeUrl(url);
+          this._client.connect(url)
+        },
         uiState: this.uiState,
       });
     }
