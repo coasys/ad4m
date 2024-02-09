@@ -116,6 +116,11 @@ jobs:
     - name: Install/update node-gyp
       run: npm install -g node-gyp
 
+    - name: Use Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
     - name: pnpm Install
       run: pnpm install --no-cache
 
