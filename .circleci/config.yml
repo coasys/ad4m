@@ -162,13 +162,14 @@ jobs:
           name: Install Rust
           command: choco install rust
       - run:
-          name: Install pnpm
+          name: Chnage node version
           command: |
             nvm list
             nvm install 18.17.0
             nvm use 18.17.0
-            nvm list
-            npm install -g pnpm
+      - run:
+          name: Install pnpm
+          command: choco install pnpm
       - run:
           name: Install cmake
           command: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=User'
