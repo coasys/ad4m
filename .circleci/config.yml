@@ -248,7 +248,7 @@ jobs:
           command: |
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
-            rustup target add wasm32-unknown-unknown
+            RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
       - run:
           name: Install Go
           command: |
