@@ -81,3 +81,5 @@ scryer-prolog = { version = "0.9.3", git = "https://github.com/coasys/scryer-pro
 ad4m-client = { path = "../rust-client" }
 [dev-dependencies]
 maplit = "1.0.2"
+
+lazy_static = "1.4.0"

@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate lazy_static;
+
 pub mod config;
 mod globals;
 pub mod graphql;
@@ -12,6 +15,7 @@ use tokio;
 pub mod init;
 mod pubsub;
 mod dapp_server;
+mod agent;
 
 use std::{env, thread::JoinHandle};
 use log::info;
