@@ -36,7 +36,7 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentAddEntanglementProofs", {{ proofs: {} }}s)
+                await core.callResolver("Mutation", "agentAddEntanglementProofs", {{ proofs: {} }})
             )"#,
             serde_json::to_string(&proofs).unwrap(),
         );
