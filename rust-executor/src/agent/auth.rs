@@ -1,3 +1,4 @@
+use deno_core::error::AnyError;
 use log::debug;
 use super::jwt::{Capability, Resource};
 
@@ -380,40 +381,33 @@ pub struct App {
     revoked: bool,
 }
 
-pub fn capabilities_from_token(token: String, admin_credential: Option<String>) -> Vec<Capability> {
+pub fn capabilities_from_token(token: String, admin_credential: Option<String>) -> Result<Vec<Capability>, String> {
     match admin_credential {
         Some(admin_credential) => {
             if token == admin_credential {
-                return vec![ALL_CAPABILITY.clone()];
+                return Ok(vec![ALL_CAPABILITY.clone()]);
             }
         }
         None => {
             if token.is_empty() {
-                return vec![ALL_CAPABILITY.clone()];
+                return Ok(vec![ALL_CAPABILITY.clone()]);
             }
         }
     }
   
     if token == "" {
-        return vec![AGENT_AUTH_CAPABILITY.clone()];
+        return Ok(vec![AGENT_AUTH_CAPABILITY.clone()]);
     }
   
-    match super::jwt::decode_jwt(token) {
-        Ok(claims) => {
-            if claims.capabilities.capabilities.is_none() {
-                vec![AGENT_AUTH_CAPABILITY.clone()]
-            } else {
-                claims.capabilities.capabilities.unwrap()
-            }
-        }
-        Err(e) => {
-            debug!("Error decoding capability token: {:?}", e);
-            vec![AGENT_AUTH_CAPABILITY.clone()]
-        }
+    let claims = super::jwt::decode_jwt(token).map_err(|e| e.to_string())?;
+
+    if claims.capabilities.capabilities.is_none() {
+        Ok(vec![AGENT_AUTH_CAPABILITY.clone()])
+    } else {
+        Ok(claims.capabilities.capabilities.unwrap())
     }
 }
 
-#[allow(dead_code)]
 pub fn check_token_authorized(apps: &[App], token: &str, is_admin_credential: bool) -> Result<(), String> {
     if !is_admin_credential {
         if !apps.is_empty() && !token.is_empty() {
@@ -432,7 +426,8 @@ pub fn check_token_authorized(apps: &[App], token: &str, is_admin_credential: bo
     Ok(())
 }
 
-pub fn check_capability(capabilities: &[Capability], expected: &Capability) -> Result<(), String> {
+pub fn check_capability(capabilities: &Result<Vec<Capability>, String>, expected: &Capability) -> Result<(), String> {
+    let capabilities = capabilities.clone()?;
     let custom_cap_match = |cap: &Capability, expected: &Capability| -> bool {
         if cap.with.domain != WILD_CARD && cap.with.domain != expected.with.domain {
             return false;
@@ -543,44 +538,44 @@ mod tests {
 
     #[test]
     fn agent_with_all_capability_can_permit_an_auth_request() {
-        assert!(check_capability(&[ALL_CAPABILITY.clone()], &AGENT_PERMIT_CAPABILITY).is_ok());
+        assert!(check_capability(&Ok(vec![ALL_CAPABILITY.clone()]), &AGENT_PERMIT_CAPABILITY).is_ok());
     }
 
     #[test]
     fn agent_with_all_capability_can_request_agent_status() {
-        assert!(check_capability(&[ALL_CAPABILITY.clone()], &AGENT_READ_CAPABILITY).is_ok());
+        assert!(check_capability(&Ok(vec![ALL_CAPABILITY.clone()]), &AGENT_READ_CAPABILITY).is_ok());
     }
 
     #[test]
     fn agent_with_all_capability_can_mutate_the_agent() {
-        assert!(check_capability(&[ALL_CAPABILITY.clone()], &AGENT_CREATE_CAPABILITY).is_ok());
+        assert!(check_capability(&Ok(vec![ALL_CAPABILITY.clone()]), &AGENT_CREATE_CAPABILITY).is_ok());
     }
 
     #[test]
     fn agent_with_agent_auth_capability_cannot_request_the_agent_status() {
-        assert!(check_capability(&[AGENT_AUTH_CAPABILITY.clone()], &AGENT_READ_CAPABILITY).is_err());
+        assert!(check_capability(&Ok(vec![AGENT_AUTH_CAPABILITY.clone()]), &AGENT_READ_CAPABILITY).is_err());
     }
 
     #[test]
     fn agent_with_agent_auth_capability_cannot_mutate_the_agent() {
-        assert!(check_capability(&[AGENT_AUTH_CAPABILITY.clone()], &AGENT_CREATE_CAPABILITY).is_err());
+        assert!(check_capability(&Ok(vec![AGENT_AUTH_CAPABILITY.clone()]), &AGENT_CREATE_CAPABILITY).is_err());
     }
 
     #[test]
     fn agent_with_agent_auth_capability_can_request_an_auth() {
-        assert!(check_capability(&[AGENT_AUTH_CAPABILITY.clone()], &AGENT_AUTH_CAPABILITY).is_ok());
+        assert!(check_capability(&Ok(vec![AGENT_AUTH_CAPABILITY.clone()]), &AGENT_AUTH_CAPABILITY).is_ok());
     }
 
     #[test]
     fn agent_with_agent_read_capability_can_request_the_agent_status() {
-        assert!(check_capability(&[AGENT_READ_CAPABILITY.clone()], &AGENT_READ_CAPABILITY).is_ok());
+        assert!(check_capability(&Ok(vec![AGENT_READ_CAPABILITY.clone()]), &AGENT_READ_CAPABILITY).is_ok());
     }
 
     #[test]
     fn agent_with_perspective_query_capability_can_query_a_perspective() {
         let query_capability = perspective_query_capability(vec!["*".to_string()]);
         let expected_capability = perspective_query_capability(vec!["123".to_string()]);
-        assert!(check_capability(&[query_capability], &expected_capability).is_ok());
+        assert!(check_capability(&Ok(vec![query_capability]), &expected_capability).is_ok());
     }
 
     #[test]

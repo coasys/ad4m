@@ -8,7 +8,7 @@ use crate::agent::jwt::{AuthInfo, Capability};
 
 #[derive(Clone)]
 pub struct RequestContext {
-    pub capabilities: Vec<Capability>,
+    pub capabilities: Result<Vec<Capability>, String>,
     pub js_handle: JsCoreHandle,
 }
 
