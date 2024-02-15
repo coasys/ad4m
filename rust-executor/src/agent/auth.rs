@@ -381,9 +381,16 @@ pub struct App {
 }
 
 pub fn capabilities_from_token(token: String, admin_credential: Option<String>) -> Vec<Capability> {
-    if let Some(admin_credential) = admin_credential {
-        if token == admin_credential {
-            return vec![ALL_CAPABILITY.clone()];
+    match admin_credential {
+        Some(admin_credential) => {
+            if token == admin_credential {
+                return vec![ALL_CAPABILITY.clone()];
+            }
+        }
+        None => {
+            if token.is_empty() {
+                return vec![ALL_CAPABILITY.clone()];
+            }
         }
     }
   
