@@ -8,23 +8,20 @@ import {
   ReadOnlyLanguage,
   ExceptionType,
 } from "@coasys/ad4m";
-import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@coasys/ad4m";
+import { Agent, ExpressionProof, AgentSignature } from "@coasys/ad4m";
 import Signatures from "./Signatures";
 import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
 import { v4 as uuidv4 } from "uuid";
 import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import {
-  ALL_CAPABILITY,
   AuthInfo,
   AuthInfoExtended,
   DefaultTokenValidPeriod,
   genRequestKey,
   genRandomDigits,
-  AGENT_AUTH_CAPABILITY,
   Capability,
 } from "./Auth";
-import * as secp from "@noble/secp256k1";
 import { getPubSub } from "../utils";
 
 
@@ -204,10 +201,6 @@ export default class AgentService {
     }
   }
 
-  private getSigningKey(): Key {
-    return WALLET.getMainKey();
-  }
-
   async createNewKeys() {
     WALLET.createMainKey()
     const didDocument = WALLET.getMainKeyDocument()
@@ -287,25 +280,6 @@ export default class AgentService {
       did: this.#did,
       didDocument: this.#didDocument,
     };
-  }
-
-  async getCapabilities(token: string) {
-    if (token == this.#adminCredential) {
-      return [ALL_CAPABILITY];
-    }
-
-    if (token === "") {
-      return [AGENT_AUTH_CAPABILITY];
-    }
-
-    const payload = await JWT.verifyJwt(token);
-
-    //@ts-ignore
-    return payload.capabilities.capabilities;
-  }
-
-  isAdminCredential(token: string) {
-    return token == this.#adminCredential;
   }
 
   async requestCapability(authInfo: AuthInfo) {
