@@ -149,9 +149,9 @@ impl Mutation {
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentPermitCapability", {{ auth: JSON.stringify({}) }})
+                await core.callResolver("Mutation", "agentPermitCapability", {{ auth: JSON.stringify({}) }}, {{ capabilities: {} }})
             )"#,
-            auth
+            auth, serde_json::to_string(&context.capabilities)?
         );
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
