@@ -4,10 +4,11 @@ use juniper::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::js_core::JsCoreHandle;
+use crate::agent::jwt::{AuthInfo, Capability};
 
 #[derive(Clone)]
 pub struct RequestContext {
-    pub capability: String,
+    pub capabilities: Vec<Capability>,
     pub js_handle: JsCoreHandle,
 }
 
@@ -46,16 +47,6 @@ pub struct Apps {
     pub token: String,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthInfo {
-    pub app_desc: String,
-    pub app_icon_path: Option<String>,
-    pub app_name: String,
-    pub app_url: String,
-    pub capabilities: Vec<Capability>,
-}
-
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfoInput {
@@ -73,12 +64,6 @@ pub struct AuthInfoInput {
     pub capabilities: Option<Vec<CapabilityInput>>,
 }
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Capability {
-    pub can: Vec<String>,
-    pub with: Resource,
-}
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

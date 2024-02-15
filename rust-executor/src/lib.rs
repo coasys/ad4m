@@ -15,7 +15,7 @@ use tokio;
 pub mod init;
 mod pubsub;
 mod dapp_server;
-mod agent;
+pub mod agent;
 
 use std::{env, thread::JoinHandle};
 use log::info;
@@ -62,8 +62,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .unwrap();
         runtime.block_on(graphql::start_server(
             js_core_handle,
-            config.gql_port.expect("Did not get gql port"),
-            config.app_data_path.expect("Did not get app data path")
+            config
         )).unwrap();
     })
 }

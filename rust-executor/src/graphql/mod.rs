@@ -10,6 +10,8 @@ use query_resolvers::*;
 use subscription_resolvers::*;
 
 use crate::js_core::JsCoreHandle;
+use crate::Ad4mConfig;
+use crate::agent::auth::capabilities_from_token;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,8 +33,11 @@ fn schema() -> Schema {
     Schema::new(Query, Mutation, Subscription)
 }
 
-pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path: String) -> Result<(), AnyError> {
+pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> Result<(), AnyError> {
+    let port = config.gql_port.expect("Did not get gql port");
+    let app_data_path = config.app_data_path.expect("Did not get app data path");
     let log = warp::log("warp::server");
+    let admin_credential = config.admin_credential.clone();
 
     let mut file = std::fs::File::create(
         Path::new(&app_data_path).join("schema.gql")
@@ -57,10 +62,11 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path
         .and(warp::header::<String>("authorization"))
         .or(default_auth)
         .unify()
-        .map(move |header| {
+        .map(move |auth_header| {
             //println!("Request body: {}", std::str::from_utf8(body_data::bytes()).expect("error converting bytes to &str"));
+            let capabilities = capabilities_from_token(auth_header, admin_credential.clone());
             RequestContext {
-                capability: header,
+                capabilities,
                 js_handle: js_core_handle_cloned1.clone(),
             }
         });
@@ -68,11 +74,13 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path
 
     let root_node = Arc::new(schema());
 
+    let admin_credential_arc = Arc::new(config.admin_credential.clone());
     let routes = (warp::path("graphql")
         .and(warp::ws())
         .map(move |ws: warp::ws::Ws| {
             let root_node = root_node.clone();
             let js_core_handle = js_core_handle.clone();
+            let admin_credential_arc = admin_credential_arc.clone();
             ws.on_upgrade(move |websocket| async move {
                 serve_graphql_transport_ws(
                     websocket,
@@ -90,8 +98,10 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path
                             }
                         };
 
+                        let capabilities = capabilities_from_token(auth_header, admin_credential_arc.as_ref().clone());
+
                         let context = RequestContext {
-                            capability: auth_header,
+                            capabilities,
                             js_handle: js_core_handle.clone(),
                         };
                         Ok(ConnectionConfig::new(context))

@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate lazy_static;
+
 mod globals;
 mod graphql;
 mod holochain_service;
@@ -7,6 +10,7 @@ mod prolog_service;
 mod utils;
 mod wallet;
 mod config;
+pub mod agent;
 
 pub mod init;
 mod pubsub;
@@ -40,8 +44,7 @@ async fn main() {
     info!("Starting GraphQL...");
     match graphql::start_server(
         js_core_handle,
-        config.gql_port.expect("Did not get gql port"),
-        config.app_data_path.expect("Did not get app data path"),
+        config,
     )
     .await
     {

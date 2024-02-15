@@ -1,14 +1,5 @@
-#[derive(Debug, Clone)]
-pub struct Capability {
-    pub with: Resource,
-    pub can: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Resource {
-    pub domain: String,
-    pub pointers: Vec<String>,
-}
+use log::debug;
+use super::jwt::{Capability, Resource};
 
 //pub type Capabilities = Vec<Capability>;
 
@@ -389,6 +380,32 @@ pub struct App {
     revoked: bool,
 }
 
+pub fn capabilities_from_token(token: String, admin_credential: Option<String>) -> Vec<Capability> {
+    if let Some(admin_credential) = admin_credential {
+        if token == admin_credential {
+            return vec![ALL_CAPABILITY.clone()];
+        }
+    }
+  
+    if token == "" {
+        return vec![AGENT_AUTH_CAPABILITY.clone()];
+    }
+  
+    match super::jwt::decode_jwt(token) {
+        Ok(claims) => {
+            if claims.capabilities.capabilities.is_none() {
+                vec![AGENT_AUTH_CAPABILITY.clone()]
+            } else {
+                claims.capabilities.capabilities.unwrap()
+            }
+        }
+        Err(e) => {
+            debug!("Error decoding capability token: {:?}", e);
+            vec![AGENT_AUTH_CAPABILITY.clone()]
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub fn check_token_authorized(apps: &[App], token: &str, is_admin_credential: bool) -> Result<(), String> {
     if !is_admin_credential {
@@ -408,7 +425,6 @@ pub fn check_token_authorized(apps: &[App], token: &str, is_admin_credential: bo
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn check_capability(capabilities: &[Capability], expected: &Capability) -> Result<(), String> {
     let custom_cap_match = |cap: &Capability, expected: &Capability| -> bool {
         if cap.with.domain != WILD_CARD && cap.with.domain != expected.with.domain {
