@@ -319,7 +319,7 @@ describe("Authentication integration tests", () => {
             await sleep(1000);
 
             expect(excpetions.length).to.be.equal(1);
-            expect(excpetions[0].type).to.be.equal("CapabilityRequested");
+            expect(excpetions[0].type).to.be.equal("CAPABILITY_REQUESTED");
             let auth_info = JSON.parse(excpetions[0].addon!);
             expect(auth_info.requestId).to.be.equal(requestId);
         })
