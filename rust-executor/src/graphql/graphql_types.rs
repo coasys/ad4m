@@ -3,8 +3,7 @@ use crate::js_core::JsCoreHandle;
 use juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
-use serde::de::{self, Visitor};
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct RequestContext {
@@ -120,77 +119,13 @@ pub struct ExceptionInfo {
     pub r#type: ExceptionType,
 }
 
-#[derive(GraphQLEnum, Default, Debug, Clone, Copy)]
+#[derive(GraphQLEnum, Default, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ExceptionType {
     LanguageIsNotLoaded = 0,
     ExpressionIsNotVerified = 1,
     AgentIsUntrusted = 2,
     #[default]
     CapabilityRequested = 3,
-}
-
-impl ExceptionType {
-    #[allow(dead_code)]
-    fn from_i32(value: i32) -> Option<Self> {
-        match value {
-            0 => Some(ExceptionType::LanguageIsNotLoaded),
-            1 => Some(ExceptionType::ExpressionIsNotVerified),
-            2 => Some(ExceptionType::AgentIsUntrusted),
-            3 => Some(ExceptionType::CapabilityRequested),
-            _ => None,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn to_i32(&self) -> i32 {
-        match self {
-            ExceptionType::LanguageIsNotLoaded => 0,
-            ExceptionType::ExpressionIsNotVerified => 1,
-            ExceptionType::AgentIsUntrusted => 2,
-            ExceptionType::CapabilityRequested => 3,
-        }
-    }
-}
-
-impl Serialize for ExceptionType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_i32(*self as i32)
-    }
-}
-
-impl<'de> Deserialize<'de> for ExceptionType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ExceptionTypeVisitor;
-
-        impl<'de> Visitor<'de> for ExceptionTypeVisitor {
-            type Value = ExceptionType;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("an integer between 0 and 3")
-            }
-
-            fn visit_i32<E>(self, value: i32) -> Result<ExceptionType, E>
-            where
-                E: de::Error,
-            {
-                match value {
-                    0 => Ok(ExceptionType::LanguageIsNotLoaded),
-                    1 => Ok(ExceptionType::ExpressionIsNotVerified),
-                    2 => Ok(ExceptionType::AgentIsUntrusted),
-                    3 => Ok(ExceptionType::CapabilityRequested),
-                    _ => Err(E::custom(format!("unknown ExceptionType value: {}", value))),
-                }
-            }
-        }
-
-        deserializer.deserialize_i32(ExceptionTypeVisitor)
-    }
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
