@@ -1,4 +1,4 @@
-import { Arg, Mutation, Resolver, Query, Subscription, ObjectType, Field } from "type-graphql";
+import { Arg, Mutation, Resolver, Query, Subscription, ObjectType, Field, Int } from "type-graphql";
 import { Perspective, PerspectiveExpression, PerspectiveInput } from "../perspectives/Perspective";
 import { ExpressionProof } from "../expression/Expression";
 import { LinkExpression } from "../links/Links";
@@ -48,7 +48,7 @@ export class ExceptionInfo {
     title: string;
     @Field()
     message: string;
-    @Field()
+    @Field(type => Int)
     type: ExceptionType;
     @Field({ nullable: true })
     addon?: string;
