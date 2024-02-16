@@ -73,6 +73,7 @@ pub struct Claims {
     aud: String,
     exp: u64,
     iat: u64,
+    nonce: String,
     pub capabilities: AuthInfo,
 }
 
@@ -89,11 +90,14 @@ impl Claims {
             .expect("Time went backwards")
             .as_secs();
 
+        let nonce = uuid::Uuid::new_v4().to_string();
+
         Claims {
             iss: issuer,
             aud: audience,
             exp: unix_timestamp + expiration_time,
             iat: unix_timestamp,
+            nonce,
             capabilities,
         }
     }
