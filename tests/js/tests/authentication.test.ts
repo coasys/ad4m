@@ -7,6 +7,7 @@ import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
+import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 
 //@ts-ignore
 global.fetch = fetch
@@ -292,6 +293,35 @@ describe("Authentication integration tests", () => {
             }
 
             await expect(call()).to.be.rejectedWith("Unauthorized access");
+        })
+
+        it("requesting a capability toke should trigger a CapabilityRequested exception", async () => {
+            let excpetions: ExceptionInfo[] = [];
+            adminAd4mClient!.runtime.addExceptionCallback((e) => { excpetions.push(e); return null; })
+            adminAd4mClient!.runtime.subscribeExceptionOccurred();
+
+            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
+                appName: "demo-app",
+                appDesc: "demo-desc",
+                appDomain: "test.ad4m.org",
+                appUrl: "https://demo-link",
+                capabilities: [
+                    {
+                        with: {
+                            domain:"agent",
+                            pointers:["*"]
+                        },
+                        can: ["READ"]
+                    }
+                ] as CapabilityInput[]
+            } as AuthInfoInput)
+            
+            await sleep(1000);
+
+            expect(excpetions.length).to.be.equal(1);
+            expect(excpetions[0].type).to.be.equal("CapabilityRequested");
+            let auth_info = JSON.parse(excpetions[0].addon!);
+            expect(auth_info.requestId).to.be.equal(requestId);
         })
     })
 })
