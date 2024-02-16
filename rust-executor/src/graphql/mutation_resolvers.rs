@@ -2,7 +2,7 @@
 use juniper::{graphql_object, graphql_value, FieldResult};
 use log::debug;
 
-use crate::agent::capabilities::*;
+use crate::agent::{self, capabilities::*};
 use super::graphql_types::*;
 use ad4m_client::literal::Literal;
 pub struct Mutation;
@@ -182,17 +182,7 @@ impl Mutation {
         auth_info: AuthInfoInput,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let auth_info_json = serde_json::to_string(&auth_info)?;
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentRequestCapability", {{ authInfo: {} }})
-            )"#,
-            auth_info_json
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Ok(agent::capabilities::request_capability(auth_info.into()).await)
     }
 
     async fn agent_revoke_token(

@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfoExtended {
     pub request_id: String,
-    auth: AuthInfo,
+    pub auth: AuthInfo,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

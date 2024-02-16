@@ -6,6 +6,9 @@ pub use defs::*;
 pub use types::*;
 pub use token::*;
 
+use crate::pubsub::{EXCEPTION_OCCURRED_TOPIC, get_global_pubsub};
+use crate::graphql::graphql_types::*;
+
 pub fn check_capability(capabilities: &Result<Vec<Capability>, String>, expected: &Capability) -> Result<(), String> {
     let capabilities = capabilities.clone()?;
     let custom_cap_match = |cap: &Capability, expected: &Capability| -> bool {
@@ -61,6 +64,31 @@ pub fn capabilities_from_token(token: String, admin_credential: Option<String>) 
     } else {
         Ok(claims.capabilities.capabilities.unwrap())
     }
+}
+
+
+pub async fn request_capability(auth_info: AuthInfo) -> String {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let app_name = auth_info.app_name.clone();
+
+    let auth_extended = AuthInfoExtended {
+        request_id: request_id.clone(),
+        auth: auth_info,
+    };
+
+    let exception_info = ExceptionInfo {
+        title: "Request to authenticate application".to_string(),
+        message: format!("{} is waiting for authentication, open the ADAM Launcher for more information.", app_name),
+        r#type: ExceptionType::CapabilityRequested, 
+        addon: Some(serde_json::to_string(&auth_extended).unwrap()),
+    };
+
+    get_global_pubsub()
+        .await
+        .publish(&EXCEPTION_OCCURRED_TOPIC, &serde_json::to_string(&exception_info).unwrap())
+        .await;
+
+    request_id
 }
 
 

@@ -541,12 +541,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return currentAgent;
             },
             //@ts-ignore
-            agentRequestCapability: async (args, context) => {
-                const { authInfo } = args;
-                let token = await core.agentService.requestCapability(authInfo);
-                return token;
-            },
-            //@ts-ignore
             agentPermitCapability: (args, context) => {
                 const { auth } = args;
                 return core.agentService.permitCapability(auth, context.capabilities);

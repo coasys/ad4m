@@ -282,23 +282,6 @@ export default class AgentService {
     };
   }
 
-  async requestCapability(authInfo: AuthInfo) {
-    let requestId = uuidv4();
-    let authExtended = {
-      requestId,
-      auth: authInfo,
-    } as AuthInfoExtended;
-
-    await this.#pubSub.publish(PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC, {
-      title: "Request to authenticate application",
-      message: `${authInfo.appName} is waiting for authentication, go to ad4m launcher for more information.`,
-      type: ExceptionType.CapabilityRequested,
-      addon: JSON.stringify(authExtended),
-    } as ExceptionInfo);
-
-    return requestId;
-  }
-
   // TODO, we may want to change the capability request workflow.
   // https://github.com/perspect3vism/ad4m-executor/issues/73
   permitCapability(authExt: string, capabilities: Capability[]) {
