@@ -1,0 +1,25 @@
+{
+  "name": "@coasys/vue-hooks",
+  "version": "0.8.2-prerelease",
+  "description": "",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "type": "module",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@coasys/ad4m": "*",
+    "@coasys/hooks-helpers": "*"
+  },
+  "peerDependencies": {
+    "vue": "^3.2.47"
+  }
+}
