@@ -161,7 +161,10 @@ impl Query {
     }
 
     async fn get_trusted_agents(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
-        check_capability(&context.capabilities, &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -288,7 +291,10 @@ impl Query {
         context: &RequestContext,
         uuid: String,
     ) -> FieldResult<Option<PerspectiveHandle>> {
-        check_capability(&context.capabilities, &perspective_query_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -307,7 +313,10 @@ impl Query {
         uuid: String,
     ) -> FieldResult<Vec<LinkExpression>> {
         let query_string = serde_json::to_string(&query)?;
-        check_capability(&context.capabilities, &perspective_query_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryLinks", {{ query: {}, uuid: "{}" }}))"#,
@@ -324,7 +333,10 @@ impl Query {
         query: String,
         uuid: String,
     ) -> FieldResult<String> {
-        check_capability(&context.capabilities, &perspective_query_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryProlog", {{ query: '{}', uuid: "{}" }}))"#,
@@ -340,7 +352,10 @@ impl Query {
         context: &RequestContext,
         uuid: String,
     ) -> FieldResult<Perspective> {
-        check_capability(&context.capabilities, &perspective_query_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -353,7 +368,10 @@ impl Query {
     }
 
     async fn perspectives(&self, context: &RequestContext) -> FieldResult<Vec<PerspectiveHandle>> {
-        check_capability(&context.capabilities, &perspective_query_capability(vec!["*".into()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec!["*".into()]),
+        )?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -369,7 +387,10 @@ impl Query {
         context: &RequestContext,
         did: String,
     ) -> FieldResult<PerspectiveExpression> {
-        check_capability(&context.capabilities, &RUNTIME_FRIEND_STATUS_READ_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -394,10 +415,15 @@ impl Query {
     }
 
     async fn runtime_hc_agent_infos(&self, context: &RequestContext) -> FieldResult<String> {
-        check_capability(&context.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos"))"#))
+            .execute(format!(
+                r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos"))"#
+            ))
             .await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -418,7 +444,10 @@ impl Query {
         &self,
         context: &RequestContext,
     ) -> FieldResult<Vec<String>> {
-        check_capability(&context.capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeKnownLinkLanguageTemplates"))"#))

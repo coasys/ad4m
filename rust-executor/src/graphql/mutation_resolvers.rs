@@ -2,8 +2,8 @@
 use juniper::{graphql_object, graphql_value, FieldResult};
 use log::debug;
 
-use crate::agent::{self, capabilities::*};
 use super::graphql_types::*;
+use crate::agent::{self, capabilities::*};
 use ad4m_client::literal::Literal;
 pub struct Mutation;
 
@@ -14,7 +14,10 @@ impl Mutation {
         context: &RequestContext,
         agents: Vec<String>,
     ) -> FieldResult<Vec<String>> {
-        check_capability(&context.capabilities, &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -192,7 +195,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         passphrase: String,
-        holochain: bool
+        holochain: bool,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
         let mut js = context.js_handle.clone();
@@ -249,7 +252,10 @@ impl Mutation {
         context: &RequestContext,
         agents: Vec<String>,
     ) -> FieldResult<Vec<String>> {
-        check_capability(&context.capabilities, &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let agents_json = serde_json::to_string(&agents)?;
         let script = format!(
@@ -606,7 +612,10 @@ impl Mutation {
         uuid: String,
         status: Option<String>,
     ) -> FieldResult<LinkExpression> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
 
         let link_json = serde_json::to_string(&link)?;
@@ -643,7 +652,10 @@ impl Mutation {
         uuid: String,
         status: Option<String>,
     ) -> FieldResult<LinkExpression> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let link_json = serde_json::to_string(&link)?;
         let status = match status {
@@ -679,7 +691,10 @@ impl Mutation {
         uuid: String,
         status: Option<String>,
     ) -> FieldResult<Vec<LinkExpression>> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let links_json = serde_json::to_string(&links)?;
         let status = match status {
@@ -715,7 +730,10 @@ impl Mutation {
         uuid: String,
         status: Option<String>,
     ) -> FieldResult<LinkExpressionMutations> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let mutations_json = serde_json::to_string(&mutations)?;
         let status = match status {
@@ -749,7 +767,10 @@ impl Mutation {
         context: &RequestContext,
         uuid: String,
     ) -> FieldResult<String> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -770,7 +791,10 @@ impl Mutation {
         context: &RequestContext,
         uuid: String,
     ) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &perspective_delete_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_delete_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -792,7 +816,10 @@ impl Mutation {
         link: LinkExpressionInput,
         uuid: String,
     ) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let link_json = serde_json::to_string(&link)?;
         let script = format!(
@@ -815,7 +842,10 @@ impl Mutation {
         links: Vec<LinkExpressionInput>,
         uuid: String,
     ) -> FieldResult<Vec<LinkExpression>> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let links_json = serde_json::to_string(&links)?;
         let script = format!(
@@ -838,7 +868,10 @@ impl Mutation {
         name: String,
         uuid: String,
     ) -> FieldResult<PerspectiveHandle> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -847,7 +880,7 @@ impl Mutation {
                 "perspectiveUpdate",
                 {{ name: "{}", uuid: "{}" }},
             ))"#,
-            name, uuid, 
+            name, uuid,
         );
         let result = js.execute(script).await?;
         let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
@@ -861,7 +894,10 @@ impl Mutation {
         old_link: LinkExpressionInput,
         uuid: String,
     ) -> FieldResult<LinkExpression> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let new_link_json = serde_json::to_string(&new_link)?;
         let old_link_json = serde_json::to_string(&old_link)?;
@@ -887,7 +923,10 @@ impl Mutation {
         sdna_code: String,
         sdna_type: String,
     ) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &perspective_update_capability(vec![uuid.clone()]))?;
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
         let mut js = context.js_handle.clone();
         let sdna_literal = Literal::from_string(sdna_code).to_url()?;
         let script = format!(
@@ -932,7 +971,10 @@ impl Mutation {
         context: &RequestContext,
         addresses: Vec<String>,
     ) -> FieldResult<Vec<String>> {
-        check_capability(&context.capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let addresses_json = serde_json::to_string(&addresses)?;
         let script = format!(
@@ -977,7 +1019,10 @@ impl Mutation {
         context: &RequestContext,
         agent_infos: String,
     ) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -1051,7 +1096,10 @@ impl Mutation {
         context: &RequestContext,
         addresses: Vec<String>,
     ) -> FieldResult<Vec<String>> {
-        check_capability(&context.capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
+        )?;
         let mut js = context.js_handle.clone();
         let addresses_json = serde_json::to_string(&addresses)?;
         let script = format!(
@@ -1090,4 +1138,3 @@ impl Mutation {
         result.get_graphql_result()
     }
 }
-

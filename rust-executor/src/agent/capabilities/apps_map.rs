@@ -1,11 +1,10 @@
-
+use super::types::AuthInfoExtended;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::Path;
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 use std::sync::Mutex;
-use super::types::AuthInfoExtended;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct App {
@@ -16,15 +15,19 @@ pub struct App {
 
 impl App {
     pub fn new(auth_info_extended: AuthInfoExtended, revoked: bool, token: String) -> Self {
-        App { auth_info_extended, revoked, token }
+        App {
+            auth_info_extended,
+            revoked,
+            token,
+        }
     }
 }
-
 
 use std::env;
 
 lazy_static! {
-    static ref DATA_FILE_PATH: Mutex<String> = Mutex::new(env::var("APPS_DATA_FILE").unwrap_or_else(|_| "apps_data.json".to_string()));
+    static ref DATA_FILE_PATH: Mutex<String> =
+        Mutex::new(env::var("APPS_DATA_FILE").unwrap_or_else(|_| "apps_data.json".to_string()));
 }
 
 fn get_data_file_path() -> String {
@@ -63,7 +66,11 @@ lazy_static! {
     };
 }
 
-pub fn insert_app(request_key: String, auth_info_extended: AuthInfoExtended, token: String) -> Result<(), String> {
+pub fn insert_app(
+    request_key: String,
+    auth_info_extended: AuthInfoExtended,
+    token: String,
+) -> Result<(), String> {
     let mut apps = APPS.lock().map_err(|e| e.to_string())?;
     apps.insert(request_key, App::new(auth_info_extended, false, token));
     persist_apps_to_file(&apps).map_err(|e| e.to_string())?;
@@ -89,7 +96,6 @@ pub fn remove_app(request_key: &str) -> Result<(), String> {
     }
 }
 
-
 pub fn get_app(request_key: &str) -> Result<Option<App>, String> {
     let apps = APPS.lock().map_err(|e| e.to_string())?;
     Ok(apps.get(request_key).cloned())
@@ -97,12 +103,12 @@ pub fn get_app(request_key: &str) -> Result<Option<App>, String> {
 
 pub fn get_apps() -> Vec<crate::graphql::graphql_types::Apps> {
     let apps = APPS.lock().unwrap();
-    apps.iter().map(|(request_id, app)| crate::graphql::graphql_types::Apps {
-        auth: app.auth_info_extended.auth.clone(),
-        request_id: request_id.clone(),
-        revoked: Some(app.revoked),
-        token: app.token.clone(),
-    }).collect()
+    apps.iter()
+        .map(|(request_id, app)| crate::graphql::graphql_types::Apps {
+            auth: app.auth_info_extended.auth.clone(),
+            request_id: request_id.clone(),
+            revoked: Some(app.revoked),
+            token: app.token.clone(),
+        })
+        .collect()
 }
-
-

@@ -20,7 +20,6 @@ pub const RUNTIME_KNOWN_LINK_LANGUAGES: &str = "runtime.known_link_languages";
 pub const RUNTIME_FRIENDS: &str = "runtime.friends";
 pub const RUNTIME_MESSAGES: &str = "runtime.messages";
 
-
 // admin capabilities
 lazy_static! {
     pub static ref ALL_CAPABILITY: Capability = Capability {

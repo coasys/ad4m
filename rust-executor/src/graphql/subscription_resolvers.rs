@@ -65,7 +65,10 @@ impl Subscription {
         &self,
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<ExceptionInfo>> + Send>> {
-        match check_capability(&context.capabilities, &RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY) {
+        match check_capability(
+            &context.capabilities,
+            &RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY,
+        ) {
             Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
@@ -93,7 +96,6 @@ impl Subscription {
                 .await
             }
         }
-        
     }
 
     async fn perspective_added(
@@ -120,7 +122,12 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_ADDED_TOPIC;
-                subscribe_and_process::<PerspectiveLinkFilter>(pubsub, topic.to_string(), Some(uuid)).await
+                subscribe_and_process::<PerspectiveLinkFilter>(
+                    pubsub,
+                    topic.to_string(),
+                    Some(uuid),
+                )
+                .await
             }
         }
     }
@@ -135,7 +142,12 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_REMOVED_TOPIC;
-                subscribe_and_process::<PerspectiveLinkFilter>(pubsub, topic.to_string(), Some(uuid)).await
+                subscribe_and_process::<PerspectiveLinkFilter>(
+                    pubsub,
+                    topic.to_string(),
+                    Some(uuid),
+                )
+                .await
             }
         }
     }
@@ -150,7 +162,12 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_UPDATED_TOPIC;
-                subscribe_and_process::<PerspectiveLinkUpdatedFilter>(pubsub, topic.to_string(), Some(uuid)).await
+                subscribe_and_process::<PerspectiveLinkUpdatedFilter>(
+                    pubsub,
+                    topic.to_string(),
+                    Some(uuid),
+                )
+                .await
             }
         }
     }
@@ -179,7 +196,12 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC;
-                subscribe_and_process::<PerspectiveStateFilter>(pubsub, topic.to_string(), Some(uuid)).await
+                subscribe_and_process::<PerspectiveStateFilter>(
+                    pubsub,
+                    topic.to_string(),
+                    Some(uuid),
+                )
+                .await
             }
         }
     }
@@ -207,7 +229,8 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &RUNTIME_MESSAGED_RECEIVED_TOPIC;
-                subscribe_and_process::<PerspectiveExpression>(pubsub, topic.to_string(), None).await
+                subscribe_and_process::<PerspectiveExpression>(pubsub, topic.to_string(), None)
+                    .await
             }
         }
     }

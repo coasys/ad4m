@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use juniper::GraphQLObject;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -28,7 +28,8 @@ impl From<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
             app_domain: Some(input.app_domain),
             app_url: input.app_url,
             app_icon_path: input.app_icon_path,
-            capabilities: input.capabilities
+            capabilities: input
+                .capabilities
                 .map(|vec| vec.into_iter().map(|c| c.into()).collect()),
         }
     }
@@ -76,7 +77,12 @@ pub struct Claims {
 }
 
 impl Claims {
-    pub fn new(issuer: String, audience: String, expiration_time: u64, capabilities: AuthInfo) -> Self {
+    pub fn new(
+        issuer: String,
+        audience: String,
+        expiration_time: u64,
+        capabilities: AuthInfo,
+    ) -> Self {
         let now = SystemTime::now();
         let unix_timestamp = now
             .duration_since(UNIX_EPOCH)
@@ -92,4 +98,3 @@ impl Claims {
         }
     }
 }
-

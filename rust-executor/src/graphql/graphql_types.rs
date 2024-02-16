@@ -1,10 +1,10 @@
+use crate::agent::capabilities::{AuthInfo, Capability};
+use crate::js_core::JsCoreHandle;
 use juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize, Serializer, Deserializer};
 use serde::de::{self, Visitor};
-use crate::js_core::JsCoreHandle;
-use crate::agent::capabilities::{AuthInfo, Capability};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Clone)]
 pub struct RequestContext {
@@ -63,7 +63,6 @@ pub struct AuthInfoInput {
     #[graphql(name = "capabilities")]
     pub capabilities: Option<Vec<CapabilityInput>>,
 }
-
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -127,7 +126,7 @@ pub enum ExceptionType {
     ExpressionIsNotVerified = 1,
     AgentIsUntrusted = 2,
     #[default]
-    CapabilityRequested = 3
+    CapabilityRequested = 3,
 }
 
 impl ExceptionType {

@@ -1,7 +1,7 @@
+use super::types::*;
+use crate::wallet::Wallet;
 use deno_core::{anyhow::anyhow, error::AnyError};
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
-use crate::wallet::Wallet;
-use super::types::*;
 
 pub fn generate_jwt(
     audience: String,
@@ -18,8 +18,10 @@ pub fn generate_jwt(
         .get_secret_key(&name)
         .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
 
-    let did_document = wallet_ref.get_did_document(&name).ok_or(anyhow!("main did not found. call createMainKey() first"))?;
-    
+    let did_document = wallet_ref
+        .get_did_document(&name)
+        .ok_or(anyhow!("main did not found. call createMainKey() first"))?;
+
     let payload = Claims::new(did_document.id, audience, expiration_time, capabilities);
 
     let token = encode(
@@ -30,7 +32,6 @@ pub fn generate_jwt(
 
     Ok(token)
 }
-
 
 pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
     //Get the private key

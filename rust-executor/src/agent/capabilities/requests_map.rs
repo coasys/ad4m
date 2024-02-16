@@ -1,6 +1,6 @@
+use super::types::AuthInfo;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use super::types::AuthInfo;
 
 lazy_static! {
     static ref REQUESTS: Mutex<HashMap<String, AuthInfo>> = Mutex::new(HashMap::new());
