@@ -56,6 +56,19 @@ pub fn check_capability(
     Ok(())
 }
 
+pub fn check_token_revoked(
+    token: &String,
+) -> Result<(), String> {
+    let apps = apps_map::get_apps();
+    if let Some(app) = apps_map::get_apps().iter().find(|app| app.token == *token) {
+        if app.revoked.unwrap_or(false) {
+            return Err("Unauthorized access".to_string());
+        }
+    };
+
+    Ok(())
+}
+
 pub fn capabilities_from_token(
     token: String,
     admin_credential: Option<String>,
@@ -76,6 +89,8 @@ pub fn capabilities_from_token(
     if token == "" {
         return Ok(vec![AGENT_AUTH_CAPABILITY.clone()]);
     }
+
+    check_token_revoked(&token)?;
 
     let claims = decode_jwt(token).map_err(|e| e.to_string())?;
 
@@ -162,36 +177,6 @@ pub fn gen_random_digits() -> String {
 
 pub fn gen_request_key(request_id: &str, rand: &str) -> String {
     format!("{}-{}", request_id, rand)
-}
-
-pub struct App {
-    token: String,
-    revoked: bool,
-}
-
-pub fn check_token_authorized(
-    apps: &[App],
-    token: &str,
-    is_admin_credential: bool,
-) -> Result<(), String> {
-    if !is_admin_credential {
-        if !apps.is_empty() && !token.is_empty() {
-            let filtered_apps: Vec<&App> = apps.iter().filter(|app| app.token == token).collect();
-
-            if filtered_apps.is_empty() {
-                return Err("Unauthorized access".to_string());
-            } else {
-                let no_revoked: Vec<&App> = filtered_apps
-                    .into_iter()
-                    .filter(|app| !app.revoked)
-                    .collect();
-                if no_revoked.is_empty() {
-                    return Err("Unauthorized access".to_string());
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

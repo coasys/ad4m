@@ -253,5 +253,39 @@ describe("Authentication integration tests", () => {
 
             await expect(call()).to.be.rejectedWith("Capability is not matched");
         })
+
+        it("user with revoked token can not query agent status", async () => {
+            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
+                appName: "demo-app",
+                appDesc: "demo-desc",
+                appDomain: "test.ad4m.org",
+                appUrl: "https://demo-link",
+                capabilities: [
+                    {
+                        with: {
+                            domain:"agent",
+                            pointers:["*"]
+                        },
+                        can: ["READ"]
+                    }
+                ] as CapabilityInput[]
+            } as AuthInfoInput)
+            let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
+            let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
+
+            // @ts-ignore
+            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
+            expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
+
+            let oldApps = await adminAd4mClient!.agent.getApps();
+            let newApps = await adminAd4mClient!.agent.removeApp(requestId);
+            expect(newApps.length).to.be.equal(oldApps.length - 1);
+
+            const call = async () => {
+                return await authenticatedAppAd4mClient!.agent.status()
+            }
+
+            await expect(call()).to.be.rejectedWith("Capability is not matched");
+        })
     })
 })
