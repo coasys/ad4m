@@ -4,7 +4,7 @@ use juniper::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::js_core::JsCoreHandle;
-use crate::agent::jwt::{AuthInfo, Capability};
+use crate::agent::capabilities::{AuthInfo, Capability};
 
 #[derive(Clone)]
 pub struct RequestContext {

@@ -1,7 +1,10 @@
-use super::jwt::{Capability, Resource};
-
-//pub type Capabilities = Vec<Capability>;
-
+use std::time::{SystemTime, UNIX_EPOCH};
+use deno_core::{anyhow::anyhow, error::AnyError};
+use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
+use serde::{Deserialize, Serialize};
+use juniper::GraphQLObject;
+use crate::wallet::Wallet;
+use crate::graphql::graphql_types::AuthInfoInput;
 
 const WILD_CARD: &str = "*";
 
@@ -23,6 +26,80 @@ const RUNTIME_TRUSTED_AGENTS: &str = "runtime.trusted_agents";
 const RUNTIME_KNOWN_LINK_LANGUAGES: &str = "runtime.known_link_languages";
 const RUNTIME_FRIENDS: &str = "runtime.friends";
 const RUNTIME_MESSAGES: &str = "runtime.messages";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthInfoExtended {
+    pub request_id: String,
+    auth: AuthInfo,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthInfo {
+    pub app_name: String,
+    pub app_desc: String,
+    pub app_domain: Option<String>,
+    pub app_url: Option<String>,
+    pub app_icon_path: Option<String>,
+    pub capabilities: Option<Vec<Capability>>,
+}
+
+impl From<AuthInfoInput> for AuthInfo {
+    fn from(input: AuthInfoInput) -> Self {
+        Self {
+            app_name: input.app_name,
+            app_desc: input.app_desc,
+            app_domain: Some(input.app_domain),
+            app_url: input.app_url,
+            app_icon_path: input.app_icon_path,
+            capabilities: input.capabilities
+                .map(|vec| vec.into_iter().map(|c| c.into()).collect()),
+        }
+    }
+}
+
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Capability {
+    pub with: Resource,
+    pub can: Vec<String>,
+}
+
+impl From<crate::graphql::graphql_types::CapabilityInput> for Capability {
+    fn from(input: crate::graphql::graphql_types::CapabilityInput) -> Self {
+        Self {
+            with: input.with.into(),
+            can: input.can,
+        }
+    }
+}
+
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Resource {
+    pub domain: String,
+    pub pointers: Vec<String>,
+}
+
+impl From<crate::graphql::graphql_types::ResourceInput> for Resource {
+    fn from(input: crate::graphql::graphql_types::ResourceInput) -> Self {
+        Self {
+            domain: input.domain,
+            pointers: input.pointers,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Claims {
+    iss: String,
+    aud: String,
+    exp: u64,
+    iat: u64,
+    pub capabilities: AuthInfo,
+}
+
 
 // admin capabilities
 lazy_static! {
@@ -397,7 +474,7 @@ pub fn capabilities_from_token(token: String, admin_credential: Option<String>) 
         return Ok(vec![AGENT_AUTH_CAPABILITY.clone()]);
     }
   
-    let claims = super::jwt::decode_jwt(token).map_err(|e| e.to_string())?;
+    let claims = decode_jwt(token).map_err(|e| e.to_string())?;
 
     if claims.capabilities.capabilities.is_none() {
         Ok(vec![AGENT_AUTH_CAPABILITY.clone()])
@@ -454,25 +531,7 @@ pub fn check_capability(capabilities: &Result<Vec<Capability>, String>, expected
     Ok(())
 }
 
-#[allow(dead_code)]
 pub const DEFAULT_TOKEN_VALID_PERIOD: i64 = 180 * 24 * 60 * 60; // 180 days in seconds
-
-
-#[allow(dead_code)]
-pub struct AuthInfoExtended {
-    pub request_id: String,
-    pub auth: AuthInfo,
-}
-
-#[allow(dead_code)]
-pub struct AuthInfo {
-    pub app_name: String,
-    pub app_desc: String,
-    pub app_domain: String,
-    pub app_url: Option<String>,
-    pub app_icon_path: Option<String>,
-    pub capabilities: Option<Vec<Capability>>,
-}
 
 #[allow(dead_code)]
 pub fn gen_random_digits() -> String {
@@ -486,6 +545,66 @@ pub fn gen_request_key(request_id: &str, rand: &str) -> String {
     format!("{}-{}", request_id, rand)
 }
 
+
+pub fn generate_jwt(
+    issuer: String,
+    audience: String,
+    expiration_time: u64,
+    capabilities: AuthInfo,
+) -> Result<String, AnyError> {
+    // Get the private key
+    let wallet = Wallet::instance();
+    let wallet_lock = wallet.lock().expect("wallet lock");
+    let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
+    let name = "main".to_string();
+
+    let secret_key = wallet_ref
+        .get_secret_key(&name)
+        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+
+    let now = SystemTime::now();
+    let unix_timestamp = now
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+
+    let payload = Claims {
+        iss: issuer,
+        aud: audience,
+        exp: unix_timestamp + expiration_time,
+        iat: unix_timestamp,
+        capabilities: capabilities,
+    };
+
+    let token = encode(
+        &Header::default(),
+        &payload,
+        &EncodingKey::from_secret(secret_key.as_slice()),
+    )?;
+
+    Ok(token)
+}
+
+
+pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
+    //Get the private key
+    let wallet = Wallet::instance();
+    let wallet_lock = wallet.lock().expect("wallet lock");
+    let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
+    let name = "main".to_string();
+
+    let secret_key = wallet_ref
+        .get_secret_key(&name)
+        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+
+    let result = jsonwebtoken::decode::<Claims>(
+        &token,
+        &DecodingKey::from_secret(secret_key.as_slice()),
+        &jsonwebtoken::Validation::new(Algorithm::HS256),
+    )?;
+
+    Ok(result.claims)
+}
 
 
 

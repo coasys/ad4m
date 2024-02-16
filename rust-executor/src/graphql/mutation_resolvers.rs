@@ -2,7 +2,7 @@
 use juniper::{graphql_object, graphql_value, FieldResult};
 use log::debug;
 
-use crate::agent::auth::*;
+use crate::agent::capabilities::*;
 use super::graphql_types::*;
 use ad4m_client::literal::Literal;
 pub struct Mutation;

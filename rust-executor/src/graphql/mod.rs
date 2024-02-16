@@ -10,7 +10,7 @@ use subscription_resolvers::*;
 
 use crate::js_core::JsCoreHandle;
 use crate::Ad4mConfig;
-use crate::agent::auth::capabilities_from_token;
+use crate::agent::capabilities::capabilities_from_token;
 
 use std::collections::HashMap;
 use std::sync::Arc;

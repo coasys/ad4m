@@ -13,7 +13,7 @@ use crate::pubsub::{
 };
 
 use super::graphql_types::*;
-use crate::agent::auth::*;
+use crate::agent::capabilities::*;
 
 pub struct Subscription;
 

@@ -2,7 +2,7 @@
 use juniper::{graphql_object, FieldResult};
 
 use super::graphql_types::*;
-use crate::agent::auth::*;
+use crate::agent::capabilities::*;
 
 pub struct Query;
 
