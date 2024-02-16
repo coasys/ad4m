@@ -16,6 +16,7 @@ pub mod init;
 mod pubsub;
 mod dapp_server;
 pub mod agent;
+pub mod db;
 
 use std::{env, thread::JoinHandle};
 use log::{info, warn};
