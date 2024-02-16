@@ -1,0 +1,30 @@
+{
+  "name": "@coasys/react-hooks",
+  "version": "0.8.2-prerelease.1",
+  "description": "",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "type": "module",
+  "private": false,
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@coasys/ad4m": "*",
+    "@coasys/ad4m-connect": "*",
+    "@coasys/hooks-helpers": "*",
+    "@types/react": "^18.2.55",
+    "@types/react-dom": "^18.2.19"
+  },
+  "peerDependencies": {
+    "preact": "*",
+    "react": "*"
+  }
+}
