@@ -47,14 +47,7 @@ impl Query {
 
     async fn agent_get_apps(&self, context: &RequestContext) -> FieldResult<Vec<Apps>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentGetApps"))"#,
-            ))
-            .await?;
-        let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Ok(apps_map::get_apps())
     }
 
     async fn agent_get_entanglement_proofs(

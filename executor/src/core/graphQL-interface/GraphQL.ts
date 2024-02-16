@@ -53,11 +53,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return !core.agentService.isUnlocked
             },
             //@ts-ignore
-            agentGetApps: async (context) => {
-                let apps = await core.agentService.getApps()
-                return apps;
-            },
-            //@ts-ignore
             expression: async (args, context) => {
                 const url = args.url.toString();
                 const ref = parseExprUrl(url)
@@ -381,19 +376,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             agentEntanglementProofPreFlight: (args, context) => {
                 const { deviceKey, deviceKeyType } = args;
                 return core.entanglementProofController.signDeviceKey(deviceKey, deviceKeyType);
-            },
-            //@ts-ignore
-            agentRemoveApp: async (args, context) => {
-                const { requestId } = args;
-                await core.agentService.removeApp(requestId)
-                return await core.agentService.getApps();
-
-            },
-            //@ts-ignore
-            agentRevokeToken: async (args, context) => {
-                const { requestId } = args;
-                await core.agentService.revokeAppToken(requestId)
-                return await core.agentService.getApps();
             },
             //@ts-ignore
             addTrustedAgents: (args, context) => {

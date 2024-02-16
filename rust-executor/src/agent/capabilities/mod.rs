@@ -1,3 +1,4 @@
+pub mod apps_map;
 pub mod defs;
 pub mod requests_map;
 pub mod types;
@@ -8,7 +9,7 @@ pub use types::*;
 pub use token::*;
 use requests_map::{insert_request, get_request, remove_request};
 
-use crate::pubsub::{EXCEPTION_OCCURRED_TOPIC, get_global_pubsub};
+use crate::pubsub::{EXCEPTION_OCCURRED_TOPIC, APPS_CHANGED, get_global_pubsub};
 use crate::graphql::graphql_types::*;
 
 pub const DEFAULT_TOKEN_VALID_PERIOD: u64 = 180 * 24 * 60 * 60; // 180 days in seconds
@@ -103,7 +104,7 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
     Ok(rand)
 }
 
-pub fn generate_capability_token(request_id: String, rand: String) -> Result<String, String> {
+pub async fn generate_capability_token(request_id: String, rand: String) -> Result<String, String> {
     let auth_key = gen_request_key(&request_id, &rand);
 
     let auth = get_request(&auth_key)?.ok_or("Can't find permitted request")?;
@@ -111,28 +112,25 @@ pub fn generate_capability_token(request_id: String, rand: String) -> Result<Str
     let cap_token = token::generate_jwt(
         auth.app_name.clone(), 
         DEFAULT_TOKEN_VALID_PERIOD, 
-        auth
+        auth.clone()
     ).map_err(|e| e.to_string())?;
     
     remove_request(&auth_key)?;
 
-    //TODO: handle the whole Apps aspect
-    /*
-    if let Some(requesting_auth_info) = &self.requesting_auth_info {
-        if request_id == requesting_auth_info.request_id {
-            let mut apps = self.apps.clone();
-            apps.push(AuthInfoExtended {
-                token: jwt.clone(),
-                ..requesting_auth_info.clone()
-            });
-            self.apps = apps;
-            fs::write(&self.apps_file, serde_json::to_string(&self.apps).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
+    apps_map::insert_app(
+        request_id.clone(), 
+        AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth,
+        },
+        cap_token.clone()
+    )?;  
 
-            self.pub_sub.publish(PubSubDefinitions::APPS_CHANGED, None).await;
-        }
-    }
- */
+    get_global_pubsub()
+        .await
+        .publish(&APPS_CHANGED, &String::from(""))
+        .await;
+
     Ok(cap_token)
 }
 

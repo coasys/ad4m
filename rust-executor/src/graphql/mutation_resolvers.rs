@@ -124,16 +124,8 @@ impl Mutation {
         request_id: String,
     ) -> FieldResult<Vec<Apps>> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentRemoveApp", {{ requestId: "{}" }})
-            )"#,
-            request_id
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        apps_map::remove_app(&request_id)?;
+        Ok(apps_map::get_apps())
     }
 
     async fn agent_request_capability(
@@ -164,7 +156,7 @@ impl Mutation {
         request_id: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let cap_token = agent::capabilities::generate_capability_token(request_id, rand)?;
+        let cap_token = agent::capabilities::generate_capability_token(request_id, rand).await?;
         Ok(cap_token)
     }
 
@@ -174,16 +166,8 @@ impl Mutation {
         request_id: String,
     ) -> FieldResult<Vec<Apps>> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentRevokeToken", {{ requestId: "{}" }})
-            )"#,
-            request_id
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        apps_map::revoke_app(&request_id)?;
+        Ok(apps_map::get_apps())
     }
 
     async fn agent_sign_message(

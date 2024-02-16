@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use juniper::GraphQLObject;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfoExtended {
     pub request_id: String,

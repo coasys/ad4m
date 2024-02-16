@@ -33,6 +33,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     let _ = env_logger::try_init();
     config.prepare();
 
+    agent::capabilities::apps_map::set_data_file_path(
+        config.app_data_path
+            .as_ref()
+            .map(|path| std::path::Path::new(path).join("apps_data.json").to_string_lossy().into_owned())
+            .expect("App data path not set in Ad4mConfig")
+        );
+
     if let Some(admin_credential) = &config.admin_credential {
         if admin_credential.is_empty() {
             warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
