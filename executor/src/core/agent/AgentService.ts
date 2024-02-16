@@ -10,7 +10,6 @@ import { Agent, ExpressionProof, AgentSignature } from "@coasys/ad4m";
 import Signatures from "./Signatures";
 import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
-import { AuthInfoExtended } from "./Auth";
 import { getPubSub } from "../utils";
 
 
@@ -19,8 +18,6 @@ export default class AgentService {
   #didDocument?: string;
   #signingKeyId?: string;
   #file: string;
-  #appsFile: string;
-  #apps: AuthInfoExtended[];
   #fileProfile: string;
   #agent?: Agent;
   #agentLanguage?: Language;
@@ -33,12 +30,6 @@ export default class AgentService {
   constructor(rootConfigPath: string, adminCredential?: string) {
     this.#file = path.join(rootConfigPath, "agent.json");
     this.#fileProfile = path.join(rootConfigPath, "agentProfile.json");
-    this.#appsFile = path.join(rootConfigPath, "apps.json");
-    try {
-      this.#apps = JSON.parse(fs.readFileSync(this.#appsFile).toString());
-    } catch (e) {
-      this.#apps = [];
-    }
     this.#pubSub = getPubSub();
     this.#readyPromise = new Promise((resolve) => {
       this.#readyPromiseResolve = resolve;
@@ -256,36 +247,6 @@ export default class AgentService {
       did: this.#did,
       didDocument: this.#didDocument,
     };
-  }
-
-  getApps(): AuthInfoExtended[] {
-    return this.#apps;
-  }
-
-  async removeApp(requestId: string) {
-    try {
-      this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId);
-
-      fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
-
-      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
-    } catch (e) {
-      console.error("Error while removing app", e);
-    }
-  }
-
-  async revokeAppToken(requestId: string) {
-    try {
-      this.#apps = this.#apps.map((app: any) =>
-        app.requestId === requestId ? { ...app, revoked: true } : app
-      );
-
-      fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
-
-      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
-    } catch (e) {
-      console.error("Error while revoking token", e);
-    }
   }
 
   async signMessage(msg: string) {
