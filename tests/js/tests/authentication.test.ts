@@ -278,14 +278,20 @@ describe("Authentication integration tests", () => {
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
 
             let oldApps = await adminAd4mClient!.agent.getApps();
-            let newApps = await adminAd4mClient!.agent.removeApp(requestId);
-            expect(newApps.length).to.be.equal(oldApps.length - 1);
+            let newApps = await adminAd4mClient!.agent.revokeToken(requestId);
+            // revoking token should not change the number of apps
+            expect(newApps.length).to.be.equal(oldApps.length);
+            newApps.forEach((app, i) => {
+                if(app.requestId === requestId) {
+                    expect(app.revoked).to.be.true;
+                }
+            })
 
             const call = async () => {
                 return await authenticatedAppAd4mClient!.agent.status()
             }
 
-            await expect(call()).to.be.rejectedWith("Capability is not matched");
+            await expect(call()).to.be.rejectedWith("Unauthorized access");
         })
     })
 })
