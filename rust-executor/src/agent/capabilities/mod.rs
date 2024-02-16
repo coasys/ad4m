@@ -1,13 +1,17 @@
 pub mod defs;
+pub mod requests_map;
 pub mod types;
 pub mod token;
 
 pub use defs::*;
 pub use types::*;
 pub use token::*;
+use requests_map::{insert_request, get_request, remove_request};
 
 use crate::pubsub::{EXCEPTION_OCCURRED_TOPIC, get_global_pubsub};
 use crate::graphql::graphql_types::*;
+
+pub const DEFAULT_TOKEN_VALID_PERIOD: u64 = 180 * 24 * 60 * 60; // 180 days in seconds
 
 pub fn check_capability(capabilities: &Result<Vec<Capability>, String>, expected: &Capability) -> Result<(), String> {
     let capabilities = capabilities.clone()?;
@@ -92,6 +96,58 @@ pub async fn request_capability(auth_info: AuthInfo) -> String {
 }
 
 
+pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
+    let rand = gen_random_digits();
+    let request_key = gen_request_key(&auth_info_extended.request_id, &rand);
+    insert_request(request_key.clone(), auth_info_extended.auth.clone())?;
+    Ok(rand)
+}
+
+pub fn generate_capability_token(request_id: String, rand: String) -> Result<String, String> {
+    let auth_key = gen_request_key(&request_id, &rand);
+
+    let auth = get_request(&auth_key)?.ok_or("Can't find permitted request")?;
+
+    let cap_token = token::generate_jwt(
+        auth.app_name.clone(), 
+        DEFAULT_TOKEN_VALID_PERIOD, 
+        auth
+    ).map_err(|e| e.to_string())?;
+    
+    remove_request(&auth_key)?;
+
+    //TODO: handle the whole Apps aspect
+    /*
+    if let Some(requesting_auth_info) = &self.requesting_auth_info {
+        if request_id == requesting_auth_info.request_id {
+            let mut apps = self.apps.clone();
+            apps.push(AuthInfoExtended {
+                token: jwt.clone(),
+                ..requesting_auth_info.clone()
+            });
+            self.apps = apps;
+            fs::write(&self.apps_file, serde_json::to_string(&self.apps).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+
+            self.pub_sub.publish(PubSubDefinitions::APPS_CHANGED, None).await;
+        }
+    }
+ */
+    Ok(cap_token)
+}
+
+
+pub fn gen_random_digits() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    rng.gen_range(100000..1000000).to_string()
+}
+
+pub fn gen_request_key(request_id: &str, rand: &str) -> String {
+    format!("{}-{}", request_id, rand)
+}
+
+
 pub struct App {
     token: String,
     revoked: bool,
@@ -114,28 +170,6 @@ pub fn check_token_authorized(apps: &[App], token: &str, is_admin_credential: bo
     }
     Ok(())
 }
-
-
-
-
-pub const DEFAULT_TOKEN_VALID_PERIOD: i64 = 180 * 24 * 60 * 60; // 180 days in seconds
-
-#[allow(dead_code)]
-pub fn gen_random_digits() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    rng.gen_range(100000..1000000).to_string()
-}
-
-#[allow(dead_code)]
-pub fn gen_request_key(request_id: &str, rand: &str) -> String {
-    format!("{}-{}", request_id, rand)
-}
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {

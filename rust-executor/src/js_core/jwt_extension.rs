@@ -10,7 +10,7 @@ async fn generate_jwt(
     #[smi] expiration_time: u64,
     #[serde] capabilities: AuthInfo,
 ) -> Result<String, AnyError> {
-    crate::agent::capabilities::generate_jwt(issuer, audience, expiration_time, capabilities)
+    crate::agent::capabilities::generate_jwt(audience, expiration_time, capabilities)
 }
 
 #[op2(async)]

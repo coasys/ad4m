@@ -4,7 +4,6 @@ use crate::wallet::Wallet;
 use super::types::*;
 
 pub fn generate_jwt(
-    issuer: String,
     audience: String,
     expiration_time: u64,
     capabilities: AuthInfo,
@@ -19,7 +18,9 @@ pub fn generate_jwt(
         .get_secret_key(&name)
         .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
 
-    let payload = Claims::new(issuer, audience, expiration_time, capabilities);
+    let did_document = wallet_ref.get_did_document(&name).ok_or(anyhow!("main did not found. call createMainKey() first"))?;
+    
+    let payload = Claims::new(did_document.id, audience, expiration_time, capabilities);
 
     let token = encode(
         &Header::default(),

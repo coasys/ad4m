@@ -541,17 +541,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return currentAgent;
             },
             //@ts-ignore
-            agentPermitCapability: (args, context) => {
-                const { auth } = args;
-                return core.agentService.permitCapability(auth, context.capabilities);
-            },
-            //@ts-ignore
-            agentGenerateJwt: async (args, context) => {
-                const { requestId, rand } = args;
-                let jwt = await core.agentService.generateJwt(requestId, rand)
-                return jwt;
-            },
-            //@ts-ignore
             agentSignMessage: async (args, context) => {
                 const { message } = args;
                 let sig = await core.agentService.signMessage(message)

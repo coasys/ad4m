@@ -18,7 +18,7 @@ mod dapp_server;
 pub mod agent;
 
 use std::{env, thread::JoinHandle};
-use log::info;
+use log::{info, warn};
 
 use js_core::JsCore;
 
@@ -32,6 +32,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server");
     let _ = env_logger::try_init();
     config.prepare();
+
+    if let Some(admin_credential) = &config.admin_credential {
+        if admin_credential.is_empty() {
+            warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
+        }
+    } else {
+        warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
+    }
 
     info!("Initializing Prolog service...");
     init_prolog_service().await;

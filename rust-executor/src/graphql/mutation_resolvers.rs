@@ -100,27 +100,6 @@ impl Mutation {
         result.get_graphql_result()
     }
 
-    async fn agent_generate_jwt(
-        &self,
-        context: &RequestContext,
-        rand: String,
-        request_id: String,
-    ) -> FieldResult<String> {
-        check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentGenerateJwt", {{ rand: "{}", requestId: "{}" }})
-            )"#,
-            rand, request_id
-        );
-        debug!("agent_generate_jwt script: {}", script);
-        let result = js.execute(script).await?;
-        debug!("agent_generate_jwt result: {}", result);
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
-    }
-
     async fn agent_lock(
         &self,
         context: &RequestContext,
@@ -136,25 +115,6 @@ impl Mutation {
         );
         let result = js.execute(script).await?;
         let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
-    }
-
-    //NOTE: all the functions from here on out have not been tested by calling the cli <-> rust graphql server
-    async fn agent_permit_capability(
-        &self,
-        context: &RequestContext,
-        auth: String,
-    ) -> FieldResult<String> {
-        check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentPermitCapability", {{ auth: JSON.stringify({}) }}, {{ capabilities: {} }})
-            )"#,
-            auth, serde_json::to_string(&context.capabilities)?
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
     }
 
@@ -183,6 +143,29 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
         Ok(agent::capabilities::request_capability(auth_info.into()).await)
+    }
+
+    //NOTE: all the functions from here on out have not been tested by calling the cli <-> rust graphql server
+    async fn agent_permit_capability(
+        &self,
+        context: &RequestContext,
+        auth: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY)?;
+        let auth: AuthInfoExtended = serde_json::from_str(&auth)?;
+        let random_number_challenge = agent::capabilities::permit_capability(auth)?;
+        Ok(random_number_challenge)
+    }
+
+    async fn agent_generate_jwt(
+        &self,
+        context: &RequestContext,
+        rand: String,
+        request_id: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
+        let cap_token = agent::capabilities::generate_capability_token(request_id, rand)?;
+        Ok(cap_token)
     }
 
     async fn agent_revoke_token(
