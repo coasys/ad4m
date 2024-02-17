@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn can_store_and_retrieve_links() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link, "shared").unwrap();
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn can_store_and_get_link_with_missing_predicate() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let mut link = construct_dummy_link_expression();
         link.data.predicate = None;
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn can_call_get_link_multiple_times() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link, "shared").unwrap();
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn can_get_all_links() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link1, "shared").unwrap();
@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn can_call_get_all_links_multiple_times() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link1, "shared").unwrap();
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn can_get_links_by_source() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link1, "shared").unwrap();
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn can_get_links_by_target() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link1, "shared").unwrap();
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn can_update_link() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link1, "shared").unwrap();
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn can_remove_link() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link1, "shared").unwrap();
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn can_get_and_remove_pending_diffs() {
-        let db = Ad4mDb::new("test.db").unwrap();
+        let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let addition = construct_dummy_link_expression();
         let removal = construct_dummy_link_expression();
