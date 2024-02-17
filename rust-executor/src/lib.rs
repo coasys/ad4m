@@ -9,15 +9,15 @@ mod js_core;
 mod prolog_service;
 mod utils;
 mod wallet;
-use tokio;
-
-
 pub mod init;
 mod pubsub;
 mod dapp_server;
 pub mod agent;
-pub mod db;
+mod db;
+pub mod types;
 
+
+use tokio;
 use std::{env, thread::JoinHandle};
 use log::{info, warn};
 
