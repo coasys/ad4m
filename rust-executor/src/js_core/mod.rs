@@ -99,6 +99,7 @@ impl JsCoreHandle {
 #[derive(Debug)]
 struct JsCoreRequest {
     script: String,
+    #[allow(dead_code)]
     id: String,
     response_tx: oneshot::Sender<JsCoreResponse>
 }

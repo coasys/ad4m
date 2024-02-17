@@ -314,7 +314,7 @@ impl HolochainService {
             config.admin_interfaces = None;
 
             let mut kitsune_config = KitsuneP2pConfig::default();
-            let mut tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
+            let tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
 
             // How long should we hold off talking to a peer
             // we've previously gotten errors speaking to.
