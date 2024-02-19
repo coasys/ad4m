@@ -2,7 +2,7 @@ use crate::formatting::{print_message_perspective, print_sent_message_perspectiv
 use ad4m_client::Ad4mClient;
 use anyhow::Result;
 use clap::Subcommand;
-
+use kitsune_p2p_types::{agent_info::AgentInfoSigned, dependencies::lair_keystore_api::dependencies::base64};
 use crate::util::string_2_perspective_snapshot;
 
 #[derive(Debug, Subcommand)]
@@ -118,7 +118,21 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         }
         RuntimeFunctions::HcAgentInfos => {
             let infos = ad4m_client.runtime.hc_agent_infos().await?;
-            println!("{}", infos);
+            println!("RAW\n{}\n\n", infos);
+            let encoded_agent_infos: Vec<String> = serde_json::from_str(&infos)?;
+            println!("Encoded agent infos: {:?}", encoded_agent_infos);
+            let agent_infos: Vec<AgentInfoSigned> = encoded_agent_infos
+                .into_iter()
+                .map(|encoded_info| {
+                    let info_bytes = base64::decode(encoded_info)
+                        .expect("Failed to decode base64 AgentInfoSigned");
+                    AgentInfoSigned::decode(&info_bytes)
+                        .expect("Failed to decode AgentInfoSigned")
+                })
+                .collect();
+            for agent_info in &agent_infos {
+                println!("{:?}", agent_info);
+            }
         }
         RuntimeFunctions::HcAddAgentInfos { infos } => {
             ad4m_client.runtime.hc_add_agent_infos(infos).await?;
