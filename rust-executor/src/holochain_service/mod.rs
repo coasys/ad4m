@@ -404,6 +404,8 @@ impl HolochainService {
         //Check if app_id already exists
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
+        install_app_payload.network_seed = Some("testing testing".to_string());
+
         match app_info {
             None => {
                 self.conductor

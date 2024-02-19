@@ -107,7 +107,7 @@ fn rlim_execute() {
 }
 
 fn main() {
-    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
+    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server,kitsune_p2p=debug");
 
     #[cfg(not(target_os = "windows"))]
     rlim_execute();
