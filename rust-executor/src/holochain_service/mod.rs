@@ -393,7 +393,7 @@ impl HolochainService {
 
     pub async fn install_app(
         &mut self,
-        install_app_payload: InstallAppPayload,
+        mut install_app_payload: InstallAppPayload,
     ) -> Result<AppInfo, AnyError> {
         if install_app_payload.installed_app_id.is_none() {
             return Err(anyhow!("App id is required"));
