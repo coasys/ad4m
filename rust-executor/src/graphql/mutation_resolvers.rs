@@ -3,6 +3,7 @@ use juniper::{graphql_object, graphql_value, FieldResult};
 
 use super::graphql_types::*;
 use crate::agent::{self, capabilities::*};
+use crate::perspectives::*;
 use ad4m_client::literal::Literal;
 pub struct Mutation;
 
@@ -589,19 +590,9 @@ impl Mutation {
         name: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveAdd",
-                {{ name: "{}" }},
-            ))"#,
-            name,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let handle = PerspectiveHandle::new_from_name(name.clone());
+        add_perspective(handle.clone())?;
+        Ok(handle)
     }
 
     async fn perspective_add_link(

@@ -1,8 +1,10 @@
+use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use crate::types::{Expression, PerspectiveDiff, LinkExpression, LinkStatus};
+use crate::graphql::graphql_types::PerspectiveHandle;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -24,15 +26,44 @@ struct ExpressionSchema {
 
 pub type Ad4mDbResult<T> = Result<T, AnyError>;
 
+
+use std::sync::{Arc, Mutex};
+
+lazy_static! {
+    static ref AD4M_DB_INSTANCE: Arc<Mutex<Option<Ad4mDb>>> = Arc::new(Mutex::new(None));
+}
+
 pub struct Ad4mDb {
     conn: Connection,
 }
 
 impl Ad4mDb {
-    pub fn new(db_path: &str) -> Ad4mDbResult<Self> {
+    pub fn init_global_instance(db_path: &str) -> Ad4mDbResult<()> {
+        let mut db_instance = AD4M_DB_INSTANCE.lock().unwrap();
+        *db_instance = Some(Ad4mDb::new(db_path)?);
+        Ok(())
+    }
+
+    pub fn global_instance() -> Arc<Mutex<Option<Ad4mDb>>> {
+        AD4M_DB_INSTANCE.clone()
+    }
+
+    fn new(db_path: &str) -> Ad4mDbResult<Self> {
         let conn = Connection::open(db_path)?;
 
         // Create tables if they don't exist
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS perspective_handle (
+                uuid TEXT PRIMARY KEY,
+                name TEXT,
+                neighbourhood TEXT,
+                shared_url TEXT,
+                state TEXT NOT NULL
+             )",
+            [],
+        )?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS link (
                 id INTEGER PRIMARY KEY,
@@ -71,7 +102,89 @@ impl Ad4mDb {
         Ok(Self { conn })
     }
 
-    pub fn add_link(&self, perspective_uuid: &str, link: &LinkExpression, status: &str) -> Ad4mDbResult<()> {
+    pub fn add_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                perspective.name,
+                perspective.uuid,
+                perspective.neighbourhood.as_ref().map(|n| serde_json::to_string(n).ok()).flatten(),
+                perspective.shared_url,
+                serde_json::to_string(&perspective.state)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle WHERE uuid = ?1",
+        )?;
+
+        let found_perspective = stmt
+            .query_map([uuid], |row| {
+                Ok(PerspectiveHandle {
+                    name: row.get(0)?,
+                    uuid: row.get(1)?,
+                    neighbourhood: row.get::<usize, Option<String>>(3)?.map(|n| serde_json::from_str(&n).ok()).flatten(),
+                    shared_url: row.get(4)?,
+                    state: serde_json::from_str(row.get::<usize, String>(5)?.as_str()).expect("Could not deserialize perspective state from DB"),
+                })
+            })?
+            .map(|p| p.ok())
+            .next()
+            .ok_or(anyhow!("No perspective found with given uuid"))?
+            .clone();
+        
+        Ok(found_perspective)
+    }
+
+    pub fn get_all_perspectives(&self) -> Ad4mDbResult<Vec<PerspectiveHandle>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle",
+        )?;
+        let perspective_iter = stmt.query_map([], |row| {
+            Ok(PerspectiveHandle {
+                name: row.get(0)?,
+                uuid: row.get(1)?,
+                neighbourhood: row.get::<usize, Option<String>>(4)?.map(|n| serde_json::from_str(&n).ok()).flatten(),
+                shared_url: row.get(5)?,
+                state: serde_json::from_str(row.get::<usize, String>(6)?.as_str()).expect("Could not deserialize perspective state from DB"),
+            })
+        })?;
+
+        let mut perspectives = Vec::new();
+        for perspective in perspective_iter {
+            perspectives.push(perspective?);
+        }
+
+        Ok(perspectives)
+    }
+
+    pub fn update_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?3, shared_url = ?4, state = ?5 WHERE uuid = ?6",
+            params![
+                perspective.name,
+                perspective.neighbourhood.as_ref().map(|n| serde_json::to_string(n).ok()).flatten(),
+                perspective.shared_url,
+                serde_json::to_string(&perspective.state)?,
+                perspective.uuid,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM perspective_handle WHERE uuid = ?1",
+            [uuid],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_link(&self, perspective_uuid: &str, link: &LinkExpression, status: &LinkStatus) -> Ad4mDbResult<()> {
         self.conn.execute(
             "INSERT INTO link (perspective, link_expression, source, predicate, target, author, timestamp, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -83,13 +196,13 @@ impl Ad4mDb {
                 link.data.target,
                 link.author,
                 link.timestamp,
-                status,
+                serde_json::to_string(status)?,
             ],
         )?;
         Ok(())
     }
 
-    pub fn add_many_links(&self, perspective_uuid: &str, links: Vec<LinkExpression>, status: LinkStatus) -> Ad4mDbResult<()> {
+    pub fn add_many_links(&self, perspective_uuid: &str, links: Vec<LinkExpression>, status: &LinkStatus) -> Ad4mDbResult<()> {
         for link in links.iter() {
             self.conn.execute(
                 "INSERT INTO link (perspective, link_expression, source, predicate, target, author, timestamp, status)
@@ -309,7 +422,7 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link, "shared").unwrap();
+        db.add_link(&p_uuid, &link, &LinkStatus::Shared).unwrap();
 
         let result: Option<LinkExpression> = db.get_link(&p_uuid, &link).unwrap();
         assert!(result.is_some());
@@ -322,7 +435,7 @@ mod tests {
         let p_uuid = Uuid::new_v4().to_string();
         let mut link = construct_dummy_link_expression();
         link.data.predicate = None;
-        db.add_link(&p_uuid, &link, "shared").unwrap();
+        db.add_link(&p_uuid, &link, &LinkStatus::Shared).unwrap();
 
         let result = db.get_link(&p_uuid, &link).unwrap();
         assert_eq!(result, Some(link));
@@ -333,7 +446,7 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link, "shared").unwrap();
+        db.add_link(&p_uuid, &link, &LinkStatus::Shared).unwrap();
 
         for _ in 0..3 {
             let result = db.get_link(&p_uuid, &link).unwrap();
@@ -346,9 +459,9 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link1, "shared").unwrap();
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
         let link2 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link2, "shared").unwrap();
+        db.add_link(&p_uuid, &link2, &LinkStatus::Shared).unwrap();
 
         let all_links = db.get_all_links(&p_uuid).unwrap();
         assert_eq!(all_links, vec![link1, link2]);
@@ -359,7 +472,7 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link1, "shared").unwrap();
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
 
         for _ in 0..3 {
             let all_links = db.get_all_links(&p_uuid).unwrap();
@@ -372,9 +485,9 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link1, "shared").unwrap();
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
         let link2 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link2, "shared").unwrap();
+        db.add_link(&p_uuid, &link2,  &LinkStatus::Shared).unwrap();
 
         let result = db.get_links_by_source(&p_uuid, &link1.data.source).unwrap();
         assert_eq!(result, vec![link1]);
@@ -385,9 +498,9 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link1, "shared").unwrap();
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
         let link2 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link2, "shared").unwrap();
+        db.add_link(&p_uuid, &link2, &LinkStatus::Shared).unwrap();
 
         let result = db.get_links_by_target(&p_uuid, &link1.data.target).unwrap();
         assert_eq!(result, vec![link1]);
@@ -398,7 +511,7 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link1, "shared").unwrap();
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
         let link2 = construct_dummy_link_expression();
         db.update_link(&p_uuid, &link1, &link2).unwrap();
 
@@ -412,7 +525,7 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link1 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link1, "shared").unwrap();
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
 
         let result = db.get_link(&p_uuid, &link1).unwrap();
         assert_eq!(result, Some(link1.clone()));
@@ -444,4 +557,5 @@ mod tests {
         assert_eq!(get2.additions.len(), 0);
     }
 }
+
 

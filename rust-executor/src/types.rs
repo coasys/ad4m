@@ -52,3 +52,24 @@ pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
 }
+
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+
+pub struct Perspective {
+    pub links: Vec<LinkExpression>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Neighbourhood {
+    pub link_language: String,
+    pub meta: Perspective,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct NeighbourhoodExpression {
+    pub author: String,
+    pub data: Neighbourhood,
+    pub proof: ExpressionProof,
+    pub timestamp: String,
+}

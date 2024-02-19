@@ -350,14 +350,52 @@ pub struct PerspectiveExpression {
     pub timestamp: String,
 }
 
+#[derive(GraphQLEnum, Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub enum PerspectiveState {
+    #[default]
+    Private,
+    NeighbourhoodJoinInitiated,
+    LinkLanguageFailedToInstall,
+    LinkLanguageInstalledButNotSynced,
+    Synced,
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveHandle {
+    pub uuid: String,
     pub name: Option<String>,
     pub neighbourhood: Option<NeighbourhoodExpression>,
     pub shared_url: Option<String>,
-    pub state: String,
-    pub uuid: String,
+    pub state: PerspectiveState,
+}
+
+impl PerspectiveHandle {
+    pub fn new(
+        uuid: String,
+        name: Option<String>,
+        neighbourhood: Option<NeighbourhoodExpression>,
+        shared_url: Option<String>,
+        state: PerspectiveState,
+    ) -> Self {
+        PerspectiveHandle {
+            name,
+            uuid,
+            neighbourhood,
+            shared_url,
+            state,
+        }
+    }
+
+    pub fn new_from_name(name: String) -> Self {
+        PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            name: Some(name),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+        }
+    }
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
