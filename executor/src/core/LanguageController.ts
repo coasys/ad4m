@@ -225,6 +225,7 @@ export default class LanguageController {
         hash: string,
     }> {
         if(!path.isAbsolute(sourceFilePath))
+            // @ts-ignore
             sourceFilePath = path.join(Deno.cwd()!, sourceFilePath)
 
         const bundleBytes = fs.readFileSync(sourceFilePath)
