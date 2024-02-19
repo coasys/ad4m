@@ -382,6 +382,30 @@ jobs:
           package: connect/package.json
           tag: ${{ env.NPM_TAG }}
           access: public
+          
+      - name: Publish ad4m hook helpers
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.COASYS_NPM_TOKEN }}
+          package: ad4m-hooks/helpers/package.json
+          tag: ${{ env.NPM_TAG }}
+          access: public
+
+      - name: Publish ad4m react hooks
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.COASYS_NPM_TOKEN }}
+          package: ad4m-hooks/react/package.json
+          tag: ${{ env.NPM_TAG }}
+          access: public
+
+      - name: Publish ad4m vue hooks
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.COASYS_NPM_TOKEN }}
+          package: ad4m-hooks/vue/package.json
+          tag: ${{ env.NPM_TAG }}
+          access: public
 
       - name: Publish executor
         uses: JS-DevTools/npm-publish@v1
