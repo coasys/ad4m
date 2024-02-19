@@ -58,7 +58,7 @@
     "ws": "8.13.0"
   },
   "patchedDependencies": {},
-  "version": "0.8.2-prerelease",
+  "version": "0.8.2-prerelease-2",
   "pnpm": {
     "patchedDependencies": {
       "graphql@15.7.2": "patches/graphql@15.7.2.patch"
