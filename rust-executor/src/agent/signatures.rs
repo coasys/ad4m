@@ -1,19 +1,20 @@
+use deno_core::error::AnyError;
 use serde_json::json;
 use sha2::{Sha256, Digest};
-use ad4m_client::types::Expression;
+use crate::types::Expression;
 use did_key::{CoreSign, PatchedKeyPair};
 use log::error;
 
-pub fn verify_string_signed_by_did(did: &str, _did_signing_key_id: &str, data: &str, signed_data: &str) -> bool {
-    let sig_bytes = hex::decode(signed_data).expect("Invalid hex in signed_data");
+pub fn verify_string_signed_by_did(did: &str, data: &str, signed_data: &str) -> Result<bool, AnyError> {
+    let sig_bytes = hex::decode(signed_data)?;
     let message = build_message_raw(&serde_json::Value::String(data.to_owned()));
-    inner_verify(did, &message, &sig_bytes)
+    Ok(inner_verify(did, &message, &sig_bytes))
 }
 
-pub fn verify(expr: &Expression) -> bool {
-    let sig_bytes = hex::decode(&expr.proof.signature).expect("Invalid hex in expr.proof.signature");
+pub fn verify(expr: &Expression) -> Result<bool, AnyError> {
+    let sig_bytes = hex::decode(&expr.proof.signature)?;
     let message = build_message(&expr.data, &expr.timestamp);
-    inner_verify(&expr.author, &message, &sig_bytes)
+    Ok(inner_verify(&expr.author, &message, &sig_bytes))
 }
 
 fn build_message(data: &serde_json::Value, timestamp: &str) -> Vec<u8> {
