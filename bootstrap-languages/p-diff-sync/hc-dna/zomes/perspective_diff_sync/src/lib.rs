@@ -27,7 +27,7 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
     let mut functions = BTreeSet::new();
     functions.insert((zome_info()?.name, "get_online_status".into()));
     //TODO; is this next function needed?
-    functions.insert((zome_info()?.name, "recv_send_remote_signal".into()));
+    functions.insert((zome_info()?.name, "recv_remote_signal".into()));
 
     let functions: GrantedFunctions = GrantedFunctions::Listed(functions);
 
@@ -100,19 +100,19 @@ pub fn update_current_revision(_hash: Hash) -> ExternResult<()> {
 /// Signal handling
 
 #[hdk_extern]
-fn recv_send_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
-    info!("recv_send_remote_signal");
+fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
+    info!("recv_remote_signal");
     //Check if its a normal diff expression signal
     match HashBroadcast::try_from(signal.clone()) {
         Ok(broadcast) => {
-            info!("recv_send_remote_signal broadcast: {:?}", broadcast);
+            info!("recv_remote_signal broadcast: {:?}", broadcast);
             link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
                 .map_err(|err| utils::err(&format!("{}", err)))?;
         }
         //Check if its a broadcast message
         Err(_) => match PerspectiveExpression::try_from(signal.clone()) {
             Ok(sig) => {
-                info!("recv_send_remote_signal signal: {:?}", sig);
+                info!("recv_remote_signal signal: {:?}", sig);
                 emit_signal(sig)?
             }
             //Check if its an online ping
