@@ -7,6 +7,7 @@ extern crate rand;
 extern crate regex;
 extern crate rustyline;
 extern crate tokio;
+extern crate kitsune_p2p_types;
 
 mod formatting;
 mod startup;

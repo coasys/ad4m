@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m"
-version = "0.8.2-prerelease.0"
+version = "0.9.0-prerelease.0"
 dependencies = [
  "ad4m-client",
  "anyhow",
@@ -24,6 +24,7 @@ dependencies = [
  "ctrlc",
  "dirs 4.0.0",
  "futures",
+ "kitsune_p2p_types",
  "rand 0.8.5",
  "regex",
  "rust-executor",
@@ -38,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.8.2-prerelease"
+version = "0.9.0-prerelease"
 dependencies = [
  "anyhow",
  "async-tungstenite",
@@ -62,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.8.2-prerelease.0"
+version = "0.9.0-prerelease.0"
 dependencies = [
  "ad4m-client",
  "chrono",
@@ -10851,7 +10852,7 @@ dependencies = [
 
 [[package]]
 name = "rust-executor"
-version = "0.8.2-prerelease"
+version = "0.9.0-prerelease"
 dependencies = [
  "ad4m-client",
  "argon2",
