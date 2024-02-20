@@ -5,7 +5,7 @@ import {
   subscribe,
   subscribeToPerspective,
   unsubscribe,
-  unsubscribeToPerspective,
+  unsubscribeFromPerspective,
 } from "@coasys/hooks-helpers";
 import { PerspectiveProxy, LinkExpression } from "@coasys/ad4m";
 import { SubjectRepository } from "@coasys/hooks-helpers";
@@ -77,7 +77,7 @@ export function useSubject<SubjectClass>(props: Props<SubjectClass>) {
       subscribeToPerspective(perspective, linkAdded, linkRemoved);
 
       return () => {
-        unsubscribeToPerspective(perspective, linkAdded, linkRemoved);
+        unsubscribeFromPerspective(perspective, linkAdded, linkRemoved);
       };
     }
   }, [perspective.uuid, id]);

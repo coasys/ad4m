@@ -12,25 +12,15 @@ export function useAgent<T>(client: AgentClient, did: string | Function, formatt
   watch(
     [client, didRef],
     async ([c, d]) => {
-      console.log('meow', c, d)
       if (d) {
-        console.log('meow', d)
         agent.value = await client.byDID(d);
-        console.log('meow 0', agent)
         if (agent.value?.perspective) {
-          console.log('meow 1')
           const perspective = agent.value.perspective;
     
-          console.log("perspective", perspective);
-        
           const prof = formatter(perspective.links);
-    
-          console.log("prof", prof, { ...prof, did: d});
-    
     
           profile.value =  { ...prof, did: d} as T;
         } else {
-          console.log('meow 2')
           profile.value =  null;
         }
       }

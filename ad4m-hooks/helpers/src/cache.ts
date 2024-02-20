@@ -57,7 +57,7 @@ export function subscribeToPerspective(
   subscribe(removedKey, removed);
 }
 
-export function unsubscribeToPerspective(
+export function unsubscribeFromPerspective(
   perspective: PerspectiveProxy,
   added: Function,
   removed: Function

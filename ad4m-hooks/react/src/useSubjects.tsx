@@ -5,7 +5,7 @@ import {
   subscribe,
   subscribeToPerspective,
   unsubscribe,
-  unsubscribeToPerspective,
+  unsubscribeFromPerspective,
 } from "@coasys/hooks-helpers";
 import { PerspectiveProxy, LinkExpression } from "@coasys/ad4m";
 import { QueryOptions, SubjectRepository } from "@coasys/hooks-helpers";
@@ -48,7 +48,7 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
   const getData = useCallback(() => {
     if (source) {
       setIsLoading(true);
-      console.log(`fetching data from remote`, source, query, cacheKey);
+      console.debug(`fetching data from remote`, source, query, cacheKey);
       Repo.getAllData(source, query)
         .then((newEntries) => {
           setError(undefined);
@@ -145,7 +145,7 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
       subscribeToPerspective(perspective, linkAdded, linkRemoved);
 
       return () => {
-        unsubscribeToPerspective(perspective, linkAdded, linkRemoved);
+        unsubscribeFromPerspective(perspective, linkAdded, linkRemoved);
       };
     }
   }, [perspective.uuid, cacheKey, query]);

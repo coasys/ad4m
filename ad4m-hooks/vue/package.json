@@ -1,5 +1,5 @@
 {
-  "name": "@coasys/vue-hooks",
+  "name": "@coasys/ad4m-vue-hooks",
   "version": "0.8.2-prerelease",
   "description": "",
   "main": "./src/index.ts",

@@ -17,7 +17,7 @@ export function useClient() {
 
   // Fetch data from AD4M and save to cache
   const getData = async () => {
-    console.log('🪝 useClient - running getAd4mClient');
+    console.debug('🪝 useClient - running getAd4mClient');
     try {
       const client = await getAd4mClient();
       error.value = null;
