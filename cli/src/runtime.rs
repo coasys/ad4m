@@ -118,20 +118,28 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         }
         RuntimeFunctions::HcAgentInfos => {
             let infos = ad4m_client.runtime.hc_agent_infos().await?;
-            println!("RAW\n{}\n\n", infos);
+            println!("\x1b[36mAll AgentInfos encoded:\n \x1b[32m{}\n\n", infos);
+
             let encoded_agent_infos: Vec<String> = serde_json::from_str(&infos)?;
-            println!("Encoded agent infos: {:?}", encoded_agent_infos);
-            let agent_infos: Vec<AgentInfoSigned> = encoded_agent_infos
+            let agent_infos: Vec<(AgentInfoSigned, String)> = encoded_agent_infos
                 .into_iter()
                 .map(|encoded_info| {
-                    let info_bytes = base64::decode(encoded_info)
+                    let info_bytes = base64::decode(encoded_info.clone())
                         .expect("Failed to decode base64 AgentInfoSigned");
-                    AgentInfoSigned::decode(&info_bytes)
-                        .expect("Failed to decode AgentInfoSigned")
+                    (
+                        AgentInfoSigned::decode(&info_bytes)
+                            .expect("Failed to decode AgentInfoSigned"),
+                        encoded_info,
+                    )
+
                 })
                 .collect();
+
+            println!("\x1b[36mSeparate AgentInfos:\n");
             for agent_info in &agent_infos {
-                println!("{:?}", agent_info);
+                println!("\x1b[36mAgent: \x1b[37m{:?}", agent_info.0.agent);
+                println!("\x1b[36mURL List: \x1b[94m{:?}", agent_info.0.url_list);
+                println!("\x1b[36mEncoded:\n\x1b[32m[{:?}]\n\n", agent_info.1);
             }
         }
         RuntimeFunctions::HcAddAgentInfos { infos } => {
