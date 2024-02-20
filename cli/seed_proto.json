@@ -12,7 +12,7 @@
         },
         {
             "meta": {
-                "name": "perspectiveDiffSync",
+                "name": "perspectiveDiffSync-socket",
                 "description": "Holochain based Perspective link sharing language, with revision signals sent with socket.io through a centralized server",
                 "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/p-diff-sync-socket-signaling",
                 "possibleTemplateParams": ["uid", "name", "description"]
@@ -21,7 +21,7 @@
         },
         {
             "meta": {
-                "name": "perspectiveDiffSync",
+                "name": "CloudLinks",
                 "description": "Centralized link language",
                 "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/p-diff-sync-socket-signaling",
                 "possibleTemplateParams": ["uid", "name", "description"]
