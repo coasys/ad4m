@@ -424,10 +424,10 @@ impl Query {
 
         let interface = get_holochain_service().await;
         let infos = interface.agent_infos().await?;
-
+        
         let encoded_infos: Vec<String> = infos
             .iter()
-            .map(|info|  base64::encode(serde_json::to_string(info).expect("Failed to encode AgentInfoSigned")))
+            .map(|info|  base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))
             .collect();
 
         Ok(serde_json::to_string(&encoded_infos)?)
