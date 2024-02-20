@@ -1,10 +1,10 @@
 # Hooks
 
-The following are a set of React hooks designed to manage state related to interacting with the AD4M (Agent-centric Decentralized Data Management) network within React applications:
+The following are a set of React hooks designed to easily work with ADAM principles like Perspectives, Expressions and Subject Classes within React applications:
 
 ## useAgent
 
-The `useAgent` hook is a custom React hook designed to manage state related to fetching and caching data from the AD4M (Agent-centric Decentralized Data Management) network.
+The `useAgent` hook is allows designed to manage state related to fetching and caching data about ADAM agents, i.e. users, based on their DID.
 
 ### Props
 
@@ -12,7 +12,7 @@ The `useAgent` hook accepts the following props:
 
 - `client`: An instance of `AgentClient` which represents a client to interact with the AD4M network.
 - `did`: A string or a function that returns a string representing the decentralized identifier (DID) of the agent.
-- `formatter`: A function that takes a DID string and returns a formatted data structure.
+- `formatter(links: LinkExpression[])`: A function that takes a links and formatted data structure.
 
 ### Return Values
 
@@ -32,7 +32,7 @@ import { useAgent } from '@coasys/ad4m/hooks/react';
 const MyComponent = () => {
   const client = new AgentClient();
   const did = "some-did";
-  const formatter = (did) => ({ id: did, name: "John Doe" });
+  const formatter = (links) => ({ id: links[0].data.target, name: links[1].data.target });
 
   const { agent, profile, error, mutate, reload } = useAgent({ client, did, formatter });
 
@@ -52,7 +52,7 @@ const MyComponent = () => {
 
 ## useClient
 
-The `useClient` hook is a custom React hook designed to manage state related to fetching and caching an AD4M (Agent-centric Decentralized Data Management) client in React applications. It provides an easy-to-use interface for interacting with the AD4M client, abstracting away the complexities of data fetching, caching, and error handling.
+The `useClient` hook is a hook provides access to the underlying `Ad4mClient.
 
 ### Props
 This hook does not accept any props.
@@ -92,11 +92,11 @@ export default MyComponent;
 
 ## useMe
 
-The `useMe` hook is a custom React hook designed to manage state related to fetching and caching user data, including agent information and profile data, from the AD4M (Agent-centric Decentralized Data Management) network in React applications. It provides an easy-to-use interface for interacting with the user's agent and profile data, abstracting away the complexities of data fetching, caching, and error handling.
+The `useMe` hook is a custom React hook designed to manage state related to fetching and caching user data, including agent information and profile data.
 
 ### Props
 - `agent`: An instance of `AgentClient` representing the user's agent in the AD4M network.
-- `formatter`: A function that takes an array of `LinkExpression` objects and returns a formatted data structure.
+- `formatter(links: LinkExpression[])`: A function that takes a links and formatted data structure.
 
 ### Return Value
 The `useMe` hook returns an object with the following properties:
@@ -146,7 +146,7 @@ export default MyComponent;
 
 ## usePerspective
 
-The `usePerspective` hook is a custom React hook designed to manage state related to fetching and caching a specific perspective from the AD4M (Agent-centric Decentralized Data Management) network in React applications. It provides an easy-to-use interface for interacting with the perspective data, abstracting away the complexities of data fetching, caching, and error handling.
+The `usePerspective` hook is a hook that allows to fetching and caching a specific perspective from the AD4M.
 
 ### Props
 - `client`: An instance of `Ad4mClient` representing the client to interact with the AD4M network.
@@ -188,7 +188,7 @@ export default MyComponent;
 
 ## usePerspectives
 
-The `usePerspectives` hook is a custom React hook designed to manage state related to fetching and caching perspectives from the AD4M (Agent-centric Decentralized Data Management) network in React applications. It provides an easy-to-use interface for interacting with perspectives and their associated events, abstracting away the complexities of data fetching, caching, and event handling.
+The `usePerspectives` hook is a hook that allows to fetching and caching all the perspectives from the AD4M.
 
 ### Props
 - `client`: An instance of `Ad4mClient` representing the client to interact with the AD4M network.
@@ -256,7 +256,7 @@ export default MyComponent;
 
 ## useSubject
 
-The `useSubject` hook is a custom React hook designed to manage state related to fetching, caching, and subscribing to a specific subject within a perspective on the AD4M (Agent-centric Decentralized Data Management) network. It provides an easy-to-use interface for interacting with subject data, abstracting away the complexities of data fetching, caching, and event handling.
+The `useSubject` hook is a hook that allows you to interact with a single subject instance and listen to any changes on that instance.
 
 ### Props
 - `id`: A string representing the unique identifier of the subject.
@@ -314,7 +314,7 @@ export default MyComponent;
 
 ## useSubjects
 
-The `useSubjects` hook is a custom React hook designed to manage state related to fetching, caching, and subscribing to multiple subjects within a perspective on the AD4M (Agent-centric Decentralized Data Management) network. It provides an easy-to-use interface for interacting with subject data, abstracting away the complexities of data fetching, caching, and event handling.
+The `useSubjects` hook that allows to listen to all the subject instances of a subject class.
 
 ### Props
 - `source`: A string representing the source of the subjects.
