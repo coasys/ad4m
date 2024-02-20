@@ -5,7 +5,7 @@ and create content. You can think of them as **small edge functions** that are e
 
 ## Why Deno Compatibility?
 
-Deno compatibility is required because of its several advantages:
+Deno compatibility is required because Languages get executed inside a sandbox that the ADAM executor spawns, and since it needs access to internals of ADAM, this needs to be an integrated JavaScript interpreter that is intertwined with the ADAM implementation. We've decided to build this Language engine on Deno of its several advantages:
 
 - **Security**: Deno is secure by default. No file, network, or environment access (unless explicitly enabled).
 - **TypeScript Support**: Deno supports TypeScript out of the box.
