@@ -22,6 +22,7 @@ use options::{main_module_url, main_worker_options};
 mod futures;
 mod options;
 mod pubsub_extension;
+mod signature_extension;
 mod string_module_loader;
 mod utils_extension;
 mod wallet_extension;
