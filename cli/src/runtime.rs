@@ -126,8 +126,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
                 .map(|encoded_info| {
                     let info_bytes = base64::decode(encoded_info)
                         .expect("Failed to decode base64 AgentInfoSigned");
-                    AgentInfoSigned::decode(&info_bytes)
-                        .expect("Failed to decode AgentInfoSigned")
+                    let info_str = String::from_utf8_lossy(&info_bytes);
+                    let json: AgentInfoSigned = serde_json::from_str(&info_str)
+                        .expect("Failed to parse JSON");
+                    json
                 })
                 .collect();
             for agent_info in &agent_infos {

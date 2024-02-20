@@ -779,19 +779,18 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             runtimeHcAddAgentInfos: async (args, context) => {
                 const { agentInfos } = args
-                //@ts-ignore
-                const parsed = JSON.parse(agentInfos).map(info => {
-                    return {
-                        //@ts-ignore
-                        agent: Buffer.from(Object.values(info.agent)),
-                        //@ts-ignore
-                        signature: Buffer.from(Object.values(info.signature)),
-                        //@ts-ignore
-                        agent_info: Buffer.from(Object.values(info.agent_info))
-                    }
-                })
 
-                await core.holochainAddAgentInfos(parsed)
+                const parsedObject = JSON.parse(agentInfos).map((b64: string) => {
+                    const jsonString = Buffer.from((b64), 'base64').toString('utf-8');
+                    let parsed = JSON.parse(jsonString);
+                    parsed.agent = Buffer.from(parsed.agent);
+                    parsed.signature = Buffer.from(parsed.signature);
+                    parsed.agent_info = Buffer.from(parsed.agent_info);
+                    return parsed;
+                });
+
+
+                await core.holochainAddAgentInfos(parsedObject)
                 return true
             },
 
