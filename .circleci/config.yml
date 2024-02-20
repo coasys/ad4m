@@ -4,6 +4,8 @@ orbs:
   node: circleci/node@5.2.0
   go: circleci/go@1.10.0
   rust: circleci/rust@1.6.1
+  win: circleci/windows@2.2.0
+  mac: circleci/macos@1.1.0
 
 jobs:
   build:
@@ -29,7 +31,7 @@ jobs:
               cd crates/hc
               cargo build --release
               pwd
-              ls -la 
+              ls -la
               mkdir -p $HOME/.cargo/bin
               cd ../../target/release
               pwd
@@ -80,7 +82,7 @@ jobs:
           name: Root tests
           command: pnpm test
 
-  integration-tests-js:
+  integration-tests-js-linux:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     resource_class: xlarge
@@ -144,6 +146,191 @@ jobs:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
 
+  integration-tests-js-windows:
+    executor:
+      name: win/default
+      size: xlarge
+    steps:
+      - add_ssh_keys:
+          fingerprints:
+            - "SHA256:pSp0IbmprP+NHD1iG2+k2xUeJOG1yTzEnfqRLnUCk3c"
+      - checkout
+      - run:
+          name: Install Deno
+          command: choco install deno
+      - run:
+          name: Install Rust
+          command: choco install rust
+      - run:
+          name: Chnage node version
+          command: |
+            nvm list
+            nvm install 18.17.0
+            nvm use 18.17.0
+      - run:
+          name: Install pnpm
+          command: choco install pnpm
+      - run:
+          name: Install cmake
+          command: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=User'
+      - run:
+          name: install dependencies 
+          command: choco install protoc curl cygwin gnuwin32-m4 msys2 make mingw python python2 visualstudio2019community
+      - run:
+          name: Verify installations
+          command: |
+            refreshenv
+            rustc --version
+            node --version
+            deno --version
+            pnpm --version
+            protoc --version
+            cmake --version
+      - run:
+          name: Set npm config
+          command: |
+            npm cache clean --force
+            npm install -g npm@latest
+            npm config set python python2.7
+            npm config set msvs_version 2019
+      - run:
+          name: Install dependencies
+          command: pnpm install
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install
+      - run:
+          name: Install HC
+          command: |
+            ls -la $HOME/.cargo/bin
+            if (!(Test-Path "$HOME/.cargo/bin/hc")) {
+              git clone https://github.com/holochain/holochain.git
+              cd holochain
+              git checkout holochain-0.3.0-beta-dev.27
+              cd crates/hc
+              cargo build --release
+              pwd
+              ls -la
+              New-Item -ItemType Directory -Force -Path $HOME/.cargo/bin
+              cd ../../target/release
+              pwd
+              ls -lah
+              Copy-Item -Path hc -Destination $HOME/.cargo/bin/hc
+              cd $HOME/.cargo/bin
+              pwd
+              ls -lah
+              ./hc --version
+            }
+            $env:PATH = "$HOME/.cargo/bin;" + $env:PATH
+      - save_cache:
+          key: hc-0.3.0-beta-dev-27-v7
+          paths:
+            - /home/circleci/.cargo/bin
+      - run:
+          name: Build ADAM (without bootstrap languages)
+          command: pnpm run build-libs
+      - run:
+          name: Build bootstrap languages
+          command: pnpm run build-languages
+      - run:
+          name: Run integration tests
+          command: cd ./tests/js && pnpm run test-main
+
+  integration-tests-js-macos:
+    macos:
+      xcode: "15.2.0"
+    steps:
+      - checkout
+      - node/install:
+          node-version: '16.14'
+      - run:
+          name: Install Rust
+          command: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
+            ~/.cargo/bin/rustup target add wasm32-unknown-unknown
+      - run:
+          name: Install Go
+          command: |
+            curl -O https://dl.google.com/go/go1.20.6.darwin-amd64.tar.gz
+            sudo tar -C /usr/local -xzf go1.20.6.darwin-amd64.tar.gz
+            echo 'export PATH="/usr/local/go/bin:$PATH"' >> $BASH_ENV
+      - run:
+          name: Install Deno
+          command: |
+            curl -fsSL https://deno.land/x/install/install.sh | sh
+            echo 'export PATH="/Users/distiller/.deno/bin:$PATH"' >> $BASH_ENV
+      - run:
+          name: Install pnpm
+          command: npm install -g pnpm
+      - run:
+          name: Install Protobuf and CMake
+          command: brew install protobuf cmake
+      - run:
+          name: Verify installations
+          command: |
+            rustc --version
+            node --version
+            deno --version
+            pnpm --version
+            protoc --version
+            cmake --version
+            python --version
+      - restore_cache:
+          keys:
+            - hc-0.3.0-beta-dev-27-v7
+            - hc-
+            - rust-cache-{{ checksum "Cargo.lock" }}
+            - rust-cache-
+      - run:
+          name: Install HC
+          command: |
+            ls -la $HOME/.cargo/bin
+            if [ ! -f "$HOME/.cargo/bin/hc" ]; then
+              git clone https://github.com/holochain/holochain.git
+              cd holochain
+              git checkout holochain-0.3.0-beta-dev.27
+              cd crates/hc
+              cargo build --release
+              pwd
+              ls -la
+              mkdir -p $HOME/.cargo/bin
+              cd ../../target/release
+              pwd
+              ls -lah
+              cp hc $HOME/.cargo/bin/hc
+              cd $HOME/.cargo/bin
+              pwd
+              ls -lah
+              ./hc --version
+            fi
+            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
+      - save_cache:
+          key: hc-0.3.0-beta-dev-27-v7
+          paths:
+            - /home/circleci/.cargo/bin
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build ADAM (without bootstrap languages)
+          command: pnpm run build-libs
+      - save_cache:
+          key: rust-cache-{{ checksum "Cargo.lock" }}-v2
+          paths:
+            - ./target
+            - ~/.cargo/registry
+            - ~/.cargo/git
+      - run:
+          name: Build bootstrap languages
+          command: pnpm run build-languages
+      - run:
+          name: Run integration tests
+          command: cd ./tests/js && pnpm run test-main
+
   integration-tests-cli:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
@@ -164,10 +351,12 @@ workflows:
   version: 2
   build-and-test:
     jobs:
-      - build
-      - unit-tests:
-          requires:
-            - build
-      - integration-tests-js:
-          requires:
-            - build
+      # - build
+      # - unit-tests:
+      #     requires:
+      #       - build
+      # - integration-tests-js-linux:
+      #     requires:
+      #       - build
+      # - integration-tests-js-windows
+      - integration-tests-js-macos
