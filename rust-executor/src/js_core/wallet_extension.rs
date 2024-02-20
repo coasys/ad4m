@@ -2,8 +2,7 @@ use std::borrow::Cow;
 
 use base64::{engine::general_purpose as base64engine, Engine as _};
 use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op2, Extension, Op};
-use did_key::{CoreSign, PatchedKeyPair};
-use log::error;
+use did_key::CoreSign;
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
@@ -115,22 +114,6 @@ fn wallet_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
     Ok(signature)
 }
 
-#[op2(fast)]
-fn wallet_verify(#[string] did: String, #[buffer] message: &[u8], #[buffer] signature: &[u8]) -> bool {
-    if let Ok(key_pair) = PatchedKeyPair::try_from(did.as_str()) {
-        match key_pair.verify(message, signature) {
-            Ok(_) => true,
-            Err(e) => {
-                error!("Signature verification failed: {:?}", e);
-                false
-            }
-        }
-    } else {
-        error!("Failed to parse DID as key method: {}", did);
-        false
-    }
-}
-
 pub fn build() -> Extension {
     Extension {
         name: "wallet",
@@ -145,7 +128,6 @@ pub fn build() -> Extension {
             wallet_export::DECL,
             wallet_load::DECL,
             wallet_sign::DECL,
-            wallet_verify::DECL,
         ]),
         ..Default::default()
     }
