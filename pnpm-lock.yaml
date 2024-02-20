@@ -125,7 +125,7 @@ importers:
         specifier: '*'
         version: link:../../connect
       '@coasys/hooks-helpers':
-        specifier: link:../helpers
+        specifier: '*'
         version: link:../helpers
       '@types/react':
         specifier: ^18.2.55
