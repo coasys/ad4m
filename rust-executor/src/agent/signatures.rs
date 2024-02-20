@@ -17,7 +17,7 @@ pub fn verify(expr: &Expression) -> Result<bool, AnyError> {
     Ok(inner_verify(&expr.author, &message, &sig_bytes))
 }
 
-fn build_message(data: &serde_json::Value, timestamp: &str) -> Vec<u8> {
+pub fn build_message(data: &serde_json::Value, timestamp: &str) -> Vec<u8> {
     let payload  = json!({ "data": data, "timestamp": timestamp });
     let payload_string = serde_json::to_string(&payload).expect("Failed to serialize payload");
     let mut hasher = Sha256::new();
@@ -25,7 +25,7 @@ fn build_message(data: &serde_json::Value, timestamp: &str) -> Vec<u8> {
     hasher.finalize().as_slice().try_into().expect("Hash should be 32 bytes")
 }
 
-fn build_message_raw(data: &serde_json::Value) -> Vec<u8> {
+pub fn build_message_raw(data: &serde_json::Value) -> Vec<u8> {
     let payload = json!({ "data": data });
     let payload_string = serde_json::to_string(&payload).expect("Failed to serialize payload");
     let mut hasher = Sha256::new();

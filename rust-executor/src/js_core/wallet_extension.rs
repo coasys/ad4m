@@ -2,7 +2,6 @@ use std::borrow::Cow;
 
 use base64::{engine::general_purpose as base64engine, Engine as _};
 use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op2, Extension, Op};
-use did_key::CoreSign;
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
@@ -104,14 +103,7 @@ fn wallet_load(#[string] data: String) -> Result<(), AnyError> {
 #[op2]
 #[serde]
 fn wallet_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
-    let wallet_instance = Wallet::instance();
-    let wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let name = "main".to_string();
-    let signature = wallet_ref
-        .sign(&name, payload)
-        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
-    Ok(signature)
+    crate::agent::sign(payload)
 }
 
 pub fn build() -> Extension {
