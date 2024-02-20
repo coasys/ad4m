@@ -1,13 +1,13 @@
+use crate::agent::capabilities::{AuthInfo, Capability};
+use crate::js_core::JsCoreHandle;
 use juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::js_core::JsCoreHandle;
-
 #[derive(Clone)]
 pub struct RequestContext {
-    pub capability: String,
+    pub capabilities: Result<Vec<Capability>, String>,
     pub js_handle: JsCoreHandle,
 }
 
@@ -46,16 +46,6 @@ pub struct Apps {
     pub token: String,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthInfo {
-    pub app_desc: String,
-    pub app_icon_path: Option<String>,
-    pub app_name: String,
-    pub app_url: String,
-    pub capabilities: Vec<Capability>,
-}
-
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfoInput {
@@ -71,13 +61,6 @@ pub struct AuthInfoInput {
     pub app_url: Option<String>,
     #[graphql(name = "capabilities")]
     pub capabilities: Option<Vec<CapabilityInput>>,
-}
-
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Capability {
-    pub can: Vec<String>,
-    pub with: Resource,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -133,7 +116,16 @@ pub struct ExceptionInfo {
     pub addon: Option<String>,
     pub message: String,
     pub title: String,
-    pub r#type: f64,
+    pub r#type: ExceptionType,
+}
+
+#[derive(GraphQLEnum, Default, Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ExceptionType {
+    LanguageIsNotLoaded = 0,
+    ExpressionIsNotVerified = 1,
+    AgentIsUntrusted = 2,
+    #[default]
+    CapabilityRequested = 3,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

@@ -21,7 +21,7 @@ pub struct Ad4mConfig {
     pub hc_proxy_url: Option<String>,
     pub hc_bootstrap_url: Option<String>,
     pub connect_holochain: Option<bool>,
-    pub admin_credential: Option<String>
+    pub admin_credential: Option<String>,
 }
 
 impl Ad4mConfig {
@@ -95,7 +95,7 @@ impl Default for Ad4mConfig {
             hc_proxy_url: None,
             hc_bootstrap_url: None,
             connect_holochain: None,
-            admin_credential: None
+            admin_credential: None,
         };
         config.prepare();
         config

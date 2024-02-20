@@ -450,3 +450,15 @@ impl From<ByDidAgentByDid> for Agent {
         }
     }
 }
+
+pub struct Neighbourhood {
+    pub link_language: String,
+    pub meta: Perspective,
+}
+
+pub struct NeighbourhoodExpression {
+    pub author: String,
+    pub data: Neighbourhood,
+    pub proof: ExpressionProof,
+    pub timestamp: String,
+}

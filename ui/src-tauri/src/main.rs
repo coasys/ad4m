@@ -236,7 +236,7 @@ fn main() {
             let handle = app.handle();
 
             async fn spawn_executor(config: Ad4mConfig, splashscreen_clone: Window, handle: &AppHandle) {
-                rust_executor::run_with_tokio(config.clone()).await;
+                rust_executor::run(config.clone()).await;
                 let url = app_url();
                 info!("Executor clone on: {:?}", url);
                 let _ = splashscreen_clone.hide();

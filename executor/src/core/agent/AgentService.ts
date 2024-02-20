@@ -1,30 +1,15 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { Key } from "../../wallet_extension";
 import {
   Language,
   Expression,
   PublicSharing,
   ReadOnlyLanguage,
-  ExceptionType,
 } from "@coasys/ad4m";
-import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@coasys/ad4m";
+import { Agent, ExpressionProof, AgentSignature } from "@coasys/ad4m";
 import Signatures from "./Signatures";
 import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
-import { v4 as uuidv4 } from "uuid";
-import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
-import {
-  ALL_CAPABILITY,
-  AuthInfo,
-  AuthInfoExtended,
-  DefaultTokenValidPeriod,
-  genRequestKey,
-  genRandomDigits,
-  AGENT_AUTH_CAPABILITY,
-  Capability,
-} from "./Auth";
-import * as secp from "@noble/secp256k1";
 import { getPubSub } from "../utils";
 
 
@@ -33,16 +18,11 @@ export default class AgentService {
   #didDocument?: string;
   #signingKeyId?: string;
   #file: string;
-  #appsFile: string;
-  #apps: AuthInfoExtended[];
-  #requestingAuthInfo?: AuthInfoExtended;
   #fileProfile: string;
   #agent?: Agent;
   #agentLanguage?: Language;
   #pubSub: PubSub;
-  #requests: Map<string, AuthInfo>;
-  #tokenValidPeriod: number;
-  #adminCredential: string;
+
 
   #readyPromise: Promise<void>;
   #readyPromiseResolve?: (value: void | PromiseLike<void>) => void;
@@ -50,26 +30,10 @@ export default class AgentService {
   constructor(rootConfigPath: string, adminCredential?: string) {
     this.#file = path.join(rootConfigPath, "agent.json");
     this.#fileProfile = path.join(rootConfigPath, "agentProfile.json");
-    this.#appsFile = path.join(rootConfigPath, "apps.json");
-    try {
-      this.#apps = JSON.parse(fs.readFileSync(this.#appsFile).toString());
-    } catch (e) {
-      this.#apps = [];
-    }
     this.#pubSub = getPubSub();
     this.#readyPromise = new Promise((resolve) => {
       this.#readyPromiseResolve = resolve;
     });
-    this.#requests = new Map();
-    this.#tokenValidPeriod = DefaultTokenValidPeriod;
-    if (adminCredential) {
-      this.#adminCredential = adminCredential;
-    } else {
-      console.warn(
-        "adminCredential is not set or empty, empty token will possess admin capabililities."
-      );
-      this.#adminCredential = "";
-    }
   }
 
   get did() {
@@ -204,10 +168,6 @@ export default class AgentService {
     }
   }
 
-  private getSigningKey(): Key {
-    return WALLET.getMainKey();
-  }
-
   async createNewKeys() {
     WALLET.createMainKey()
     const didDocument = WALLET.getMainKeyDocument()
@@ -287,110 +247,6 @@ export default class AgentService {
       did: this.#did,
       didDocument: this.#didDocument,
     };
-  }
-
-  async getCapabilities(token: string) {
-    if (token == this.#adminCredential) {
-      return [ALL_CAPABILITY];
-    }
-
-    if (token === "") {
-      return [AGENT_AUTH_CAPABILITY];
-    }
-
-    const payload = await JWT.verifyJwt(token);
-
-    //@ts-ignore
-    return payload.capabilities.capabilities;
-  }
-
-  isAdminCredential(token: string) {
-    return token == this.#adminCredential;
-  }
-
-  async requestCapability(authInfo: AuthInfo) {
-    let requestId = uuidv4();
-    let authExtended = {
-      requestId,
-      auth: authInfo,
-    } as AuthInfoExtended;
-
-    await this.#pubSub.publish(PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC, {
-      title: "Request to authenticate application",
-      message: `${authInfo.appName} is waiting for authentication, go to ad4m launcher for more information.`,
-      type: ExceptionType.CapabilityRequested,
-      addon: JSON.stringify(authExtended),
-    } as ExceptionInfo);
-
-    return requestId;
-  }
-
-  // TODO, we may want to change the capability request workflow.
-  // https://github.com/perspect3vism/ad4m-executor/issues/73
-  permitCapability(authExt: string, capabilities: Capability[]) {
-    console.log("AgentService.permitCapability(): admin user capabilities: ", capabilities);
-    console.log("AgentService.permitCapability(): auth info: ", authExt);
-
-    let { requestId, auth }: AuthInfoExtended = JSON.parse(authExt);
-    let rand = genRandomDigits();
-    this.#requests.set(genRequestKey(requestId, rand), auth);
-
-    this.#requestingAuthInfo = JSON.parse(authExt);
-
-    return rand;
-  }
-
-  async generateJwt(requestId: string, rand: string) {
-    const authKey = genRequestKey(requestId, rand);
-    const auth = this.#requests.get(authKey);
-
-    if (!auth) {
-      throw new Error("Can't find permitted request");
-    }
-
-    const jwt = await JWT.generateJwt(this.did || "", `${auth.appName}:${this.did || ""}`, this.#tokenValidPeriod, auth);
-
-    this.#requests.delete(authKey);
-
-    if (requestId === this.#requestingAuthInfo?.requestId) {
-      const apps = [...this.#apps, { ...this.#requestingAuthInfo, token: jwt }];
-      this.#apps = apps;
-      fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
-
-      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);      
-    }
-
-    return jwt;
-  }
-
-  getApps(): AuthInfoExtended[] {
-    return this.#apps;
-  }
-
-  async removeApp(requestId: string) {
-    try {
-      this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId);
-
-      fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
-
-      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
-    } catch (e) {
-      console.error("Error while removing app", e);
-    }
-  }
-
-  async revokeAppToken(requestId: string) {
-    try {
-      this.#apps = this.#apps.map((app: any) =>
-        app.requestId === requestId ? { ...app, revoked: true } : app
-      );
-
-      fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
-
-      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
-    } catch (e) {
-      console.error("Error while revoking token", e);
-    }
   }
 
   async signMessage(msg: string) {

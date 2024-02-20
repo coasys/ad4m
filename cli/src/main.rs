@@ -222,7 +222,7 @@ async fn main() -> Result<()> {
     } = args.domain
     {
         let _ = tokio::spawn(async move {
-            rust_executor::run_with_tokio(Ad4mConfig {
+            rust_executor::run(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
                 language_language_only,
