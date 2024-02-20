@@ -32,7 +32,7 @@ pub enum RuntimeFunctions {
     Friends,
     HcAgentInfos,
     HcAddAgentInfos {
-        infos: String,
+        infos_file: Option<String>,
     },
     VerifySignature {
         did: String,
@@ -142,9 +142,22 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
                 println!("\x1b[36mEncoded:\n\x1b[32m[{:?}]\n\n", agent_info.1);
             }
         }
-        RuntimeFunctions::HcAddAgentInfos { infos } => {
-            ad4m_client.runtime.hc_add_agent_infos(infos).await?;
-            println!("Holochain agent infos added!");
+        RuntimeFunctions::HcAddAgentInfos { infos_file } => {
+            if let Some(infos_file) = infos_file {
+                let infos = std::fs::read_to_string(infos_file)?;
+                ad4m_client.runtime.hc_add_agent_infos(infos).await?;
+                println!("Holochain agent infos added!");
+            } else {
+            let mut rl = rustyline::Editor::<()>::new()?;
+            let readline = rl.readline("Please enter the encoded agent infos string: ");
+            match readline {
+                Ok(line) => {
+                    ad4m_client.runtime.hc_add_agent_infos(line).await?;
+                    println!("Holochain agent infos added!");
+                },
+                Err(_) => println!("Failed to read line"),
+            }
+            }
         }
         RuntimeFunctions::VerifySignature {
             did,
