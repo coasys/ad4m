@@ -11,7 +11,10 @@
     "tests/js",
     "rust-executor",
     "cli",
-    "dapp"
+    "dapp",
+    "ad4m-hooks/react",
+    "ad4m-hooks/vue",
+    "ad4m-hooks/helpers"
   ],
   "private": true,
   "scripts": {
@@ -89,5 +92,5 @@
       "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
-  "version": "0.8.1"
+  "version": "0.9.0-prerelease"
 }

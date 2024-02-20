@@ -7,7 +7,6 @@ function denoAlias(nodeModule) {
         name: `${nodeModule}-alias`,
         setup(build) {
             build.onResolve({ filter: new RegExp(`^node:${nodeModule}$`) }, (args) => {
-                console.log('meow 1111', args)
                 return { path: nodeModule, namespace: 'imports' };
             });
         },

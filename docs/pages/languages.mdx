@@ -3,6 +3,39 @@
 Languages are essentially Node.js modules that encapsulate how to retrieve
 and create content. You can think of them as **small edge functions** that are executed on the Agents device and that can communicate with different backends and technologies.
 
+## Why Deno Compatibility?
+
+Deno compatibility is required because Languages get executed inside a sandbox that the ADAM executor spawns, and since it needs access to internals of ADAM, this needs to be an integrated JavaScript interpreter that is intertwined with the ADAM implementation. We've decided to build this Language engine on Deno of its several advantages:
+
+- **Security**: Deno is secure by default. No file, network, or environment access (unless explicitly enabled).
+- **TypeScript Support**: Deno supports TypeScript out of the box.
+- **Standard Modules**: Deno provides a set of reviewed (audited) standard modules that are guaranteed to work with Deno.
+
+## How to Make Your Language Deno Compatible?
+
+To make your Language Deno compatible, you need to follow these steps:
+
+1. **Use ES Modules**: Deno uses ES Modules (ESM) instead of CommonJS, which is used by Node.js. So, you need to use `import` and `export` instead of `require()` and `module.exports`.
+
+2. **Use Node Specifiers**: Unlike Node.js, Deno requires the full file name including its extension when importing modules. For example, use `import { serve } from "./server.ts";` instead of `import { serve } from "./server";`.
+
+3. **No `node_modules`**: Deno doesn't use the `node_modules` directory or `package.json`. Instead, it imports modules from URLs or file paths.
+
+4. **Use Built-in Functions and Standard Modules**: Deno has several built-in functions and does not rely on a `package.json`. So, you need to use Deno's built-in functions and standard modules instead of npm packages. You can find more about Deno's standard modules [here](https://deno.land/std).
+
+Remember, making your Language Deno compatible means it can run in more environments and take advantage of the benefits that Deno provides.
+
+# Language Templates
+
+To help you get started with creating your own languages, we have provided some templates that you can use as a starting point. These templates are Deno compatible and provide a basic structure for your language.
+
+- [Expression Language without DNA template](https://github.com/coasys/ad4m-language-template-js)
+- [Expression Language with DNA template](https://github.com/coasys/ad4m-expression-language-with-dna)
+- [Link Language without DNA template](https://github.com/coasys/ad4m-link-template-js)
+- [Link Language with DNA template](https://github.com/coasys/ad4m-link-template-language-dna)
+
+You can clone these repositories and modify them to create your own language. Remember to follow the guidelines for making your language Deno compatible.
+
 ## Creating a Language
 
 There are several types of Languages, but let's start with the most common one – an Expression Language.

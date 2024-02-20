@@ -92,7 +92,7 @@ jobs:
 
     - name: install dependencies (windows only)
       if: matrix.platform == 'windows-latest'
-      run: choco install protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
+      run: choco install strawberryperl protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
 
     - name: get version
       run: echo "PACKAGE_VERSION=$(node -p "require('./ui/package.json').version")" >> $GITHUB_ENV
@@ -354,6 +354,30 @@ jobs:
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: connect/package.json
+          access: public
+
+      - name: Publish ad4m hook helpers
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.COASYS_NPM_TOKEN }}
+          package: ad4m-hooks/helpers/package.json
+          tag: ${{ env.NPM_TAG }}
+          access: public
+
+      - name: Publish ad4m react hooks
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.COASYS_NPM_TOKEN }}
+          package: ad4m-hooks/react/package.json
+          tag: ${{ env.NPM_TAG }}
+          access: public
+
+      - name: Publish ad4m vue hooks
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.COASYS_NPM_TOKEN }}
+          package: ad4m-hooks/vue/package.json
+          tag: ${{ env.NPM_TAG }}
           access: public
 
       - name: Publish executor
