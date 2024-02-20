@@ -70,6 +70,10 @@ struct ClapApp {
     /// Override default executor URL look-up and provide custom URL
     #[arg(short, long)]
     executor_url: Option<String>,
+
+    /// Provide admin credential to gain all capabilities
+    #[arg(short, long)]
+    admin_credential: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -160,7 +164,9 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
         crate::startup::get_executor_url()?
     };
 
-    let cap_token = if args.no_capability {
+    let cap_token = if let Some(admin_credential) = &args.admin_credential {
+        admin_credential.clone()
+    } else if args.no_capability {
         "".to_string()
     } else {
         match &args.domain {
