@@ -26,7 +26,7 @@ pub fn did() -> String {
     did_document().id.clone()
 }
 
-pub fn create_signed_expression(data: serde_json::Value) -> Result<Expression, Box<dyn std::error::Error>> {
+pub fn create_signed_expression(data: serde_json::Value) -> Result<Expression, AnyError> {
     let timestamp = chrono::Utc::now().to_rfc3339();
     let payload_bytes = signatures::build_message(&data, &timestamp);
 
