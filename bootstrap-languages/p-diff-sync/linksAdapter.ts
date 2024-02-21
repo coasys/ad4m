@@ -50,9 +50,9 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async sync(): Promise<PerspectiveDiff> {
-    console.log("PerspectiveDiffSync.sync(); Getting lock");
+    //console.log("PerspectiveDiffSync.sync(); Getting lock");
     const release = await this.generalMutex.acquire();
-    console.log("PerspectiveDiffSync.sync(); Got lock");
+    //console.log("PerspectiveDiffSync.sync(); Got lock");
     try {
       //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
@@ -70,7 +70,6 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async gossip() {
-    console.log("PerspectiveDiffSync.gossip()");
     this.gossipLogCount += 1;
     let lostPeers: DID[] = [];
 
@@ -92,8 +91,6 @@ export class LinkAdapter implements LinkSyncAdapter {
       
       // Lexically sort the peers
       peers.sort();
-
-      console.log("PerspectiveDiffSync.gossip(); peers:", peers);
 
       // If we are the first peer, we are the scribe
       let is_scribe = peers[0] == this.me;
@@ -196,7 +193,6 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async commit(diff: PerspectiveDiff): Promise<string> {
-    console.log("PerspectiveDiffSync.commit()");
     //console.log("PerspectiveDiffSync.commit(); Getting lock");
     const release = await this.generalMutex.acquire();
     try {
@@ -228,20 +224,19 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async handleHolochainSignal(signal: any): Promise<void> {
-    console.log("PerspectiveDiffSync.handleHolochainSignal(); signal", signal);
     const { diff, reference_hash, reference, broadcast_author } = signal.payload;
     //Check if this signal came from another agent & contains a diff and reference_hash
     if (diff && reference_hash && reference && broadcast_author) {
-      console.log(`PerspectiveDiffSync.handleHolochainSignal: 
-            diff: ${JSON.stringify(diff)}
-            reference_hash: ${reference_hash.toString('base64')}
-            reference: {
-                diff: ${reference.diff?.toString('base64')}
-                parents: ${reference.parents ? reference.parents.map( (parent: Buffer) => parent ? parent.toString('base64') : 'null').join(', '):'none'}
-                diffs_since_snapshot: ${reference?.diffs_since_snapshot}
-            }
-            broadcast_author: ${broadcast_author}
-            `)
+      // console.log(`PerspectiveDiffSync.handleHolochainSignal: 
+      //       diff: ${JSON.stringify(diff)}
+      //       reference_hash: ${reference_hash.toString('base64')}
+      //       reference: {
+      //           diff: ${reference.diff?.toString('base64')}
+      //           parents: ${reference.parents ? reference.parents.map( (parent: Buffer) => parent ? parent.toString('base64') : 'null').join(', '):'none'}
+      //           diffs_since_snapshot: ${reference?.diffs_since_snapshot}
+      //       }
+      //       broadcast_author: ${broadcast_author}
+      //       `)
       try {
         //console.log("PerspectiveDiffSync.handleHolochainSignal: Getting lock");
 

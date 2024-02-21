@@ -214,7 +214,7 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
 pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver>(
     broadcast: HashBroadcast,
 ) -> SocialContextResult<()> {
-    debug!("===PerspectiveDiffSync.handle_broadcast(): Function start");
+    // debug!("===PerspectiveDiffSync.fast_forward_signal(): Function start");
     // let fn_start = get_now()?.time();
     let diff_reference = broadcast.reference.clone();
     let revision = broadcast.reference_hash.clone();
@@ -224,10 +224,10 @@ pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver>(
     if current_revision.is_some() {
         let current_revision = current_revision.unwrap();
         if revision == current_revision.hash {
-            debug!("===PerspectiveDiffSync.handle_broadcast(): Revision is the same as current");
+            // debug!("===PerspectiveDiffSync.fast_forward_signal(): Revision is the same as current");
         };
         if diff_reference.parents == Some(vec![current_revision.hash]) {
-            debug!("===PerspectiveDiffSync.handle_broadcast(): Revisions parent is the same as current, we can fast forward our current");
+            // debug!("===PerspectiveDiffSync.fast_forward_signal(): Revisions parent is the same as current, we can fast forward our current");
             update_current_revision::<Retriever>(revision, get_now()?)?;
             emit_signal(broadcast.diff.clone())?;
         };

@@ -101,7 +101,6 @@ pub fn update_current_revision(_hash: Hash) -> ExternResult<()> {
 
 #[hdk_extern]
 fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
-    info!("recv_remote_signal");
     //Check if its a normal diff expression signal
     match HashBroadcast::try_from(signal.clone()) {
         Ok(broadcast) => {
@@ -111,10 +110,7 @@ fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
         }
         //Check if its a broadcast message
         Err(_) => match PerspectiveExpression::try_from(signal.clone()) {
-            Ok(sig) => {
-                info!("recv_remote_signal signal: {:?}", sig);
-                emit_signal(sig)?
-            }
+            Ok(sig) => emit_signal(sig)?,
             //Check if its an online ping
             Err(_) => return Err(utils::err(&format!("Signal not recognized: {:?}", signal))),
         },
