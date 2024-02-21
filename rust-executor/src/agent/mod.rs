@@ -90,3 +90,71 @@ impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::agent::signatures::{verify_string_signed_by_did, verify};
+    use crate::types::ExpressionProof;
+
+    fn setup_wallet() {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_mut().expect("wallet instance");
+        wallet_ref.generate_keypair("main".to_string());
+    }
+
+    #[test]
+    fn test_sign_and_verify_string_hex_roundtrip() {
+        setup_wallet();
+        let test_message = "Hello, World!".to_string();
+        let signature = sign_string_hex(test_message.clone()).expect("Failed to sign message");
+        let did = did();
+
+        assert!(
+            verify_string_signed_by_did(&did, &test_message, &signature).expect("Verification failed"),
+            "Signature verification for sign_string_hex failed"
+        );
+    }
+
+    #[test]
+    fn test_create_signed_expression() {
+        setup_wallet();
+        let signed_expression = create_signed_expression(json!({"test": "data"})).expect("Failed to create signed expression");
+        assert!(
+            signatures::verify(&signed_expression).expect("Verification failed"),
+            "Signature verification for create_signed_expression failed"
+        );
+
+        let mut broken = signed_expression.clone();
+        broken.proof.signature = "broken".to_string();
+
+        assert!(signatures::verify(&broken).is_err(), "Broken signature verification should fail");
+
+        let mut changed = signed_expression.clone();
+        changed.data = json!({"changed": "data"});
+
+        assert!(
+            !signatures::verify(&changed).expect("Verification failed"),
+            "Signature invalidation for create_signed_expression failed"
+        );
+    }
+
+
+    #[test]
+    fn test_agent_signature_roundtrip() {
+        setup_wallet();
+        let test_message = "Agent signature test".to_string();
+        let agent_signature = AgentSignature::from_message(test_message.clone()).expect("Failed to create agent signature");
+        let did = did();
+
+        assert!(
+            verify_string_signed_by_did(&did, &test_message, &agent_signature.signature).expect("Verification failed"),
+            "Signature verification for AgentSignature failed"
+        );
+    }
+}
+
