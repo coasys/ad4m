@@ -51,6 +51,7 @@ pub fn build() -> Extension {
             agent_did::DECL,
             agent_create_signed_expression::DECL,
             agent_sign::DECL,
+            agent_sign_string_hex::DECL,
         ]),
         ..Default::default()
     }
