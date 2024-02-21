@@ -4,7 +4,7 @@ use kitsune_p2p_types::agent_info::AgentInfoSigned;
 use log::debug;
 
 use super::graphql_types::*;
-use crate::{agent::{self, capabilities::*}, holochain_service::get_holochain_service};
+use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
 use ad4m_client::literal::Literal;
 pub struct Mutation;
 
@@ -1025,20 +1025,8 @@ impl Mutation {
             &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
         )?;
 
-        log::debug!("Adding agent infos... Got RAW String: {}", agent_infos);
-        let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
-        let agent_infos: Vec<AgentInfoSigned> = agent_infos
-            .into_iter()
-            .map(|encoded_info| {
-                let info_bytes = base64::decode(encoded_info)
-                    .expect("Failed to decode base64 AgentInfoSigned");
-                AgentInfoSigned::decode(&info_bytes)
-                    .expect("Failed to decode AgentInfoSigned")
-            })
-            .collect();
-
+        let agent_infos = agent_infos_from_str(agent_infos.as_str())?;
         log::info!("Adding HC agent infos: {:?}", agent_infos);
-        
 
         get_holochain_service()
             .await

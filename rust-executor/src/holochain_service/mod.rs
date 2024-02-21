@@ -38,6 +38,23 @@ pub(crate) use interface::{
 
 use self::interface::set_holochain_service;
 
+const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#"["g6VhZ2VudMQkjjQGnd0y3eNvqw351QN/BcffiZg6J9G14EgVJF8xtboPJ1JhqXNpZ25hdHVyZcRArigZozIINMY8dXriSrkVq4UzxYzTZXOSPTbpQDrgI2fUeomfbv14H8KraoXJzigrEcqSZXWfgb7O2K/5TPzUB6phZ2VudF9pbmZvxQEEhqVzcGFjZcQkyTpTbofXI6V7nagFNAXn3AvXHmVkCHJ7Uh3fYJWUre/zH6skpWFnZW50xCSONAad3TLd42+rDfnVA38Fx9+JmDon0bXgSBUkXzG1ug8nUmGkdXJsc5HZSXdzczovL3NpZ25hbC5ob2xvLmhvc3QvdHg1LXdzL1ZBcTE3LVZwNW8xX0syVGNBcGtwR0hjZF9sUTJNSXplNkFlVFBUWEcxVTSsc2lnbmVkX2F0X21zzwAAAY3IclNMsGV4cGlyZXNfYWZ0ZXJfbXPOABJPgKltZXRhX2luZm/EIoG7ZGh0X3N0b3JhZ2VfYXJjX2hhbGZfbGVuZ3RozoAAAAE="]"#;
+
+pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, AnyError> {
+    let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
+    let agent_infos: Vec<AgentInfoSigned> = agent_infos
+        .into_iter()
+        .map(|encoded_info| {
+            let info_bytes = base64::decode(encoded_info)
+                .expect("Failed to decode base64 AgentInfoSigned");
+            AgentInfoSigned::decode(&info_bytes)
+                .expect("Failed to decode AgentInfoSigned")
+        })
+        .collect();
+
+    Ok(agent_infos)
+}
+
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
@@ -295,6 +312,8 @@ impl HolochainService {
             HolochainServiceResponse::InitComplete(result) => result?,
             _ => unreachable!(),
         };
+
+        inteface.add_agent_infos(agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO).expect("Couldn't deserialize hard-wired AgentInfo")).await?;
 
         set_holochain_service(inteface).await;
 
