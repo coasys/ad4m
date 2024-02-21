@@ -179,16 +179,7 @@ impl Mutation {
         message: String,
     ) -> FieldResult<AgentSignature> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentSignMessage", {{ message: "{}" }})
-            )"#,
-            message
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentSignature> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Ok(agent::AgentSignature::from_message(message)?.into())
     }
 
     async fn agent_unlock(

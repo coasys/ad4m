@@ -190,7 +190,7 @@ export default class Perspective {
     }
 
     linkToExpression(link: Link): Expression {
-        return this.#agent.createSignedExpression(link)
+        return AGENT.createSignedExpression(link)
     }
 
     ensureLinkExpression(maybeLink: any): Expression {

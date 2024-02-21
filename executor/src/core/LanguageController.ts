@@ -14,7 +14,6 @@ import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
-import Signatures from './agent/Signatures';
 import { Ad4mDb } from './db';
 import stringify from 'json-stable-stringify'
 import { getPubSub } from './utils';
@@ -46,7 +45,6 @@ type SyncStateChangeObserver = (state: PerspectiveState, lang: LanguageRef)=>voi
 interface Services {
     holochainService: HolochainService,
     runtimeService: RuntimeService,
-    signatures: Signatures,
     db: Ad4mDb
 }
 
@@ -87,7 +85,6 @@ export default class LanguageController {
     #syncStateChangeObservers: SyncStateChangeObserver[];
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
-    #signatures: Signatures;
     #db: Ad4mDb;
     #config: Config.MainConfig;
     #pubSub: PubSub;
@@ -101,7 +98,6 @@ export default class LanguageController {
         this.#context = context
         this.#holochainService = services.holochainService
         this.#runtimeService = services.runtimeService
-        this.#signatures = services.signatures
         this.#db = services.db
         this.#languages = new Map()
         this.#languages.set("literal", {
@@ -1095,7 +1091,7 @@ export default class LanguageController {
     async tagExpressionSignatureStatus(expression: Expression) {
         if(expression) {
             try{
-                if(!await this.#signatures.verify(expression)) {
+                if(!await SIGNATURE.verify(expression)) {
                     let expressionString = JSON.stringify(expression);
                     let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
                     console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)

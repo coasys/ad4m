@@ -59,3 +59,34 @@ pub fn sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
         .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
     Ok(signature)
 }
+
+pub fn sign_string_hex(data: String) -> Result<String, AnyError> {
+    let payload_bytes = signatures::hash_message(&data);
+    let signature = sign(&payload_bytes)?;
+    let sig_hex = hex::encode(signature);
+    Ok(sig_hex)
+}
+
+pub struct AgentSignature {
+    pub signature: String,
+    pub public_key: String,
+}
+
+impl AgentSignature {
+    pub fn from_message(message: String) -> Result<AgentSignature, AnyError> {
+        let signature = sign_string_hex(message)?;
+        Ok(AgentSignature {
+            signature,
+            public_key: signing_key_id(),
+        })
+    }
+}
+
+impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
+    fn into(self) -> crate::graphql::graphql_types::AgentSignature {
+        crate::graphql::graphql_types::AgentSignature {
+            signature: self.signature,
+            public_key: self.public_key,
+        }
+    }
+}

@@ -17,5 +17,8 @@
         sign: (payload) => {
             return core.ops.agent_sign(payload);
         },
+        signStringHex: (payload) => {
+            return core.ops.agent_sign_string_hex(payload);
+        },
     };
 })(globalThis);

@@ -1,6 +1,6 @@
 use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
 use std::borrow::Cow;
-use crate::agent::{did, did_document, signing_key_id, create_signed_expression, sign};
+use crate::agent::{did, did_document, signing_key_id, create_signed_expression, sign, sign_string_hex};
 
 #[op2]
 #[serde]
@@ -32,6 +32,14 @@ fn agent_create_signed_expression(#[serde] data: serde_json::Value) -> Result<se
 fn agent_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
     sign(payload)
 }
+
+
+#[op2]
+#[string]
+fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyError> {
+    sign_string_hex(payload)
+}
+
 
 pub fn build() -> Extension {
     Extension {
