@@ -16,7 +16,7 @@ import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
 import { Ad4mDb } from './db';
 import stringify from 'json-stable-stringify'
-import { getPubSub } from './utils';
+import { getPubSub, tagExpressionSignatureStatus } from './utils';
 
 function cloneWithoutCircularReferences(obj: any, seen: WeakSet<any> = new WeakSet()): any {
     if (typeof obj === 'object' && obj !== null) {
@@ -1091,16 +1091,7 @@ export default class LanguageController {
     async tagExpressionSignatureStatus(expression: Expression) {
         if(expression) {
             try{
-                if(!SIGNATURE.verify(expression)) {
-                    let expressionString = JSON.stringify(expression);
-                    let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
-                    console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)
-                    expression.proof.invalid = true
-                    expression.proof.valid = false
-                } else {
-                    expression.proof.valid = true
-                    expression.proof.invalid = false
-                }
+                tagExpressionSignatureStatus(expression);
             } catch(e) {
                 let expressionFormatted;
                 if (typeof expression === "string") {
