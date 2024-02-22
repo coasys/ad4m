@@ -9,11 +9,10 @@ import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
 import { DID } from "@coasys/ad4m/lib/src/DID";
 import { Ad4mDb } from "./db";
-import { getPubSub, tagExpressionSignatureStatus } from "./utils";
+import { getPubSub, tagExpressionSignatureStatus, removeSignatureTags } from "./utils";
 
 const maxRetries = 10;
 const backoffStep = 200;
-
 export default class Perspective {
     name?: string;
     uuid?: string;
@@ -204,6 +203,12 @@ export default class Perspective {
 
         throw new Error(`NH [${this.sharedUrl}] (${this.name}): Object is neither Link nor Expression: ${JSON.stringify(maybeLink)}`)
     }
+
+    sanitizeLinkInput(link: (LinkInput | LinkExpressionInput)): LinkExpression {
+        removeSignatureTags(link)
+        return this.ensureLinkExpression(link)
+    }
+    
 
     private async getLinksAdapter(): Promise<LinkSyncAdapter | undefined> {
         if(!this.neighbourhood || !this.neighbourhood.data.linkLanguage) {
@@ -420,7 +425,7 @@ export default class Perspective {
     }
 
     async addLink(link: LinkInput | LinkExpressionInput, status: LinkStatus = 'shared'): Promise<LinkExpression> {
-        const linkExpression = this.ensureLinkExpression(link);
+        const linkExpression = this.sanitizeLinkInput(link);
 
         if (status === 'shared') {
             const diff = {
@@ -447,12 +452,13 @@ export default class Perspective {
         })
         this.#prologNeedsRebuild = true
 
-
+        tagExpressionSignatureStatus(linkExpression);
         return linkExpression
     }
 
     async addLinks(links: (LinkInput | LinkExpressionInput)[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
-        const linkExpressions = links.map(l => this.ensureLinkExpression(l));
+        const linkExpressions = links.map(l => this.sanitizeLinkInput(l))
+
         const diff = {
             additions: linkExpressions,
             removals: []
@@ -475,11 +481,14 @@ export default class Perspective {
         this.#prologNeedsRebuild = true
 
         // @ts-ignore
-        return linkExpressions.map(l => ({...l, status}))
+        return linkExpressions.map(l => {
+            tagExpressionSignatureStatus(l);
+            return {...l, status}
+        })
     }
 
     async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
-        const linkExpressions = links.map(l => this.ensureLinkExpression(l));
+        const linkExpressions = links.map(l => this.sanitizeLinkInput(l));
         const diff = {
             additions: [],
             removals: linkExpressions
@@ -535,10 +544,10 @@ export default class Perspective {
     }
 
     async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
+        this.sanitizeLinkInput(oldLink);
         const link = await this.#db.getLink(this.uuid!, oldLink);
         if (!link) {
-            const allLinks = await this.#db.getAllLinks(this.uuid!);
-            throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
+            throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain().uuid}": ${JSON.stringify(oldLink)}`)
         }
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
@@ -566,6 +575,8 @@ export default class Perspective {
         if (link.status) {
             newLinkExpression.status = link.status
         }
+
+        tagExpressionSignatureStatus(newLinkExpression);
 
         return newLinkExpression
     }

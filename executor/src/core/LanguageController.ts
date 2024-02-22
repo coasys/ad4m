@@ -1090,30 +1090,7 @@ export default class LanguageController {
 
     async tagExpressionSignatureStatus(expression: Expression) {
         if(expression) {
-            try{
-                tagExpressionSignatureStatus(expression);
-            } catch(e) {
-                let expressionFormatted;
-                if (typeof expression === "string") {
-                    expressionFormatted = expression.substring(0, 50);
-                } else if (typeof expression === "object") {
-                    let expressionString = JSON.stringify(expression);
-                    expressionFormatted =  expressionString.substring(0, 50)
-                } else {
-                    expressionFormatted = expression;
-                }
-                let errMsg = `Error trying to verify signature for expression: ${expressionFormatted}`
-                console.error(errMsg)
-                console.error(e)
-                await this.#pubSub.publish(
-                    PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
-                    {
-                        title: "Failed to get expression",
-                        message: errMsg,
-                        type: ExceptionType.ExpressionIsNotVerified,
-                    } as ExceptionInfo
-                );
-            }
+            tagExpressionSignatureStatus(expression)
         }
     }
 

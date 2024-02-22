@@ -1,7 +1,3 @@
-export interface SignatureVerificationResult {
-    isValid: boolean;
-}
-
 export interface Expression {
     author: string;
     timestamp: string;
@@ -16,8 +12,8 @@ export interface ExpressionProof {
 
 declare global {
     interface RustSignature {
-        verifyStringSignedByDid: (did: string, data: string, signedData: string) => SignatureVerificationResult;
-        verify: (expr: Expression) => SignatureVerificationResult;
+        verifyStringSignedByDid: (did: string, data: string, signedData: string) => boolean;
+        verify: (expr: Expression) => boolean;
     }
 
     const SIGNATURE: RustSignature;
