@@ -1095,16 +1095,7 @@ export default class LanguageController {
     async tagExpressionSignatureStatus(expression: Expression) {
         if(expression) {
             try{
-                if(!await this.#signatures.verify(expression)) {
-                    let expressionString = JSON.stringify(expression);
-                    let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
-                    console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)
-                    expression.proof.invalid = true
-                    expression.proof.valid = false
-                } else {
-                    expression.proof.valid = true
-                    expression.proof.invalid = false
-                }
+                await Signatures.tagExpressionSignatureStatus(expression)
             } catch(e) {
                 let expressionFormatted;
                 if (typeof expression === "string") {

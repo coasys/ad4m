@@ -95,7 +95,7 @@ describe('Perspective', () => {
                 }
                 //@ts-ignore
                 allLinks!.push(await perspective!.addLink(link))
-                
+
             }
         })
 
@@ -131,7 +131,7 @@ describe('Perspective', () => {
 
     // describe('Prolog Engine', () => {
     //     it('answers correctly in a run with multiple link additions/removals', async () => {
-    //         let result 
+    //         let result
     //         let linkResult
     //         let l1 = await perspective!.addLink({source: 'ad4m://self', target: 'ad4m://test1'})
 
@@ -181,7 +181,7 @@ describe('Perspective', () => {
                     valid: true
                 }
             } as NeighbourhoodExpression;
-            
+
             //@ts-ignore
             linksAdapter = new LinksAdapter()
         })
@@ -244,10 +244,10 @@ describe('Perspective', () => {
         describe('syncWithSharingAdpater', () => {
             it('commits all missing links from local DB to linksAdapter', async () => {
                 perspective!.neighbourhood = undefined
-    
+
                 const link = createLink()
                 const linkExpression = await perspective!.addLink(link)
-    
+
                 perspective!.neighbourhood = {
                     data: {
                         linkLanguage: sharingLanguage,
@@ -273,7 +273,7 @@ describe('Perspective', () => {
                 expect(linksAdapter.render.calledOnce).to.be.true;
             })
         })
-        
+
     })
 
 })

@@ -10,6 +10,7 @@ import { Mutex } from 'async-mutex'
 import { DID } from "@coasys/ad4m/lib/src/DID";
 import { Ad4mDb } from "./db";
 import { getPubSub } from "./utils";
+import Signatures from "./agent/Signatures";
 
 const maxRetries = 10;
 const backoffStep = 200;
@@ -689,6 +690,16 @@ export default class Perspective {
             const startLimit = reverse ? values.length - query.limit : 0;
             const endLimit = reverse ? (values.length - query.limit) + query.limit : query.limit;
             values = values.slice(startLimit, endLimit)
+        }
+
+        for(const link of values) {
+            try {
+                await Signatures.tagExpressionSignatureStatus(link)
+            } catch (e) {
+                console.error(`Perspective.getLinks(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to tag expression signature status: ${e}`);
+                link.proof.invalid = true;
+                link.proof.valid = false;
+            }
         }
 
         return values;
