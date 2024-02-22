@@ -6,7 +6,7 @@ orbs:
   rust: circleci/rust@1.6.1
 
 jobs:
-  build:
+  build-unit:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     resource_class: xlarge
@@ -29,7 +29,74 @@ jobs:
               cd crates/hc
               cargo build --release
               pwd
-              ls -la 
+              ls -la
+              mkdir -p $HOME/.cargo/bin
+              cd ../../target/release
+              pwd
+              ls -lah
+              cp hc $HOME/.cargo/bin/hc
+              cd $HOME/.cargo/bin
+              pwd
+              ls -lah
+              ./hc --version
+            fi
+            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
+      - save_cache:
+          key: hc-0.3.0-beta-dev-27-v7
+          paths:
+            - /home/circleci/.cargo/bin
+      - restore_cache:
+          keys:
+            - rust-cache-{{ checksum "Cargo.lock" }}-v2
+            - rust-cache-
+      - remove_pnpm_paches:
+          name: Remove pnpm patches
+          command: node removePnpm.js
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build ADAM (without bootstrap languages)
+          command: pnpm run build-libs
+      - save_cache:
+          key: rust-cache-{{ checksum "Cargo.lock" }}-v2
+          paths:
+            - ./target
+            - ~/.cargo/registry
+            - ~/.cargo/git
+      - persist_to_workspace:
+          no-output-timeout: 30m
+          root: .
+          paths:
+            - .
+
+  build-integration:
+    docker:
+      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
+    resource_class: xlarge
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - hc-0.3.0-beta-dev-27-v7
+            - hc-
+            - rust-cache-{{ checksum "Cargo.lock" }}
+            - rust-cache-
+      - run:
+          name: Install HC
+          command: |
+            ls -la $HOME/.cargo/bin
+            if [ ! -f "$HOME/.cargo/bin/hc" ]; then
+              git clone https://github.com/holochain/holochain.git
+              cd holochain
+              git checkout holochain-0.3.0-beta-dev.27
+              cd crates/hc
+              cargo build --release
+              pwd
+              ls -la
               mkdir -p $HOME/.cargo/bin
               cd ../../target/release
               pwd
@@ -164,10 +231,11 @@ workflows:
   version: 2
   build-and-test:
     jobs:
-      - build
+      - build-integration
+      - build-unit
       - unit-tests:
           requires:
-            - build
+            - build-unit
       - integration-tests-js:
           requires:
-            - build
+            - build-integration
