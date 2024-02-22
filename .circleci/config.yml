@@ -49,7 +49,7 @@ jobs:
           keys:
             - rust-cache-{{ checksum "Cargo.lock" }}-v2
             - rust-cache-
-      - remove_pnpm_paches:
+      - run:
           name: Remove pnpm patches
           command: node removePnpm.js
       - run:
