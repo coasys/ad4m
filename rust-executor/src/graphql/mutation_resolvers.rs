@@ -1,9 +1,10 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, graphql_value, FieldResult};
+use kitsune_p2p_types::agent_info::AgentInfoSigned;
 use log::debug;
 
 use super::graphql_types::*;
-use crate::agent::{self, capabilities::*};
+use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
 use ad4m_client::literal::Literal;
 pub struct Mutation;
 
@@ -1014,19 +1015,20 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeHcAddAgentInfos",
-                {{ agentInfos: JSON.stringify({}) }},
-            ))"#,
-            agent_infos,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let agent_infos = agent_infos_from_str(agent_infos.as_str())?;
+        log::info!("Adding HC agent infos: {:?}", agent_infos);
+
+        get_holochain_service()
+            .await
+            .add_agent_infos(agent_infos)
+            .await
+            .map_err(|e| {
+                log::error!("Failed to add agent infos: {:?}", e);
+                e
+            })?;
+
+        Ok(true)
     }
 
     async fn runtime_open_link(&self, context: &RequestContext, url: String) -> FieldResult<bool> {

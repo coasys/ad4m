@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, FieldResult};
 
+use crate::holochain_service::get_holochain_service;
+
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
 
@@ -419,14 +421,16 @@ impl Query {
             &context.capabilities,
             &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos"))"#
-            ))
-            .await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let interface = get_holochain_service().await;
+        let infos = interface.agent_infos().await?;
+        
+        let encoded_infos: Vec<String> = infos
+            .iter()
+            .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))
+            .collect();
+
+        Ok(serde_json::to_string(&encoded_infos)?)
     }
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
