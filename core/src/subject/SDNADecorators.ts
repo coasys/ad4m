@@ -82,6 +82,10 @@ interface PropertyOptions {
 }
 export function SubjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
+        if (opts.required && !opts.initial) {
+            throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
+        }
+
         if (!opts.through && !opts.getter) {
             throw new Error("SubjectProperty requires either 'through' or 'getter' option")
         }
