@@ -15,7 +15,7 @@ Consider the following example for Todo definition:
         name: "Todo",
     })
     export default class Todo {
-        @subjectProperty({
+        @SubjectProperty({
             through: "rdf://title",
             writable: true,
             required: true,
@@ -24,7 +24,7 @@ Consider the following example for Todo definition:
         })
         title: string;
 
-        @subjectProperty({
+        @SubjectProperty({
             through: "rdf://done",
             writable: true,
             required: true,
@@ -40,7 +40,7 @@ Consider the following example for Todo definition:
     ```prolog
     subject_class("Todo", c).
     constructor(c, '[
-      {action: "addLink", source: "this", predicate: "rdf://title", target: "literal://string:''"}, 
+      {action: "addLink", source: "this", predicate: "rdf://title", target: "literal://string:''"},
       {action: "addLink", source: "this", predicate: "rdf://state", target: "literal://boolean:true"}
     ]').
     instance(c, Base) :- triple(Base, "rdf://state", *), triple(Base, "rdf://title", *).
@@ -82,7 +82,7 @@ Every class must be Decorated using the decorator inorder for it to have the cor
 Properties:
 
 Name: Name of the Subject class (When the js class goes through a minfiner it can change the class name so needed this)
-subjectProperty
+SubjectProperty
 All the properties on the subject class that are not collections should use this decorator to define the property. Atleast one property should be an instance property for the class to function meaning it should define through, initial & required.
 
 Properties:
@@ -95,14 +95,14 @@ Properties:
 - getter: Overrides the default getter, a prolog query.
 - setter: Overrides the default setter, a prolog query.
 
-## subjectFlag
+## SubjectFlag
 
-This decorator simplifies the creation of an instance property. Unlike subjectProperty this is not writable mean once define can't be changed so if you are planning to add an instance property that can be overridden use subjectProperty.
+This decorator simplifies the creation of an instance property. Unlike SubjectProperty this is not writable mean once define can't be changed so if you are planning to add an instance property that can be overridden use SubjectProperty.
 
 through: Indicates the predicate for the property
 value: Initial value for the property
-subjectCollection
-This decorator can be used to define collections/ arrays and comes with some additional functions unlike subjectProperty. With this decorator you can set, push & remove items from the collections.
+SubjectCollection
+This decorator can be used to define collections/ arrays and comes with some additional functions unlike SubjectProperty. With this decorator you can set, push & remove items from the collections.
 
 through: Indicates the predicate for the property
 where:
@@ -114,7 +114,7 @@ The above implementation can be writen below as js class using the decorator.
 ```js
 @SDNAClass({ name: "Todo" })
 class Todo {
-  @subjectProperty({
+  @SubjectProperty({
     through: "todo://state",
     initial: "todo://ready",
     writable: true,
@@ -122,7 +122,7 @@ class Todo {
   })
   state: string = "";
 
-  @subjectProperty({
+  @SubjectProperty({
     through: "todo://has_title",
     writable: true,
     resolveLanguage: "literal",
@@ -197,7 +197,7 @@ All you need is to extend the above class with SubjectEntity.
 ```js
 @SDNAClass({ name: "Todo" })
 class Todo extends SubjectEntity {
-  @subjectProperty({
+  @SubjectProperty({
     through: "todo://state",
     initial: "todo://ready",
     writable: true,
@@ -205,7 +205,7 @@ class Todo extends SubjectEntity {
   })
   state: string = "";
 
-  @subjectProperty({
+  @SubjectProperty({
     through: "todo://has_title",
     writable: true,
     resolveLanguage: "literal",

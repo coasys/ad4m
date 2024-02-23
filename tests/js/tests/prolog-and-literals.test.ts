@@ -2,8 +2,8 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
-    instanceQuery, Subject, subjectProperty,
-    subjectCollection, subjectFlag,
+    InstanceQuery, Subject, SubjectProperty,
+    SubjectCollection, SubjectFlag,
     SDNAClass,
     SubjectEntity,
 } from "@coasys/ad4m";
@@ -263,18 +263,18 @@ describe("Prolog + Literals", () => {
             })
             class Message {
                 //@ts-ignore
-                @subjectFlag({
+                @SubjectFlag({
                     through: "ad4m://type",
                     value: "ad4m://message"
                 })
                 type: string = ""
 
                 //@ts-ignore
-                @instanceQuery()
+                @InstanceQuery()
                 static async all(perspective: PerspectiveProxy): Promise<Message[]> { return [] }
 
                 //@ts-ignore
-                @subjectProperty({
+                @SubjectProperty({
                     through: "todo://state",
                     initial: "todo://ready",
                     writable: true,
@@ -303,20 +303,20 @@ describe("Prolog + Literals", () => {
                 // isSubjectInstance = [hasLink("todo://state")]
 
                 //@ts-ignore
-                @instanceQuery()
+                @InstanceQuery()
                 static async all(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @instanceQuery({where: {state: "todo://ready"}})
+                @InstanceQuery({where: {state: "todo://ready"}})
                 static async allReady(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @instanceQuery({where: { state: "todo://done" }})
+                @InstanceQuery({where: { state: "todo://done" }})
                 static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @instanceQuery({condition: 'triple("ad4m://self", _, Instance)'})
+                @InstanceQuery({condition: 'triple("ad4m://self", _, Instance)'})
                 static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
                 //@ts-ignore
-                @subjectProperty({
+                @SubjectProperty({
                     through: "todo://state",
                     initial:"todo://ready",
                     writable: true,
@@ -325,36 +325,36 @@ describe("Prolog + Literals", () => {
                 state: string = ""
 
                 //@ts-ignore
-                @subjectProperty({
+                @SubjectProperty({
                     through: "todo://has_title",
                     writable: true,
                     resolveLanguage: "literal"
                 })
                 title: string = ""
 
-                @subjectProperty({
+                @SubjectProperty({
                     getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
                 })
                 isLiked: boolean = false
 
                 //@ts-ignore
-                @subjectCollection({ through: "todo://comment" })
+                @SubjectCollection({ through: "todo://comment" })
                 // @ts-ignore
                 comments: string[] = []
 
                 //@ts-ignore
-                @subjectCollection({ through: "flux://entry_type" })
+                @SubjectCollection({ through: "flux://entry_type" })
                 entries: string[] = []
 
                 //@ts-ignore
-                @subjectCollection({
+                @SubjectCollection({
                     through: "flux://entry_type",
                     where: { isInstance: Message }
                 })
                 messages: string[] = []
 
                 //@ts-ignore
-                @subjectCollection({
+                @SubjectCollection({
                     through: "flux://entry_type",
                     where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
                 })
@@ -401,7 +401,7 @@ describe("Prolog + Literals", () => {
                 expect(todos.length).to.equal(3)
             })
 
-            it("can retrieve all mathching instance through instanceQuery(where: ..)", async () => {
+            it("can retrieve all mathching instance through InstanceQuery(where: ..)", async () => {
                 let todos = await Todo.allReady(perspective!)
                 expect(todos.length).to.equal(1)
                 expect(await todos[0].state).to.equal("todo://ready")
@@ -411,7 +411,7 @@ describe("Prolog + Literals", () => {
                 expect(await todos[0].state).to.equal("todo://done")
             })
 
-            it("can retrieve matching instance through instanceQuery(condition: ..)", async () => {
+            it("can retrieve matching instance through InstanceQuery(condition: ..)", async () => {
                 let todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(0)
 
@@ -447,7 +447,7 @@ describe("Prolog + Literals", () => {
                     name: "Test"
                 })
                 class Test {
-                    @subjectProperty({through: "test://test_numer"})
+                    @SubjectProperty({through: "test://test_numer"})
                     number: number = 0
                 }
 
@@ -549,25 +549,25 @@ describe("Prolog + Literals", () => {
                 })
                 class Recipe extends SubjectEntity {
                     //@ts-ignore
-                    @subjectFlag({
+                    @SubjectFlag({
                         through: "ad4m://type",
                         value: "ad4m://recipe"
                     })
                     type: string = ""
 
                     //@ts-ignore
-                    @subjectProperty({
+                    @SubjectProperty({
                         through: "recipe://name",
                         writable: true,
                     })
                     name: string = ""
 
                     //@ts-ignore
-                    @subjectCollection({ through: "recipe://entries" })
+                    @SubjectCollection({ through: "recipe://entries" })
                     entries: string[] = []
 
                     // @ts-ignore
-                    @subjectCollection({
+                    @SubjectCollection({
                         through: "recipe://entries",
                         where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
                     })
@@ -575,12 +575,12 @@ describe("Prolog + Literals", () => {
                     ingredients: [];
 
                     //@ts-ignore
-                    @subjectCollection({ through: "recipe://comment" })
+                    @SubjectCollection({ through: "recipe://comment" })
                     // @ts-ignore
                     comments: string[] = []
 
                     //@ts-ignore
-                    @subjectProperty({
+                    @SubjectProperty({
                         through: "recipe://local",
                         writable: true,
                         local: true

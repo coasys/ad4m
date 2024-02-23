@@ -27,11 +27,11 @@ interface InstanceQueryParams {
     condition?: string;
 }
 
-export function instanceQuery(options?: InstanceQueryParams) {
+export function InstanceQuery(options?: InstanceQueryParams) {
     return function <T>(target: T, key: keyof T, descriptor: PropertyDescriptor) {
         const originalMethod = descriptor.value;
         if(typeof originalMethod !== "function") {
-            throw new Error("instanceQuery decorator can only be applied to methods");
+            throw new Error("InstanceQuery decorator can only be applied to methods");
         }
 
         descriptor.value = async function(perspective: PerspectiveProxy): Promise<T[]> {
@@ -80,7 +80,7 @@ interface PropertyOptions {
     setter?: string;
     local?: boolean
 }
-export function subjectProperty(opts: PropertyOptions) {
+export function SubjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
@@ -99,18 +99,18 @@ interface FlagOptions {
     through: string;
     value: string;
 }
-export function subjectFlag(opts: FlagOptions) {
+export function SubjectFlag(opts: FlagOptions) {
     return function <T>(target: T, key: keyof T) {
         if (!opts.through && !opts.value) {
-            throw new Error("subjectFlag requires a 'through' and 'value' option")
+            throw new Error("SubjectFlag requires a 'through' and 'value' option")
         }
 
         if (!opts.through) {
-            throw new Error("subjectFlag requires a 'through' option")
+            throw new Error("SubjectFlag requires a 'through' option")
         }
 
         if (!opts.value) {
-            throw new Error("subjectFlag requires a 'value' option")
+            throw new Error("SubjectFlag requires a 'value' option")
         }
 
         target["__properties"] = target["__properties"] || {};
@@ -140,7 +140,7 @@ interface CollectionOptions {
     local?: boolean
 }
 
-export function subjectCollection(opts: CollectionOptions) {
+export function SubjectCollection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
