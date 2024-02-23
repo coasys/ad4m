@@ -82,6 +82,10 @@ interface PropertyOptions {
 }
 export function SubjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
+        if (!opts.through && !opts.getter) {
+            throw new Error("SubjectProperty requires either 'through' or 'getter' option")
+        }
+
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
         target["__properties"][key] = { ...target["__properties"][key], ...opts }
