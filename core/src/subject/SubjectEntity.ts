@@ -177,7 +177,7 @@ export class SubjectEntity {
     const entries = Object.entries(this);
 
     for (const [key, value] of entries) {
-      if (value) {
+      if (value !== undefined && value !== null) {
         if (value?.action) {
           switch (value.action) {
             case 'setter':
@@ -194,7 +194,7 @@ export class SubjectEntity {
           }
         } else if (Array.isArray(value) && value.length > 0) {
           await this.setCollectionSetter(key, value)
-        } else {
+        } else if (value !== undefined && value !== null && value !== "") {
           await this.setProperty(key, value);
         }
       }

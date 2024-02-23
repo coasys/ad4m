@@ -562,6 +562,13 @@ describe("Prolog + Literals", () => {
                     })
                     name: string = ""
 
+                    // @ts-ignore
+                    @SubjectProperty({
+                        through: "recipe://boolean",
+                        writable: true,
+                    })
+                    booleanTest: boolean = false
+
                     //@ts-ignore
                     @SubjectCollection({ through: "recipe://entries" })
                     entries: string[] = []
@@ -599,6 +606,7 @@ describe("Prolog + Literals", () => {
                     const recipe = new Recipe(perspective!, root)
 
                     recipe.name = "recipe://test";
+                    recipe.booleanTest = false;
 
                     await recipe.save();
 
@@ -607,6 +615,7 @@ describe("Prolog + Literals", () => {
                     await recipe2.get();
 
                     expect(recipe2.name).to.equal("recipe://test")
+                    expect(recipe2.booleanTest).to.equal(false)
                 })
 
                 it("update()", async () => {
