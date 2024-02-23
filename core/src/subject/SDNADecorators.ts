@@ -101,6 +101,18 @@ interface FlagOptions {
 }
 export function subjectFlag(opts: FlagOptions) {
     return function <T>(target: T, key: keyof T) {
+        if (!opts.through && !opts.value) {
+            throw new Error("subjectFlag requires a 'through' and 'value' option")
+        }
+
+        if (!opts.through) {
+            throw new Error("subjectFlag requires a 'through' option")
+        }
+
+        if (!opts.value) {
+            throw new Error("subjectFlag requires a 'value' option")
+        }
+
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
         target["__properties"][key] = {
