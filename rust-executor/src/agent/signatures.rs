@@ -1,5 +1,5 @@
+use std::collections::BTreeMap;
 use deno_core::error::AnyError;
-use serde_json::json;
 use sha2::{Sha256, Digest};
 use crate::types::Expression;
 use did_key::{CoreSign, PatchedKeyPair};
@@ -15,11 +15,32 @@ pub fn verify(expr: &Expression) -> Result<bool, AnyError> {
     let sig_bytes = hex::decode(&expr.proof.signature)?;
     let message = build_message(&expr.data, &expr.timestamp);
     Ok(inner_verify(&expr.author, &message, &sig_bytes))
+fn sort_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(obj) => {
+            let mut map = BTreeMap::new();
+            for (k, v) in obj {
+                map.insert(k.clone(), sort_json_value(v));
+            }
+            serde_json::Value::Object(serde_json::Map::from_iter(map.into_iter()))
+        },
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(sort_json_value).collect())
+        },
+        _ => value.clone(),
+    }
 }
 
 pub(super) fn build_message(data: &serde_json::Value, timestamp: &str) -> Vec<u8> {
-    let payload  = json!({ "data": data, "timestamp": timestamp });
-    let payload_string = serde_json::to_string(&payload).expect("Failed to serialize payload");
+
+    let sorted_data = sort_json_value(data);
+    let mut map = BTreeMap::new();
+    map.insert("data".to_string(), sorted_data);
+    map.insert("timestamp".to_string(), serde_json::Value::String(timestamp.to_string()));
+
+    let sorted_payload = serde_json::Value::Object(serde_json::Map::from_iter(map.into_iter()));
+    let payload_string = serde_json::to_string(&sorted_payload).expect("Failed to serialize payload");
+
     let mut hasher = Sha256::new();
     hasher.update(payload_string.as_bytes());
     hasher.finalize().as_slice().try_into().expect("Hash should be 32 bytes")
