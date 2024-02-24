@@ -10873,6 +10873,7 @@ dependencies = [
  "holochain_cli_bundle",
  "holochain_cli_run_local_services",
  "holochain_types",
+ "itertools 0.10.5",
  "jsonwebtoken",
  "juniper",
  "juniper_graphql_transport_ws",

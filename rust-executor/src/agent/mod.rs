@@ -94,11 +94,14 @@ impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use super::*;
     use crate::agent::signatures::{verify_string_signed_by_did, verify};
     use crate::types::ExpressionProof;
+    use itertools::Itertools;
 
     fn setup_wallet() {
         let wallet_instance = Wallet::instance();
@@ -156,5 +159,28 @@ mod tests {
             "Signature verification for AgentSignature failed"
         );
     }
+
+#[test]
+fn test_create_signed_expression_and_verify_with_changed_sorting() {
+    setup_wallet();
+    let json_value = json!({"key2": "value1", "key1": "value2"});
+    let signed_expression = create_signed_expression(json_value).expect("Failed to create signed expression");
+
+    // Simulate changing the sorting of the JSON in the signed expression
+    let mut data_map = BTreeMap::new();
+    let sorted_keys = signed_expression.data.as_object().unwrap().keys().sorted();
+    for key in sorted_keys {
+        data_map.insert(key.clone(), signed_expression.data[key].clone());
+    }
+    let sorted_json = json!(data_map);
+    let mut sorted_expression = signed_expression.clone();
+    sorted_expression.data = sorted_json;
+
+    // Verify the expression with changed sorting
+    assert!(
+        signatures::verify(&sorted_expression).expect("Verification failed"),
+        "Signature verification for create_signed_expression with changed sorting should succeed"
+    );
+}
 }
 
