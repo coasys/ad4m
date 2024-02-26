@@ -445,19 +445,19 @@ export default class Perspective {
         let perspectivePlain = this.plain();
 
         linkExpression.status = status;
+        tagExpressionSignatureStatus(linkExpression);
 
         await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
             perspective: perspectivePlain,
             link: linkExpression
         })
         this.#prologNeedsRebuild = true
-
-        tagExpressionSignatureStatus(linkExpression);
+        
         return linkExpression
     }
 
     async addLinks(links: (LinkInput | LinkExpressionInput)[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
-        const linkExpressions = links.map(l => this.sanitizeLinkInput(l))
+        let linkExpressions = links.map(l => this.sanitizeLinkInput(l))
 
         const diff = {
             additions: linkExpressions,
@@ -471,6 +471,12 @@ export default class Perspective {
 
         await this.#db.addManyLinks(this.uuid!, linkExpressions, status);
         this.#prologNeedsRebuild = true;
+
+        linkExpressions = linkExpressions.map(l => {
+            tagExpressionSignatureStatus(l);
+            return {...l, status} as LinkExpression
+        })
+
         let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
             await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
@@ -481,10 +487,7 @@ export default class Perspective {
         this.#prologNeedsRebuild = true
 
         // @ts-ignore
-        return linkExpressions.map(l => {
-            tagExpressionSignatureStatus(l);
-            return {...l, status}
-        })
+        return linkExpressions
     }
 
     async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
@@ -564,6 +567,8 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
+        tagExpressionSignatureStatus(newLinkExpression);
+
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
         await this.#pubSub.publish(PubSubDefinitions.LINK_UPDATED_TOPIC, {
@@ -576,7 +581,7 @@ export default class Perspective {
             newLinkExpression.status = link.status
         }
 
-        tagExpressionSignatureStatus(newLinkExpression);
+        
 
         return newLinkExpression
     }
