@@ -447,6 +447,11 @@ export class PerspectiveProxy {
         return instances
     }
 
+    /** Returns all subject proxies of the given subject class.
+     *  @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, all subject classes
+     * that match the given properties will be used.
+     */
     async getAllSubjectProxies<T>(subjectClass: T): Promise<T[]> {
         let classes = []
         if(typeof subjectClass === "string") {
