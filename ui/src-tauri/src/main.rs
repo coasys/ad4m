@@ -43,12 +43,14 @@ mod util;
 mod system_tray;
 mod menu;
 mod commands;
+mod app_state;
 
 use tauri::Manager;
+use crate::app_state::load_state;
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
-use crate::commands::app::{close_application, close_main_window, clear_state, open_tray, open_tray_message, open_dapp};
-use crate::config::data_path;
+use crate::commands::app::{toggle_dev_mode, get_app_state, close_application, close_main_window, clear_state, open_tray, open_tray_message, open_dapp};
+use crate::config::{data_dev_path, data_path};
 use crate::config::log_path;
 use crate::util::find_port;
 use crate::menu::{handle_menu_event, open_logs_folder};
@@ -109,11 +111,19 @@ fn rlim_execute() {
 fn main() {
     env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
 
+    let state = load_state().unwrap();
+
+    let app_path = if state.dev_mode {
+        data_dev_path()
+    } else {
+        data_path()
+    };
+
     #[cfg(not(target_os = "windows"))]
     rlim_execute();
 
-    if !data_path().exists() {
-        let _ = fs::create_dir_all(data_path());
+    if !app_path.exists() {
+        let _ = fs::create_dir_all(app_path.clone());
     }
 
     if log_path().exists() {
@@ -170,7 +180,7 @@ fn main() {
     save_executor_port(free_port);
 
     match rust_executor::init::init(
-        Some(String::from(data_path().to_str().unwrap())),
+        Some(String::from(app_path.to_str().unwrap())),
          None
         ) {
         Ok(()) => {
@@ -208,7 +218,9 @@ fn main() {
             clear_state,
             open_tray,
             open_tray_message,
-            open_dapp
+            open_dapp,
+            toggle_dev_mode,
+            get_app_state
         ])
         .setup(move |app| {
             // Hides the dock icon
@@ -225,7 +237,7 @@ fn main() {
 
             let mut config = Ad4mConfig::default();
             config.admin_credential = Some(req_credential.to_string());
-            config.app_data_path = Some(String::from(data_path().to_str().unwrap()));
+            config.app_data_path = Some(String::from(app_path.to_str().unwrap()));
             config.gql_port = Some(free_port);
             config.network_bootstrap_seed = None;
             config.run_dapp_server = Some(true);

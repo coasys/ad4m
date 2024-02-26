@@ -57,6 +57,8 @@ const Profile = (props: Props) => {
     methods: { toggleExpertMode },
   } = useContext(Ad4minContext);
 
+  const [appState, setAppState] = useState({} as any);
+
   const [trustedAgents, setTrustedAgents] = useState<any[]>([]);
 
   const [trustedAgentModalOpen, settrustedAgentModalOpen] = useState(false);
@@ -88,6 +90,12 @@ const Profile = (props: Props) => {
     let { value } = event.target;
     setPassword(value);
   };
+
+  const getAppState = useCallback(async () => {
+    const state = await invoke("get_app_state");
+    console.log("state", state);
+    setAppState(JSON.parse(state))
+  }, []);
 
   const getTrustedAgents = useCallback(async () => {
     if (url) {
@@ -126,7 +134,8 @@ const Profile = (props: Props) => {
   useEffect(() => {
     fetchCurrentAgentProfile();
     getTrustedAgents();
-  }, [fetchCurrentAgentProfile, getTrustedAgents]);
+    getAppState();
+  }, [fetchCurrentAgentProfile, getTrustedAgents, getAppState]);
 
   useEffect(() => {
     const getProxy = async () => {
@@ -215,6 +224,16 @@ const Profile = (props: Props) => {
           }}
         >
           Proxy
+        </j-toggle>
+
+        <j-toggle
+          checked={appState?.dev_mode}
+          onChange={(e) => {
+            invoke("toggle_dev_mode");
+            getAppState();
+          }}
+        >
+          Dev mode
         </j-toggle>
 
         {loadingProxy && <j-spinner size="sm"></j-spinner>}

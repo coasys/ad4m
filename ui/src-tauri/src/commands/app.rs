@@ -1,4 +1,5 @@
 extern crate remove_dir_all;
+use crate::app_state::{load_state, save_state};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 
@@ -36,6 +37,26 @@ pub fn open_tray(app_handle: tauri::AppHandle) {
         let _ = window.set_decorations(false);
         let _ = window.set_always_on_top(true);
     }
+}
+
+#[tauri::command]
+pub fn toggle_dev_mode(app_handle: tauri::AppHandle) {
+    let state = load_state().unwrap();
+
+    let new_state = crate::app_state::LauncherState {
+        dev_mode: !state.dev_mode,
+    };
+    
+    save_state(&new_state).unwrap();
+
+    app_handle.restart();
+}
+
+#[tauri::command]
+pub fn get_app_state(app_handle: tauri::AppHandle) -> Option<String> {
+    let state = load_state().unwrap();
+
+    serde_json::to_string(&state).ok()
 }
 
 #[tauri::command]
