@@ -1,4 +1,4 @@
-use chrono::SecondsFormat;
+
 use deno_core::error::AnyError;
 use deno_core::anyhow::anyhow;
 
@@ -28,9 +28,10 @@ pub fn did() -> String {
 }
 
 pub fn create_signed_expression(data: serde_json::Value) -> Result<Expression, AnyError> {
-    let timestamp = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let timestamp = chrono::Utc::now();
     let payload_bytes = signatures::build_message(&data, &timestamp);
-
+    let timestamp = timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    
     let signature = sign(&payload_bytes)?;
     let sig_hex = hex::encode(signature);
 

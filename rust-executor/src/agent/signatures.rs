@@ -1,4 +1,8 @@
 use std::collections::BTreeMap;
+use std::str::FromStr;
+use chrono::{DateTime, Offset, Utc};
+use chrono::SecondsFormat;
+use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use sha2::{Sha256, Digest};
 use crate::types::Expression;
@@ -13,8 +17,13 @@ pub fn verify_string_signed_by_did(did: &str, data: &str, signed_data: &str) -> 
 
 pub fn verify(expr: &Expression) -> Result<bool, AnyError> {
     let sig_bytes = hex::decode(&expr.proof.signature)?;
-    let message = build_message(&expr.data, &expr.timestamp);
-    Ok(inner_verify(&expr.author, &message, &sig_bytes))
+    let timestamp = DateTime::<Utc>::from_str(&expr.timestamp)
+        .map_err(|e| anyhow!("Failed to parse timestamp when trying to verify signature: {}", e))?;
+    let message = build_message(&expr.data, &timestamp);
+    let result = inner_verify(&expr.author, &message, &sig_bytes);
+    Ok(result)
+}
+
 fn sort_json_value(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(obj) => {
@@ -31,12 +40,12 @@ fn sort_json_value(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-pub(super) fn build_message(data: &serde_json::Value, timestamp: &str) -> Vec<u8> {
-
+pub(super) fn build_message(data: &serde_json::Value, timestamp: &DateTime<Utc>) -> Vec<u8> {
+    let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
     let sorted_data = sort_json_value(data);
     let mut map = BTreeMap::new();
     map.insert("data".to_string(), sorted_data);
-    map.insert("timestamp".to_string(), serde_json::Value::String(timestamp.to_string()));
+    map.insert("timestamp".to_string(), serde_json::Value::String(timestamp));
 
     let sorted_payload = serde_json::Value::Object(serde_json::Map::from_iter(map.into_iter()));
     let payload_string = serde_json::to_string(&sorted_payload).expect("Failed to serialize payload");
