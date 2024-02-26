@@ -74,6 +74,7 @@ jobs:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     steps:
+      - checkout
       - attach_workspace:
           at: .
       - run:
@@ -97,6 +98,7 @@ jobs:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     resource_class: xlarge
     steps:
+      - checkout
       - attach_workspace:
           at: .
       - restore_cache:
@@ -160,6 +162,7 @@ jobs:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     steps:
+      - checkout
       - attach_workspace:
           at: .
       - run:
