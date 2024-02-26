@@ -38,6 +38,23 @@ pub(crate) use interface::{
 
 use self::interface::set_holochain_service;
 
+const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#"["g6VhZ2VudMQkjjQGnd0y3eNvqw351QN/BcffiZg6J9G14EgVJF8xtboPJ1JhqXNpZ25hdHVyZcRArigZozIINMY8dXriSrkVq4UzxYzTZXOSPTbpQDrgI2fUeomfbv14H8KraoXJzigrEcqSZXWfgb7O2K/5TPzUB6phZ2VudF9pbmZvxQEEhqVzcGFjZcQkyTpTbofXI6V7nagFNAXn3AvXHmVkCHJ7Uh3fYJWUre/zH6skpWFnZW50xCSONAad3TLd42+rDfnVA38Fx9+JmDon0bXgSBUkXzG1ug8nUmGkdXJsc5HZSXdzczovL3NpZ25hbC5ob2xvLmhvc3QvdHg1LXdzL1ZBcTE3LVZwNW8xX0syVGNBcGtwR0hjZF9sUTJNSXplNkFlVFBUWEcxVTSsc2lnbmVkX2F0X21zzwAAAY3IclNMsGV4cGlyZXNfYWZ0ZXJfbXPOABJPgKltZXRhX2luZm/EIoG7ZGh0X3N0b3JhZ2VfYXJjX2hhbGZfbGVuZ3RozoAAAAE="]"#;
+
+pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, AnyError> {
+    let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
+    let agent_infos: Vec<AgentInfoSigned> = agent_infos
+        .into_iter()
+        .map(|encoded_info| {
+            let info_bytes = base64::decode(encoded_info)
+                .expect("Failed to decode base64 AgentInfoSigned");
+            AgentInfoSigned::decode(&info_bytes)
+                .expect("Failed to decode AgentInfoSigned")
+        })
+        .collect();
+
+    Ok(agent_infos)
+}
+
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
@@ -296,6 +313,8 @@ impl HolochainService {
             _ => unreachable!(),
         };
 
+        inteface.add_agent_infos(agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO).expect("Couldn't deserialize hard-wired AgentInfo")).await?;
+
         set_holochain_service(inteface).await;
 
         Ok(())
@@ -328,7 +347,11 @@ impl HolochainService {
             kitsune_config.tuning_params = Arc::new(tuning_params);
 
             if local_config.use_bootstrap {
-                kitsune_config.bootstrap_service = Some(Url2::parse(String::from("http://207.148.16.17:38245")));
+                // prod - https://bootstrap.holo.host
+                // staging - https://bootstrap-staging.holo.host
+                // dev - https://bootstrap-dev.holohost.workers.dev
+                // own - http://207.148.16.17:38245
+                kitsune_config.bootstrap_service = Some(Url2::parse(String::from("https://bootstrap.holo.host/"))); 
             } else {
                 kitsune_config.bootstrap_service = None;
             }
@@ -339,7 +362,10 @@ impl HolochainService {
             }
             if local_config.use_proxy {
                 kitsune_config.transport_pool = vec![TransportConfig::WebRTC {
-                    signal_url: String::from("ws://207.148.16.17:42697"),
+                    // prod - wss://signal.holo.host
+                    // dev - wss://signal.holotest.net
+                    // our - ws://207.148.16.17:42697
+                    signal_url: String::from("wss://signal.holo.host"),
                 }];
             } else {
                 kitsune_config.transport_pool = vec![

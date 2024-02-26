@@ -1,7 +1,7 @@
 [package]
 name = "ad4m"
 
-version = "0.8.1"
+version = "0.9.0-prerelease.0"
 
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@coasys.org>"]
@@ -34,3 +34,6 @@ serde = { version = "1.0", features = ["derive"] }
 colour = "0.7.0"
 syntect = "5.0"
 ctrlc = "3.4.0"
+
+#holochain_kitsune_p2p = "0.3.0-beta-dev.37"
+kitsune_p2p_types = { version = "0.3.0-beta-dev.21", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }

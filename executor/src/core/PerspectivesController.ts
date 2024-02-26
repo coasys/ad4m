@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { v4 as uuidv4 } from 'uuid';
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import type PerspectiveContext from './PerspectiveContext'
-import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression, NeighbourhoodExpression } from '@coasys/ad4m'
+import { Perspective as Ad4mPerspective, Neighbourhood, LinkQuery, PerspectiveHandle, LanguageRef, PerspectiveDiff, PerspectiveState, PerspectiveExpression, NeighbourhoodExpression, LinkExpression } from '@coasys/ad4m'
 import Perspective from './Perspective'
 import { getPubSub, sleep } from './utils';
 
@@ -47,6 +47,7 @@ export default class PerspectivesController {
                 try {
                     let perspectivePlain = perspective.plain();
                     for (const link of diff.additions) {
+                        tagExpressionSignatureStatus(link);
                         await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
                             perspective: perspectivePlain,
                             link: link
@@ -54,6 +55,7 @@ export default class PerspectivesController {
                     }
 
                     for (const linkRemoved of diff.removals) {
+                        tagExpressionSignatureStatus(linkRemoved);
                         await this.#pubSub.publish(PubSubDefinitions.LINK_REMOVED_TOPIC, {
                             perspective: perspectivePlain,
                             link: linkRemoved

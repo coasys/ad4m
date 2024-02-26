@@ -1,0 +1,23 @@
+{
+  "name": "@coasys/ad4m-vue-hooks",
+  "version": "0.9.0-prerelease",
+  "description": "",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "type": "module",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@coasys/ad4m": "*",
+    "@coasys/hooks-helpers": "*"
+  },
+  "peerDependencies": {
+    "vue": "^3.2.47"
+  }
+}

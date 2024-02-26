@@ -1,8 +1,10 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, FieldResult};
 
+use crate::holochain_service::get_holochain_service;
+
 use super::graphql_types::*;
-use crate::agent::capabilities::*;
+use crate::agent::{capabilities::*, signatures};
 
 pub struct Query;
 
@@ -419,14 +421,16 @@ impl Query {
             &context.capabilities,
             &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos"))"#
-            ))
-            .await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let interface = get_holochain_service().await;
+        let infos = interface.agent_infos().await?;
+        
+        let encoded_infos: Vec<String> = infos
+            .iter()
+            .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))
+            .collect();
+
+        Ok(serde_json::to_string(&encoded_infos)?)
     }
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
@@ -499,21 +503,12 @@ impl Query {
         context: &RequestContext,
         data: String,
         did: String,
-        did_signing_key_id: String,
+        _did_signing_key_id: String,
         signed_data: String,
     ) -> FieldResult<bool> {
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(
-                await core.callResolver("Query", "runtimeVerifyStringSignedByDid",
-                    {{ data: "{}", did: "{}", didSigningKeyId: "{}", signedData: "{}" }},
-                )
-            )"#,
-                data, did, did_signing_key_id, signed_data,
-            ))
-            .await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        signatures::verify_string_signed_by_did(&did, &data, &signed_data)
+            .map_err(|e| e.to_string())
+            .map_err(|e| juniper::FieldError::new(e, juniper::Value::Null))
     }
 }

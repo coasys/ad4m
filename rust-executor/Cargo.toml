@@ -1,6 +1,6 @@
 [package]
 name = "rust-executor"
-version = "0.8.1"
+version = "0.9.0-prerelease"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@coasys.org>"]
 description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
@@ -69,22 +69,23 @@ jsonwebtoken = "8.3.0"
 # holochain_types = { version = "0.2.2" }
 # holochain_cli_run_local_services = { version = "0.2.2" }
 
-holochain = { version = "0.3.0-beta-dev.35", git = "https://github.com/coasys/holochain.git", rev = "e97988ca9aff16b18a66cd0b20456bc6a5e9a26e", features = ["test_utils", "default"] }
-holochain_cli_bundle = { version = "0.3.0-beta-dev.33", git = "https://github.com/coasys/holochain.git", rev = "e97988ca9aff16b18a66cd0b20456bc6a5e9a26e" }
-holochain_types = { version = "0.3.0-beta-dev.24", git = "https://github.com/coasys/holochain.git", rev = "e97988ca9aff16b18a66cd0b20456bc6a5e9a26e" }
-holochain_cli_run_local_services = { version = "0.3.0-beta-dev.21", git = "https://github.com/coasys/holochain.git", rev = "e97988ca9aff16b18a66cd0b20456bc6a5e9a26e" }
-kitsune_p2p_types = { version = "0.3.0-beta-dev.20", git = "https://github.com/coasys/holochain.git", rev = "e97988ca9aff16b18a66cd0b20456bc6a5e9a26e" }
+holochain = { version = "0.3.0-beta-dev.37", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3", features = ["test_utils", "default"] }
+holochain_cli_bundle = { version = "0.3.0-beta-dev.34", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
+holochain_types = { version = "0.3.0-beta-dev.33", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
+holochain_cli_run_local_services = { version = "0.3.0-beta-dev.22", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
+kitsune_p2p_types = { version = "0.3.0-beta-dev.21", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
 
-scryer-prolog = { version = "0.9.3", git = "https://github.com/coasys/scryer-prolog", rev = "1670154be788e9809e7bfad16483c4f5feaf374e" }
+scryer-prolog = { version = "0.9.3", git = "https://github.com/coasys/scryer-prolog", rev = "ce34ca8f1fe41e1f11517168394172aafae16a2b" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client" }
 
 rusqlite = { version = "0.29.0", features = ["bundled"] }
 fake = { version = "2.9.2", features = ["derive"] }
+sha2 = "0.10.8"
 
 
 [dev-dependencies]
 maplit = "1.0.2"
 lazy_static = "1.4.0"
-
+itertools = "0.10.1"

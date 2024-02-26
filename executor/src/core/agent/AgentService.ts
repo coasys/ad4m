@@ -7,7 +7,6 @@ import {
   ReadOnlyLanguage,
 } from "@coasys/ad4m";
 import { Agent, ExpressionProof, AgentSignature } from "@coasys/ad4m";
-import Signatures from "./Signatures";
 import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
 import { getPubSub } from "../utils";
@@ -69,36 +68,12 @@ export default class AgentService {
 
   createSignedExpression(data: any): Expression {
     this.signingChecks()
-
-    const timestamp = new Date().toISOString();
-    const payloadBytes = Signatures.buildMessage(data, timestamp);
-
-    const signature = WALLET.sign(payloadBytes);
-    const sigBuffer = Buffer.from(signature);
-    const sigHex = sigBuffer.toString("hex");
-
-    let proof = new ExpressionProof(sigHex.toString(), this.#signingKeyId!);
-    proof.valid = true;
-    proof.invalid = false;
-
-    const signedExpresssion = {
-      author: this.#did,
-      timestamp,
-      data,
-      proof,
-    } as Expression;
-
-    return signedExpresssion;
+    return AGENT.createSignedExpression(data);
   }
 
   signString(data: string): string {
     this.signingChecks()
-
-    const payloadBytes = Signatures.buildMessageRaw(data)
-    const signature = WALLET.sign(payloadBytes);
-    const sigBuffer = Buffer.from(signature);
-    const sigHex = sigBuffer.toString("hex");
-    return sigHex
+    return AGENT.signStringHex(data);
   }
 
   async updateAgent(a: Agent) {
@@ -247,17 +222,6 @@ export default class AgentService {
       did: this.#did,
       didDocument: this.#didDocument,
     };
-  }
-
-  async signMessage(msg: string) {
-    this.signingChecks()
-
-    const payloadBytes = Signatures.buildMessageRaw(msg)
-    const signature = WALLET.sign(payloadBytes);
-    const sigBuffer = Buffer.from(signature);
-    const sigHex = sigBuffer.toString("hex");
-
-    return new AgentSignature(sigHex, WALLET.getMainKey().publicKey);
   }
 }
 

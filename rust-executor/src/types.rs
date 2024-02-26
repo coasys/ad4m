@@ -7,10 +7,10 @@ use juniper::{
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Expression {
-    author: String,
-    timestamp: String,
-    data: JsonValue,
-    proof: ExpressionProof,
+    pub author: String,
+    pub timestamp: String,
+    pub data: JsonValue,
+    pub proof: ExpressionProof,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]

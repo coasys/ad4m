@@ -8,12 +8,19 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Added
 
 ### Changed
+ - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):
+   - Added back window decorations to splashscreen to not stay in the users way
+   - Separate mandatory password input from optional profile fields and start agent generation early
+   - Show popup making the user aware of the system tray icon
+- Update Holochain to 0.3.0-beta-dev.35 [PR#443](https://github.com/coasys/ad4m/pull/443)
+- Improve readability of logs [PR#443](https://github.com/coasys/ad4m/pull/443)
  
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+- Fix ADAM proxy [PR#442](https://github.com/coasys/ad4m/pull/442) and [PR#446](https://github.com/coasys/ad4m/pull/446)
 
 ## [0.8.0] - 12/12/2023
 

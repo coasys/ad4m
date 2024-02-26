@@ -29,7 +29,7 @@ jobs:
               cd crates/hc
               cargo build --release
               pwd
-              ls -la 
+              ls -la
               mkdir -p $HOME/.cargo/bin
               cd ../../target/release
               pwd
@@ -76,6 +76,18 @@ jobs:
     steps:
       - attach_workspace:
           at: .
+      - run:
+          name: Remove pnpm patches
+          command: node removePnpm.js
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build ADAM (without bootstrap languages)
+          command: pnpm run build-core-executor
       - run:
           name: Root tests
           command: pnpm test

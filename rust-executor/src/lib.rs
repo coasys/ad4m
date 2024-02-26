@@ -9,6 +9,8 @@ mod js_core;
 mod prolog_service;
 mod utils;
 mod wallet;
+//use tokio;
+
 pub mod init;
 mod pubsub;
 mod dapp_server;

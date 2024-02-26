@@ -263,7 +263,7 @@ export default class HolochainService {
         //4. Call the zome function
         try {
             if (fnName != "sync" && fnName != "current_revision") {
-                console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, payload, "\nFor language with address", lang, "\x1b[0m");
+                console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, JSON.stringify(payload), "\nFor language with address", lang, "\x1b[0m");
             }
 
             let result = await HOLOCHAIN_SERVICE.callZomeFunction(installed_app_id, dnaNick, zomeName, fnName, encode(payload));
