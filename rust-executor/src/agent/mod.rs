@@ -160,27 +160,39 @@ mod tests {
         );
     }
 
-#[test]
-fn test_create_signed_expression_and_verify_with_changed_sorting() {
-    setup_wallet();
-    let json_value = json!({"key2": "value1", "key1": "value2"});
-    let signed_expression = create_signed_expression(json_value).expect("Failed to create signed expression");
+    #[test]
+    fn test_create_signed_expression_and_verify_with_changed_sorting() {
+        setup_wallet();
+        let json_value = json!({"key2": "value1", "key1": "value2"});
+        let signed_expression = create_signed_expression(json_value).expect("Failed to create signed expression");
 
-    // Simulate changing the sorting of the JSON in the signed expression
-    let mut data_map = BTreeMap::new();
-    let sorted_keys = signed_expression.data.as_object().unwrap().keys().sorted();
-    for key in sorted_keys {
-        data_map.insert(key.clone(), signed_expression.data[key].clone());
+        // Simulate changing the sorting of the JSON in the signed expression
+        let mut data_map = BTreeMap::new();
+        let sorted_keys = signed_expression.data.as_object().unwrap().keys().sorted();
+        for key in sorted_keys {
+            data_map.insert(key.clone(), signed_expression.data[key].clone());
+        }
+        let sorted_json = json!(data_map);
+        let mut sorted_expression = signed_expression.clone();
+        sorted_expression.data = sorted_json;
+
+        // Verify the expression with changed sorting
+        assert!(
+            signatures::verify(&sorted_expression).expect("Verification failed"),
+            "Signature verification for create_signed_expression with changed sorting should succeed"
+        );
     }
-    let sorted_json = json!(data_map);
-    let mut sorted_expression = signed_expression.clone();
-    sorted_expression.data = sorted_json;
 
-    // Verify the expression with changed sorting
-    assert!(
-        signatures::verify(&sorted_expression).expect("Verification failed"),
-        "Signature verification for create_signed_expression with changed sorting should succeed"
-    );
-}
+    #[test]
+    fn test_create_signed_expression_with_data_string() {
+        setup_wallet();
+        let json_value = serde_json::Value::String(r#"{"key2": "value1", "key1": "value2"}"#.to_string());
+        let signed_expression = create_signed_expression(json_value).expect("Failed to create signed expression");
+        // Verify the expression with changed sorting
+        assert!(
+            signatures::verify(&signed_expression).expect("Verification failed"),
+            "Signature verification for create_signed_expression with string data should succeed"
+        );
+    }
 }
 
