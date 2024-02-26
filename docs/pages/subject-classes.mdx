@@ -82,7 +82,8 @@ Every class must be Decorated using the decorator inorder for it to have the cor
 Properties:
 
 Name: Name of the Subject class (When the js class goes through a minfiner it can change the class name so needed this)
-SubjectProperty
+
+### SubjectProperty
 All the properties on the subject class that are not collections should use this decorator to define the property. Atleast one property should be an instance property for the class to function meaning it should define through, initial & required.
 
 Properties:
@@ -95,30 +96,30 @@ Properties:
 - getter: Overrides the default getter, a prolog query.
 - setter: Overrides the default setter, a prolog query.
 
-## SubjectFlag
+### SubjectFlag
 
 This decorator simplifies the creation of an instance property. Unlike SubjectProperty this is not writable mean once define can't be changed so if you are planning to add an instance property that can be overridden use SubjectProperty.
 
 through: Indicates the predicate for the property
 value: Initial value for the property
-SubjectCollection
+
+### SubjectCollection
 This decorator can be used to define collections/ arrays and comes with some additional functions unlike SubjectProperty. With this decorator you can set, push & remove items from the collections.
 
 through: Indicates the predicate for the property
 where:
 isInstance: You can pass in the subject class directly instead of using a prolog query.
 condition: prolog query to add a condition
-Vanilla JS way
+
+### Vanilla JS way
 The above implementation can be writen below as js class using the decorator.
 
 ```js
 @SDNAClass({ name: "Todo" })
 class Todo {
-  @SubjectProperty({
+  @SubjectFlag({
     through: "todo://state",
     initial: "todo://ready",
-    writable: true,
-    required: true,
   })
   state: string = "";
 
@@ -128,6 +129,12 @@ class Todo {
     resolveLanguage: "literal",
   })
   title: string = "";
+
+  @SubjectCollections({
+    through: "flux://entry_type",
+    where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
+  })
+  likedMessages: string = "";
 }
 ```
 
@@ -257,7 +264,20 @@ Get all subject proxies for this class:
 
 ```js
 // This will get all the instances of the subject class
-await Todo.all();
+await Todo.all(perspective);
+```
+
+Query subject proxies for this class:
+
+```js
+/** This will get all the instances of the subject class
+  *
+  * SubjectEntityQueryParam:
+  * - `size: number`: The number of items/ subject proxies to return per page.
+  * - `page: number`: Page number starts from 1.
+  * - `source: string`: The baseExpression that all the instances are linked to, defaults to `ad4m://self`
+  */
+await Todo.query(perspective, { page: 1, size: 10 });
 ```
 
 Update properties/ collections:
