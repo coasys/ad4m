@@ -68,7 +68,7 @@ jobs:
           no-output-timeout: 30m
           root: .
           paths:
-            - .
+            - ./target/release/ad4m
 
   unit-tests:
     docker:
