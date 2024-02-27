@@ -1,5 +1,6 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::js_core::JsCoreHandle;
+use crate::types::DecoratedLinkExpression;
 use juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -252,16 +253,7 @@ impl std::fmt::Display for LinkStatus {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkExpression {
-    pub author: String,
-    pub data: Link,
-    pub proof: ExpressionProof,
-    pub timestamp: String,
-    pub status: Option<LinkStatus>,
-}
-
+pub type LinkExpression = DecoratedLinkExpression;
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionInput {

@@ -1,23 +1,66 @@
+use std::default;
+
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use juniper::{
-    GraphQLEnum, GraphQLObject,
+    GraphQLEnum, GraphQLObject, GraphQLValue,
 };
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+use crate::agent::signatures::verify;
+
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Expression<T> {
+pub struct Expression<T: Serialize> {
     pub author: String,
     pub timestamp: String,
     pub data: T,
     pub proof: ExpressionProof,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ExpressionProof {
     pub key: String,
     pub signature: String,
 }
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct VerifiedExpression<T: GraphQLValue + Serialize> {
+    pub author: String,
+    pub timestamp: String,
+    pub data: T,
+    pub proof: DecoratedExpressionProof,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+
+pub struct DecoratedExpressionProof {
+    pub key: String,
+    pub signature: String,
+    pub valid: bool,
+    pub invalid: bool,
+}
+
+impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> {
+    fn from(expr: Expression<T>) -> Self {
+        let valid = match verify(&expr) {
+            Ok(valid) => valid,
+            Err(_) => false,
+        };
+        let invalid = !valid;
+        VerifiedExpression {
+            author: expr.author,
+            timestamp: expr.timestamp,
+            data: expr.data,
+            proof: DecoratedExpressionProof {
+                key: expr.proof.key,
+                signature: expr.proof.signature,
+                valid,
+                invalid,
+            },
+        }
+    }
+}
+
+
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -28,18 +71,36 @@ pub struct Link {
 }
 
 
+pub type LinkExpression = Expression<Link>;
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct LinkExpression {
+pub struct DecoratedLinkExpression {
     pub author: String,
-    pub data: Link,
-    pub proof: ExpressionProof,
     pub timestamp: String,
-    pub status: Option<LinkStatus>,
+    pub data: Link,
+    pub proof: DecoratedExpressionProof,
+    pub status: LinkStatus,
 }
 
-#[derive(GraphQLEnum, Debug, Deserialize, Serialize, Clone, PartialEq)]
+impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
+    fn from((expr, status): (LinkExpression, LinkStatus)) -> Self {
+        let verified_expr: VerifiedExpression<Link> = expr.into();
+        DecoratedLinkExpression {
+            author: verified_expr.author,
+            timestamp: verified_expr.timestamp,
+            data: verified_expr.data,
+            proof: verified_expr.proof,
+            status,
+        }
+    }
+}
+
+
+
+#[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
 pub enum LinkStatus {
+    #[default]
     #[serde(rename = "shared")]
     Shared,
     #[serde(rename = "local")]
