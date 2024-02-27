@@ -367,7 +367,7 @@ impl Ad4mDb {
 
     // Expression Methods
 
-    pub fn add_expression(&self, url: &str, expression: &Expression) -> Ad4mDbResult<()> {
+    pub fn add_expression<T: Serialize>(&self, url: &str, expression: &Expression<T>) -> Ad4mDbResult<()> {
         self.conn.execute(
             "INSERT INTO expression (url, data)
              VALUES (?1, ?2)",
@@ -379,7 +379,7 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_expression(&self, url: &str) -> Ad4mDbResult<Option<Expression>> {
+    pub fn get_expression(&self, url: &str) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
         let mut stmt = self.conn.prepare(
             "SELECT data FROM expression WHERE url = ?1",
         )?;
