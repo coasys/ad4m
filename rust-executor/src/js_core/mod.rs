@@ -27,6 +27,7 @@ mod signature_extension;
 mod string_module_loader;
 mod utils_extension;
 mod wallet_extension;
+mod utils;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 use crate::holochain_service::maybe_get_holochain_service;

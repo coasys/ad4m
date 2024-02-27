@@ -351,7 +351,7 @@ impl HolochainService {
                 // staging - https://bootstrap-staging.holo.host
                 // dev - https://bootstrap-dev.holohost.workers.dev
                 // own - http://207.148.16.17:38245
-                kitsune_config.bootstrap_service = Some(Url2::parse(String::from("https://bootstrap.holo.host/"))); 
+                kitsune_config.bootstrap_service = Some(Url2::parse(local_config.bootstrap_url));
             } else {
                 kitsune_config.bootstrap_service = None;
             }
@@ -365,7 +365,7 @@ impl HolochainService {
                     // prod - wss://signal.holo.host
                     // dev - wss://signal.holotest.net
                     // our - ws://207.148.16.17:42697
-                    signal_url: String::from("wss://signal.holo.host"),
+                    signal_url: local_config.proxy_url,
                 }];
             } else {
                 kitsune_config.transport_pool = vec![
@@ -376,8 +376,6 @@ impl HolochainService {
                 ];
             }
             config.network = kitsune_config;
-
-            println!("wow 1 {:?}", config);
 
             config
         };
@@ -598,7 +596,7 @@ impl HolochainService {
 
         let stats = self.conductor.dump_network_stats().await?;
         info!("Network stats: {}", stats);
-        
+
         Ok(())
     }
 

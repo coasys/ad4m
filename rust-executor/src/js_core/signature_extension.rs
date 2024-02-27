@@ -4,6 +4,8 @@ use std::borrow::Cow;
 use crate::types::Expression;
 use crate::agent::signatures::{verify_string_signed_by_did, verify};
 
+use super::utils::sort_json_value;
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SignatureVerificationResult {
@@ -24,9 +26,15 @@ fn signature_verify_string_signed_by_did(
 #[op2]
 #[serde]
 fn signature_verify(
-    #[serde] expr: Expression,
+    #[serde] expr: Expression<serde_json::Value>,
 ) -> Result<SignatureVerificationResult, AnyError> {
-    let is_valid = verify(&expr)?;
+    let sorted_expression = Expression {
+        author: expr.author,
+        timestamp: expr.timestamp,
+        data: sort_json_value(&expr.data),
+        proof: expr.proof,
+    };
+    let is_valid =  verify(&sorted_expression)?;
     Ok(SignatureVerificationResult { is_valid })
 }
 

@@ -17,7 +17,7 @@
   "scripts": {
     "build": "deno run --allow-all esbuild.ts",
     "bundle": "deno run --allow-all esbuild.ts",
-    "test": "pnpm run test-perspective && pnpm test-db",
+    "test-js-executor": "pnpm run test-perspective && pnpm test-db",
     "test-perspective": "ts-mocha -p tsconfig.json --exit src/core/Perspective.test.ts",
     "test-db": "ts-mocha -p tsconfig.json --exit src/core/db.test.ts",
     "test-prolog": "ts-mocha -p tsconfig.json --exit src/core/PrologInstance.test.ts"

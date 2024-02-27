@@ -6,10 +6,10 @@ use juniper::{
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct Expression {
+pub struct Expression<T> {
     pub author: String,
     pub timestamp: String,
-    pub data: JsonValue,
+    pub data: T,
     pub proof: ExpressionProof,
 }
 

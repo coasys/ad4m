@@ -1,13 +1,15 @@
-use std::collections::BTreeMap;
+
 use std::str::FromStr;
-use chrono::{DateTime, Offset, Utc};
+use chrono::{DateTime, Utc};
 use chrono::SecondsFormat;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use serde::Serialize;
 use sha2::{Sha256, Digest};
 use crate::types::Expression;
 use did_key::{CoreSign, PatchedKeyPair};
 use log::error;
+
 
 pub fn verify_string_signed_by_did(did: &str, data: &str, signed_data: &str) -> Result<bool, AnyError> {
     let sig_bytes = hex::decode(signed_data)?;
@@ -15,43 +17,28 @@ pub fn verify_string_signed_by_did(did: &str, data: &str, signed_data: &str) -> 
     Ok(inner_verify(did, &message, &sig_bytes))
 }
 
-pub fn verify(expr: &Expression) -> Result<bool, AnyError> {
+pub fn verify<T: Serialize>(expr: &Expression<T>) -> Result<bool, AnyError> {
     let sig_bytes = hex::decode(&expr.proof.signature)?;
     let timestamp = DateTime::<Utc>::from_str(&expr.timestamp)
         .map_err(|e| anyhow!("Failed to parse timestamp when trying to verify signature: {}", e))?;
-    let message = build_message(&expr.data, &timestamp);
+    let message = hash_data_and_timestamp(&expr.data, &timestamp);
     let result = inner_verify(&expr.author, &message, &sig_bytes);
     Ok(result)
 }
 
-fn sort_json_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(obj) => {
-            let mut map = BTreeMap::new();
-            for (k, v) in obj {
-                map.insert(k.clone(), sort_json_value(v));
-            }
-            serde_json::Value::Object(serde_json::Map::from_iter(map.into_iter()))
-        },
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(sort_json_value).collect())
-        },
-        _ => value.clone(),
-    }
-}
 
-pub(super) fn build_message(data: &serde_json::Value, timestamp: &DateTime<Utc>) -> Vec<u8> {
-    let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
-    let sorted_data = sort_json_value(data);
-    let mut map = BTreeMap::new();
-    map.insert("data".to_string(), sorted_data);
-    map.insert("timestamp".to_string(), serde_json::Value::String(timestamp));
-
-    let sorted_payload = serde_json::Value::Object(serde_json::Map::from_iter(map.into_iter()));
-    let payload_string = serde_json::to_string(&sorted_payload).expect("Failed to serialize payload");
-
+pub(super) fn hash_data_and_timestamp<T: Serialize>(data: &T, timestamp: &DateTime<Utc>) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    hasher.update(payload_string.as_bytes());
+
+    // Serialize and hash the data directly.
+    let serialized_data = serde_json::to_vec(data).expect("Failed to serialize data");
+    hasher.update(&serialized_data);
+
+    // Serialize and hash the timestamp.
+    let timestamp_str = timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
+    hasher.update(timestamp_str.as_bytes());
+
+    // Finalize the hash and return the result.
     hasher.finalize().as_slice().try_into().expect("Hash should be 32 bytes")
 }
 

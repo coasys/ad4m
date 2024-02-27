@@ -167,7 +167,7 @@ describe("Integration tests", function () {
 
           await testContext.bob.agent.updatePublicPerspective(new Perspective([link]))
 
-          //await testContext.makeAllNodesKnown()
+          await testContext.makeAllNodesKnown()
         })
 
         after(async () => {

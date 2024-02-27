@@ -13,7 +13,7 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
     let mut functions = BTreeSet::new();
     functions.insert((
         ZomeName::from("direct-message"),
-        "recv_send_remote_signal".into(),
+        "recv_remote_signal".into(),
     ));
     functions.insert((ZomeName::from("direct-message"), "get_status".into()));
     let granted_functions: GrantedFunctions = GrantedFunctions::Listed(functions);
@@ -117,7 +117,7 @@ pub fn get_status(_: ()) -> ExternResult<Option<PerspectiveExpression>> {
 //---------------------------------------------------------
 
 #[hdk_extern]
-fn recv_send_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
+fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
     debug!("RECEIVEING MESSAGE...");
     match PerspectiveExpression::try_from(signal) {
         Ok(message) => {
