@@ -1,24 +1,13 @@
 // rust-executor/src/perspective.rs
 
 use std::sync::{Arc, Mutex};
+use deno_core::error::AnyError;
 use serde::{Serialize, Deserialize};
+use crate::agent::create_signed_expression;
+use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
 
-use crate::graphql::graphql_types::{PerspectiveHandle};
-
-
-fn sign_link(link: Link) -> LinkExpression {
-    LinkExpression {
-        author: "dummy_author".to_string(),
-        timestamp: "2021-01-01T00:00:00Z".to_string(),
-        data: link,
-        proof: ExpressionProof {
-            signature: "dummy_signature".to_string(),
-            key: "dummy_key".to_string(),
-        },
-        status: Some(LinkStatus::Shared),
-    }
-}
+use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveLinkFilter};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PerspectiveInstance {
@@ -64,13 +53,51 @@ impl PerspectiveInstance {
         self.persisted = handle;
     }
 
-    pub fn add_link(&self, link: Link, status: LinkStatus) {
-        let link_expression = sign_link(link);
+    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
+        Err(AnyError::msg("Not implemented"))
+    }
+
+    pub async fn add_link(&mut self, link: Link, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
+        let link_expression = create_signed_expression(link)?;
         Ad4mDb::global_instance()
             .lock()
             .expect("Couldn't get write lock on Ad4mDb")
             .as_ref()
             .expect("Ad4mDb not initialized")
-            .add_link(&self.persisted.uuid, &link_expression, &status);
+            .add_link(&self.persisted.uuid, &link_expression, &status)?;
+
+        if status == LinkStatus::Shared {
+            let diff = PerspectiveDiff {
+                additions: vec![link_expression.clone()],
+                removals: vec![],
+            };
+            match self.commit(&diff).await {
+                Ok(_) => (),
+                Err(_) => {
+                    Ad4mDb::global_instance()
+                        .lock()
+                        .expect("Couldn't get write lock on Ad4mDb")
+                        .as_ref()
+                        .expect("Ad4mDb not initialized")
+                        .add_pending_diff(&self.persisted.uuid, &diff)?;
+                }
+            }
+        }
+
+        let link_expression = DecoratedLinkExpression::from((link_expression, status));
+        self.prolog_needs_rebuild = true;
+
+        get_global_pubsub()
+            .await
+            .publish(
+                &PERSPECTIVE_LINK_ADDED_TOPIC, 
+                &serde_json::to_string(&PerspectiveLinkFilter {
+                    perspective: self.persisted.clone(),
+                    link: link_expression.clone(),
+                }).unwrap(),
+            )
+            .await;
+
+        Ok(link_expression)
     }
 }
