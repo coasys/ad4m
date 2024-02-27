@@ -10,7 +10,7 @@ export default function directMessageTests(testContext: TestContext) {
         link.author = "did:test";
         link.timestamp = new Date().toISOString();
         link.data = new Link({
-            source: Literal.from("me").toUrl(),  
+            source: Literal.from("me").toUrl(),
             predicate: Literal.from("thinks").toUrl(),
             target: Literal.from("nothing").toUrl()
         });
@@ -28,11 +28,11 @@ export default function directMessageTests(testContext: TestContext) {
             }catch(e) {
                 hasThrown = true
             }
-            
-            expect(hasThrown).to.be.true;
-        })    
 
-        describe.skip("with Alice and Bob being friends", () => {
+            expect(hasThrown).to.be.true;
+        })
+
+        describe("with Alice and Bob being friends", () => {
             //@ts-ignore
             let alice, bob, didAlice, didBob
 
@@ -52,7 +52,7 @@ export default function directMessageTests(testContext: TestContext) {
                 link.timestamp = new Date().toISOString();
                 link.data = new Link({
                     //@ts-ignore
-                    source: didBob,  
+                    source: didBob,
                     predicate: Literal.from("is").toUrl(),
                     target: Literal.from("online").toUrl()
                 });
@@ -60,7 +60,7 @@ export default function directMessageTests(testContext: TestContext) {
                 const statusBob = new Perspective([link])
                 //@ts-ignore
                 await bob.runtime.setStatus(statusBob)
-                await sleep(1000)    
+                await sleep(1000)
                 //@ts-ignore
                 const statusAlice = await alice.runtime.friendStatus(didBob)
                 expect(statusAlice).not.to.be.undefined;
@@ -91,7 +91,7 @@ export default function directMessageTests(testContext: TestContext) {
                 expect((await bob.runtime.messageInbox(didAlice)).length).to.be.equal(1)
                 //@ts-ignore
                 expect((await bob.runtime.messageInbox("did:test:other")).length).to.be.equal(0)
-                
+
             })
 
             it("Alice finds her sent message in the outbox", async () => {
