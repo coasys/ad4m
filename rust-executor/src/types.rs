@@ -108,6 +108,11 @@ pub enum LinkStatus {
 }
 
 
+pub struct LinkMutations {
+    pub additions: Vec<Link>,
+    pub removals: Vec<Link>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
