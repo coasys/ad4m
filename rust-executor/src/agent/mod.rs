@@ -1,6 +1,7 @@
 
 use deno_core::error::AnyError;
 use deno_core::anyhow::anyhow;
+use serde::Serialize;
 
 use crate::types::{Expression, ExpressionProof};
 use crate::wallet::Wallet;
@@ -27,27 +28,19 @@ pub fn did() -> String {
     did_document().id.clone()
 }
 
-pub fn create_signed_expression(data: serde_json::Value) -> Result<Expression, AnyError> {
+pub fn create_signed_expression<T: Serialize>(data: T) -> Result<Expression<T>, AnyError> {
     let timestamp = chrono::Utc::now();
-    let payload_bytes = signatures::build_message(&data, &timestamp);
-    let timestamp = timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    
-    let signature = sign(&payload_bytes)?;
-    let sig_hex = hex::encode(signature);
+    let signature = hex::encode(sign(&signatures::hash_data_and_timestamp(&data, &timestamp))?);
 
-    let proof = ExpressionProof {
-        signature: sig_hex,
-        key: signing_key_id(),
-    };
-
-    let signed_expression = Expression {
+    Ok(Expression {
         author: did(),
-        timestamp,
+        timestamp: timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         data,
-        proof,
-    };
-
-    Ok(signed_expression)
+        proof: ExpressionProof {
+            signature,
+            key: signing_key_id(),
+        },
+    })
 }
 
 

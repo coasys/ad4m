@@ -1,6 +1,8 @@
 use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
 use std::borrow::Cow;
-use crate::agent::{did, did_document, signing_key_id, create_signed_expression, sign, sign_string_hex};
+use crate::agent::{create_signed_expression, did, did_document, sign, sign_string_hex, signing_key_id};
+
+use super::utils::sort_json_value;
 
 #[op2]
 #[serde]
@@ -23,7 +25,8 @@ fn agent_did() -> Result<String, AnyError> {
 #[op2]
 #[serde]
 fn agent_create_signed_expression(#[serde] data: serde_json::Value) -> Result<serde_json::Value, AnyError> {
-    let signed_expression = create_signed_expression(data)?;
+    let sorted_json = sort_json_value(&data);
+    let signed_expression = create_signed_expression(sorted_json)?;
     Ok(serde_json::to_value(signed_expression)?)
 }
 
