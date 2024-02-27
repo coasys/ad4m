@@ -6,7 +6,7 @@ orbs:
   rust: circleci/rust@1.6.1
 
 jobs:
-  build:
+  build-and-test:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     resource_class: xlarge
@@ -68,14 +68,7 @@ jobs:
           no-output-timeout: 30m
           root: .
           paths:
-            - .
-
-  unit-tests:
-    docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
-    steps:
-      - attach_workspace:
-          at: .
+            - ./target/release/ad4m
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -86,9 +79,6 @@ jobs:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
-          name: Build ADAM (without bootstrap languages)
-          command: pnpm run build-core-executor
-      - run:
           name: Root tests
           command: pnpm test
 
@@ -97,6 +87,7 @@ jobs:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     resource_class: xlarge
     steps:
+      - checkout
       - attach_workspace:
           at: .
       - restore_cache:
@@ -160,6 +151,7 @@ jobs:
     docker:
       - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
     steps:
+      - checkout
       - attach_workspace:
           at: .
       - run:
@@ -176,10 +168,7 @@ workflows:
   version: 2
   build-and-test:
     jobs:
-      - build
-      - unit-tests:
-          requires:
-            - build
+      - build-and-test
       - integration-tests-js:
           requires:
-            - build
+            - build-and-test
