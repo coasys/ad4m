@@ -123,26 +123,26 @@ Let's say we want to create a list of tasks to be completed.
 First, we need a task model. We can use the [SDNA](/social-dna/) helpers to create this:
 
 ```jsx filename="models/Task.ts"
-import { SDNAClass, subjectProperty, subjectFlag } from "@coasys/ad4m";
+import { SDNAClass, SubjectProperty, SubjectFlag } from "@coasys/ad4m";
 
 @SDNAClass({
   name: "Task",
 })
 export default class Task {
-  @subjectFlag({
+  @SubjectFlag({
     through: "flux://entry_type",
     value: "flux://has_task",
   })
   type: string;
 
-  @subjectProperty({
+  @SubjectProperty({
     through: "rdf://title",
     writable: true,
     resolveLanguage: "literal",
   })
   title: string;
 
-  @subjectProperty({
+  @SubjectProperty({
     through: "rdf://status",
     writable: true,
     resolveLanguage: "literal",
