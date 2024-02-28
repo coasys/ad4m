@@ -3,7 +3,7 @@ use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use crate::types::{Expression, PerspectiveDiff, LinkExpression, LinkStatus};
+use crate::types::{Expression, ExpressionProof, Link, LinkExpression, LinkStatus, PerspectiveDiff};
 use crate::graphql::graphql_types::PerspectiveHandle;
 
 #[derive(Serialize, Deserialize)]
@@ -68,12 +68,13 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS link (
                 id INTEGER PRIMARY KEY,
                 perspective TEXT NOT NULL,
-                link_expression TEXT NOT NULL,
                 source TEXT NOT NULL,
                 predicate TEXT NOT NULL,
                 target TEXT NOT NULL,
                 author TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                key TEXT NOT NULL,
                 status TEXT NOT NULL
              )",
             [],
@@ -186,16 +187,17 @@ impl Ad4mDb {
 
     pub fn add_link(&self, perspective_uuid: &str, link: &LinkExpression, status: &LinkStatus) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "INSERT INTO link (perspective, link_expression, source, predicate, target, author, timestamp, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 perspective_uuid,
-                serde_json::to_string(link)?,
                 link.data.source,
                 link.data.predicate.as_ref().unwrap_or(&"".to_string()),
                 link.data.target,
                 link.author,
                 link.timestamp,
+                link.proof.signature,
+                link.proof.key,
                 serde_json::to_string(status)?,
             ],
         )?;
@@ -205,16 +207,17 @@ impl Ad4mDb {
     pub fn add_many_links(&self, perspective_uuid: &str, links: Vec<LinkExpression>, status: &LinkStatus) -> Ad4mDbResult<()> {
         for link in links.iter() {
             self.conn.execute(
-                "INSERT INTO link (perspective, link_expression, source, predicate, target, author, timestamp, status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     perspective_uuid,
-                    serde_json::to_string(link)?,
                     link.data.source,
                     link.data.predicate.as_ref().unwrap_or(&"".to_string()),
                     link.data.target,
                     link.author,
                     link.timestamp,
+                    link.proof.signature,
+                    link.proof.key,
                     serde_json::to_string(&status)?,
                 ],
             )?;
@@ -224,17 +227,22 @@ impl Ad4mDb {
 
     pub fn update_link(&self, perspective_uuid: &str, old_link: &LinkExpression, new_link: &LinkExpression) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "UPDATE link SET link_expression = ?1, source = ?2, predicate = ?3, target = ?4, author = ?5, timestamp = ?6
-             WHERE perspective = ?7 AND link_expression = ?8",
+            "UPDATE link SET source = ?1, predicate = ?2, target = ?3, author = ?4, timestamp = ?5, signature = ?6, key = ?7
+             WHERE perspective = ?8 AND source = ?9 AND predicate = ?10 AND target = ?11 AND author = ?12 AND timestamp = ?13",
             params![
-                serde_json::to_string(new_link)?,
                 new_link.data.source,
                 new_link.data.predicate.as_ref().unwrap_or(&"".to_string()),
                 new_link.data.target,
                 new_link.author,
                 new_link.timestamp,
+                new_link.proof.signature,
+                new_link.proof.key,
                 perspective_uuid,
-                serde_json::to_string(old_link)?,
+                old_link.data.source,
+                old_link.data.predicate.as_ref().unwrap_or(&"".to_string()),
+                old_link.data.target,
+                old_link.author,
+                old_link.timestamp,
             ],
         )?;
         Ok(())
@@ -242,73 +250,151 @@ impl Ad4mDb {
 
     pub fn remove_link(&self, perspective_uuid: &str, link: &LinkExpression) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "DELETE FROM link WHERE perspective = ?1 AND link_expression = ?2",
+            "DELETE FROM link WHERE perspective = ?1 AND source = ?2 AND predicate = ?3 AND target = ?4 AND author = ?5 AND timestamp = ?6",
             params![
                 perspective_uuid,
-                serde_json::to_string(link)?,
+                link.data.source,
+                link.data.predicate.as_ref().unwrap_or(&"".to_string()),
+                link.data.target,
+                link.author,
+                link.timestamp,
             ],
         )?;
         Ok(())
     }
 
-    pub fn get_link(&self, perspective_uuid: &str, link: &LinkExpression) -> Ad4mDbResult<Option<LinkExpression>> {
+    pub fn get_link(&self, perspective_uuid: &str, link: &LinkExpression) -> Ad4mDbResult<Option<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT link_expression FROM link WHERE perspective = ?1 AND link_expression = ?2",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2 AND predicate = ?3 AND target = ?4 AND author = ?5 AND timestamp = ?6",
         )?;
-        let link_expression: Option<String> = stmt.query_row(
-            params![perspective_uuid, serde_json::to_string(link)?],
-            |row| row.get(0),
+        let link_expression: Option<(LinkExpression, LinkStatus)> = stmt.query_row(
+            params![perspective_uuid, link.data.source, link.data.predicate.as_ref().unwrap_or(&"".to_string()), link.data.target, link.author, link.timestamp],
+            |row| {
+                Ok((
+                    LinkExpression {
+                        data: Link {
+                            source: row.get(1)?,
+                            predicate: row.get(2).map(|p: Option<String>| {
+                                match p.as_ref().map(|p| p.as_str()){
+                                    Some("") => None,
+                                    _ => p
+                                }
+                            })?,
+                            target: row.get(3)?,
+                        },
+                        proof: ExpressionProof {
+                            signature: row.get(6)?,
+                            key: row.get(7)?,
+                        },
+                        author: row.get(4)?,
+                        timestamp: row.get(5)?,
+                    },
+                    serde_json::from_str(&row.get::<_, String>(8)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e)
+                    ))?
+                ))
+            }
         ).optional()?;
-        Ok(link_expression.map(|le| serde_json::from_str(&le).unwrap()))
+        Ok(link_expression)
     }
 
-    pub fn get_all_links(&self, perspective_uuid: &str) -> Ad4mDbResult<Vec<LinkExpression>> {
+    pub fn get_all_links(&self, perspective_uuid: &str) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT link_expression FROM link WHERE perspective = ?1",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1",
         )?;
         let link_iter = stmt.query_map(
             params![perspective_uuid],
-            |row| serde_json::from_str(&row.get::<_, String>(0).unwrap())
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e)
-                ))
+            |row| {
+                let link_expression = LinkExpression {
+                    data: Link {
+                        source: row.get(1)?,
+                        predicate: row.get(2)?,
+                        target: row.get(3)?,
+                    },
+                    proof: ExpressionProof {
+                        signature: row.get(6)?,
+                        key: row.get(7)?,
+                    },
+                    author: row.get(4)?,
+                    timestamp: row.get(5)?,
+                };
+                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e)
+                    ))?;
+                Ok((link_expression, status))
+            }
         )?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
     }
 
-    pub fn get_links_by_source(&self, perspective_uuid: &str, source: &str) -> Ad4mDbResult<Vec<LinkExpression>> {
+    pub fn get_links_by_source(&self, perspective_uuid: &str, source: &str) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT link_expression FROM link WHERE perspective = ?1 AND source = ?2",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2",
         )?;
         let link_iter = stmt.query_map(
             params![perspective_uuid, source],
-            |row| serde_json::from_str(&row.get::<_, String>(0).unwrap())
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e)
-                ))
-
+            |row| {
+                let link_expression = LinkExpression {
+                    data: Link {
+                        source: row.get(1)?,
+                        predicate: row.get(2)?,
+                        target: row.get(3)?,
+                    },
+                    proof: ExpressionProof {
+                        signature: row.get(6)?,
+                        key: row.get(7)?,
+                    },
+                    author: row.get(4)?,
+                    timestamp: row.get(5)?,
+                };
+                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e)
+                    ))?;
+                Ok((link_expression, status))
+            }
         )?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
     }
 
-    pub fn get_links_by_target(&self, perspective_uuid: &str, target: &str) -> Ad4mDbResult<Vec<LinkExpression>> {
+    pub fn get_links_by_target(&self, perspective_uuid: &str, target: &str) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT link_expression FROM link WHERE perspective = ?1 AND target = ?2",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND target = ?2",
         )?;
         let link_iter = stmt.query_map(
             params![perspective_uuid, target],
-            |row| serde_json::from_str(&row.get::<_, String>(0).unwrap())
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e)
-                ))
+            |row| {
+                let link_expression = LinkExpression {
+                    data: Link {
+                        source: row.get(1)?,
+                        predicate: row.get(2)?,
+                        target: row.get(3)?,
+                    },
+                    proof: ExpressionProof {
+                        signature: row.get(6)?,
+                        key: row.get(7)?,
+                    },
+                    author: row.get(4)?,
+                    timestamp: row.get(5)?,
+                };
+                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e)
+                    ))?;
+                Ok((link_expression, status))
+            }
         )?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
@@ -437,9 +523,9 @@ mod tests {
         let link = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link, &LinkStatus::Shared).unwrap();
 
-        let result: Option<LinkExpression> = db.get_link(&p_uuid, &link).unwrap();
+        let result: Option<(LinkExpression, LinkStatus)> = db.get_link(&p_uuid, &link).unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), link);
+        assert_eq!(result.unwrap(), (link, LinkStatus::Shared));
     }
 
     #[test]
@@ -451,7 +537,7 @@ mod tests {
         db.add_link(&p_uuid, &link, &LinkStatus::Shared).unwrap();
 
         let result = db.get_link(&p_uuid, &link).unwrap();
-        assert_eq!(result, Some(link));
+        assert_eq!(result, Some((link, LinkStatus::Shared)));
     }
 
     #[test]
@@ -459,11 +545,11 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
         let link = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link, &LinkStatus::Shared).unwrap();
+        db.add_link(&p_uuid, &link, &LinkStatus::Local).unwrap();
 
         for _ in 0..3 {
             let result = db.get_link(&p_uuid, &link).unwrap();
-            assert_eq!(result, Some(link.clone()));
+            assert_eq!(result, Some((link.clone(), LinkStatus::Local)));
         }
     }
 
@@ -474,10 +560,10 @@ mod tests {
         let link1 = construct_dummy_link_expression();
         db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
         let link2 = construct_dummy_link_expression();
-        db.add_link(&p_uuid, &link2, &LinkStatus::Shared).unwrap();
+        db.add_link(&p_uuid, &link2, &LinkStatus::Local).unwrap();
 
         let all_links = db.get_all_links(&p_uuid).unwrap();
-        assert_eq!(all_links, vec![link1, link2]);
+        assert_eq!(all_links, vec![(link1, LinkStatus::Shared), (link2, LinkStatus::Local)]);
     }
 
     #[test]
@@ -489,7 +575,7 @@ mod tests {
 
         for _ in 0..3 {
             let all_links = db.get_all_links(&p_uuid).unwrap();
-            assert_eq!(all_links, vec![link1.clone()]);
+            assert_eq!(all_links, vec![(link1.clone(), LinkStatus::Shared)]);
         }
     }
 
@@ -503,7 +589,7 @@ mod tests {
         db.add_link(&p_uuid, &link2,  &LinkStatus::Shared).unwrap();
 
         let result = db.get_links_by_source(&p_uuid, &link1.data.source).unwrap();
-        assert_eq!(result, vec![link1]);
+        assert_eq!(result, vec![(link1, LinkStatus::Shared)]);
     }
 
     #[test]
@@ -516,7 +602,7 @@ mod tests {
         db.add_link(&p_uuid, &link2, &LinkStatus::Shared).unwrap();
 
         let result = db.get_links_by_target(&p_uuid, &link1.data.target).unwrap();
-        assert_eq!(result, vec![link1]);
+        assert_eq!(result, vec![(link1, LinkStatus::Shared)]);
     }
 
     #[test]
@@ -530,7 +616,7 @@ mod tests {
 
         assert!(db.get_link(&p_uuid, &link1).unwrap().is_none());
         let result = db.get_link(&p_uuid, &link2).unwrap();
-        assert_eq!(result, Some(link2));
+        assert_eq!(result, Some((link2, LinkStatus::Shared)));
     }
 
     #[test]
@@ -541,7 +627,7 @@ mod tests {
         db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
 
         let result = db.get_link(&p_uuid, &link1).unwrap();
-        assert_eq!(result, Some(link1.clone()));
+        assert_eq!(result, Some((link1.clone(), LinkStatus::Shared)));
         db.remove_link(&p_uuid, &link1).unwrap();
         assert!(db.get_link(&p_uuid, &link1).unwrap().is_none());
     }

@@ -238,7 +238,7 @@ impl PerspectiveInstance {
             .expect("Ad4mDb not initialized")
             .get_link(&self.persisted.uuid, &old_link)?;
 
-        let link = match link_option {
+        let (link, _link_status) = match link_option {
             Some(link) => link,
             None => {
                 return Err(AnyError::msg(format!(
@@ -296,7 +296,7 @@ impl PerspectiveInstance {
         Ok(new_link_expression)
     }
 
-    async fn get_links_local(&self, query: &LinkQuery) -> Result<Vec<LinkExpression>, AnyError> {
+    async fn get_links_local(&self, query: &LinkQuery) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
             return Ad4mDb::with_global_instance(|db| {
                 db.get_all_links(&self.persisted.uuid)
@@ -313,11 +313,11 @@ impl PerspectiveInstance {
             })?
         } else if let Some(predicate) = &query.predicate {
             Ad4mDb::with_global_instance(|db| {
-                Ok::<Vec<LinkExpression>, AnyError>(
+                Ok::<Vec<(LinkExpression, LinkStatus)>, AnyError>(
                     db.get_all_links(&self.persisted.uuid)?
                         .into_iter()
-                        .filter(|link| link.data.predicate.as_ref() == Some(predicate))
-                        .collect::<Vec<LinkExpression>>()
+                        .filter(|(link, status)| link.data.predicate.as_ref() == Some(predicate))
+                        .collect::<Vec<(LinkExpression, LinkStatus)>>()
                 )
             })?
         } else {
@@ -325,7 +325,7 @@ impl PerspectiveInstance {
         };
 
         if let Some(predicate) = &query.predicate {
-            result.retain(|link| link.data.predicate.as_ref() == Some(predicate));
+            result.retain(|(link, _status)| link.data.predicate.as_ref() == Some(predicate));
         }
 /*
         if let Some(from_date) = &query.from_date {
@@ -386,10 +386,8 @@ impl PerspectiveInstance {
 
         Ok(links
             .into_iter()
-            .map(|link| {
-                // TODO: actually get the status from the link
-                let link_status = LinkStatus::default(); // Assuming default status or retrieve it as needed
-                DecoratedLinkExpression::from((link.clone(), link_status)).into()
+            .map(|(link, status)| {
+                DecoratedLinkExpression::from((link.clone(), status)).into()
             })
             .collect())
     }
