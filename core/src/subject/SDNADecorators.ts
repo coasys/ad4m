@@ -22,16 +22,42 @@ export function hasLink(predicate: string): string {
     return `triple(this, "${predicate}", _)`
 }
 
-interface InstanceQueryParams {
-    where?: object;
-    condition?: string;
+export interface InstanceQueryParams {
+/**
+ * An object representing the WHERE clause of the query.
+ */
+where?: object;
+
+/**
+ * A string representing the condition clause of the query.
+ */
+condition?: string;
 }
 
-export function instanceQuery(options?: InstanceQueryParams) {
+/**
+ * Decorator for querying instances of a subject class.
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * NOTE: Only works on methods that return a promise and will throw an error if not used on a method that returns a promise.
+ * This will allow you to query for instances of a subject class with custom clauses within the instance clauses.
+ * 
+ * @example
+ * // Usage with where clause
+ * InstanceQuery({ where: { name: "John" }}) // this will return all the properties of the subject class with the name "John"
+ * 
+ * @example
+ * // Usage with condition clause
+ * InstanceQuery({ condition: "triple(Instance, 'age', Age), Age > 18" }) // this will return all the properties of the subject class with the age greater than 18
+ * 
+ * @param {Object} [options] - Query options.
+ */
+export function InstanceQuery(options?: InstanceQueryParams) {
     return function <T>(target: T, key: keyof T, descriptor: PropertyDescriptor) {
         const originalMethod = descriptor.value;
         if(typeof originalMethod !== "function") {
-            throw new Error("instanceQuery decorator can only be applied to methods");
+            throw new Error("InstanceQuery decorator can only be applied to methods");
         }
 
         descriptor.value = async function(perspective: PerspectiveProxy): Promise<T[]> {
@@ -70,18 +96,79 @@ export function instanceQuery(options?: InstanceQueryParams) {
 }
 
 
-interface PropertyOptions {
+export interface PropertyOptions {
+    /**
+     * The predicate of the property. All properties must have this option.
+     */
     through?: string;
-    initial?: string,
-    required?: boolean,
-    writable?: boolean,
+
+    /**
+     * The initial value of the property. Required if the property is marked as required.
+     */
+    initial?: string;
+
+    /**
+     * Indicates whether the property is required. If true, an initial value must be provided.
+     */
+    required?: boolean;
+
+    /**
+     * Indicates whether the property is writable. If true, a setter will be available in the prolog engine.
+     */
+    writable?: boolean;
+
+    /**
+     * The language used to store the property. Can be the default `Literal` Language or a custom language address.
+     */
     resolveLanguage?: string;
+
+    /**
+     * Custom getter to get the value of the property in the prolog engine. If not provided, the default getter will be used.
+     */
     getter?: string;
+
+    /**
+     * Custom setter to set the value of the property in the prolog engine. Only available if the property is writable.
+     */
     setter?: string;
-    local?: boolean
+
+    /**
+     * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
+     */
+    local?: boolean;
 }
-export function subjectProperty(opts: PropertyOptions) {
+
+/**
+ * Decorator for defining properties of a subject class.
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * This will allow you to define properties with different conditions and how they would be defined in proflog engine.
+ * 
+ * - All properties must have a `through` option which is the predicate of the property.
+ * -e If the property is required, it must have an `initial` option which is the initial value of the property.
+ * - If the property is writable, it will have a setter in prolog engine. A custom setter can be defined with the `setter` option.
+ * - If resolveLanguage is defined, you can use the default `Literal` Language or use your custom language address that can be used to store the property.
+ * - If a custom getter is defined, it will be used to get the value of the property in prolog engine. If not, the default getter will be used.
+ * - If local is defined, the property will be stored locally in the perspective and not in the network. This is useful for properties that are not meant to be shared with the network
+ * 
+ * @example
+ * // Usage
+ * SubjectProperty({ through: "ad4m://name", initial: "John", required: true }) // this will define a property with the name "ad4m://name" and the initial value "John"
+ * 
+ * @param {PropertyOptions} [opts] - Property options.
+ */
+export function SubjectProperty(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
+        if (opts.required && !opts.initial) {
+            throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
+        }
+
+        if (!opts.through && !opts.getter) {
+            throw new Error("SubjectProperty requires either 'through' or 'getter' option")
+        }
+
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
         target["__properties"][key] = { ...target["__properties"][key], ...opts }
@@ -95,12 +182,51 @@ export function subjectProperty(opts: PropertyOptions) {
     };
 }
 
-interface FlagOptions {
+export interface FlagOptions {
+    /**
+     * The predicate of the property. All properties must have this option.
+     */
     through: string;
+
+    /**
+     * The value of the property.
+     */
     value: string;
 }
-export function subjectFlag(opts: FlagOptions) {
+
+/**
+ * Decorator for defining flags of a subject class
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * The idea behind flag decorator is to define a property that is required and has an initial value. 
+ * This will allow you to define a strict instance query. This behaviour can also be achieved with the `SubjectProperty` decorator but the `SubjectFlag` decorator is a shorthand for that.
+ * 
+ * NOTE: Use of Flag is discouraged and should be used only when necessary.
+ * 
+ * - All properties must have a `through` & `initial` option which is the predicate of the property.
+ * 
+ * @example
+ * // Usage
+ * SubjectFlag({ through: "ad4m://name", value: "John" }) // this will define a flag with the name "ad4m://name" and the initial value "John"   
+ * 
+ * @param {FlagOptions} [opts] Flag options.
+ */
+export function SubjectFlag(opts: FlagOptions) {
     return function <T>(target: T, key: keyof T) {
+        if (!opts.through && !opts.value) {
+            throw new Error("SubjectFlag requires a 'through' and 'value' option")
+        }
+
+        if (!opts.through) {
+            throw new Error("SubjectFlag requires a 'through' option")
+        }
+
+        if (!opts.value) {
+            throw new Error("SubjectFlag requires a 'value' option")
+        }
+
         target["__properties"] = target["__properties"] || {};
         target["__properties"][key] = target["__properties"][key] || {};
         target["__properties"][key] = {
@@ -122,13 +248,45 @@ interface WhereOptions {
     isInstance?: any
     condition?: string
 }
-interface CollectionOptions {
-    through: string,
-    where?: WhereOptions,
-    local?: boolean
+
+export interface CollectionOptions {
+    /**
+     * The predicate of the property. All properties must have this option.
+     */
+    through: string;
+
+    /**
+     * An object representing the WHERE clause of the query.
+     */
+    where?: WhereOptions;
+
+    /**
+     * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
+     */
+    local?: boolean;
 }
 
-export function subjectCollection(opts: CollectionOptions) {
+/**
+ * Decorator for defining collections of a subject class.
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * This will allow you to define collections with different conditions and how they would be defined in proflog engine.
+ * 
+ * NOTE: The property needs to be an array for it to picked up during the initialization phase.
+ * 
+ * - All collections must have a `through` option which is the predicate of the collection.
+ * - If the collection has a `where` option, it can be used to define a custom condition for the collection.
+ * - If the collection has a `local` option, the collection will be stored locally in the perspective and not in the network. This is useful for collections that are not meant to be shared with the network.
+ * 
+ * @example
+ * // Usage
+ * SubjectCollection({ through: "ad4m://friends" }) // this will define a collection with the name "ad4m://friends"
+ * 
+ * @param opts Collection options.
+ */
+export function SubjectCollection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
@@ -152,10 +310,29 @@ export function makeRandomPrologAtom(length: number): string {
     return result;
  }
 
- interface SDNAClassOptions {
+export interface SDNAClassOptions {
+    /**
+     * The name of the entity.
+     */
     name: string;
 }
 
+/**
+ * Decorator for defining an SDNA class.
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * This will create a new SDNA class with the given name and add custom methods to generate the SDNA for the class, for this to work the class need to have the properties defined using the decorators like `SubjectProperty`.
+ * 
+ * Note: This decorator is required for the class to be picked up during the initialization phase.
+ * 
+ * @example
+ * // Usage
+ *  SDNAClass({ name: "Person" }) // this will create a new SDNA class with the name "Person"
+ * 
+ * @param opts SDNA class options.
+ */
 export function SDNAClass(opts: SDNAClassOptions) {
     return function (target: any) {
         target.prototype.className = opts.name;
