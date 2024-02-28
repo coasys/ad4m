@@ -21,6 +21,7 @@
     "build": "turbo run build-languages --concurrency=1 && turbo run build-libs",
     "build-no-cache": "turbo run build-languages --concurrency=1 --force && turbo run build-libs --force",
     "build-libs": "turbo run build-libs",
+    "build-core-executor": "turbo run build-core-executor",
     "dev": "turbo run dev --parallel",
     "serve": "turbo run serve",
     "lint": "turbo run lint",
