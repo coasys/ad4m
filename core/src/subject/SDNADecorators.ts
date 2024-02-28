@@ -22,16 +22,22 @@ export function hasLink(predicate: string): string {
     return `triple(this, "${predicate}", _)`
 }
 
-interface InstanceQueryParams {
-    // An object representing the WHERE clause of the query
-    where?: object;
+export interface InstanceQueryParams {
+/**
+ * An object representing the WHERE clause of the query.
+ */
+where?: object;
 
-    // A string representing the condition clause of the query
-    condition?: string;
+/**
+ * A string representing the condition clause of the query.
+ */
+condition?: string;
 }
 
 /**
  * Decorator for querying instances of a subject class.
+ * 
+ * @category Decorators
  * 
  * @description
  * NOTE: Only works on methods that return a promise and will throw an error if not used on a method that returns a promise.
@@ -90,34 +96,52 @@ export function InstanceQuery(options?: InstanceQueryParams) {
 }
 
 
-interface PropertyOptions {
-    // The predicate of the property. All properties must have this option.
+export interface PropertyOptions {
+    /**
+     * The predicate of the property. All properties must have this option.
+     */
     through?: string;
 
-    // The initial value of the property. Required if the property is marked as required.
+    /**
+     * The initial value of the property. Required if the property is marked as required.
+     */
     initial?: string;
 
-    // Indicates whether the property is required. If true, an initial value must be provided.
+    /**
+     * Indicates whether the property is required. If true, an initial value must be provided.
+     */
     required?: boolean;
 
-    // Indicates whether the property is writable. If true, a setter will be available in the prolog engine.
+    /**
+     * Indicates whether the property is writable. If true, a setter will be available in the prolog engine.
+     */
     writable?: boolean;
 
-    // The language used to store the property. Can be the default `Literal` Language or a custom language address.
+    /**
+     * The language used to store the property. Can be the default `Literal` Language or a custom language address.
+     */
     resolveLanguage?: string;
 
-    // Custom getter to get the value of the property in the prolog engine. If not provided, the default getter will be used.
+    /**
+     * Custom getter to get the value of the property in the prolog engine. If not provided, the default getter will be used.
+     */
     getter?: string;
 
-    // Custom setter to set the value of the property in the prolog engine. Only available if the property is writable.
+    /**
+     * Custom setter to set the value of the property in the prolog engine. Only available if the property is writable.
+     */
     setter?: string;
 
-    // Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
+    /**
+     * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
+     */
     local?: boolean;
 }
 
 /**
  * Decorator for defining properties of a subject class.
+ * 
+ * @category Decorators
  * 
  * @description
  * This will allow you to define properties with different conditions and how they would be defined in proflog engine.
@@ -158,16 +182,22 @@ export function SubjectProperty(opts: PropertyOptions) {
     };
 }
 
-interface FlagOptions {
-    // The predicate of the property. All properties must have this option.
+export interface FlagOptions {
+    /**
+     * The predicate of the property. All properties must have this option.
+     */
     through: string;
 
-    // The value of the property.
+    /**
+     * The value of the property.
+     */
     value: string;
 }
 
 /**
  * Decorator for defining flags of a subject class
+ * 
+ * @category Decorators
  * 
  * @description
  * The idea behind flag decorator is to define a property that is required and has an initial value. 
@@ -218,19 +248,28 @@ interface WhereOptions {
     isInstance?: any
     condition?: string
 }
-interface CollectionOptions {
-    // The predicate of the property. All properties must have this option.
+
+export interface CollectionOptions {
+    /**
+     * The predicate of the property. All properties must have this option.
+     */
     through: string;
 
-    // An object representing the WHERE clause of the query
+    /**
+     * An object representing the WHERE clause of the query.
+     */
     where?: WhereOptions;
 
-    // Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
+    /**
+     * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
+     */
     local?: boolean;
 }
 
 /**
  * Decorator for defining collections of a subject class.
+ * 
+ * @category Decorators
  * 
  * @description
  * This will allow you to define collections with different conditions and how they would be defined in proflog engine.
@@ -271,12 +310,17 @@ export function makeRandomPrologAtom(length: number): string {
     return result;
  }
 
- interface SDNAClassOptions {
+export interface SDNAClassOptions {
+    /**
+     * The name of the entity.
+     */
     name: string;
 }
 
 /**
  * Decorator for defining an SDNA class.
+ * 
+ * @category Decorators
  * 
  * @description
  * This will create a new SDNA class with the given name and add custom methods to generate the SDNA for the class, for this to work the class need to have the properties defined using the decorators like `SubjectProperty`.
