@@ -296,4 +296,190 @@ impl PerspectiveInstance {
         Ok(new_link_expression)
     }
 
+    async fn get_links_local(&self, query: &LinkQuery) -> Result<Vec<LinkExpression>, AnyError> {
+        if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
+            return Ad4mDb::with_global_instance(|db| {
+                db.get_all_links(&self.persisted.uuid)
+            })
+        }
+
+        let mut result = if let Some(source) = &query.source {
+            Ad4mDb::with_global_instance(|db| {
+                db.get_links_by_source(&self.persisted.uuid, source)
+            })?
+        } else if let Some(target) = &query.target {
+            Ad4mDb::with_global_instance(|db| {
+                db.get_links_by_target(&self.persisted.uuid, target)
+            })?
+        } else if let Some(predicate) = &query.predicate {
+            Ad4mDb::with_global_instance(|db| {
+                Ok::<Vec<LinkExpression>, AnyError>(
+                    db.get_all_links(&self.persisted.uuid)?
+                        .into_iter()
+                        .filter(|link| link.data.predicate.as_ref() == Some(predicate))
+                        .collect::<Vec<LinkExpression>>()
+                )
+            })?
+        } else {
+            vec![]
+        };
+
+        if let Some(predicate) = &query.predicate {
+            result.retain(|link| link.data.predicate.as_ref() == Some(predicate));
+        }
+/*
+        if let Some(from_date) = &query.from_date {
+            result.retain(|link| {
+                let link_date = DateTime::parse_from_rfc3339(&link.timestamp).unwrap();
+                if from_date >= query.until_date.unwrap_or(chrono::Utc::now()) {
+                    link_date <= *from_date.into()
+                } else {
+                    link_date >= *from_date.into()
+                }
+            });
+        }
+
+        if let Some(until_date) = &query.until_date {
+            result.retain(|link| {
+                let link_date = DateTime::parse_from_rfc3339(&link.timestamp).unwrap();
+                if query.from_date >= query.until_date {
+                    link_date >= *until_date.into()
+                } else {
+                    link_date <= *until_date.into()
+                }
+            });
+        }
+
+        if let Some(limit) = query.limit {
+            let start_limit = if query.from_date >= query.until_date { 
+                result.len().saturating_sub(limit) 
+            } else {
+                0 
+            };
+            let end_limit = if query.from_date >= query.until_date { 
+                result.len() 
+            } else { 
+                limit.min(result.len()) 
+            };
+            result = result[start_limit..end_limit].to_vec();
+        }
+ */
+        Ok(result)
+    }
+
+    async fn get_links(&self, query: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        let links = self.get_links_local(query).await?;
+/*
+        let reverse = query.from_date >= query.until_date;
+
+        links.sort_by(|a, b| {
+            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
+            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            a_time.cmp(&b_time)
+        });
+
+        if let Some(limit) = query.limit {
+            let start_limit = if reverse { links.len().saturating_sub(limit) } else { 0 };
+            let end_limit = if reverse { links.len() } else { limit.min(links.len()) };
+            links = links[start_limit..end_limit].to_vec();
+        } */
+
+        Ok(links
+            .into_iter()
+            .map(|link| {
+                // TODO: actually get the status from the link
+                let link_status = LinkStatus::default(); // Assuming default status or retrieve it as needed
+                DecoratedLinkExpression::from((link.clone(), link_status)).into()
+            })
+            .collect())
+    }
 }
+
+
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graphql::graphql_types::PerspectiveState;
+    use crate::perspectives::perspective_instance::{PerspectiveHandle};
+    use crate::db::Ad4mDb;
+    use uuid::Uuid;
+    use crate::test_utils::setup_wallet;
+    use fake::{Fake, Faker};
+
+    fn setup() -> PerspectiveInstance {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+
+        PerspectiveInstance::new(
+            PerspectiveHandle {
+                uuid: Uuid::new_v4().to_string(),
+                name: Some("Test Perspective".to_string()),
+                shared_url: None,
+                neighbourhood: None,
+                state: PerspectiveState::Private,
+            },
+             None
+        )
+    }
+
+    pub fn create_link() -> Link {
+        Link {
+            source: format!("https://{}.com", Faker.fake::<String>()),
+            target: format!("https://{}.org", Faker.fake::<String>()),
+            predicate: Some(format!("https://{}.net", Faker.fake::<String>())),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_all_links_after_adding_five() {
+        let mut perspective = setup();
+        let mut all_links = Vec::new();
+
+        for _ in 0..5 {
+            let link = create_link();
+            let expression = perspective.add_link(link.clone(), LinkStatus::Local).await.unwrap();
+            all_links.push(expression);
+        }
+
+        let query = LinkQuery::default();
+        let links = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links.len(), 5);
+        assert_eq!(links, all_links);
+    }
+
+    #[tokio::test]
+    async fn test_get_links_by_source() {
+        let mut perspective = setup();
+        let mut all_links = Vec::new();
+        let source = "ad4m://self";
+
+        for i in 0..5 {
+            let mut link = create_link();
+            if i % 2 == 0 {
+                link.source = source.to_string();
+            }
+
+            let expression = perspective.add_link(link.clone(), LinkStatus::Shared).await.unwrap();
+            all_links.push(expression);
+        }
+
+        let query = LinkQuery {
+            source: Some(source.to_string()),
+            ..Default::default()
+        };
+        let links = perspective.get_links(&query).await.unwrap();
+        let expected_links: Vec<_> = all_links
+            .into_iter()
+            .filter(|expr| expr.data.source == source)
+            .collect();
+        assert_eq!(links.len(), expected_links.len());
+        assert_eq!(links, expected_links);
+    }
+
+    // Additional tests for updateLink, removeLink, syncWithSharingAdapter, etc. would go here
+    // following the same pattern as above.
+}
+

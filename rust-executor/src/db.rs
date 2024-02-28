@@ -389,7 +389,20 @@ impl Ad4mDb {
         ).optional()?;
         Ok(expression.map(|e| serde_json::from_str(&e).unwrap()))
     }
+
+    pub fn with_global_instance<F, R>(func: F) -> R
+    where
+        F: FnOnce(&Ad4mDb) -> R,
+    {
+        let global_instance_arc = Ad4mDb::global_instance();
+        let lock_result = global_instance_arc.lock();
+        let ad4m_db_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
+        let ad4m_db_ref = ad4m_db_lock.as_ref().expect("Ad4mDb not initialized");
+        func(ad4m_db_ref)
+    }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -413,7 +426,7 @@ mod tests {
             },
             author: "did:test:key".to_string(),
             timestamp: Utc::now().to_rfc3339(),
-            status: Some(LinkStatus::Shared),
+            //status: Some(LinkStatus::Shared),
         }
     }
 

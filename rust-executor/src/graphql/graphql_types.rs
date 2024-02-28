@@ -77,6 +77,12 @@ pub struct CapabilityInput {
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
 
+impl Into<chrono::DateTime<chrono::Utc>> for DateTime {
+    fn into(self) -> chrono::DateTime<chrono::Utc> {
+        self.0
+    }
+}
+
 #[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
@@ -297,7 +303,7 @@ pub struct LinkMutations {
 #[serde(rename_all = "camelCase")]
 pub struct LinkQuery {
     pub from_date: Option<DateTime>,
-    pub limit: Option<f64>,
+    pub limit: Option<i32>,
     pub predicate: Option<String>,
     pub source: Option<String>,
     pub target: Option<String>,

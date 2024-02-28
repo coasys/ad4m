@@ -1,9 +1,7 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, graphql_value, FieldResult};
 
-use crate::perspectives::*;
-use kitsune_p2p_types::agent_info::AgentInfoSigned;
-use log::debug;
+use crate::perspectives::add_perspective;
 
 use super::graphql_types::*;
 use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};

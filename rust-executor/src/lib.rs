@@ -19,6 +19,8 @@ mod db;
 pub mod types;
 pub mod perspectives;
 pub mod languages;
+#[cfg(test)]
+mod test_utils;
 
 
 use tokio;
