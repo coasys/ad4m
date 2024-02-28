@@ -13,6 +13,14 @@ repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
 
+[[bin]]
+name = "ad4m"
+path = "src/ad4m.rs"
+
+[[bin]]
+name = "ad4m-executor"
+path = "src/ad4m_executor.rs"
+
 [dependencies]
 
 
