@@ -73,6 +73,10 @@ const Profile = (props: Props) => {
 
   const [loadingProxy, setLoadingProxy] = useState(false);
 
+  const [showAddHcAgentInfos, setShowAddHcAgentInfos] = useState(false);
+
+  const [addHcAgentInfos, setAddHcAgentInfos] = useState("");
+
   function openLogs() {
     appWindow.emit("copyLogs");
   }
@@ -122,6 +126,19 @@ const Profile = (props: Props) => {
       setProfile(profile);
     }
   }, [url]);
+
+  const getAgentInfo = async () => {
+    const info = await client?.runtime.hcAgentInfos();
+
+    console.log("info", info);
+
+    copyTextToClipboard(info);
+  }
+
+  const addAgentInfo = async (info: string) => {
+    await client?.runtime.hcAddAgentInfos(info);
+    setShowAddHcAgentInfos(false);
+  }
 
   useEffect(() => {
     fetchCurrentAgentProfile();
@@ -254,6 +271,32 @@ const Profile = (props: Props) => {
       </j-box>
 
       <j-box px="500" my="500">
+        <j-button
+          onClick={() => {
+            getAgentInfo()
+          }}
+          full
+          variant="secondary"
+        >
+          <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+          Copy Holochain Agents Info
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button
+          onClick={() => {
+            setShowAddHcAgentInfos(true)
+          }}
+          full
+          variant="secondary"
+        >
+          <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+          Create Holochain Agents Info
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
         <j-button onClick={openLogs} full variant="secondary">
           <j-icon size="sm" slot="start" name="clipboard"></j-icon>
           Show logs
@@ -270,6 +313,37 @@ const Profile = (props: Props) => {
           Delete Agent
         </j-button>
       </j-box>
+
+      {showAddHcAgentInfos && (
+        <j-modal
+          open={showAddHcAgentInfos}
+          onToggle={(e: any) => setAddHcAgentInfos(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Add Holochain Agents Info
+              </j-text>
+            </j-box>
+            <j-box pb="500">
+            <j-input
+              placeholder="Holochain agent info"
+              label="Input your agents info here.."
+              size="lg"
+              required
+              onInput={(e: any) => setAddHcAgentInfos(e.target.value)}
+            ></j-input>
+            <j-box p="400"></j-box>
+            <j-button
+              onClick={() => addAgentInfo(addHcAgentInfos)}
+              full
+              loading={loading}>
+                Create
+              </j-button>
+            </j-box>
+          </j-box>
+        </j-modal>
+      )}
 
       {trustedAgentModalOpen && (
         <j-modal
