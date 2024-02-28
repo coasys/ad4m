@@ -11,6 +11,7 @@ mod prolog;
 mod prolog_service;
 mod utils;
 mod wallet;
+mod types;
 
 pub mod init;
 mod pubsub;

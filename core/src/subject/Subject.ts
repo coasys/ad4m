@@ -1,31 +1,50 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { collectionSetterToName, collectionToAdderName, collectionToRemoverName, collectionToSetterName, propertyNameToSetterName } from "./util";
 
+/**
+ * Represents a subject in the perspective.
+ * A subject is an entity that has properties and collections.
+ */
 export class Subject {
     #baseExpression: string;
     #subjectClass: string;
     #perspective: PerspectiveProxy
 
+    /**
+     * Constructs a new subject.
+     * @param perspective - The perspective that the subject belongs to.
+     * @param baseExpression - The base expression of the subject.
+     * @param subjectClass - The class of the subject.
+     */
     constructor(perspective: PerspectiveProxy, baseExpression: string, subjectClass: string) {
         this.#baseExpression = baseExpression
         this.#subjectClass = subjectClass
         this.#perspective = perspective
     }
 
+    /**
+     * Gets the base expression of the subject.
+     */
     get baseExpression() {
         return this.#baseExpression
     }
 
+    /**
+     * Initializes the subject by validating it and defining its properties and collections dynamically.
+     * 
+     * NOTE: This method should be called before using the subject. All the properties and collections of the subject defined are not type-checked.
+     */
     async init() {
+        // Check if the subject is a valid instance of the subject class
         let isInstance = await this.#perspective.isSubjectInstance(this.#baseExpression, this.#subjectClass)
         if(!isInstance) {
             throw `Not a valid subject instance of ${this.#subjectClass} for ${this.#baseExpression}`
         }
 
+        // Define properties and collections dynamically
         let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property(C, Property)`)
         let properties = results.map(result => result.Property)
         
-
         for(let p of properties) {
             const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve(C, "${p}")`)
             Object.defineProperty(this, p, {
@@ -61,10 +80,9 @@ export class Subject {
             })
         }
 
-
+        // Define setters
         const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, Property, Setter)`)
-        
-        //console.log("Subject setters: " + setters.map(setter => setter.Property))
+
         for(let setter of (setters ? setters : [])) {
             if(setter) {
                 const property = setter.Property
@@ -83,6 +101,7 @@ export class Subject {
             }
         }
         
+        // Define collections
         let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection(C, Collection)`)
         if(!results2) results2 = []
         let collections = results2.map(result => result.Collection)
@@ -102,6 +121,7 @@ export class Subject {
             })
         }
 
+        // Define collection adders
         let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_adder(C, Collection, Adder)`)
         if(!adders) adders = []
 
@@ -119,6 +139,7 @@ export class Subject {
             }
         }
 
+        // Define collection removers
         let removers = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_remover(C, Collection, Remover)`)
         if(!removers) removers = []
 
@@ -136,6 +157,7 @@ export class Subject {
             }
         }
 
+        // Define collection setters
         let collectionSetters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_setter(C, Collection, Setter)`)
         if(!collectionSetters) collectionSetters = []
 

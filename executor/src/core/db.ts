@@ -106,7 +106,6 @@ export class Ad4mDb {
 
         await this.#linkDb.deleteOne({
             perspective: perspectiveUuid,
-            linkExpression: link,
             source: link.data.source,
             predicate: link.data.predicate,
             target: link.data.target,

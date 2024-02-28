@@ -17,6 +17,12 @@ based on the structure of the graph data. Using [Prolog](https://en.wikipedia.or
 turing complete logical programming language, any kind of alorithm can be run based on the
 state of the graph.
 
+<Callout type="info" emoji="ℹ️">
+  Don't worry if you are unfamiliar with [Prolog](https://en.wikipedia.org/wiki/Prolog). You will normally either
+  use AI to write it for you, or you will use some of our abstraction layers to
+  avoid writing Prolog code yourself. (Think of ORMs vs raw SQL, Ad4m comes with its own implementation [Subject Classes](/subject-classes) ).
+</Callout>
+
 <details>
 <summary>
 Quick Intro to Prolog
@@ -84,12 +90,6 @@ for (let i = 0; i < 10; i++) {
 
 Great! Now we have one post with 10 likes in our Perspective. Now let's define what `top_comments` mean
 to use in this Perspective:
-
-<Callout type="info" emoji="ℹ️">
-  Don't worry if this looks very unfamiliar for now. You will normally either
-  use AI to write it for you, or you will use some of our abstraction layers to
-  avoid writing Prolog code yourself. (Think of ORMs vs raw SQL).
-</Callout>
 
 ```prolog filename="top_posts.pl"
 top_posts(Post) :-

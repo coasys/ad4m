@@ -22,7 +22,7 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
     })()
 
     if (!cmd) throw new Error("Invalid OS");
-  
+
     return new Promise((resolve, reject) => {
       //@ts-ignore
       exec(cmd, (err: ExecException, stdout: string, stderr: string) => {
@@ -30,7 +30,7 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
 
         resolve(stdout.toLowerCase().indexOf(processName.toLowerCase()) > -1)
       })
-    }) 
+    })
 }
 
 export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, process: ChildProcess}> {
@@ -61,8 +61,8 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
     return {proxyUrl, bootstrapUrl, process: servicesProcess};
 }
 
-export async function startExecutor(dataPath: string, 
-    bootstrapSeedPath: string, 
+export async function startExecutor(dataPath: string,
+    bootstrapSeedPath: string,
     gqlPort: number,
     hcAdminPort: number,
     hcAppPort: number,
@@ -78,15 +78,15 @@ export async function startExecutor(dataPath: string,
     let executorProcess = null as ChildProcess | null;
     rmSync(dataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
-    
+
     console.log("Starting executor")
 
     console.log("USING LOCAL BOOTSTRAP & PROXY URL: ", bootstrapUrl, proxyUrl);
-    
+
     if (!adminCredential) {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap false --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
+        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --run-dapp-server false`, {})
     } else {
-        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap false --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
+        executorProcess = exec(`${command} run --app-data-path ${dataPath} --gql-port ${gqlPort} --hc-admin-port ${hcAdminPort} --hc-app-port ${hcAppPort} --hc-proxy-url ${proxyUrl} --hc-bootstrap-url ${bootstrapUrl} --hc-use-bootstrap true --hc-use-proxy true --hc-use-local-proxy true --hc-use-mdns true --language-language-only ${languageLanguageOnly} --admin-credential ${adminCredential} --run-dapp-server false`, {})
     }
     let executorReady = new Promise<void>((resolve, reject) => {
         executorProcess!.stdout!.on('data', (data) => {
@@ -98,7 +98,7 @@ export async function startExecutor(dataPath: string,
             if (data.includes(`listening on http://127.0.0.1:${gqlPort}`)) {
                 resolve()
             }
-        }); 
+        });
     })
 
     executorProcess!.stdout!.on('data', (data) => {
@@ -109,7 +109,7 @@ export async function startExecutor(dataPath: string,
     });
 
     console.log("Waiting for executor to settle...")
-    await executorReady 
+    await executorReady
     return executorProcess;
 }
 
@@ -149,7 +149,7 @@ export function apolloClient(port: number, token?: string): ApolloClient<any> {
             }
         },
     });
-    
+
     return client;
 }
 
