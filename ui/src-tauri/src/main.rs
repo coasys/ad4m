@@ -46,10 +46,10 @@ mod commands;
 mod app_state;
 
 use tauri::Manager;
-use crate::app_state::load_state;
+use crate::app_state::LauncherState;
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
-use crate::commands::app::{toggle_dev_mode, get_app_state, close_application, close_main_window, clear_state, open_tray, open_tray_message, open_dapp};
+use crate::commands::app::{add_app_agent_state, get_app_agent_list, remove_app_agent_state, set_selected_agent, close_application, close_main_window, clear_state, open_tray, open_tray_message, open_dapp};
 use crate::config::{data_dev_path, data_path};
 use crate::config::log_path;
 use crate::util::find_port;
@@ -111,13 +111,11 @@ fn rlim_execute() {
 fn main() {
     env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
 
-    let state = load_state().unwrap();
+    let state = LauncherState::load().unwrap();
 
-    let app_path = if state.dev_mode {
-        data_dev_path()
-    } else {
-        data_path()
-    };
+    let selected_agent = state.selected_agent.clone().unwrap();
+    let app_path = selected_agent.path;
+    let bootstrap_path = selected_agent.bootstrap;
 
     #[cfg(not(target_os = "windows"))]
     rlim_execute();
@@ -181,7 +179,7 @@ fn main() {
 
     match rust_executor::init::init(
         Some(String::from(app_path.to_str().unwrap())),
-         None
+        bootstrap_path.and_then(|path| path.to_str().map(|s| s.to_string())),
         ) {
         Ok(()) => {
             println!("Ad4m initialized sucessfully");
@@ -219,8 +217,10 @@ fn main() {
             open_tray,
             open_tray_message,
             open_dapp,
-            toggle_dev_mode,
-            get_app_state
+            add_app_agent_state,
+            get_app_agent_list,
+            set_selected_agent,
+            remove_app_agent_state
         ])
         .setup(move |app| {
             // Hides the dock icon
