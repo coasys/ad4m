@@ -144,6 +144,8 @@ export default function expressionTests(testContext: TestContext) {
                 const expr2 = JSON.parse(expr2Raw)
                 console.log(expr2)
 
+                expr.proof.valid = true
+                expr.proof.invalid = false
                 expect(expr2).to.be.eql(expr)
             })
         })

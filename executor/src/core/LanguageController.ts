@@ -14,10 +14,9 @@ import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
 import RuntimeService from './RuntimeService';
-import Signatures from './agent/Signatures';
 import { Ad4mDb } from './db';
 import stringify from 'json-stable-stringify'
-import { getPubSub } from './utils';
+import { getPubSub, tagExpressionSignatureStatus } from './utils';
 
 function cloneWithoutCircularReferences(obj: any, seen: WeakSet<any> = new WeakSet()): any {
     if (typeof obj === 'object' && obj !== null) {
@@ -46,7 +45,6 @@ type SyncStateChangeObserver = (state: PerspectiveState, lang: LanguageRef)=>voi
 interface Services {
     holochainService: HolochainService,
     runtimeService: RuntimeService,
-    signatures: Signatures,
     db: Ad4mDb
 }
 
@@ -87,7 +85,6 @@ export default class LanguageController {
     #syncStateChangeObservers: SyncStateChangeObserver[];
     #holochainService: HolochainService
     #runtimeService: RuntimeService;
-    #signatures: Signatures;
     #db: Ad4mDb;
     #config: Config.MainConfig;
     #pubSub: PubSub;
@@ -101,7 +98,6 @@ export default class LanguageController {
         this.#context = context
         this.#holochainService = services.holochainService
         this.#runtimeService = services.runtimeService
-        this.#signatures = services.signatures
         this.#db = services.db
         this.#languages = new Map()
         this.#languages.set("literal", {
@@ -1094,30 +1090,7 @@ export default class LanguageController {
 
     async tagExpressionSignatureStatus(expression: Expression) {
         if(expression) {
-            try{
-                await Signatures.tagExpressionSignatureStatus(expression)
-            } catch(e) {
-                let expressionFormatted;
-                if (typeof expression === "string") {
-                    expressionFormatted = expression.substring(0, 50);
-                } else if (typeof expression === "object") {
-                    let expressionString = JSON.stringify(expression);
-                    expressionFormatted =  expressionString.substring(0, 50)
-                } else {
-                    expressionFormatted = expression;
-                }
-                let errMsg = `Error trying to verify signature for expression: ${expressionFormatted}`
-                console.error(errMsg)
-                console.error(e)
-                await this.#pubSub.publish(
-                    PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
-                    {
-                        title: "Failed to get expression",
-                        message: errMsg,
-                        type: ExceptionType.ExpressionIsNotVerified,
-                    } as ExceptionInfo
-                );
-            }
+            tagExpressionSignatureStatus(expression)
         }
     }
 

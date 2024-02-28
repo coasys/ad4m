@@ -9,6 +9,7 @@ mod js_core;
 mod prolog_service;
 mod utils;
 mod wallet;
+mod types;
 use tokio;
 
 

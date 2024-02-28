@@ -10,7 +10,6 @@ import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
-import Signatures from './agent/Signatures'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import EntanglementProofController from './EntanglementProof'
 import fs from 'node:fs'
@@ -58,7 +57,6 @@ export default class Ad4mCore {
 
     #db: Ad4mDb
     #didResolver: DIDResolver
-    #signatures: Signatures
 
     #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
@@ -80,7 +78,6 @@ export default class Ad4mCore {
         this.#agentService.load()
         this.#db = Db.init(this.#config.dataPath)
         this.#didResolver = DIDs.init(this.#config.dataPath)
-        this.#signatures = new Signatures()
         const that = this
         this.#resolveLanguagesReady = () => {}
         this.#languagesReady = new Promise(resolve => {
@@ -132,13 +129,6 @@ export default class Ad4mCore {
 
     get runtimeService(): RuntimeService {
         return this.#runtimeService
-    }
-
-    get signatureService(): Signatures {
-        if (!this.#signatures) {
-            throw Error("No signature service")
-        }
-        return this.#signatures
     }
 
     get perspectivesController(): PerspectivesController {
@@ -233,10 +223,9 @@ export default class Ad4mCore {
             agent: this.#agentService,
             runtime: this.#runtimeService,
             //IPFS: this.#IPFS,
-            signatures: this.#signatures,
             ad4mSignal: this.languageSignal,
             config: this.#config,
-        }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, signatures: this.#signatures, db: this.#db } )
+        }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, db: this.#db } )
 
         this.#perspectivesController = new PerspectivesController(this.#config.rootConfigPath, {
             db: this.#db,

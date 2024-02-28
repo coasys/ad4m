@@ -16,8 +16,8 @@ function checkLinkLanguageInstalled(perspective: Perspective) {
 export function createResolvers(core: Ad4mCore, config: OuterConfig) {
     function signPerspectiveDeep(input: PerspectiveUnsignedInput): PerspectiveExpression {
         let out = new PerspectiveExpression()
-        out.links = input.links.map(l => core.agentService.createSignedExpression(l))
-        return core.agentService.createSignedExpression(out)
+        out.links = input.links.map(l => AGENT.createSignedExpression(l))
+        return AGENT.createSignedExpression(out)
     }
 
     return {
@@ -321,12 +321,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            runtimeVerifyStringSignedByDid: async (args, context) => {
-                const { did, didSigningKeyId, data, signedData } = args;
-                return await core.signatureService.verifyStringSignedByDid(did, didSigningKeyId, data, signedData)
-            },
-
-            //@ts-ignore
             runtimeFriendStatus: async (args, context) => {
                 const { did } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
@@ -523,12 +517,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return currentAgent;
             },
             //@ts-ignore
-            agentSignMessage: async (args, context) => {
-                const { message } = args;
-                let sig = await core.agentService.signMessage(message)
-                return sig
-            },
-            //@ts-ignore
             expressionCreate: async (args, context) => {
                 const { languageAddress, content } = args
 
@@ -622,7 +610,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const statusExpression = core.agentService.createSignedExpression(status)
+                const statusExpression = AGENT.createSignedExpression(status)
                 await telepresenceAdapter!.setOnlineStatus(statusExpression)
                 return true
             },
@@ -648,7 +636,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const payloadExpression = core.agentService.createSignedExpression(payload)
+                const payloadExpression = AGENT.createSignedExpression(payload)
                 await telepresenceAdapter!.sendSignal(remoteAgentDid, payloadExpression)
                 return true
             },
@@ -674,7 +662,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 checkLinkLanguageInstalled(perspective)
                 const telepresenceAdapter = await perspective.getTelepresenceAdapter()
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const payloadExpression = core.agentService.createSignedExpression(payload)
+                const payloadExpression = AGENT.createSignedExpression(payload)
                 await telepresenceAdapter!.sendBroadcast(payloadExpression)
                 return true
             },
