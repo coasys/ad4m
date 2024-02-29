@@ -31,21 +31,23 @@ impl LauncherState {
         let mut file = OpenOptions::new().read(true).write(true).create(true).open(&path)?;
         let mut data = String::new();
         file.read_to_string(&mut data)?;
-        let state: LauncherState = if data.is_empty() {
-            let agent = AgentList {
-                name: "Main Net".to_string(),
-                path: PathBuf::from(home_dir().expect("Could not get home dir")).join(".ad4m".to_string()),
-                bootstrap: None
-            };
-    
-            LauncherState {
-                agent_list: vec![{
-                    agent.clone()
-                }],
-                selected_agent: Some(agent)
+
+        let state = match serde_json::from_str(&data) {
+            Ok(state) => state,
+            Err(_) => {
+                let agent = AgentList {
+                    name: "Main Net".to_string(),
+                    path: PathBuf::from(home_dir().expect("Could not get home dir")).join(".ad4m".to_string()),
+                    bootstrap: None
+                };
+        
+                LauncherState {
+                    agent_list: vec![{
+                        agent.clone()
+                    }],
+                    selected_agent: Some(agent)
+                }
             }
-        } else {
-            serde_json::from_str(&data).unwrap()
         };
     
         Ok(state)
