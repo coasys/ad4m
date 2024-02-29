@@ -57,11 +57,17 @@ const Profile = (props: Props) => {
     methods: { toggleExpertMode },
   } = useContext(Ad4minContext);
 
+  const [appState, setAppState] = useState({} as any);
+
   const [trustedAgents, setTrustedAgents] = useState<any[]>([]);
 
   const [trustedAgentModalOpen, settrustedAgentModalOpen] = useState(false);
 
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
+  const [showAgentSelection, setShowAgentSelection] = useState(false);
+  const [createAgent, setCreateAgent] = useState(false);
+  const [newAgentName, setNewAgentName] = useState("");
+  const [file, setFile] = useState<File | null>(null);
 
   const [proxy, setProxy] = useState("");
 
@@ -88,6 +94,11 @@ const Profile = (props: Props) => {
     let { value } = event.target;
     setPassword(value);
   };
+
+  const getAppState = useCallback(async () => {
+    const state = await invoke("get_app_agent_list");
+    setAppState(JSON.parse(state))
+  }, []);
 
   const getTrustedAgents = useCallback(async () => {
     if (url) {
@@ -126,7 +137,8 @@ const Profile = (props: Props) => {
   useEffect(() => {
     fetchCurrentAgentProfile();
     getTrustedAgents();
-  }, [fetchCurrentAgentProfile, getTrustedAgents]);
+    getAppState();
+  }, [fetchCurrentAgentProfile, getTrustedAgents, getAppState]);
 
   useEffect(() => {
     const getProxy = async () => {
@@ -195,6 +207,19 @@ const Profile = (props: Props) => {
     }
   };
 
+  const creatAgentFunc = async () => {
+    await invoke("add_app_agent_state", {
+      agent: {
+        name: newAgentName,
+        path: `.${newAgentName.toLowerCase()}`,
+        bootstrap: file,
+      }
+    });
+
+    setCreateAgent(false);
+    getAppState();
+  }
+
   return (
     <div>
       <j-box px="500" my="500">
@@ -257,6 +282,13 @@ const Profile = (props: Props) => {
         <j-button onClick={openLogs} full variant="secondary">
           <j-icon size="sm" slot="start" name="clipboard"></j-icon>
           Show logs
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button onClick={() => setShowAgentSelection(true)} full variant="secondary">
+          <j-icon size="sm" slot="start" name="server"></j-icon>
+          Select agent
         </j-button>
       </j-box>
 
@@ -330,6 +362,87 @@ const Profile = (props: Props) => {
           </j-box>
         </j-modal>
       )}
+
+      {showAgentSelection && (
+        <j-modal
+          size="fullscreen"
+          open={showAgentSelection}
+          onToggle={(e: any) => setShowAgentSelection(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Select agent
+              </j-text>
+            </j-box>
+            <j-text>
+              Disclaimer: After changing the agent you will have to restart the launcher
+              for it to start using the new agent
+            </j-text>
+            <j-box p="200"></j-box>
+            {
+              appState.agent_list.map((agent: any) => (
+                <>                
+                  <j-button
+                    full
+                    variant={ agent.path === appState.selected_agent.path ? "primary" : "secondary"}
+                    onClick={() => {
+                      invoke("set_selected_agent", { agent });
+                      getAppState();
+                      setShowAgentSelection(false);
+                    }}
+                  >
+                    {agent.name}
+                  </j-button>
+                  <j-box p="300"></j-box>
+                </>
+              ))
+            } 
+            <j-button full onCLick={() => setCreateAgent(true)}>
+              <j-icon name="plus"></j-icon>
+              Add new agent
+            </j-button>
+          </j-box>
+        </j-modal>
+      )}
+
+      {
+        createAgent && (
+          <j-modal
+            open={createAgent}
+            onToggle={(e: any) => setCreateAgent(e.target.open)}
+          >
+            <j-box px="400" py="600">
+              <j-box pb="500">
+                <j-text nomargin size="600" color="black" weight="600">
+                  Create new agent
+                </j-text>
+              </j-box>
+              <j-input
+                placeholder="Agent name"
+                label="Name"
+                size="lg"
+                onInput={(e) => setNewAgentName(e.target.value)}
+                required></j-input>
+                <j-box p="200"></j-box>
+                <j-input
+                  label="Bootstrap file path (absolute path)"
+                  size="lg"
+                  placeholder="ex. /path/to/agent-bootstrap.json"
+                onInput={(e) => setFile(e.target.value)}
+                required
+                ></j-input>
+                <j-box p="200"></j-box>
+                <j-button
+                  variant="primary"
+                  full
+                  onClick={creatAgentFunc}>
+                  Create Agent
+                  </j-button>
+            </j-box>
+          </j-modal>
+        )
+      }
 
       {clearAgentModalOpen && (
         <j-modal
