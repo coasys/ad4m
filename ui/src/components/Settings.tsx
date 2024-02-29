@@ -15,6 +15,7 @@ import { AgentContext } from "../context/AgentContext";
 import ActionButton from "./ActionButton";
 import { appWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/api/shell";
+import { writeText } from '@tauri-apps/api/clipboard'
 
 type Props = {
   did: String;
@@ -66,6 +67,8 @@ const Profile = (props: Props) => {
   const [proxy, setProxy] = useState("");
 
   const [qrcodeModal, setQRCodeModal] = useState(false);
+
+  const [copied, setCopied] = useState(false);
 
   const [password, setPassword] = useState("");
 
@@ -132,7 +135,14 @@ const Profile = (props: Props) => {
 
     console.log("info", info);
 
-    copyTextToClipboard(info);
+    await writeText(info);
+
+    setCopied(true);
+
+    setTimeout(() => {
+      setCopied(false);
+      closeSecretCodeModal();
+    }, 3000);
   }
 
   const addAgentInfo = async (info: string) => {
@@ -278,7 +288,7 @@ const Profile = (props: Props) => {
           full
           variant="secondary"
         >
-          <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+          <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
           Copy Holochain Agents Info
         </j-button>
       </j-box>
