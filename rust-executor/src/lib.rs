@@ -19,7 +19,7 @@ mod pubsub;
 mod dapp_server;
 pub mod agent;
 
-use std::{env, thread::JoinHandle};
+use std::{env, path::Path, thread::JoinHandle};
 use log::{info, warn};
 
 use js_core::JsCore;
@@ -34,6 +34,12 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server");
     let _ = env_logger::try_init();
     config.prepare();
+
+    let data_path = config.app_data_path.clone().unwrap();
+
+    let target_seed_path = Path::new(&data_path).to_path_buf().join("mainnet_seed.seed");
+
+    env::set_var("MAINNET_SEED", target_seed_path.clone());
 
     agent::capabilities::apps_map::set_data_file_path(
         config.app_data_path

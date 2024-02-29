@@ -78,54 +78,12 @@ export default class RuntimeService {
         this.#did = did
     }
 
-    trustedAgentsPath(): string {
-        return path.join(this.#config.rootConfigPath, TRUSTED_AGENTS_FILE)
-    }
-
-    knowLinkLanguagesPath(): string {
-        return path.join(this.#config.rootConfigPath, KNOW_LINK_LANGUAGES_FILE)
-    }
-
     friendsPath(): string {
         return path.join(this.#config.rootConfigPath, FRIENDS_FILE)
     }
 
     outboxPath(): string {
         return path.join(this.#config.rootConfigPath, OUTBOX_FILE)
-    }
-
-    addTrustedAgents(agents: string[]): void {
-        _add(agents, this.trustedAgentsPath())
-    }
-
-    deleteTrustedAgents(agents: string[]): void {
-        _delete(agents, this.trustedAgentsPath())
-    }
-
-    getTrustedAgents(): string[] {
-        let agents = [this.#did!, ...this.#config.trustedAgents, ..._get(this.trustedAgentsPath())]
-        let dedupAgents = [...new Set(agents)]
-        return dedupAgents
-    }
-
-    addKnowLinkLanguageTemplates(addresses: string[]): void {
-        _add(addresses, this.knowLinkLanguagesPath())
-    }
-
-    removeKnownLinkLanguageTemplates(addresses: string[]): void {
-        _delete(addresses, this.knowLinkLanguagesPath())
-    }
-
-    knowLinkLanguageTemplates(): string[] {
-        return [...this.#config.knownLinkLanguages, ..._get(this.knowLinkLanguagesPath())]
-    }
-
-    addFriends(addresses: string[]): void {
-        _add(addresses, this.friendsPath())
-    }
-
-    removeFriends(addresses: string[]): void {
-        _delete(addresses, this.friendsPath())
     }
 
     friends(): string[] {
@@ -135,14 +93,4 @@ export default class RuntimeService {
     addMessageOutbox(recipient: string, message: PerspectiveExpression) {
         _addObject({recipient, message}, this.outboxPath())
     }
-
-    getMessagesOutbox(filter?: string): Message[] {
-        let messages = _getObjects(this.outboxPath()) as Message[]
-        // console.log("OUTBOX:", messages)
-        if(filter) {
-            messages = messages.filter(m => m.recipient === filter)
-        }
-        return messages
-    }
-
 }

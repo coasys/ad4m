@@ -1,7 +1,28 @@
-use std::{ env, fs::{self, File}, io, path::Path, sync::Mutex};
+use std::{ collections::HashMap, env, fs::{self, File}, io, path::Path, sync::Mutex};
 use std::io::{Read};
 
-use crate::graphql::graphql_types::SentMessage;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BootstrapSeed {
+    #[serde(rename = "trustedAgents")]
+    pub trusted_agents: Vec<String>,
+    #[serde(rename = "knownLinkLanguages")]
+    pub known_link_languages: Vec<String>,
+    #[serde(rename = "directMessageLanguage")]
+    pub direct_message_language: String,
+    #[serde(rename = "agentLanguage")]
+    pub agent_language: String,
+    #[serde(rename = "perspectiveLanguage")]
+    pub perspective_language: String,
+    #[serde(rename = "neighbourhoodLanguage")]
+    pub neighbourhood_language: String,
+    #[serde(rename = "languageLanguageBundle")]
+    pub language_language_bundle: String,
+}
+
+use serde::{Deserialize, Serialize};
+
+use crate::{agent::did, graphql::graphql_types::SentMessage};
 
 lazy_static! {
     static ref TRUSTED_AGENTS_FILE: Mutex<String> =
@@ -12,6 +33,12 @@ lazy_static! {
         Mutex::new(env::var("APPS_DATA_FILE").unwrap_or_else(|_| "friends.json".to_string()));
     static ref OUTBOX_FILE: Mutex<String> =
         Mutex::new(env::var("APPS_DATA_FILE").unwrap_or_else(|_| "outbox.json".to_string()));
+    static ref MAINNETSEED_FILE: Mutex<String> =
+        Mutex::new(env::var("MAINNET_SEED").unwrap_or_else(|_| "../mainnet_seed.seed".to_string()));
+}
+
+fn get_mainnet_seed_file_path() -> String {
+    MAINNETSEED_FILE.lock().unwrap().clone()
 }
 
 fn get_trusted_agents_file_path() -> String {
@@ -28,6 +55,15 @@ fn get_friends_file_path() -> String {
 
 fn get_outbox_file_path() -> String {
     OUTBOX_FILE.lock().unwrap().clone()
+}
+
+fn load_mainnet_seed_from_file() -> io::Result<BootstrapSeed> {
+    let file_path = get_mainnet_seed_file_path();
+    let mut file = File::open(&file_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let seed: BootstrapSeed = serde_json::from_str(&contents)?;
+    Ok(seed)
 }
 
 fn load_agents_from_file() -> io::Result<Vec<String>> {
@@ -130,7 +166,11 @@ lazy_static! {
 }
 
 pub fn get_trusted_agents() -> Vec<String> {
-    TRUSTED_AGENTS.lock().unwrap().clone()
+    let seed = load_mainnet_seed_from_file().unwrap();
+    let mut trusted_agents: Vec<String> = seed.trusted_agents.clone();
+    trusted_agents.push(did());
+    trusted_agents.append(TRUSTED_AGENTS.lock().unwrap().clone().as_mut());
+    trusted_agents
 }
 
 pub fn add_trusted_agent(new_agents: Vec<String>) {
@@ -148,7 +188,10 @@ pub fn remove_trusted_agent(agents_to_remove: Vec<String>) {
 }
 
 pub fn get_know_link_languages() -> Vec<String> {
-    KNOW_LINK_LANGUAGES.lock().unwrap().clone()
+    let seed = load_mainnet_seed_from_file().unwrap();
+    let mut languages: Vec<String> = seed.known_link_languages.clone();
+    languages.append(KNOW_LINK_LANGUAGES.lock().unwrap().clone().as_mut());
+    languages
 }
 
 pub fn add_know_link_language(language: Vec<String>) {
