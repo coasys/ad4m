@@ -96,6 +96,22 @@ impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
     }
 }
 
+impl From<DecoratedLinkExpression> for LinkExpression {
+    fn from(decorated: DecoratedLinkExpression) -> Self {
+        LinkExpression {
+            author: decorated.author,
+            timestamp: decorated.timestamp,
+            data: decorated.data,
+            proof: ExpressionProof {
+                key: decorated.proof.key,
+                signature: decorated.proof.signature,
+            }
+        }
+    }
+}
+
+            
+
 
 
 #[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq)]

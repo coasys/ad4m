@@ -1,7 +1,7 @@
 // rust-executor/src/perspective.rs
 
 use std::sync::{Arc, Mutex};
-use chrono::DateTime;
+use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Serialize, Deserialize};
 use crate::agent::create_signed_expression;
@@ -54,7 +54,7 @@ impl PerspectiveInstance {
         self.persisted = handle;
     }
 
-    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
+    pub async fn commit(&self, _diff: &PerspectiveDiff) -> Result<(), AnyError> {
         Err(AnyError::msg("Not implemented"))
     }
 
@@ -296,6 +296,38 @@ impl PerspectiveInstance {
         Ok(new_link_expression)
     }
 
+    pub async fn remove_link(&mut self, link_expression: LinkExpression) -> Result<(), AnyError> {
+        if let Some((_, status)) = Ad4mDb::with_global_instance(|db| db.get_link(&self.persisted.uuid, &link_expression))? {
+            Ad4mDb::with_global_instance(|db| db.remove_link(&self.persisted.uuid, &link_expression))?;
+
+            let diff = PerspectiveDiff {
+                additions: vec![],
+                removals: vec![link_expression.clone()],
+            };
+            let mutation_result = self.commit(&diff).await;
+
+            if mutation_result.is_err() {
+                Ad4mDb::with_global_instance(|db| db.add_pending_diff(&self.persisted.uuid, &diff))?;
+            }
+
+            self.prolog_needs_rebuild = true;
+            get_global_pubsub()
+                .await
+                .publish(
+                    &PERSPECTIVE_LINK_REMOVED_TOPIC,
+                    &serde_json::to_string(&PerspectiveLinkFilter {
+                        perspective: self.persisted.clone(),
+                        link: DecoratedLinkExpression::from((link_expression, status)),
+                    }).unwrap(),
+                )
+                .await;
+
+            Ok(())
+        } else {
+            Err(anyhow!("Link not found"))
+        }
+    }
+
     async fn get_links_local(&self, query: &LinkQuery) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
             return Ad4mDb::with_global_instance(|db| {
@@ -316,7 +348,7 @@ impl PerspectiveInstance {
                 Ok::<Vec<(LinkExpression, LinkStatus)>, AnyError>(
                     db.get_all_links(&self.persisted.uuid)?
                         .into_iter()
-                        .filter(|(link, status)| link.data.predicate.as_ref() == Some(predicate))
+                        .filter(|(link, _)| link.data.predicate.as_ref() == Some(predicate))
                         .collect::<Vec<(LinkExpression, LinkStatus)>>()
                 )
             })?
@@ -475,6 +507,29 @@ mod tests {
             .collect();
         assert_eq!(links.len(), expected_links.len());
         assert_eq!(links, expected_links);
+    }
+
+
+    #[tokio::test]
+    async fn test_remove_link() {
+        let mut perspective = setup();
+        let link = create_link();
+        let status = LinkStatus::Local;
+
+        // Add a link to the perspective
+        let expression = perspective.add_link(link.clone(), status).await.unwrap();
+
+        // Ensure the link is present
+        let query = LinkQuery::default();
+        let links_before_removal = perspective.get_links(&query).await.unwrap();
+        assert!(links_before_removal.contains(&expression));
+
+        // Remove the link from the perspective
+        perspective.remove_link(expression.clone().into()).await.unwrap();
+
+        // Ensure the link is no longer present
+        let links_after_removal = perspective.get_links(&query).await.unwrap();
+        assert!(!links_after_removal.contains(&expression));
     }
 
     // Additional tests for updateLink, removeLink, syncWithSharingAdapter, etc. would go here
