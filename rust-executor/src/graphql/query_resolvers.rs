@@ -1,7 +1,8 @@
 #![allow(non_snake_case)]
+use deno_core::anyhow::Ok;
 use juniper::{graphql_object, FieldResult};
 
-use crate::holochain_service::get_holochain_service;
+use crate::{holochain_service::get_holochain_service, runtime};
 
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
@@ -167,14 +168,9 @@ impl Query {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "getTrustedAgents"))"#,
-            ))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let agents = runtime::get_trusted_agents();
+
+        Ok(agents)
     }
 
     async fn language(
@@ -393,15 +389,8 @@ impl Query {
             &context.capabilities,
             &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriendStatus", {{ did: "{}" }}))"#,
-                did
-            ))
-            .await?;
-        let result: JsResultType<PerspectiveExpression> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let friends = runtime::get_friends();
+        Ok(friends)
     }
 
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
@@ -452,12 +441,8 @@ impl Query {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeKnownLinkLanguageTemplates"))"#))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let runtime = runtime::get_know_link_languages();
+        Ok(runtime)
     }
 
     async fn runtime_message_inbox(

@@ -300,20 +300,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             agentGetEntanglementProofs: () => {
                 return core.entanglementProofController.getEntanglementProofs();
             },
-            //@ts-ignore
-            getTrustedAgents: (context) => {
-                return core.runtimeService.getTrustedAgents();
-            },
-
-            //@ts-ignore
-            runtimeKnownLinkLanguageTemplates: (context) => {
-                return core.runtimeService.knowLinkLanguageTemplates();
-            },
-
-            //@ts-ignore
-            runtimeFriends: (context) => {
-                return core.runtimeService.friends();
-            },
 
             //@ts-ignore
             runtimeHcAgentInfos: async (context) => {
