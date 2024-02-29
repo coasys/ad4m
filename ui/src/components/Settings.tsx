@@ -376,7 +376,7 @@ const Profile = (props: Props) => {
               </j-text>
             </j-box>
             <j-text>
-              Disclaimer: After selecting the agent you will have to restart the app 
+              Disclaimer: After changing the agent you will have to restart the launcher
               for it to start using the new agent
             </j-text>
             <j-box p="200"></j-box>
