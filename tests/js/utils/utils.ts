@@ -34,7 +34,7 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
 }
 
 export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, process: ChildProcess}> {
-    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m');
+    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
     let servicesProcess = exec(`${command} run-local-hc-services`);
 
     let proxyUrl: string | null = null;
@@ -71,7 +71,7 @@ export async function startExecutor(dataPath: string,
     proxyUrl: string = "wss://signal.holotest.net",
     bootstrapUrl: string = "https://bootstrap.holo.host",
 ): Promise<ChildProcess> {
-    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m');
+    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
     console.log(bootstrapSeedPath);
     console.log(dataPath);
