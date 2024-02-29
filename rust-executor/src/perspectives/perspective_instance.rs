@@ -1,17 +1,28 @@
 // rust-executor/src/perspective.rs
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Serialize, Deserialize};
 use crate::agent::create_signed_expression;
+use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
-
 use crate::graphql::graphql_types::{LinkQuery, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter};
+use super::sdna::init_engine_facts;
+use super::utils::prolog_resolution_to_string;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub enum SdnaType {
+    SubjectClass,
+    Flow,
+    Custom,
+}
+
 pub struct PerspectiveInstance {
     pub persisted: PerspectiveHandle,
 
@@ -23,7 +34,7 @@ pub struct PerspectiveInstance {
     //agent: AgentService,
     //language_controller: LanguageController,
     //update_controllers_handle_sync_status: Box<dyn Fn(String, PerspectiveState)>,
-    //prolog_engine: Option<PrologInstance>,
+    prolog_engine: Option<PrologEngine>,
     prolog_needs_rebuild: bool,
     //polling_interval: Option<tokio::time::Interval>,
     //pending_diff_polling_interval: Option<tokio::time::Interval>,
@@ -44,6 +55,7 @@ impl PerspectiveInstance {
             created_from_join: created_from_join.unwrap_or(false),
             is_fast_polling: false,
             retries: 0,
+            prolog_engine: None,
             prolog_needs_rebuild: false,
             prolog_mutex: Arc::new(Mutex::new(())),
             is_teardown: false,
@@ -429,6 +441,80 @@ impl PerspectiveInstance {
                 DecoratedLinkExpression::from((link.clone(), status)).into()
             })
             .collect())
+    }
+
+
+
+    /// Adds the given Social DNA code to the perspective's SDNA code
+    async fn add_sdna(&mut self, name: String, mut sdna_code: String, sdna_type: SdnaType) -> Result<bool, AnyError> {
+        let mut added = false;
+        let mutex = self.sdna_change_mutex.clone();
+        let _guard = mutex.lock().await;
+        
+        let predicate = match sdna_type {
+            SdnaType::SubjectClass => "ad4m://has_subject_class",
+            SdnaType::Flow => "ad4m://has_flow",
+            SdnaType::Custom => "ad4m://has_custom_sdna",
+        };
+
+        let literal_name = Literal::from_string(name).to_url().expect("just initialized Literal couldn't be turned into URL");
+
+        let links = self.get_links(&LinkQuery {
+            source: Some("ad4m://self".to_string()),
+            predicate: Some(predicate.to_string()),
+            target: Some(literal_name.clone()),
+            from_date: None,
+            until_date: None,
+            limit: None,
+        }).await?;
+
+        let mut sdna_links: Vec<Link> = Vec::new();
+
+        if let Err(_) = Literal::from_url(sdna_code.clone()) {
+            sdna_code = Literal::from_string(sdna_code).to_url().expect("just initialized Literal couldn't be turned into URL");
+        }
+
+        
+
+        if links.is_empty() {
+            sdna_links.push(Link {
+                source: "ad4m://self".to_string(),
+                predicate: Some(predicate.to_string()),
+                target: literal_name.clone(),
+            });
+
+            sdna_links.push(Link {
+                source: literal_name,
+                predicate: Some("ad4m://sdna".to_string()),
+                target: sdna_code,
+            });
+
+            self.add_links(sdna_links, LinkStatus::Shared).await?;
+            added = true;
+        }
+        // Mutex guard is automatically dropped here
+        Ok(added)
+    }
+
+
+    /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
+    async fn prolog_query(&mut self, query: String) -> Result<String, AnyError> {
+        let _guard = self.prolog_mutex.lock().await;
+        if self.prolog_engine.is_none() {
+            let mut engine = PrologEngine::new();
+            engine.spawn().await.map_err(|e| anyhow!("Failed to spawn Prolog engine: {}", e))?;
+            self.prolog_engine = Some(engine);
+            self.prolog_needs_rebuild = true;
+        }
+
+        if self.prolog_needs_rebuild {
+            let all_links = self.get_links(&LinkQuery::default()).await?;
+            let facts = init_engine_facts(all_links, self.persisted.neighbourhood.as_ref().map(|n| n.author.clone())).await?;
+            self.prolog_engine.as_ref().unwrap().load_module_string("facts".to_string(), facts).await?;
+        }
+
+        let result = self.prolog_engine.as_ref().unwrap().run_query(query).await?.map_err(|e| anyhow!(e))?;
+        Ok(prolog_resolution_to_string(result))
     }
 }
 

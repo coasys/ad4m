@@ -1,11 +1,13 @@
 use std::default;
 
+use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
 use juniper::{
     GraphQLEnum, GraphQLObject, GraphQLValue,
 };
 
 use crate::agent::signatures::verify;
+use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -154,4 +156,80 @@ pub struct NeighbourhoodExpression {
     pub data: Neighbourhood,
     pub proof: ExpressionProof,
     pub timestamp: String,
+}
+
+type Address = String;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct LanguageRef {
+    pub name: String,
+    pub address: Address,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ExpressionRef {
+    pub language: LanguageRef,
+    pub expression: Address,
+}
+
+impl TryFrom<String> for ExpressionRef {
+    type Error = AnyError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.starts_with("literal://") {
+            let language_ref = LanguageRef {
+                address: "literal".to_string(),
+                name: "literal".to_string(),
+            };
+            let content = value[10..].to_string();
+            return Ok(ExpressionRef {
+                language: language_ref,
+                expression: content,
+            });
+        }
+
+        let uri_regexp = Regex::new(r"^([^:^\s]+):\/\/([\s\S]+)$").unwrap();
+        if let Some(uri_captures) = uri_regexp.captures(&value) {
+            if uri_captures.len() == 3 {
+                let language = uri_captures.get(1).unwrap().as_str().to_string();
+                let expression = uri_captures.get(2).unwrap().as_str().to_string();
+
+                let language_ref = LanguageRef {
+                    address: language,
+                    name: "".to_string(), // Assuming name is not provided in the URI
+                };
+
+                return Ok(ExpressionRef {
+                    language: language_ref,
+                    expression,
+                });
+            }
+        }
+
+        let did_regexp = Regex::new(r"^did:([^\s]+)$").unwrap();
+        if let Some(did_captures) = did_regexp.captures(&value) {
+            if did_captures.len() == 2 {
+                let language_ref = LanguageRef {
+                    address: "did".to_string(),
+                    name: "".to_string(), // Assuming name is not provided in the DID
+                };
+
+                return Ok(ExpressionRef {
+                    language: language_ref,
+                    expression: value,
+                });
+            }
+        }
+
+        Err(anyhow!("Couldn't parse string as expression URL or DID: {}", value))
+    }
+}
+
+impl ToString for ExpressionRef {
+    fn to_string(&self) -> String {
+        if self.language.address == "did" {
+            return self.expression.clone();
+        }
+        format!("{}://{}", self.language.address, self.expression)
+    }
 }

@@ -1,5 +1,6 @@
 pub mod perspective_instance;
-
+pub mod sdna;
+pub mod utils;
 
 use std::sync::{RwLock, RwLockWriteGuard};
 use std::collections::HashMap;

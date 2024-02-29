@@ -10918,6 +10918,7 @@ dependencies = [
  "once_cell",
  "os_info",
  "rand 0.8.5",
+ "regex",
  "rocket",
  "rusqlite",
  "rust-embed",
