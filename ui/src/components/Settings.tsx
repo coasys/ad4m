@@ -280,31 +280,35 @@ const Profile = (props: Props) => {
         </j-button>
       </j-box>
 
-      <j-box px="500" my="500">
-        <j-button
-          onClick={() => {
-            getAgentInfo()
-          }}
-          full
-          variant="secondary"
-        >
-          <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
-          Copy Holochain Agents Info
-        </j-button>
-      </j-box>
+      {expertMode && (
+        <div>
+          <j-box px="500" my="500">
+            <j-button
+              onClick={() => {
+                getAgentInfo()
+              }}
+              full
+              variant="secondary"
+            >
+              <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
+              Copy Holochain Agent Info(s)
+            </j-button>
+          </j-box>
 
-      <j-box px="500" my="500">
-        <j-button
-          onClick={() => {
-            setShowAddHcAgentInfos(true)
-          }}
-          full
-          variant="secondary"
-        >
-          <j-icon size="sm" slot="start" name="shield-check"></j-icon>
-          Create Holochain Agents Info
-        </j-button>
-      </j-box>
+          <j-box px="500" my="500">
+            <j-button
+              onClick={() => {
+                setShowAddHcAgentInfos(true)
+              }}
+              full
+              variant="secondary"
+            >
+              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+              Add Holochain Agent Info(s)
+            </j-button>
+          </j-box>
+        </div>
+      )}
 
       <j-box px="500" my="500">
         <j-button onClick={openLogs} full variant="secondary">
@@ -337,8 +341,8 @@ const Profile = (props: Props) => {
             </j-box>
             <j-box pb="500">
             <j-input
-              placeholder="Holochain agent info"
-              label="Input your agents info here.."
+              placeholder="Encoded Holochain AgentInfo string"
+              label="Input another agent's info string here.."
               size="lg"
               required
               onInput={(e: any) => setAddHcAgentInfos(e.target.value)}
@@ -348,7 +352,7 @@ const Profile = (props: Props) => {
               onClick={() => addAgentInfo(addHcAgentInfos)}
               full
               loading={loading}>
-                Create
+                Add Agent Info
               </j-button>
             </j-box>
           </j-box>
