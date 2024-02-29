@@ -1,11 +1,8 @@
 #![allow(non_snake_case)]
-use deno_core::anyhow::Ok;
 use juniper::{graphql_object, FieldResult};
 
-use crate::{holochain_service::get_holochain_service, runtime};
-
 use super::graphql_types::*;
-use crate::agent::{capabilities::*, signatures};
+use crate::{agent::{capabilities::*, signatures}, runtime};
 
 pub struct Query;
 
@@ -389,20 +386,22 @@ impl Query {
             &context.capabilities,
             &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
         )?;
-        let friends = runtime::get_friends();
-        Ok(friends)
+        let mut js = context.js_handle.clone();
+        let result = js
+            .execute(format!(
+                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriendStatus", {{ did: "{}" }}))"#,
+                did
+            ))
+            .await?;
+        let result: JsResultType<PerspectiveExpression> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriends"))"#,
-            ))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        
+        let friends = runtime::get_friends();
+        Ok(friends)
     }
 
     async fn runtime_hc_agent_infos(&self, context: &RequestContext) -> FieldResult<String> {
@@ -410,16 +409,14 @@ impl Query {
             &context.capabilities,
             &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
         )?;
-
-        let interface = get_holochain_service().await;
-        let infos = interface.agent_infos().await?;
-        
-        let encoded_infos: Vec<String> = infos
-            .iter()
-            .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))
-            .collect();
-
-        Ok(serde_json::to_string(&encoded_infos)?)
+        let mut js = context.js_handle.clone();
+        let result = js
+            .execute(format!(
+                r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos"))"#
+            ))
+            .await?;
+        let result: JsResultType<String> = serde_json::from_str(&result)?;
+        result.get_graphql_result()
     }
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
@@ -470,17 +467,8 @@ impl Query {
         filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
-        let filter_str = filter
-            .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
-            .unwrap_or_else(|| String::from("{ filter: null }"));
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageOutbox", {}))"#,
-            filter_str,
-        );
-        let mut js = context.js_handle.clone();
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<SentMessage>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let outbox = runtime::get_outbox();
+        Ok(outbox)
     }
 
     async fn runtime_verify_string_signed_by_did(

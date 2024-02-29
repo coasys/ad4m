@@ -324,11 +324,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return await dmLang.directMessageAdapter!.inbox(filter)
             },
             //@ts-ignore
-            runtimeMessageOutbox: (args, context) => {
-                const { filter } = args
-                return core.runtimeService.getMessagesOutbox(filter)
-            },
-            //@ts-ignore
             runtimeInfo: () => {
                 const isInitialized = core.agentService.isInitialized();
                 const isUnlocked = core.agentService.isUnlocked();

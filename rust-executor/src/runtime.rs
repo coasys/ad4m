@@ -1,13 +1,7 @@
 use std::{ env, fs::{self, File}, io, path::Path, sync::Mutex};
-use ad4m_client::types::PerspectiveExpression;
-use serde::{Deserialize, Serialize};
 use std::io::{Read};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Message {
-    recipient: String,
-    message: PerspectiveExpression,
-}
+use crate::graphql::graphql_types::SentMessage;
 
 lazy_static! {
     static ref TRUSTED_AGENTS_FILE: Mutex<String> =
@@ -63,12 +57,12 @@ fn load_friends_from_file() -> io::Result<Vec<String>> {
     Ok(friends)
 }
 
-fn load_outbox_from_file() -> io::Result<Vec<Message>> {
+fn load_outbox_from_file() -> io::Result<Vec<SentMessage>> {
     let file_path = get_outbox_file_path();
     let mut file = File::open(&file_path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
-    let outbox: Vec<Message> = serde_json::from_str(&contents)?;
+    let outbox: Vec<SentMessage> = serde_json::from_str(&contents)?;
     Ok(outbox)
 }
 
@@ -93,7 +87,7 @@ fn persist_friends_to_file(friends: &Vec<String>) -> io::Result<()> {
     Ok(())
 }
 
-fn persist_outbox_to_file(message: &Vec<Message>) -> io::Result<()> {
+fn persist_outbox_to_file(message: &Vec<SentMessage>) -> io::Result<()> {
     let file_path = get_outbox_file_path();
     let serialized_message = serde_json::to_string(message)?;
     fs::write(file_path, serialized_message)?;
@@ -125,7 +119,7 @@ lazy_static! {
         };
         Mutex::new(friends)
     };
-    static ref OUTBOX: Mutex<Vec<Message>> = {
+    static ref OUTBOX: Mutex<Vec<SentMessage>> = {
         let outbox = if Path::new(&get_outbox_file_path()).exists() {
             load_outbox_from_file().unwrap_or_else(|_| Vec::new())
         } else {
@@ -183,11 +177,11 @@ pub fn remove_friend(friend: String) {
     persist_friends_to_file(&friends).unwrap();
 }
 
-pub fn get_outbox() -> Vec<Message> {
+pub fn get_outbox() -> Vec<SentMessage> {
     OUTBOX.lock().unwrap().clone()
 }
 
-pub fn add_message_to_outbox(message: Message) {
+pub fn add_message_to_outbox(message: SentMessage) {
     let mut outbox = OUTBOX.lock().unwrap();
     outbox.push(message);
     persist_outbox_to_file(&outbox).unwrap();
