@@ -6,6 +6,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Added
+ - Add ability to get and add Holochain agent infos through launcher [PR#463](https://github.com/coasys/ad4m/pull/463)
 
 ### Changed
  - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):
