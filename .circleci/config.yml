@@ -69,6 +69,7 @@ jobs:
           root: .
           paths:
             - ./target/release/ad4m
+            - ./target/release/ad4m-executor
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
