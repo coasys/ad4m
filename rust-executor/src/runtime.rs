@@ -133,15 +133,17 @@ pub fn get_trusted_agents() -> Vec<String> {
     TRUSTED_AGENTS.lock().unwrap().clone()
 }
 
-pub fn add_trusted_agent(agent: String) {
+pub fn add_trusted_agent(new_agents: Vec<String>) {
     let mut agents = TRUSTED_AGENTS.lock().unwrap();
-    agents.push(agent);
+    agents.append(new_agents.clone().as_mut());
     persist_agents_to_file(&agents).unwrap();
 }
 
-pub fn remove_trusted_agent(agent: String) {
+pub fn remove_trusted_agent(agents_to_remove: Vec<String>) {
     let mut agents = TRUSTED_AGENTS.lock().unwrap();
-    agents.retain(|a| a != &agent);
+    for agent in agents_to_remove {
+        agents.retain(|a| a != &agent);
+    }
     persist_agents_to_file(&agents).unwrap();
 }
 
@@ -149,15 +151,17 @@ pub fn get_know_link_languages() -> Vec<String> {
     KNOW_LINK_LANGUAGES.lock().unwrap().clone()
 }
 
-pub fn add_know_link_language(language: String) {
+pub fn add_know_link_language(language: Vec<String>) {
     let mut languages = KNOW_LINK_LANGUAGES.lock().unwrap();
-    languages.push(language);
+    languages.append(language.clone().as_mut());
     persist_know_link_language_to_file(&languages).unwrap();
 }
 
-pub fn remove_know_link_language(language: String) {
+pub fn remove_know_link_language(language_to_remove: Vec<String>) {
     let mut languages = KNOW_LINK_LANGUAGES.lock().unwrap();
-    languages.retain(|l| l != &language);
+    for language in language_to_remove {
+        languages.retain(|a| a != &language);
+    }
     persist_know_link_language_to_file(&languages).unwrap();
 }
 
@@ -165,15 +169,17 @@ pub fn get_friends() -> Vec<String> {
     FRIENDS.lock().unwrap().clone()
 }
 
-pub fn add_friend(friend: String) {
+pub fn add_friend(friend: Vec<String>) {
     let mut friends = FRIENDS.lock().unwrap();
-    friends.push(friend);
+    friends.append(friend.clone().as_mut());
     persist_friends_to_file(&friends).unwrap();
 }
 
-pub fn remove_friend(friend: String) {
+pub fn remove_friend(friend_to_remove: Vec<String>) {
     let mut friends = FRIENDS.lock().unwrap();
-    friends.retain(|f| f != &friend);
+    for friend in friend_to_remove {
+        friends.retain(|a| a != &friend);
+    }
     persist_friends_to_file(&friends).unwrap();
 }
 

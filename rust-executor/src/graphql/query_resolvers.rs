@@ -2,7 +2,7 @@
 use juniper::{graphql_object, FieldResult};
 
 use super::graphql_types::*;
-use crate::{agent::{capabilities::*, signatures}, runtime};
+use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime};
 
 pub struct Query;
 

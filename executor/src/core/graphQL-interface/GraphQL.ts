@@ -352,42 +352,12 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 const { deviceKey, deviceKeyType } = args;
                 return core.entanglementProofController.signDeviceKey(deviceKey, deviceKeyType);
             },
-            //@ts-ignore
-            addTrustedAgents: (args, context) => {
-                const { agents } = args;
-                core.runtimeService.addTrustedAgents(agents);
-                return core.runtimeService.getTrustedAgents();
-            },
-            //@ts-ignore
-            deleteTrustedAgents: (args, context) => {
-                const { agents } = args;
-                core.runtimeService.deleteTrustedAgents(agents);
-                return core.runtimeService.getTrustedAgents();
-            },
-            //@ts-ignore
-            runtimeAddKnownLinkLanguageTemplates: (args, context) => {
-                const { addresses } = args;
-                core.runtimeService.addKnowLinkLanguageTemplates(addresses);
-                return core.runtimeService.knowLinkLanguageTemplates();
-            },
-            //@ts-ignore
-            runtimeRemoveKnownLinkLanguageTemplates: (args, context) => {
-                const { addresses } = args;
-                core.runtimeService.removeKnownLinkLanguageTemplates(addresses);
-                return core.runtimeService.knowLinkLanguageTemplates();
-            },
+            // TODO: Remove this after languageController is moved
             //@ts-ignore
             runtimeAddFriends: async (args, context) => {
                 const { dids } = args;
-                core.runtimeService.addFriends(dids);
                 //@ts-ignore
                 await Promise.all(dids.map(did => core.friendsDirectMessageLanguage(did)))
-                return core.runtimeService.friends();
-            },
-            //@ts-ignore
-            runtimeRemoveFriends: (args, context) => {
-                const { dids } = args;
-                core.runtimeService.removeFriends(dids);
                 return core.runtimeService.friends();
             },
             //@ts-ignore
