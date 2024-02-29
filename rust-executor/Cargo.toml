@@ -56,10 +56,10 @@ rust-embed="8.0.0"
 dirs = "5.0.1"
 rocket = "0.5.0"
 
-juniper = { git = "https://github.com/graphql-rust/juniper", features = ["chrono"], rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_subscriptions = { git = "https://github.com/graphql-rust/juniper", rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_graphql_transport_ws = { git = "https://github.com/graphql-rust/juniper", rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_warp = { git = "https://github.com/graphql-rust/juniper", features = ["subscriptions"], rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
+coasys_juniper = { version="0.16.0", features = ["chrono"] }
+coasys_juniper_subscriptions = { version="0.17.0" }
+coasys_juniper_graphql_transport_ws = { version="0.4.0" }
+coasys_juniper_warp = { version="0.8.0", features = ["subscriptions"] }
 warp = "0.3.4"
 
 jsonwebtoken = "8.3.0"

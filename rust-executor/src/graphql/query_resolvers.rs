@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use juniper::{graphql_object, FieldResult};
+use coasys_juniper::{graphql_object, FieldResult};
 
 use crate::holochain_service::get_holochain_service;
 

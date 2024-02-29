@@ -18,13 +18,13 @@ use std::{convert::Infallible, io::Write};
 
 use deno_core::error::AnyError;
 use futures::FutureExt as _;
-use juniper::{InputValue, RootNode};
-use juniper_graphql_transport_ws::ConnectionConfig;
-use juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
+use coasys_juniper::{InputValue, RootNode};
+use coasys_juniper_graphql_transport_ws::ConnectionConfig;
+use coasys_juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
 use std::path::Path;
 
-impl juniper::Context for RequestContext {}
+impl coasys_juniper::Context for RequestContext {}
 
 type Schema = RootNode<'static, Query, Mutation, Subscription>;
 
@@ -69,7 +69,7 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
                 js_handle: js_core_handle_cloned1.clone(),
             }
         });
-    let qm_graphql_filter = juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
+    let qm_graphql_filter = coasys_juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
 
     let root_node = Arc::new(schema());
 

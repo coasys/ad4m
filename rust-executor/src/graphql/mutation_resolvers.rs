@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use juniper::{graphql_object, graphql_value, FieldResult};
+use coasys_juniper::{graphql_object, graphql_value, FieldResult};
 use kitsune_p2p_types::agent_info::AgentInfoSigned;
 use log::debug;
 
@@ -623,7 +623,7 @@ impl Mutation {
         let status = match status {
             Some(status) => {
                 if status != String::from("shared") && status != String::from("local") {
-                    return Err(juniper::FieldError::new(
+                    return Err(coasys_juniper::FieldError::new(
                         "Invalid status, must be either 'shared' or 'local'",
                         graphql_value!({ "invalid_status": status }),
                     ));
@@ -662,7 +662,7 @@ impl Mutation {
         let status = match status {
             Some(status) => {
                 if status != String::from("shared") && status != String::from("local") {
-                    return Err(juniper::FieldError::new(
+                    return Err(coasys_juniper::FieldError::new(
                         "Invalid status, must be either 'shared' or 'local'",
                         graphql_value!({ "invalid_status": status }),
                     ));
@@ -701,7 +701,7 @@ impl Mutation {
         let status = match status {
             Some(status) => {
                 if status != String::from("shared") && status != String::from("local") {
-                    return Err(juniper::FieldError::new(
+                    return Err(coasys_juniper::FieldError::new(
                         "Invalid status, must be either 'shared' or 'local'",
                         graphql_value!({ "invalid_status": status }),
                     ));
@@ -740,7 +740,7 @@ impl Mutation {
         let status = match status {
             Some(status) => {
                 if status != String::from("shared") && status != String::from("local") {
-                    return Err(juniper::FieldError::new(
+                    return Err(coasys_juniper::FieldError::new(
                         "Invalid status, must be either 'shared' or 'local'",
                         graphql_value!({ "invalid_status": status }),
                     ));
