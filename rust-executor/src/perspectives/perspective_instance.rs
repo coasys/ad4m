@@ -1,6 +1,7 @@
 // rust-executor/src/perspective.rs
 
 use std::sync::{Arc, Mutex};
+use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Serialize, Deserialize};
@@ -60,6 +61,10 @@ impl PerspectiveInstance {
 
     pub async fn add_link(&mut self, link: Link, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expression = create_signed_expression(link)?;
+        self.add_link_expression(link_expression, status).await
+    }
+
+    async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {    
         Ad4mDb::global_instance()
             .lock()
             .expect("Couldn't get write lock on Ad4mDb")
@@ -329,13 +334,14 @@ impl PerspectiveInstance {
     }
 
     async fn get_links_local(&self, query: &LinkQuery) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
-        if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
-            return Ad4mDb::with_global_instance(|db| {
-                db.get_all_links(&self.persisted.uuid)
-            })
-        }
+        println!("Query: {:?}", query);
+        
 
-        let mut result = if let Some(source) = &query.source {
+        let mut result = if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
+            Ad4mDb::with_global_instance(|db| {
+                db.get_all_links(&self.persisted.uuid)
+            })?
+        } else if let Some(source) = &query.source {
             Ad4mDb::with_global_instance(|db| {
                 db.get_links_by_source(&self.persisted.uuid, source)
             })?
@@ -359,62 +365,63 @@ impl PerspectiveInstance {
         if let Some(predicate) = &query.predicate {
             result.retain(|(link, _status)| link.data.predicate.as_ref() == Some(predicate));
         }
-/*
-        if let Some(from_date) = &query.from_date {
-            result.retain(|link| {
+
+        let until_date: Option<chrono::DateTime<chrono::Utc>> = query.until_date.clone().map(|d| d.into());
+        let from_date: Option<chrono::DateTime<chrono::Utc>> = query.from_date.clone().map(|d| d.into());
+
+        if let Some(from_date) = &from_date {
+            result.retain(|(link, _)| {
                 let link_date = DateTime::parse_from_rfc3339(&link.timestamp).unwrap();
-                if from_date >= query.until_date.unwrap_or(chrono::Utc::now()) {
-                    link_date <= *from_date.into()
-                } else {
-                    link_date >= *from_date.into()
-                }
+                link_date >= *from_date
             });
         }
 
-        if let Some(until_date) = &query.until_date {
-            result.retain(|link| {
+        if let Some(until_date) = &until_date {
+            result.retain(|(link, _)| {
                 let link_date = DateTime::parse_from_rfc3339(&link.timestamp).unwrap();
-                if query.from_date >= query.until_date {
-                    link_date >= *until_date.into()
-                } else {
-                    link_date <= *until_date.into()
-                }
+                link_date <= *until_date
             });
         }
 
         if let Some(limit) = query.limit {
-            let start_limit = if query.from_date >= query.until_date { 
-                result.len().saturating_sub(limit) 
+            let result_length = result.len() as i32;
+            let start_limit = if from_date >= until_date { 
+                result_length.saturating_sub(limit) 
             } else {
                 0 
-            };
-            let end_limit = if query.from_date >= query.until_date { 
-                result.len() 
+            } as usize;
+
+            let end_limit = if from_date >= until_date { 
+                result_length
             } else { 
-                limit.min(result.len()) 
-            };
+                limit.min(result_length) 
+            } as usize;
+
             result = result[start_limit..end_limit].to_vec();
         }
- */
+ 
         Ok(result)
     }
 
     async fn get_links(&self, query: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let links = self.get_links_local(query).await?;
-/*
-        let reverse = query.from_date >= query.until_date;
+        let mut links = self.get_links_local(query).await?;
 
-        links.sort_by(|a, b| {
+        let until_date: Option<chrono::DateTime<chrono::Utc>> = query.until_date.clone().map(|d| d.into());
+        let from_date: Option<chrono::DateTime<chrono::Utc>> = query.from_date.clone().map(|d| d.into());
+
+        let reverse = from_date >= until_date;
+
+        links.sort_by(|(a, _), (b, _)| {
             let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
             let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
             a_time.cmp(&b_time)
         });
 
         if let Some(limit) = query.limit {
-            let start_limit = if reverse { links.len().saturating_sub(limit) } else { 0 };
-            let end_limit = if reverse { links.len() } else { limit.min(links.len()) };
+            let start_limit = if reverse { links.len().saturating_sub(limit as usize) } else { 0 };
+            let end_limit = if reverse { links.len() } else { limit.min(links.len() as i32) as usize };
             links = links[start_limit..end_limit].to_vec();
-        } */
+        } 
 
         Ok(links
             .into_iter()
@@ -530,6 +537,53 @@ mod tests {
         // Ensure the link is no longer present
         let links_after_removal = perspective.get_links(&query).await.unwrap();
         assert!(!links_after_removal.contains(&expression));
+    }
+
+    #[tokio::test]
+    async fn test_link_query_date_filtering() {
+        let mut perspective = setup();
+        let mut all_links = Vec::new();
+        let now = chrono::Utc::now();
+
+        // Add links with timestamps spread out by one minute intervals
+        for i in 0..5 {
+            let mut link = create_signed_expression(create_link()).expect("Failed to create link");
+            link.timestamp = (now - chrono::Duration::minutes(i as i64)).to_rfc3339();
+            let expression = perspective.add_link_expression(link.clone(), LinkStatus::Shared).await.unwrap();
+            all_links.push(expression);
+            println!("Added link with timestamp: {}, {:?}", link.timestamp, link);
+        }
+
+        // Query for links with a from_date set to 3 minutes ago
+        let from_date = (now - chrono::Duration::minutes(2) - chrono::Duration::seconds(30)).into();
+        let query_with_from_date = LinkQuery {
+            from_date: Some(from_date),
+            ..Default::default()
+        };
+        //println!("Query with from_date: {:?}", query_with_from_date);
+        let links_from_date = perspective.get_links(&query_with_from_date).await.unwrap();
+        //println!("Links from date: {:?}", links_from_date);
+        assert_eq!(links_from_date.len(), 3);
+
+        // Query for links with an until_date set to 3 minutes ago
+        let until_date = (now - chrono::Duration::minutes(3)).into();
+        let query_with_until_date = LinkQuery {
+            until_date: Some(until_date),
+            ..Default::default()
+        };
+        let links_until_date = perspective.get_links(&query_with_until_date).await.unwrap();
+        assert_eq!(links_until_date.len(), 2);
+
+        // Query for links with both from_date and until_date set to filter a range
+        let from_date = (now - chrono::Duration::minutes(4)).into();
+        let until_date = (now - chrono::Duration::minutes(2) - chrono::Duration::seconds(30)).into();
+        let query_with_date_range = LinkQuery {
+            from_date: Some(from_date),
+            until_date: Some(until_date),
+            ..Default::default()
+        };
+        let links_date_range = perspective.get_links(&query_with_date_range).await.unwrap();
+        assert_eq!(links_date_range.len(), 2);
     }
 
     // Additional tests for updateLink, removeLink, syncWithSharingAdapter, etc. would go here

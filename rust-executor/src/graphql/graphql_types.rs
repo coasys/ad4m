@@ -83,6 +83,12 @@ impl Into<chrono::DateTime<chrono::Utc>> for DateTime {
     }
 }
 
+impl From<chrono::DateTime<chrono::Utc>> for DateTime {
+    fn from(date: chrono::DateTime<chrono::Utc>) -> Self {
+        DateTime(date)
+    }
+}
+
 #[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
