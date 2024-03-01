@@ -41,7 +41,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - SDNA imporvements [PR#457](https://github.com/coasys/ad4m/pull/457):
   - Fixed value returns as undefined if the property was boolean and set to false in `SubjectEntity.
   - Fixed links in docs.
-- Fixed falky integration tests [PR#462](https://github.com/coasys/ad4m/pull/462)
+- Fixed flaky integration tests [PR#462](https://github.com/coasys/ad4m/pull/462)
 
 ## [0.8.0] - 12/12/2023
 
