@@ -25,16 +25,11 @@ use serde::{Deserialize, Serialize};
 use crate::{agent::did, graphql::graphql_types::SentMessage};
 
 lazy_static! {
-    static ref TRUSTED_AGENTS_FILE: Mutex<String> =
-        Mutex::new(env::var("APPS_DATA_FILE").unwrap_or_else(|_| "trusted_agents.json".to_string()));
-    static ref KNOW_LINK_LANGUAGES_FILE: Mutex<String> =
-        Mutex::new(env::var("APPS_DATA_FILE").unwrap_or_else(|_| "know_link_languages.json".to_string()));
-    static ref FRIENDS_FILE: Mutex<String> =
-        Mutex::new(env::var("APPS_DATA_FILE").unwrap_or_else(|_| "friends.json".to_string()));
-    static ref OUTBOX_FILE: Mutex<String> =
-        Mutex::new(env::var("APPS_DATA_FILE").unwrap_or_else(|_| "outbox.json".to_string()));
-    static ref MAINNETSEED_FILE: Mutex<String> =
-        Mutex::new(env::var("MAINNET_SEED").unwrap_or_else(|_| "../mainnet_seed.seed".to_string()));
+    static ref TRUSTED_AGENTS_FILE: Mutex<String> = Mutex::new(format!("{}/trusted_agents.json", env::var("APPS_DATA_PATH").unwrap_or_else(|_| "".to_string())));
+    static ref KNOW_LINK_LANGUAGES_FILE: Mutex<String> = Mutex::new(format!("{}/know_link_languages.json", env::var("APPS_DATA_PATH").unwrap_or_else(|_| "".to_string())));
+    static ref FRIENDS_FILE: Mutex<String> = Mutex::new(format!("{}/friends.json", env::var("APPS_DATA_PATH").unwrap_or_else(|_| "".to_string())));
+    static ref OUTBOX_FILE: Mutex<String> = Mutex::new(format!("{}/outbox.json", env::var("APPS_DATA_PATH").unwrap_or_else(|_| "".to_string())));
+    static ref MAINNETSEED_FILE: Mutex<String> = Mutex::new(format!("{}/mainnet_seed.seed", env::var("APPS_DATA_PATH").unwrap_or_else(|_| "".to_string())));
 }
 
 fn get_mainnet_seed_file_path() -> String {
