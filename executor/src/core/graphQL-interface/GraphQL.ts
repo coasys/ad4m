@@ -302,11 +302,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             },
 
             //@ts-ignore
-            runtimeHcAgentInfos: async (context) => {
-                return JSON.stringify(await core.holochainRequestAgentInfos());
-            },
-
-            //@ts-ignore
             runtimeFriendStatus: async (args, context) => {
                 const { did } = args
                 if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
@@ -358,7 +353,8 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 const { dids } = args;
                 //@ts-ignore
                 await Promise.all(dids.map(did => core.friendsDirectMessageLanguage(did)))
-                return core.runtimeService.friends();
+
+                return [];
             },
             //@ts-ignore
             agentGenerate: async (args, context) => {

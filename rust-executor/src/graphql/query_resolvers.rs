@@ -409,14 +409,8 @@ impl Query {
             &context.capabilities,
             &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos"))"#
-            ))
-            .await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let infos = holochain_service::get_holochain_service().await.agent_infos().await?;
+        Ok(serde_json::to_string(&infos)?)
     }
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
