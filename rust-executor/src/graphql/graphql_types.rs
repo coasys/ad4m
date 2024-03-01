@@ -1,6 +1,6 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::js_core::JsCoreHandle;
-use crate::types::DecoratedLinkExpression;
+use crate::types::{DecoratedLinkExpression, LinkExpression};
 use juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -340,10 +340,57 @@ pub struct OnlineAgent {
     pub status: PerspectiveExpression,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct GraphQLLinkExpression {
+    pub link_expression: LinkExpression,
+}
+
+#[juniper::graphql_object]
+impl GraphQLLinkExpression {
+    pub fn author(&self) -> &String {
+        &self.link_expression.author
+    }
+
+    pub fn timestamp(&self) -> &String {
+        &self.link_expression.timestamp
+    }
+
+    pub fn data(&self) -> &Link {
+        &self.link_expression.data
+    }
+
+    pub fn proof(&self) -> &ExpressionProof {
+        &self.link_expression.proof
+    }
+}
+
+impl Default for GraphQLLinkExpression {
+    fn default() -> Self {
+        GraphQLLinkExpression {
+            link_expression: LinkExpression::default(),
+        }
+    }
+}
+
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Perspective {
+    pub links: Vec<GraphQLLinkExpression>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DecoratedPerspective {
     pub links: Vec<DecoratedLinkExpression>,
+}
+
+impl From<Perspective> for DecoratedPerspective {
+    fn from(perspective: Perspective) -> Self {
+        DecoratedPerspective {
+            links: perspective.links.into_iter().map(|l| l.into()).collect(),
+        }
+    }
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
