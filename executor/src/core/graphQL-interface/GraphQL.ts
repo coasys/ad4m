@@ -304,7 +304,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             runtimeFriendStatus: async (args, context) => {
                 const { did } = args
-                if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
                 const dmLang = await core.friendsDirectMessageLanguage(did)
                 if(dmLang)
                     return await dmLang.directMessageAdapter!.status()
@@ -741,7 +740,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             runtimeFriendSendMessage: async (args, context) => {
                 const { did, message } = args
-                if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
+
                 const dmLang = await core.friendsDirectMessageLanguage(did)
                 if(!dmLang) return false
 
@@ -761,9 +760,10 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 }
 
                 if(wasSent && messageExpression) {
-                    core.runtimeService.addMessageOutbox(did, messageExpression)
+                    await RUNTIME_SERVICE.addMessageOutbox(did, messageExpression, wasSent)
                 }
-                return wasSent
+
+                return wasSent;
             }
 
         },

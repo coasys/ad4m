@@ -14,7 +14,6 @@ import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import EntanglementProofController from './EntanglementProof'
 import fs from 'node:fs'
 import { AgentInfoResponse } from '@holochain/client'
-import RuntimeService from './RuntimeService'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
 import { getPubSub, sleep } from "./utils";
@@ -53,8 +52,6 @@ export default class Ad4mCore {
     //#IPFS?: IPFSType
 
     #agentService: AgentService
-    #runtimeService: RuntimeService
-
     #db: Ad4mDb
     #didResolver: DIDResolver
 
@@ -71,10 +68,6 @@ export default class Ad4mCore {
         this.#config = Config.init(config);
 
         this.#agentService = new AgentService(this.#config.rootConfigPath, this.#config.adminCredential)
-        this.#runtimeService = new RuntimeService(this.#config)
-        this.#agentService.ready.then(() => {
-            this.#runtimeService.did = this.#agentService!.did!
-        })
         this.#agentService.load()
         this.#db = Db.init(this.#config.dataPath)
         this.#didResolver = DIDs.init(this.#config.dataPath)
@@ -125,10 +118,6 @@ export default class Ad4mCore {
 
     get agentService(): AgentService {
         return this.#agentService
-    }
-
-    get runtimeService(): RuntimeService {
-        return this.#runtimeService
     }
 
     get perspectivesController(): PerspectivesController {
@@ -221,11 +210,10 @@ export default class Ad4mCore {
     initControllers() {
         this.#languageController = new LanguageController({
             agent: this.#agentService,
-            runtime: this.#runtimeService,
             //IPFS: this.#IPFS,
             ad4mSignal: this.languageSignal,
             config: this.#config,
-        }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, db: this.#db } )
+        }, { holochainService: this.#holochain!, db: this.#db } )
 
         this.#perspectivesController = new PerspectivesController(this.#config.rootConfigPath, {
             db: this.#db,

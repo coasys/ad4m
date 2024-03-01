@@ -13,7 +13,6 @@ import type AgentService from './agent/AgentService'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
-import RuntimeService from './RuntimeService';
 import { Ad4mDb } from './db';
 import stringify from 'json-stable-stringify'
 import { getPubSub, tagExpressionSignatureStatus } from './utils';
@@ -44,7 +43,6 @@ type SyncStateChangeObserver = (state: PerspectiveState, lang: LanguageRef)=>voi
 
 interface Services {
     holochainService: HolochainService,
-    runtimeService: RuntimeService,
     db: Ad4mDb
 }
 
@@ -84,7 +82,6 @@ export default class LanguageController {
     #telepresenceSignalObservers: TelepresenceSignalObserver[];
     #syncStateChangeObservers: SyncStateChangeObserver[];
     #holochainService: HolochainService
-    #runtimeService: RuntimeService;
     #db: Ad4mDb;
     #config: Config.MainConfig;
     #pubSub: PubSub;
@@ -97,7 +94,6 @@ export default class LanguageController {
     constructor(context: object, services: Services) {
         this.#context = context
         this.#holochainService = services.holochainService
-        this.#runtimeService = services.runtimeService
         this.#db = services.db
         this.#languages = new Map()
         this.#languages.set("literal", {
@@ -505,7 +501,7 @@ export default class LanguageController {
             }
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
-            const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
+            const trustedAgents: string[] = await RUNTIME_SERVICE.getTrustedAgents();
             const agentService = (this.#context as LanguageContext).agent as AgentService;
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
             if (trustedAgents.find((agent) => agent === languageAuthor) || agentService.agent! === languageAuthor) {
