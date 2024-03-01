@@ -3,7 +3,7 @@ extern crate lazy_static;
 
 pub mod config;
 mod globals;
-mod runtime;
+mod runtime_service;
 pub mod graphql;
 mod holochain_service;
 mod js_core;

@@ -12,7 +12,7 @@ mod prolog_service;
 mod utils;
 mod wallet;
 mod types;
-mod runtime;
+mod runtime_service;
 
 pub mod init;
 mod pubsub;

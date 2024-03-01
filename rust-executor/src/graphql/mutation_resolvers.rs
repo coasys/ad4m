@@ -1,10 +1,8 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, graphql_value, FieldResult};
-use kitsune_p2p_types::agent_info::AgentInfoSigned;
-use log::debug;
 
 use super::graphql_types::*;
-use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}, runtime};
+use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}, runtime_service};
 use ad4m_client::literal::Literal;
 pub struct Mutation;
 
@@ -19,9 +17,9 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
         )?;
-        runtime::add_trusted_agent(agents);
+        runtime_service::add_trusted_agent(agents);
 
-        Ok(runtime::get_trusted_agents())
+        Ok(runtime_service::get_trusted_agents())
     }
 
     async fn agent_add_entanglement_proofs(
@@ -241,9 +239,9 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
         )?;
-        runtime::remove_trusted_agent(agents);
+        runtime_service::remove_trusted_agent(agents);
 
-        Ok(runtime::get_trusted_agents())
+        Ok(runtime_service::get_trusted_agents())
     }
 
     async fn expression_create(
@@ -928,7 +926,7 @@ impl Mutation {
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)?;
         let cloned_did = dids.clone();
-        runtime::add_friend(dids);
+        runtime_service::add_friend(dids);
         // TODO: remove this when language controller is moved.
         let mut js = context.js_handle.clone();
         let dids_json = serde_json::to_string(&cloned_did)?;
@@ -945,7 +943,7 @@ impl Mutation {
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
         result.get_graphql_result();
 
-        Ok(runtime::get_friends())
+        Ok(runtime_service::get_friends())
     }
 
     async fn runtime_add_known_link_language_templates(
@@ -957,8 +955,8 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
         )?;
-        runtime::add_know_link_language(addresses);
-        Ok(runtime::get_know_link_languages())
+        runtime_service::add_know_link_language(addresses);
+        Ok(runtime_service::get_know_link_languages())
     }
 
     async fn runtime_friend_send_message(
@@ -968,6 +966,14 @@ impl Mutation {
         message: PerspectiveInput,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)?;
+        let friends = runtime_service::get_friends();
+
+        if !friends.contains(&did.clone()) {
+            log::error!("Friend not found: {}", did);
+
+            return Ok(false)
+        }
+
         let mut js = context.js_handle.clone();
         let message_json = serde_json::to_string(&message)?;
         let script = format!(
@@ -981,7 +987,8 @@ impl Mutation {
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let get_graphql_result = result.get_graphql_result()?;
+        Ok(get_graphql_result)
     }
 
     async fn runtime_hc_add_agent_infos(
@@ -1046,8 +1053,8 @@ impl Mutation {
         dids: Vec<String>,
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)?;
-        runtime::remove_friend(dids);
-        Ok(runtime::get_friends())
+        runtime_service::remove_friend(dids);
+        Ok(runtime_service::get_friends())
     }
 
     async fn runtime_remove_known_link_language_templates(
@@ -1059,8 +1066,8 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
         )?;
-        runtime::remove_know_link_language(addresses);
-        Ok(runtime::get_know_link_languages())
+        runtime_service::remove_know_link_language(addresses);
+        Ok(runtime_service::get_know_link_languages())
     }
 
     async fn runtime_set_status(

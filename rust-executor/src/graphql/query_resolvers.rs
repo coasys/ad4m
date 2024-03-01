@@ -2,7 +2,7 @@
 use juniper::{graphql_object, FieldResult};
 
 use super::graphql_types::*;
-use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime};
+use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime_service};
 
 pub struct Query;
 
@@ -165,7 +165,7 @@ impl Query {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
         )?;
-        let agents = runtime::get_trusted_agents();
+        let agents = runtime_service::get_trusted_agents();
 
         Ok(agents)
     }
@@ -386,6 +386,14 @@ impl Query {
             &context.capabilities,
             &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
         )?;
+        let friends = runtime_service::get_friends();
+
+        if !friends.contains(&did.clone()) {
+            log::error!("Friend not found: {}", did);
+
+            return Ok(PerspectiveExpression::default());
+        }
+
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -394,13 +402,14 @@ impl Query {
             ))
             .await?;
         let result: JsResultType<PerspectiveExpression> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let get_graphql_result = result.get_graphql_result()?;
+        Ok(get_graphql_result)
     }
 
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)?;
         
-        let friends = runtime::get_friends();
+        let friends = runtime_service::get_friends();
         Ok(friends)
     }
 
@@ -432,7 +441,7 @@ impl Query {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
         )?;
-        let runtime = runtime::get_know_link_languages();
+        let runtime = runtime_service::get_know_link_languages();
         Ok(runtime)
     }
 
@@ -461,7 +470,7 @@ impl Query {
         filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
-        let outbox = runtime::get_outbox();
+        let outbox = runtime_service::get_outbox();
         Ok(outbox)
     }
 
