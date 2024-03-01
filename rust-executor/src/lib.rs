@@ -37,9 +37,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     let data_path = config.app_data_path.clone().unwrap();
 
-    let target_seed_path = Path::new(&data_path).to_path_buf().join("mainnet_seed.seed");
 
-    env::set_var("MAINNET_SEED", target_seed_path.clone());
+    env::set_var("APPS_DATA_PATH", data_path.clone());
 
     agent::capabilities::apps_map::set_data_file_path(
         config.app_data_path
