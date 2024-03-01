@@ -37,7 +37,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     let data_path = config.app_data_path.clone().unwrap();
 
-
     env::set_var("APPS_DATA_PATH", data_path.clone());
 
     agent::capabilities::apps_map::set_data_file_path(
