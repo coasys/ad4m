@@ -165,6 +165,8 @@ pub fn get_trusted_agents() -> Vec<String> {
     let mut trusted_agents: Vec<String> = seed.trusted_agents.clone();
     trusted_agents.push(did());
     trusted_agents.append(TRUSTED_AGENTS.lock().unwrap().clone().as_mut());
+    trusted_agents.sort();
+    trusted_agents.dedup();
     trusted_agents
 }
 
@@ -186,6 +188,8 @@ pub fn get_know_link_languages() -> Vec<String> {
     let seed = load_mainnet_seed_from_file().unwrap();
     let mut languages: Vec<String> = seed.known_link_languages.clone();
     languages.append(KNOW_LINK_LANGUAGES.lock().unwrap().clone().as_mut());
+    languages.sort();
+    languages.dedup();
     languages
 }
 
@@ -204,7 +208,10 @@ pub fn remove_know_link_language(language_to_remove: Vec<String>) {
 }
 
 pub fn get_friends() -> Vec<String> {
-    FRIENDS.lock().unwrap().clone()
+    let mut friends = FRIENDS.lock().unwrap().clone();
+    friends.sort();
+    friends.dedup();
+    friends
 }
 
 pub fn add_friend(friend: Vec<String>) {
