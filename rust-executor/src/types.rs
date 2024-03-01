@@ -6,7 +6,7 @@ use juniper::{
     GraphQLEnum, GraphQLObject, GraphQLValue,
 };
 
-use crate::agent::signatures::verify;
+use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput}};
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -72,8 +72,53 @@ pub struct Link {
     pub target: String,
 }
 
+impl From<LinkInput> for Link {
+    fn from(input: LinkInput) -> Self {
+        Link {
+            predicate: input.predicate,
+            source: input.source,
+            target: input.target,
+        }
+    }
+}
 
 pub type LinkExpression = Expression<Link>;
+
+impl TryFrom<LinkExpressionInput> for LinkExpression {
+    type Error = AnyError;
+    fn try_from(input: LinkExpressionInput) -> Result<Self, Self::Error> {
+        let data = Link {
+            predicate: input.data.predicate,
+            source: input.data.source,
+            target: input.data.target,
+        };
+        Ok(Expression {
+            author: input.author,
+            timestamp: input.timestamp,
+            data: data,
+            proof: ExpressionProof {
+                key: input.proof.key.ok_or(anyhow!("Key is required"))?,
+                signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
+            },
+        })
+    }
+}
+
+impl LinkExpression {
+     pub fn from_input_without_proof(input: LinkExpressionInput) -> Self {
+        let data = Link {
+            predicate: input.data.predicate,
+            source: input.data.source,
+            target: input.data.target,
+        };
+        Expression {
+            author: input.author,
+            timestamp: input.timestamp,
+            data,
+            proof: ExpressionProof::default(),
+        }
+    }
+}
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -124,19 +169,6 @@ pub enum LinkStatus {
     #[serde(rename = "local")]
     Local,
 }
-
-
-pub struct LinkMutations {
-    pub additions: Vec<Link>,
-    pub removals: Vec<Link>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct PerspectiveDiff {
-    pub additions: Vec<LinkExpression>,
-    pub removals: Vec<LinkExpression>,
-}
-
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 
@@ -232,4 +264,10 @@ impl ToString for ExpressionRef {
         }
         format!("{}://{}", self.language.address, self.expression)
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PerspectiveDiff {
+    pub additions: Vec<LinkExpression>,
+    pub removals: Vec<LinkExpression>,
 }

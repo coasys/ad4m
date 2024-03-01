@@ -1,12 +1,32 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, graphql_value, FieldResult};
 
-use crate::perspectives::add_perspective;
+use crate::{perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective}, types::{DecoratedLinkExpression, LinkExpression, PerspectiveDiff}};
 
 use super::graphql_types::*;
 use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
 use ad4m_client::literal::Literal;
 pub struct Mutation;
+
+fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<PerspectiveInstance> {
+    get_perspective(uuid).ok_or_else(|| juniper::FieldError::new(
+        "Perspective not found",
+        graphql_value!({ "uuid": uuid.clone() }),
+    ))
+}
+
+fn link_status_from_input(status: Option<String>) -> Result<crate::types::LinkStatus, juniper::FieldError> {
+    if let Some(status) = status {
+        serde_json::from_str::<crate::types::LinkStatus>(&status).map_err(|_| {
+            juniper::FieldError::new(
+                "Invalid status, must be either 'shared' or 'local'",
+                graphql_value!({ "invalid_status": status }),
+            )
+        })
+    } else {
+        Ok(crate::types::LinkStatus::Shared)
+    }
+}
 
 #[graphql_object(context = RequestContext)]
 impl Mutation {
@@ -593,38 +613,15 @@ impl Mutation {
         link: LinkInput,
         uuid: String,
         status: Option<String>,
-    ) -> FieldResult<LinkExpression> {
+    ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
 
-        let link_json = serde_json::to_string(&link)?;
-        let status = match status {
-            Some(status) => {
-                if status != String::from("shared") && status != String::from("local") {
-                    return Err(juniper::FieldError::new(
-                        "Invalid status, must be either 'shared' or 'local'",
-                        graphql_value!({ "invalid_status": status }),
-                    ));
-                }
-                format!(r#""{}""#, status)
-            }
-            None => String::from("null"),
-        };
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveAddLink",
-                {{ link: {}, uuid: "{}", status: {} }},
-            ))"#,
-            link_json, uuid, status,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.add_link(link.into(), link_status_from_input(status)?).await?)
+
     }
 
     async fn perspective_add_link_expression(
@@ -633,37 +630,14 @@ impl Mutation {
         link: LinkExpressionInput,
         uuid: String,
         status: Option<String>,
-    ) -> FieldResult<LinkExpression> {
+    ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let link_json = serde_json::to_string(&link)?;
-        let status = match status {
-            Some(status) => {
-                if status != String::from("shared") && status != String::from("local") {
-                    return Err(juniper::FieldError::new(
-                        "Invalid status, must be either 'shared' or 'local'",
-                        graphql_value!({ "invalid_status": status }),
-                    ));
-                }
-                format!(r#""{}""#, status)
-            }
-            None => String::from("null"),
-        };
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveAddLinkExpression",
-                {{ link: {}, uuid: "{}", status: {} }},
-            ))"#,
-            link_json, uuid, status,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let link = crate::types::LinkExpression::try_from(link)?;
+        Ok(perspective.add_link_expression(link, link_status_from_input(status)?).await?)
     }
 
     async fn perspective_add_links(
@@ -672,37 +646,19 @@ impl Mutation {
         links: Vec<LinkInput>,
         uuid: String,
         status: Option<String>,
-    ) -> FieldResult<Vec<LinkExpression>> {
+    ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let links_json = serde_json::to_string(&links)?;
-        let status = match status {
-            Some(status) => {
-                if status != String::from("shared") && status != String::from("local") {
-                    return Err(juniper::FieldError::new(
-                        "Invalid status, must be either 'shared' or 'local'",
-                        graphql_value!({ "invalid_status": status }),
-                    ));
-                }
-                format!(r#""{}""#, status)
-            }
-            None => String::from("null"),
-        };
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveAddLinks",
-                {{ links: {}, uuid: "{}", status: {} }},
-            ))"#,
-            links_json, uuid, status,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.add_links(
+            links
+                .into_iter()
+                .map(|l| l.into())
+                .collect(), 
+            link_status_from_input(status)?
+        ).await?)
     }
 
     async fn perspective_link_mutations(
@@ -711,37 +667,13 @@ impl Mutation {
         mutations: LinkMutations,
         uuid: String,
         status: Option<String>,
-    ) -> FieldResult<LinkExpressionMutations> {
+    ) -> FieldResult<DecoratedPerspectiveDiff> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let mutations_json = serde_json::to_string(&mutations)?;
-        let status = match status {
-            Some(status) => {
-                if status != String::from("shared") && status != String::from("local") {
-                    return Err(juniper::FieldError::new(
-                        "Invalid status, must be either 'shared' or 'local'",
-                        graphql_value!({ "invalid_status": status }),
-                    ));
-                }
-                format!(r#""{}""#, status)
-            }
-            None => String::from("shared"),
-        };
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveLinkMutations",
-                {{ mutations: {}, uuid: "{}", status: {} }},
-            ))"#,
-            mutations_json, uuid, status,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<LinkExpressionMutations> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.link_mutations(mutations, link_status_from_input(status)?).await?)
     }
 
     async fn perspective_publish_snapshot(
@@ -753,19 +685,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectivePublishSnapshot",
-                {{ uuid: "{}" }},
-            ))"#,
-            uuid,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        unimplemented!()
     }
 
     async fn perspective_remove(
@@ -777,19 +697,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_delete_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveRemove",
-                {{ uuid: "{}" }},
-            ))"#,
-            uuid,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Ok(remove_perspective(&uuid).is_some())
     }
 
     async fn perspective_remove_link(
@@ -802,20 +710,10 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let link_json = serde_json::to_string(&link)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveRemoveLink",
-                {{ link: {}, uuid: "{}" }},
-            ))"#,
-            link_json, uuid,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let link = crate::types::LinkExpression::try_from(link)?;
+        perspective.remove_link(link.into()).await?;
+        Ok(true)
     }
 
     async fn perspective_remove_links(
@@ -823,25 +721,19 @@ impl Mutation {
         context: &RequestContext,
         links: Vec<LinkExpressionInput>,
         uuid: String,
-    ) -> FieldResult<Vec<LinkExpression>> {
+    ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let links_json = serde_json::to_string(&links)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveRemoveLinks",
-                {{ links: {}, uuid: "{}" }},
-            ))"#,
-            links_json, uuid,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        for link in links.into_iter() {
+            let link = crate::types::LinkExpression::try_from(link)?;
+            perspective.remove_link(link.into()).await?;
+        }
+        
+        // TODO: change this return type. why should we return all the deleted links again?
+        Ok(Vec::new())
     }
 
     async fn perspective_update(
@@ -854,19 +746,11 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveUpdate",
-                {{ name: "{}", uuid: "{}" }},
-            ))"#,
-            name, uuid,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut handle = perspective.persisted.as_ref().clone();
+        handle.name = Some(name);
+        perspective.update_from_handle(handle.clone());
+        Ok(handle)
     }
 
     async fn perspective_update_link(
@@ -875,26 +759,13 @@ impl Mutation {
         new_link: LinkInput,
         old_link: LinkExpressionInput,
         uuid: String,
-    ) -> FieldResult<LinkExpression> {
+    ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let new_link_json = serde_json::to_string(&new_link)?;
-        let old_link_json = serde_json::to_string(&old_link)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "perspectiveUpdateLink",
-                {{ newLink: {}, oldLink: {}, uuid: "{}" }},
-            ))"#,
-            new_link_json, old_link_json, uuid,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<LinkExpression> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.update_link(LinkExpression::from_input_without_proof(old_link), new_link.into()).await?)
     }
 
     async fn perspective_add_sdna(
@@ -909,21 +780,14 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let sdna_literal = Literal::from_string(sdna_code).to_url()?;
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver(
-                    "Mutation",
-                    "perspectiveAddSdna",
-                    {{ uuid: "{}", name: "{}", sdnaCode: "{}", sdnaType: "{}" }},
-                )
-            )"#,
-            uuid, name, sdna_literal, sdna_type,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let sdna_type: SdnaType = serde_json::from_str(&sdna_type)
+            .map_err(|e| juniper::FieldError::new(
+                "SDNA type is invalid. Must be one of 'subject_class', 'flow' or 'custom'.", 
+                graphql_value!({ "invalid_sdna_type": e.to_string() })
+            ))?;
+        perspective.add_sdna(name, sdna_code, sdna_type).await?;
+        Ok(true)
     }
 
     async fn runtime_add_friends(

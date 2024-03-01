@@ -265,7 +265,6 @@ impl std::fmt::Display for LinkStatus {
     }
 }
 
-pub type LinkExpression = DecoratedLinkExpression;
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionInput {
@@ -276,18 +275,12 @@ pub struct LinkExpressionInput {
     pub status: Option<LinkStatus>,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkExpressionMutations {
-    pub additions: Vec<LinkExpression>,
-    pub removals: Vec<LinkExpression>,
-}
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionUpdated {
-    pub new_link: LinkExpression,
-    pub old_link: LinkExpression,
+    pub new_link: DecoratedLinkExpression,
+    pub old_link: DecoratedLinkExpression,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -300,13 +293,6 @@ pub struct LinkInput {
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct LinkMutations {
-    pub additions: Vec<LinkInput>,
-    pub removals: Vec<LinkExpressionInput>,
-}
-
-#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct LinkQuery {
     pub from_date: Option<DateTime>,
     pub limit: Option<i32>,
@@ -315,6 +301,21 @@ pub struct LinkQuery {
     pub target: Option<String>,
     pub until_date: Option<DateTime>,
 }
+
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkMutations {
+    pub additions: Vec<LinkInput>,
+    pub removals: Vec<LinkExpressionInput>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DecoratedPerspectiveDiff {
+    pub additions: Vec<DecoratedLinkExpression>,
+    pub removals: Vec<DecoratedLinkExpression>,
+}
+
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -342,7 +343,7 @@ pub struct OnlineAgent {
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Perspective {
-    pub links: Vec<LinkExpression>,
+    pub links: Vec<DecoratedLinkExpression>,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -452,22 +453,22 @@ pub struct NeighbourhoodSignalFilter {
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct PerspectiveLinkFilter {
     pub perspective: PerspectiveHandle,
-    pub link: LinkExpression,
+    pub link: DecoratedLinkExpression,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveLinkUpdatedFilter {
-    pub new_link: LinkExpression,
-    pub old_link: LinkExpression,
+    pub new_link: DecoratedLinkExpression,
+    pub old_link: DecoratedLinkExpression,
     pub perspective: PerspectiveHandle,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkUpdated {
-    pub new_link: LinkExpression,
-    pub old_link: LinkExpression,
+    pub new_link: DecoratedLinkExpression,
+    pub old_link: DecoratedLinkExpression,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
@@ -540,7 +541,7 @@ impl GetFilter for NeighbourhoodSignalFilter {
 
 // Implement the trait for the `PerspectiveLinkFilter` struct
 impl GetValue for PerspectiveLinkFilter {
-    type Value = LinkExpression;
+    type Value = DecoratedLinkExpression;
 
     fn get_value(&self) -> Self::Value {
         self.link.clone()

@@ -11,7 +11,7 @@ use crate::agent::create_signed_expression;
 use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
-use crate::graphql::graphql_types::{LinkQuery, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter};
+use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter};
 use super::sdna::init_engine_facts;
 use super::utils::prolog_resolution_to_string;
 
@@ -23,8 +23,9 @@ pub enum SdnaType {
     Custom,
 }
 
+#[derive(Clone)]
 pub struct PerspectiveInstance {
-    pub persisted: PerspectiveHandle,
+    pub persisted: Arc<PerspectiveHandle>,
 
     pub created_from_join: bool,
     pub is_fast_polling: bool,
@@ -34,7 +35,7 @@ pub struct PerspectiveInstance {
     //agent: AgentService,
     //language_controller: LanguageController,
     //update_controllers_handle_sync_status: Box<dyn Fn(String, PerspectiveState)>,
-    prolog_engine: Option<PrologEngine>,
+    prolog_engine: Arc<Option<PrologEngine>>,
     prolog_needs_rebuild: bool,
     //polling_interval: Option<tokio::time::Interval>,
     //pending_diff_polling_interval: Option<tokio::time::Interval>,
@@ -50,12 +51,12 @@ impl PerspectiveInstance {
         ) -> Self {
         // Constructor logic
         PerspectiveInstance {
-            persisted: handle.clone(),
+            persisted: Arc::new(handle.clone()),
             
             created_from_join: created_from_join.unwrap_or(false),
             is_fast_polling: false,
             retries: 0,
-            prolog_engine: None,
+            prolog_engine: Arc::new(None),
             prolog_needs_rebuild: false,
             prolog_mutex: Arc::new(Mutex::new(())),
             is_teardown: false,
@@ -64,7 +65,7 @@ impl PerspectiveInstance {
     }
 
     pub fn update_from_handle(&mut self, handle: PerspectiveHandle) {
-        self.persisted = handle;
+        self.persisted = Arc::new(handle);
     }
 
     pub async fn commit(&self, _diff: &PerspectiveDiff) -> Result<(), AnyError> {
@@ -76,7 +77,7 @@ impl PerspectiveInstance {
         self.add_link_expression(link_expression, status).await
     }
 
-    async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {    
+    pub async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {    
         Ad4mDb::global_instance()
             .lock()
             .expect("Couldn't get write lock on Ad4mDb")
@@ -110,7 +111,7 @@ impl PerspectiveInstance {
             .publish(
                 &PERSPECTIVE_LINK_ADDED_TOPIC, 
                 &serde_json::to_string(&PerspectiveLinkFilter {
-                    perspective: self.persisted.clone(),
+                    perspective: self.persisted.as_ref().clone(),
                     link: link_expression.clone(),
                 }).unwrap(),
             )
@@ -161,7 +162,7 @@ impl PerspectiveInstance {
                 .publish(
                     &PERSPECTIVE_LINK_ADDED_TOPIC,
                     &serde_json::to_string(&PerspectiveLinkFilter {
-                        perspective: self.persisted.clone(),
+                        perspective: self.persisted.as_ref().clone(),
                         link: link.clone(),
                     }).unwrap(),
                 )
@@ -172,17 +173,36 @@ impl PerspectiveInstance {
         Ok(decorated_link_expressions)
     }
 
-    pub async fn link_mutations(&mut self, mutations: LinkMutations, status: Option<LinkStatus>) -> Result<PerspectiveDiff, AnyError> {
+    pub async fn link_mutations(&mut self, mutations: LinkMutations, status: LinkStatus) -> Result<DecoratedPerspectiveDiff, AnyError> {
         let additions = mutations.additions.into_iter()
+            .map(Link::from)
             .map(create_signed_expression)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         let removals = mutations.removals.into_iter()
-            .map(create_signed_expression)
+            .map(LinkExpression::try_from)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
 
+        Ad4mDb::global_instance()
+            .lock()
+            .expect("Couldn't get write lock on Ad4mDb")
+            .as_ref()
+            .expect("Ad4mDb not initialized")
+            .add_many_links(&self.persisted.uuid, additions.clone(), &status)?;
+
+        for link in &removals {
+            Ad4mDb::global_instance()
+                .lock()
+                .expect("Couldn't get write lock on Ad4mDb")
+                .as_ref()
+                .expect("Ad4mDb not initialized")
+                .remove_link(&self.persisted.uuid, link)?;
+        }
+
+        self.prolog_needs_rebuild = true;
+
         let diff = PerspectiveDiff {
-            additions,
-            removals,
+            additions: additions.clone(),
+            removals: removals.clone()
         };
 
         let mutation_result = self.commit(&diff).await;
@@ -196,32 +216,18 @@ impl PerspectiveInstance {
                 .add_pending_diff(&self.persisted.uuid, &diff)?;
         }
 
-        Ad4mDb::global_instance()
-            .lock()
-            .expect("Couldn't get write lock on Ad4mDb")
-            .as_ref()
-            .expect("Ad4mDb not initialized")
-            .add_many_links(&self.persisted.uuid, diff.additions.clone(), &status.clone().unwrap_or_default())?;
-
-        for link in &diff.removals {
-            Ad4mDb::global_instance()
-                .lock()
-                .expect("Couldn't get write lock on Ad4mDb")
-                .as_ref()
-                .expect("Ad4mDb not initialized")
-                .remove_link(&self.persisted.uuid, link)?;
-        }
-
-        self.prolog_needs_rebuild = true;
+        let diff = DecoratedPerspectiveDiff {
+            additions: additions.into_iter().map(|l| DecoratedLinkExpression::from((l, status.clone()))).collect::<Vec<DecoratedLinkExpression>>(),
+            removals: removals.clone().into_iter().map(|l| DecoratedLinkExpression::from((l, status.clone()))).collect::<Vec<DecoratedLinkExpression>>(),
+        };
 
         for link in &diff.additions {
-            let link = DecoratedLinkExpression::from((link.clone(), status.clone().unwrap_or_default()));
             get_global_pubsub()
                 .await
                 .publish(
                     &PERSPECTIVE_LINK_ADDED_TOPIC,
                     &serde_json::to_string(&PerspectiveLinkFilter {
-                        perspective: self.persisted.clone(),
+                        perspective: self.persisted.as_ref().clone(),
                         link: link.clone(),
                     }).unwrap(),
                 )
@@ -229,13 +235,12 @@ impl PerspectiveInstance {
         }
 
         for link in &diff.removals {
-            let link = DecoratedLinkExpression::from((link.clone(), status.clone().unwrap_or_default()));
             get_global_pubsub()
                 .await
                 .publish(
                     &PERSPECTIVE_LINK_REMOVED_TOPIC,
                     &serde_json::to_string(&PerspectiveLinkFilter {
-                        perspective: self.persisted.clone(),
+                        perspective: self.persisted.as_ref().clone(),
                         link: link.clone(),
                     }).unwrap(),
                 )
@@ -302,7 +307,7 @@ impl PerspectiveInstance {
             .publish(
                 &PERSPECTIVE_LINK_UPDATED_TOPIC,
                 &serde_json::to_string(&PerspectiveLinkUpdatedFilter {
-                    perspective: self.persisted.clone(),
+                    perspective: self.persisted.as_ref().clone(),
                     old_link,
                     new_link: new_link_expression.clone(),
                 }).unwrap(),
@@ -333,7 +338,7 @@ impl PerspectiveInstance {
                 .publish(
                     &PERSPECTIVE_LINK_REMOVED_TOPIC,
                     &serde_json::to_string(&PerspectiveLinkFilter {
-                        perspective: self.persisted.clone(),
+                        perspective: self.persisted.as_ref().clone(),
                         link: DecoratedLinkExpression::from((link_expression, status)),
                     }).unwrap(),
                 )
@@ -415,7 +420,7 @@ impl PerspectiveInstance {
         Ok(result)
     }
 
-    async fn get_links(&self, query: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+    pub async fn get_links(&self, query: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let mut links = self.get_links_local(query).await?;
 
         let until_date: Option<chrono::DateTime<chrono::Utc>> = query.until_date.clone().map(|d| d.into());
@@ -446,7 +451,7 @@ impl PerspectiveInstance {
 
 
     /// Adds the given Social DNA code to the perspective's SDNA code
-    async fn add_sdna(&mut self, name: String, mut sdna_code: String, sdna_type: SdnaType) -> Result<bool, AnyError> {
+    pub async fn add_sdna(&mut self, name: String, mut sdna_code: String, sdna_type: SdnaType) -> Result<bool, AnyError> {
         let mut added = false;
         let mutex = self.sdna_change_mutex.clone();
         let _guard = mutex.lock().await;
@@ -498,22 +503,30 @@ impl PerspectiveInstance {
 
 
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
-    async fn prolog_query(&mut self, query: String) -> Result<String, AnyError> {
+    pub async fn prolog_query(&mut self, query: String) -> Result<String, AnyError> {
         let _guard = self.prolog_mutex.lock().await;
         if self.prolog_engine.is_none() {
             let mut engine = PrologEngine::new();
             engine.spawn().await.map_err(|e| anyhow!("Failed to spawn Prolog engine: {}", e))?;
-            self.prolog_engine = Some(engine);
+            self.prolog_engine = Arc::new(Some(engine));
             self.prolog_needs_rebuild = true;
         }
 
         if self.prolog_needs_rebuild {
             let all_links = self.get_links(&LinkQuery::default()).await?;
             let facts = init_engine_facts(all_links, self.persisted.neighbourhood.as_ref().map(|n| n.author.clone())).await?;
-            self.prolog_engine.as_ref().unwrap().load_module_string("facts".to_string(), facts).await?;
+            self.prolog_engine
+                .as_ref()
+                .as_ref()
+                .expect("Must be some since we initialized the engine above")
+                .load_module_string("facts".to_string(), facts).await?;
         }
 
-        let result = self.prolog_engine.as_ref().unwrap().run_query(query).await?.map_err(|e| anyhow!(e))?;
+        let result = self.prolog_engine
+            .as_ref()
+            .as_ref()
+            .expect("Must be some since we initialized the engine above")
+            .run_query(query).await?.map_err(|e| anyhow!(e))?;
         Ok(prolog_resolution_to_string(result))
     }
 }

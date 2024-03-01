@@ -1,7 +1,8 @@
 #![allow(non_snake_case)]
-use juniper::{graphql_object, FieldResult};
+use deno_core::anyhow;
+use juniper::{graphql_object, FieldError, FieldResult};
 
-use crate::holochain_service::get_holochain_service;
+use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::DecoratedLinkExpression};
 
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
@@ -297,15 +298,9 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspective", {{ uuid: "{}" }}))"#,
-                uuid,
-            ))
-            .await?;
-        let result: JsResultType<Option<PerspectiveHandle>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        Ok(get_perspective(&uuid)
+            .map(|p| p.persisted.as_ref().clone()))
     }
 
     async fn perspective_query_links(
@@ -313,20 +308,16 @@ impl Query {
         context: &RequestContext,
         query: LinkQuery,
         uuid: String,
-    ) -> FieldResult<Vec<LinkExpression>> {
-        let query_string = serde_json::to_string(&query)?;
+    ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryLinks", {{ query: {}, uuid: "{}" }}))"#,
-            query_string, uuid
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .get_links(&query)
+            .await?)
     }
 
     async fn perspective_query_prolog(
@@ -339,14 +330,11 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryProlog", {{ query: '{}', uuid: "{}" }}))"#,
-            query, uuid
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .prolog_query(query)
+            .await?)
     }
 
     async fn perspective_snapshot(
@@ -358,15 +346,15 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspectiveSnapshot", {{ uuid: "{}" }}))"#,
-                uuid,
-            ))
+        
+        let all_links = get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .get_links(&LinkQuery::default())
             .await?;
-        let result: JsResultType<Perspective> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        Ok(Perspective {
+            links: all_links.into_iter().map(|l| l.into()).collect(),
+        })
     }
 
     async fn perspectives(&self, context: &RequestContext) -> FieldResult<Vec<PerspectiveHandle>> {
@@ -374,14 +362,7 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec!["*".into()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspectives"))"#,
-            ))
-            .await?;
-        let result: JsResultType<Vec<PerspectiveHandle>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Ok(all_perspectives().into_iter().map(|p| p.persisted.as_ref().clone()).collect())
     }
 
     async fn runtime_friend_status(

@@ -1,7 +1,6 @@
 pub mod perspective_instance;
 pub mod sdna;
 pub mod utils;
-
 use std::sync::{RwLock, RwLockWriteGuard};
 use std::collections::HashMap;
 use lazy_static::lazy_static;
@@ -53,12 +52,21 @@ pub fn add_perspective(handle: PerspectiveHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn with_perspective<F, T>(uuid: &str, f: F) -> Option<T>
-where
-    F: FnOnce(RwLockWriteGuard<PerspectiveInstance>) -> T,
-{
-    let perspectives = PERSPECTIVES.read().unwrap();
-    perspectives.get(uuid).and_then(|lock| lock.write().ok()).map(f)
+pub fn all_perspectives() -> Vec<PerspectiveInstance> {
+    PERSPECTIVES
+        .read()
+        .expect("Couldn't get read lock on PERSPECTIVES")
+        .values()
+        .map(|lock| lock.read().expect("Couldn't get read lock on PerspectiveInstance").clone())
+        .collect()
+}
+
+pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
+    PERSPECTIVES
+        .read()
+        .expect("Couldn't get read lock on PERSPECTIVES")
+        .get(uuid)
+        .map(|lock| lock.read().expect("Couldn't get read lock on PerspectiveInstance").clone())
 }
 
 pub fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String> {

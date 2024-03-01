@@ -4,13 +4,13 @@ use futures::stream::Stream;
 use juniper::FieldResult;
 use std::pin::Pin;
 
-use crate::pubsub::{
+use crate::{pubsub::{
     get_global_pubsub, subscribe_and_process, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC,
     APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
     PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
     PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC,
-};
+}, types::DecoratedLinkExpression};
 
 use super::graphql_types::*;
 use crate::agent::capabilities::*;
@@ -116,7 +116,7 @@ impl Subscription {
         &self,
         context: &RequestContext,
         uuid: String,
-    ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkExpression>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<DecoratedLinkExpression>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
@@ -136,7 +136,7 @@ impl Subscription {
         &self,
         context: &RequestContext,
         uuid: String,
-    ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkExpression>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<DecoratedLinkExpression>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
