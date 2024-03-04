@@ -7,22 +7,42 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Added
  - Add ability to get and add Holochain agent infos through launcher [PR#463](https://github.com/coasys/ad4m/pull/463)
+ - Added new packages that provide reusable hooks for `react` & `vue` to interact with ad4m `ad4m-react-hooks` & `ad4m-vue-hooks`. Also updated docs for the hooks [PR#450](https://github.com/coasys/ad4m/pull/450)
+ - Hard-wired Hosted ad4m client `AgentInfo` in the executor. [PR#453](https://github.com/coasys/ad4m/pull/453)
+ - Added ability to handle multiple agents in launcher. [PR#459](https://github.com/coasys/ad4m/pull/459)
+ - Added a way to show & add new `AgentInfo` in launcher. [PR#463](https://github.com/coasys/ad4m/pull/463)
 
 ### Changed
  - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):
    - Added back window decorations to splashscreen to not stay in the users way
    - Separate mandatory password input from optional profile fields and start agent generation early
    - Show popup making the user aware of the system tray icon
+   - Fixed JScore service in rust crashing on windows
 - Update Holochain to 0.3.0-beta-dev.35 [PR#443](https://github.com/coasys/ad4m/pull/443)
 - Improve readability of logs [PR#443](https://github.com/coasys/ad4m/pull/443)
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
+- Update Holochain to 0.3.0-beta-dev.37 [PR#449](https://github.com/coasys/ad4m/pull/449)
+- Update cli to correctly show `AgentInfo` in base64 encoded format & add. Also removes the use of jscore for getting the `AgentInfo` [PR#451](https://github.com/coasys/ad4m/pull/451)
+- Expression signing & verification migrated to Rust. [PR#452](https://github.com/coasys/ad4m/pull/452)
+- SDNA imporvements [PR#457](https://github.com/coasys/ad4m/pull/457):
+  - Change SDNA Decorator names to PascalCase
+  - Add validation for decorators.
+  - Improved Docs for sdna & subject classes.
+  - Added typedoc for decorators.
+- Split `ad4m` binary into two seperate binaries `ad4m` which is client & `ad4m-executor` to spawn your executor. [PR#464](https://github.com/coasys/ad4m/pull/464)
 
 ### Deprecated
 
 ### Removed
+- Removed holochain toggle from Login page in launcher. [PR#467](https://github.com/coasys/ad4m/pull/467)
 
 ### Fixed
 - Fix ADAM proxy [PR#442](https://github.com/coasys/ad4m/pull/442) and [PR#446](https://github.com/coasys/ad4m/pull/446)
+- Fixed `p-diff-sync` language to use correct function name `send_remote_signal` instead of `recv_send_remote_signal ` [PR#454](https://github.com/coasys/ad4m/pull/454)
+- SDNA imporvements [PR#457](https://github.com/coasys/ad4m/pull/457):
+  - Fixed value returns as undefined if the property was boolean and set to false in `SubjectEntity.
+  - Fixed links in docs.
+- Fixed flaky integration tests [PR#462](https://github.com/coasys/ad4m/pull/462)
 
 ## [0.8.0] - 12/12/2023
 
