@@ -104,3 +104,60 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
         //}
     });
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::perspective_instance::PerspectiveInstance;
+
+    fn setup() {
+        //setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+    }
+
+    #[test]
+    fn test_perspective_persistence_roundtrip() {
+        setup();
+        assert!(all_perspectives().is_empty());
+
+        let handle1 = PerspectiveHandle::new_from_name("Test Perspective 1".to_string());
+        let handle2 = PerspectiveHandle::new_from_name("Test Perspective 2".to_string());
+
+        add_perspective(handle1.clone()).expect("Failed to add perspective");
+        add_perspective(handle2.clone()).expect("Failed to add perspective");
+        // Test the get_all_perspectives function
+        let perspectives = all_perspectives();
+        
+        // Assert expected results
+        assert_eq!(perspectives.len(), 2);
+        assert!(perspectives.iter().any(|p| p.persisted.uuid == handle1.uuid));
+        assert!(perspectives.iter().any(|p| p.persisted.uuid == handle2.uuid));
+        
+        let p1 = perspectives.iter().find(|p| p.persisted.uuid == handle1.uuid).unwrap().clone();
+        assert_eq!(p1.persisted.name, Some("Test Perspective 1".to_string()));
+
+
+        let mut handle_updated = handle1.clone();
+        handle_updated.name = Some("Test Perspective 1 Updated".to_string());
+        update_perspective(&handle_updated).expect("Failed to update perspective");
+
+        let p1_updated = get_perspective(&handle1.uuid).unwrap();
+        assert_eq!(p1_updated.persisted.name, Some("Test Perspective 1 Updated".to_string()));
+
+        let perspectives = all_perspectives();
+        assert_eq!(perspectives.len(), 2);
+        let p1_updated_from_all = perspectives.iter().find(|p| p.persisted.uuid == handle1.uuid).unwrap().clone();
+        assert_eq!(p1_updated_from_all.persisted.name, Some("Test Perspective 1 Updated".to_string()));
+
+
+        // Clean up test perspectives
+        remove_perspective(handle1.uuid.as_str());
+        let perspectives = all_perspectives();
+        assert_eq!(perspectives.len(), 1);
+        assert!(perspectives.iter().any(|p| p.persisted.uuid == handle2.uuid));
+    }
+
+    // Additional tests for other functions can be added here
+}
+
