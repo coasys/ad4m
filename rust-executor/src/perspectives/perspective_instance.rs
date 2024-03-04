@@ -401,7 +401,8 @@ impl PerspectiveInstance {
         }
 
         if let Some(limit) = query.limit {
-            let result_length = result.len() as i32;
+            let limit = limit as usize;
+            let result_length = result.len();
             let start_limit = if from_date >= until_date { 
                 result_length.saturating_sub(limit) 
             } else {
