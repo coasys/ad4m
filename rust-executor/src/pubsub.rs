@@ -98,7 +98,11 @@ pub(crate) async fn subscribe_and_process<
                 futures::future::ready(Some(Ok(value)))
             }
             Err(e) => {
-                error!("Failed to deserialize message: {:?}", e);
+                let type_name = std::any::type_name::<T>();
+                error!("Failed to deserialize pubsub message: {:?}", e);
+                error!("Type: {}", type_name);
+                error!("Message: {:?}", msg);
+                
                 let field_error = FieldError::new(
                     e,
                     graphql_value!({ "type": "INTERNAL_ERROR_COULD_NOT_SERIALIZE" }),
