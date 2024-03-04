@@ -2,6 +2,7 @@
 use juniper::{graphql_object, FieldResult};
 
 use super::graphql_types::*;
+use base64::{encode};
 use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime_service};
 
 pub struct Query;
@@ -32,8 +33,8 @@ impl Query {
             .execute(
                 format!(
                     r#"JSON.stringify(
-                    await core.callResolver("Query", "agentByDID", 
-                        {{ did: "{}" }}, 
+                    await core.callResolver("Query", "agentByDID",
+                        {{ did: "{}" }},
                     )
                 )"#,
                     did,
@@ -408,7 +409,7 @@ impl Query {
 
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)?;
-        
+
         let friends = runtime_service::get_friends();
         Ok(friends)
     }
@@ -419,7 +420,14 @@ impl Query {
             &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
         )?;
         let infos = holochain_service::get_holochain_service().await.agent_infos().await?;
-        Ok(serde_json::to_string(&infos)?)
+
+        let encoded_agents: Vec<String> = infos.into_iter().map(|agent| {
+            let ecoded_agents = agent.encode().unwrap();
+            let encoded_agent_info = encode(&ecoded_agents);
+            encoded_agent_info
+        }).collect();
+
+        Ok(serde_json::to_string(&encoded_agents)?)
     }
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
