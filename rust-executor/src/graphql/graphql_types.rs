@@ -1,6 +1,6 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::js_core::JsCoreHandle;
-use crate::types::DecoratedLinkExpression;
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, ExpressionProof, Link, LinkExpression};
 use juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -141,15 +141,6 @@ pub enum ExceptionType {
     CapabilityRequested = 3,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ExpressionProof {
-    pub invalid: Option<bool>,
-    pub key: Option<String>,
-    pub signature: Option<String>,
-    pub valid: Option<bool>,
-}
-
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpressionProofInput {
@@ -166,7 +157,7 @@ pub struct ExpressionRendered {
     pub data: String,
     pub icon: Icon,
     pub language: LanguageRef,
-    pub proof: ExpressionProof,
+    pub proof: DecoratedExpressionProof,
     pub timestamp: String,
 }
 
@@ -239,13 +230,6 @@ pub struct LanguageRef {
     pub name: String,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Link {
-    pub predicate: Option<String>,
-    pub source: String,
-    pub target: String,
-}
 
 #[derive(GraphQLEnum, Debug, Deserialize, Serialize, Clone)]
 pub enum LinkStatus {
@@ -329,7 +313,7 @@ pub struct Neighbourhood {
 pub struct NeighbourhoodExpression {
     pub author: String,
     pub data: Neighbourhood,
-    pub proof: ExpressionProof,
+    pub proof: DecoratedExpressionProof,
     pub timestamp: String,
 }
 
@@ -346,12 +330,13 @@ pub struct Perspective {
     pub links: Vec<DecoratedLinkExpression>,
 }
 
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveExpression {
     pub author: String,
     pub data: Perspective,
-    pub proof: ExpressionProof,
+    pub proof: DecoratedExpressionProof,
     pub timestamp: String,
 }
 

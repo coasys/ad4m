@@ -5,7 +5,7 @@ import * as PubSubDefinitions from './SubscriptionDefinitions'
 import { ad4mExecutorVersion } from '../Config';
 import { OuterConfig } from '../../main';
 import Perspective from '../Perspective';
-import { getPubSub } from '../utils';
+import { getPubSub, tagExpressionSignatureStatus } from '../utils';
 
 function checkLinkLanguageInstalled(perspective: Perspective) {
     if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
@@ -36,6 +36,10 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     }
                     const expr = await agentLanguage.get(did);
                     if (expr != null) {
+                        tagExpressionSignatureStatus(expr);
+                        for(const link of expr.data.perspective.links) {
+                            tagExpressionSignatureStatus(link)
+                        }
                         return expr.data;
                     } else {
                         return null
@@ -514,7 +518,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 };
 
                 await core.agentService.updateAgent(currentAgent);
-                return currentAgent;
+                return core.agentService.agent;
             },
             //@ts-ignore
             expressionCreate: async (args, context) => {

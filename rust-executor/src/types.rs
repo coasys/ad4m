@@ -18,7 +18,7 @@ pub struct Expression<T: Serialize> {
     pub proof: ExpressionProof,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ExpressionProof {
     pub key: String,
     pub signature: String,
@@ -127,7 +127,7 @@ pub struct DecoratedLinkExpression {
     pub timestamp: String,
     pub data: Link,
     pub proof: DecoratedExpressionProof,
-    pub status: LinkStatus,
+    pub status: Option<LinkStatus>,
 }
 
 impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
@@ -138,7 +138,7 @@ impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
             timestamp: verified_expr.timestamp,
             data: verified_expr.data,
             proof: verified_expr.proof,
-            status,
+            status: Some(status),
         }
     }
 }
