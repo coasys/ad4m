@@ -497,7 +497,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 }
                 currentAgent.directMessageLanguage = directMessageLanguage;
                 await core.agentService.updateAgent(currentAgent);
-                return currentAgent;
+                return core.agentService.agent;
             },
             //@ts-ignore
             agentUpdatePublicPerspective: async (args, context) => {
