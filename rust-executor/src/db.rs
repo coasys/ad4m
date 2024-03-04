@@ -106,7 +106,7 @@ impl Ad4mDb {
     pub fn add_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
         self.conn.execute(
             "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 perspective.name,
                 perspective.uuid,
