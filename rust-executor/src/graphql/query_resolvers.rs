@@ -1,9 +1,11 @@
 #![allow(non_snake_case)]
+use std::{env, path};
+
 use juniper::{graphql_object, FieldResult};
 
 use super::graphql_types::*;
 use base64::{encode};
-use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime_service};
+use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime_service, wallet::{self, Wallet}};
 
 pub struct Query;
 
@@ -432,13 +434,20 @@ impl Query {
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
         let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeInfo", null))"#,
-            ))
-            .await?;
-        let result: JsResultType<RuntimeInfo> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let agent_path = format!("{}/ad4m/agent.json", env::var("APPS_DATA_PATH").unwrap_or_else(|_| "".to_string()));
+
+        let wallet_instance = Wallet::instance();
+        let wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_ref().expect("wallet instance");
+        let is_unlocked = wallet_ref.is_unlocked();
+        let is_initialized: bool = path::Path::new(&agent_path).exists();
+
+        Ok(RuntimeInfo {
+            is_initialized,
+            is_unlocked,
+            ad4m_executor_version: env!("CARGO_PKG_VERSION").to_string(),
+        })
     }
 
     async fn runtime_known_link_language_templates(

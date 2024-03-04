@@ -10901,6 +10901,7 @@ dependencies = [
  "url 2.4.1",
  "uuid 1.7.0",
  "warp",
+ "webbrowser",
  "zip",
 ]
 

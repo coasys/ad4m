@@ -1017,34 +1017,21 @@ impl Mutation {
     }
 
     async fn runtime_open_link(&self, context: &RequestContext, url: String) -> FieldResult<bool> {
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeOpenLink",
-                {{ url: "{}" }},
-            ))"#,
-            url,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        if webbrowser::open(&url).is_ok() {
+            log::info!("Browser opened successfully");
+            Ok(true)
+        } else {
+            log::info!("Failed to open browser");
+            Ok(false)
+        }
     }
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeQuit",
-            ))"#,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        std::process::exit(0);
+
+        Ok(true)
     }
 
     async fn runtime_remove_friends(

@@ -64,6 +64,8 @@ warp = "0.3.4"
 
 jsonwebtoken = "8.3.0"
 
+webbrowser = "0.8.12"
+
 # holochain = { version = "0.2.2", features = ["test_utils", "default"] }
 # holochain_cli_bundle = { version = "0.2.2" }
 # holochain_types = { version = "0.2.2" }

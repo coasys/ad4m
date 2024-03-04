@@ -317,16 +317,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 const dmLang = await core.myDirectMessageLanguage()
                 return await dmLang.directMessageAdapter!.inbox(filter)
             },
-            //@ts-ignore
-            runtimeInfo: () => {
-                const isInitialized = core.agentService.isInitialized();
-                const isUnlocked = core.agentService.isUnlocked();
-                return {
-                    ad4mExecutorVersion: ad4mExecutorVersion,
-                    isUnlocked,
-                    isInitialized
-                }
-            }
         },
         Mutation: {
             //@ts-ignore
@@ -697,18 +687,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 const { uuid, name, sdnaCode, sdnaType } = args
                 const perspective = core.perspectivesController.perspective(uuid)
                 return await perspective.addSdna(name, sdnaCode, sdnaType)
-            },
-            //@ts-ignore
-            runtimeOpenLink: (args) => {
-                const { url } = args
-                console.log("openLinkExtern:", url)
-                //shell.openExternal(url)
-                return true
-            },
-            //@ts-ignore
-            runtimeQuit: (context) => {
-                process.exit(0)
-                return true
             },
 
             //@ts-ignore
