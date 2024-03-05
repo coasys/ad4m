@@ -76,7 +76,7 @@ pub struct CapabilityInput {
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
     #[graphql(name = "deviceKey")]
