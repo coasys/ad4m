@@ -7,4 +7,5 @@ schema.gql
 !src/js_core/jwt_extension.js
 !src/prolog_service/prolog_service_extension.js
 !src/holochain_service/holochain_service_extension.js
+!src/entanglement_service/entanglement_service_extension.js
 dapp

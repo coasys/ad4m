@@ -11,6 +11,7 @@ mod utils;
 mod wallet;
 mod types;
 use tokio;
+mod entanglement_service;
 
 
 pub mod init;
