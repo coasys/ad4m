@@ -1,13 +1,27 @@
 
+use std::path;
+use std::sync::{Arc, Mutex};
+
 use deno_core::error::AnyError;
 use deno_core::anyhow::anyhow;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::graphql::graphql_types::{Agent, AgentStatus};
+use crate::pubsub::{self, get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};
 use crate::types::{Expression, ExpressionProof};
-use crate::wallet::Wallet;
+use crate::wallet::{self, Wallet};
 
 pub mod capabilities;
 pub mod signatures;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentStore {
+    did: String,
+    did_document: did_key::Document,
+    signing_key_id: String,
+    keystore: String,
+    agent: Option<Agent>,
+}
 
 pub fn did_document() -> did_key::Document {
     let wallet_instance = Wallet::instance();
@@ -82,6 +96,204 @@ impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
         crate::graphql::graphql_types::AgentSignature {
             signature: self.signature,
             public_key: self.public_key,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone,)]
+pub struct AgentService {
+    pub did: String,
+    pub did_document: did_key::Document,
+    pub signing_key_id: Option<String>,
+    file: String,
+    file_profile: String,
+    pub agent: Option<Agent>,
+}
+
+lazy_static! {
+    static ref AGENT_SERVICE: Arc<Mutex<Option<AgentService>>> = Arc::new(Mutex::new(None));
+}
+
+impl AgentService {
+    pub fn new() -> AgentService {
+        let agent_path = format!("{}/ad4m/agent.json", std::env::var("APPS_DATA_PATH").unwrap());
+        let agent_profile_path = format!("{}/ad4m/agent_profile.json", std::env::var("APPS_DATA_PATH").unwrap());
+
+        AgentService {
+            did: did(),
+            did_document: did_document(),
+            file: agent_path,
+            file_profile: agent_profile_path,
+            agent: None,
+            signing_key_id: None
+        }
+    }
+
+    pub fn instance() -> Arc<Mutex<Option<AgentService>>> {
+        let agent_service = AGENT_SERVICE.clone();
+        {
+            let mut agent_service_lock = agent_service.lock().unwrap();
+            if agent_service_lock.is_none() {
+                *agent_service_lock = Some(AgentService::new());
+            }
+        }
+        agent_service
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        let is_initialized = path::Path::new(self.file.as_str()).exists();
+        is_initialized
+    }
+
+    pub fn is_unlocked(&self) -> bool {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+        wallet_ref.is_unlocked()
+    }
+
+    fn signing_checks(&self) -> Result<(), AnyError> {
+        if !self.is_initialized() {
+            return Err(anyhow!("Agent not initialized"));
+        }
+        if !self.is_unlocked() {
+            return Err(anyhow!("Agent not unlocked"));
+        }
+        if !self.signing_key_id.is_some() {
+            return Err(anyhow!("Agent signing key not found"));
+        }
+        Ok(())
+    }
+
+    pub fn create_signed_expression<T: Serialize>(&self, data: T) -> Result<Expression<T>, AnyError> {
+        self.signing_checks()?;
+
+        create_signed_expression(data)
+    }
+
+    pub fn sign_string_hex(&self, data: String) -> Result<String, AnyError> {
+        self.signing_checks()?;
+
+        sign_string_hex(data)
+    }
+
+    pub fn store_agent_profile(&self) {
+        let agent = self.agent.as_ref().expect("Agent profile not found");
+        std::fs::write(self.file_profile.as_str(), serde_json::to_string(&agent).unwrap()).expect("Failed to write agent profile file");
+
+        // TODO: once language controller is moved add updating agent profile here
+    }
+
+    pub fn create_new_keys(&mut self) -> Result<(), AnyError> {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+        wallet_ref.generate_keypair("main".to_string());
+
+        self.did_document = did_document();
+        self.did = did();
+        self.agent = Some(Agent {
+            did: did(),
+            perspective: None,
+            direct_message_language: None,
+        });
+        self.signing_key_id = Some(signing_key_id());
+
+        Ok(())
+    }
+
+    pub async fn unlock(&self, password: String) -> Result<(), AnyError> {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+        wallet_ref.unlock(password);
+
+        get_global_pubsub()
+            .await
+            .publish(
+                &AGENT_STATUS_CHANGED_TOPIC,
+                &serde_json::to_string(&self.dump()).unwrap(),
+            )
+            .await;
+
+        // TODO store agent proifle
+
+        Ok(())
+    }
+
+    pub async fn lock(&self, password: String) -> Result<(), AnyError> {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+        wallet_ref.lock(password);
+
+        get_global_pubsub()
+            .await
+            .publish(
+                &AGENT_STATUS_CHANGED_TOPIC,
+                &serde_json::to_string(&self.dump()).unwrap(),
+            )
+            .await;
+
+        Ok(())
+    }
+
+    pub fn save(&self, password: String) {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_mut().expect("wallet instance");
+
+        let keystore = wallet_ref.export(password);
+
+        let store = AgentStore {
+            did: self.did.clone(),
+            did_document: self.did_document.clone(),
+            signing_key_id: self.signing_key_id.clone().unwrap(),
+            keystore,
+            agent: self.agent.clone(),
+        };
+
+        std::fs::write(self.file.as_str(), serde_json::to_string(&store).unwrap()).expect("Failed to write agent file");
+    }
+
+    pub fn load(&mut self) {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_mut().expect("wallet instance");
+
+        if !self.is_initialized() {
+            return;
+        }
+
+        let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
+        let dump: AgentStore = serde_json::from_str(&self.file).unwrap();
+
+        self.did = dump.did;
+        self.did_document = dump.did_document;
+        self.signing_key_id = Some(dump.signing_key_id);
+        wallet_ref.load(dump.keystore);
+
+        if std::path::Path::new(self.file_profile.as_str()).exists() {
+            let file_profile = std::fs::read_to_string(self.file_profile.as_str()).expect("Failed to read agent profile file");
+            self.agent = Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
+        } else {
+            self.agent = Some(Agent {
+                did: did(),
+                perspective: None,
+                direct_message_language: None,
+            });
+        }
+    }
+
+    pub fn dump(&self) -> AgentStatus {
+        let document = serde_json::to_string(&self.did_document).unwrap();
+
+        AgentStatus {
+            did: Some(self.did.clone()),
+            did_document: Some(document),
+            is_initialized: self.is_initialized(),
+            is_unlocked: self.is_unlocked(),
+            error: None,
         }
     }
 }
