@@ -530,8 +530,15 @@ impl PerspectiveInstance {
                 .as_ref()
                 .expect("Must be some since we initialized the engine above")
                 .load_module_string("facts".to_string(), facts).await?;
+            self.prolog_needs_rebuild = false;
         }
 
+        let query = if !query.ends_with(".") {
+            query + "."
+        } else {
+            query
+        };
+        
         let result = self.prolog_engine
             .as_ref()
             .as_ref()
