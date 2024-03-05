@@ -16,15 +16,14 @@ fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<Perspecti
 }
 
 fn link_status_from_input(status: Option<String>) -> Result<crate::types::LinkStatus, juniper::FieldError> {
-    if let Some(status) = status {
-        serde_json::from_str::<crate::types::LinkStatus>(&status).map_err(|_| {
-            juniper::FieldError::new(
-                "Invalid status, must be either 'shared' or 'local'",
-                graphql_value!({ "invalid_status": status }),
-            )
-        })
-    } else {
-        Ok(crate::types::LinkStatus::Shared)
+    match status.as_ref().map(|s| s.as_str()) {
+        Some("shared") => Ok(crate::types::LinkStatus::Shared),
+        Some("local") => Ok(crate::types::LinkStatus::Local),
+        None => Ok(crate::types::LinkStatus::Shared),
+        _ => Err(juniper::FieldError::new(
+            "Invalid status, must be either 'shared' or 'local'",
+            graphql_value!({ "invalid_status": status }),
+        )),
     }
 }
 
@@ -781,10 +780,10 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        let sdna_type: SdnaType = serde_json::from_str(&sdna_type)
+        let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| juniper::FieldError::new(
-                "SDNA type is invalid. Must be one of 'subject_class', 'flow' or 'custom'.", 
-                graphql_value!({ "invalid_sdna_type": e.to_string() })
+                e,
+                graphql_value!({ "invalid_sdna_type": sdna_type })
             ))?;
         perspective.add_sdna(name, sdna_code, sdna_type).await?;
         Ok(true)

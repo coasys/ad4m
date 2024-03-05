@@ -1,5 +1,3 @@
-// rust-executor/src/perspective.rs
-
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use ad4m_client::literal::Literal;
@@ -21,6 +19,17 @@ pub enum SdnaType {
     SubjectClass,
     Flow,
     Custom,
+}
+
+impl SdnaType {
+    pub fn from_string(s: &str) -> Result<Self, AnyError> {
+        match s {
+            "subject_class" => Ok(SdnaType::SubjectClass),
+            "flow" => Ok(SdnaType::Flow),
+            "custom" => Ok(SdnaType::Custom),
+            _ => Err(anyhow!("Invalid SDNA type: {}. Must one of 'subject_class', 'flow' or 'custom'.", s)),
+        }
+    }
 }
 
 #[derive(Clone)]
