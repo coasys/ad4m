@@ -11,7 +11,6 @@ import LanguageController from './LanguageController'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
-import EntanglementProofController from './EntanglementProof'
 import fs from 'node:fs'
 import { AgentInfoResponse } from '@holochain/client'
 import RuntimeService from './RuntimeService'
@@ -61,7 +60,6 @@ export default class Ad4mCore {
     #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
 
-    #entanglementProofController?: EntanglementProofController
     #languagesReady: Promise<void>
     #resolveLanguagesReady: (value: void) => void
 
@@ -145,13 +143,6 @@ export default class Ad4mCore {
         return this.#languageController!
     }
 
-    get entanglementProofController(): EntanglementProofController {
-        if (!this.#entanglementProofController) {
-            this.#entanglementProofController = new EntanglementProofController(this.#config.rootConfigPath, this.#agentService);
-        }
-        return this.#entanglementProofController
-    }
-
     get database(): Ad4mDb {
         return this.#db
     }
@@ -195,7 +186,7 @@ export default class Ad4mCore {
             hcBootstrapUrl: params.hcBootstrapUrl,
         }
 
-        this.#holochain = new HolochainService(holochainConfig, this.#agentService, this.entanglementProofController)
+        this.#holochain = new HolochainService(holochainConfig, this.#agentService)
         await this.#holochain.run({
             ...holochainConfig,
             passphrase: params.passphrase!
@@ -233,8 +224,6 @@ export default class Ad4mCore {
             languageController: this.#languageController,
             config: this.#config
         })
-
-        this.entanglementProofController
     }
 
     async initLanguages() {

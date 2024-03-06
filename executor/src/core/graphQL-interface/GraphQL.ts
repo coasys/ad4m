@@ -8,8 +8,8 @@ import Perspective from '../Perspective';
 import { getPubSub } from '../utils';
 
 function checkLinkLanguageInstalled(perspective: Perspective) {
-    if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
-        throw new Error(`Perspective ${perspective.uuid}/${perspective.name} does not have a LinkLanguage installed. State is: ${perspective.state}`) 
+    if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {
+        throw new Error(`Perspective ${perspective.uuid}/${perspective.name} does not have a LinkLanguage installed. State is: ${perspective.state}`)
     }
 }
 
@@ -72,13 +72,13 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         lang = { address: "literal", name: "literal" }
                     } else {
                         try {
-                            lang = await core.languageController.languageForExpression(expression.ref) as any    
+                            lang = await core.languageController.languageForExpression(expression.ref) as any
                         } catch(e) {
                             console.error("While trying to get language for expression", expression, ":", e)
                             lang = {}
                         }
                     }
-                    
+
                     lang.address = expression.ref.language.address
                     expression.language = lang
                 }
@@ -110,12 +110,12 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         }
 
                         try {
-                            lang = await core.languageController.languageForExpression(expression.ref) as any    
+                            lang = await core.languageController.languageForExpression(expression.ref) as any
                         } catch(e) {
                             console.error("While trying to get language for expression", expression, ":", e)
                             lang = {}
                         }
-                        
+
                         lang.address = expression.ref.language.address
                         expression.language = lang
                     }
@@ -263,7 +263,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
                 return await perspective!.getOnlineAgents();
             },
-            
+
             //@ts-ignore
             perspective: (args, context) => {
                 const id = args.uuid
@@ -295,10 +295,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             perspectives: (context) => {
                 return core.perspectivesController.allPerspectiveHandles()
-            },
-            //@ts-ignore
-            agentGetEntanglementProofs: () => {
-                return core.entanglementProofController.getEntanglementProofs();
             },
             //@ts-ignore
             getTrustedAgents: (context) => {
@@ -354,23 +350,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             }
         },
         Mutation: {
-            //@ts-ignore
-            agentAddEntanglementProofs: (args, context) => {
-                const { proofs } = args;
-                core.entanglementProofController.addEntanglementProofs(proofs);
-                return core.entanglementProofController.getEntanglementProofs();
-            },
-            //@ts-ignore
-            agentDeleteEntanglementProofs: (args, context) => {
-                const { proofs } = args;
-                core.entanglementProofController.deleteEntanglementProofs(proofs);
-                return core.entanglementProofController.getEntanglementProofs();  
-            },
-            //@ts-ignore
-            agentEntanglementProofPreFlight: (args, context) => {
-                const { deviceKey, deviceKeyType } = args;
-                return core.entanglementProofController.signDeviceKey(deviceKey, deviceKeyType);
-            },
             //@ts-ignore
             addTrustedAgents: (args, context) => {
                 const { agents } = args;
@@ -465,12 +444,12 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         await core.waitForAgent();
                         core.initControllers()
                         await core.initLanguages()
-    
+
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
                     }
 
                     try {
-                        await core.agentService.ensureAgentExpression();    
+                        await core.agentService.ensureAgentExpression();
                     } catch (e) {
                         console.log("Error ensuring public agent expression: ", e)
                     }
@@ -508,7 +487,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     links: perspective.links.map((l: any) => {
                         const link = {...l};
                         delete link.status
-                  
+
                         return link
                     })
                 };

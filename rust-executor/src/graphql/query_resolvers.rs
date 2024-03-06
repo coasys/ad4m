@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, FieldResult};
 
-use crate::holochain_service::get_holochain_service;
+use crate::{entanglement_service::get_entanglement_proofs, holochain_service::get_holochain_service};
 
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
@@ -34,8 +34,8 @@ impl Query {
             .execute(
                 format!(
                     r#"JSON.stringify(
-                    await core.callResolver("Query", "agentByDID", 
-                        {{ did: "{}" }}, 
+                    await core.callResolver("Query", "agentByDID",
+                        {{ did: "{}" }},
                     )
                 )"#,
                     did,
@@ -56,14 +56,8 @@ impl Query {
         &self,
         context: &RequestContext,
     ) -> FieldResult<Vec<EntanglementProof>> {
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentGetEntanglementProofs", null, null))"#
-            ))
-            .await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let proofs = get_entanglement_proofs();
+        Ok(proofs)
     }
 
     async fn agent_is_locked(&self, context: &RequestContext) -> FieldResult<bool> {
@@ -424,7 +418,7 @@ impl Query {
 
         let interface = get_holochain_service().await;
         let infos = interface.agent_infos().await?;
-        
+
         let encoded_infos: Vec<String> = infos
             .iter()
             .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))

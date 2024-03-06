@@ -4,7 +4,7 @@ use kitsune_p2p_types::agent_info::AgentInfoSigned;
 use log::debug;
 
 use super::graphql_types::*;
-use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
+use crate::{agent::{self, capabilities::*}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, sign_device_key, get_entanglement_proofs}, holochain_service::{agent_infos_from_str, get_holochain_service}};
 use ad4m_client::literal::Literal;
 pub struct Mutation;
 
@@ -37,16 +37,20 @@ impl Mutation {
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentAddEntanglementProofs", {{ proofs: {} }})
-            )"#,
-            serde_json::to_string(&proofs).unwrap(),
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let converted_proofs: Vec<EntanglementProof> = proofs.into_iter().map(|input| EntanglementProof {
+            did: input.did,
+            did_signing_key_id: input.did_signing_key_id,
+            device_key_type: input.device_key_type,
+            device_key: input.device_key,
+            device_key_signed_by_did: input.device_key_signed_by_did,
+            did_signed_by_device_key: Some(input.did_signed_by_device_key),
+        }).collect();
+
+        add_entanglement_proofs(converted_proofs);
+
+        let proofs = get_entanglement_proofs();
+
+        Ok(proofs)
     }
 
     async fn agent_delete_entanglement_proofs(
@@ -55,16 +59,20 @@ impl Mutation {
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentDeleteEntanglementProofs", {{ proofs: {} }})
-            )"#,
-            serde_json::to_string(&proofs).unwrap(),
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let converted_proofs: Vec<EntanglementProof> = proofs.into_iter().map(|input| EntanglementProof {
+            did: input.did,
+            did_signing_key_id: input.did_signing_key_id,
+            device_key_type: input.device_key_type,
+            device_key: input.device_key,
+            device_key_signed_by_did: input.device_key_signed_by_did,
+            did_signed_by_device_key: Some(input.did_signed_by_device_key),
+        }).collect();
+
+        delete_entanglement_proof(converted_proofs);
+
+        let proofs = get_entanglement_proofs();
+
+        Ok(proofs)
     }
 
     async fn agent_entanglement_proof_pre_flight(
@@ -74,16 +82,9 @@ impl Mutation {
         device_key_type: String,
     ) -> FieldResult<EntanglementProof> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentEntanglementProofPreFlight", {{ deviceKey: "{}", deviceKeyType: "{}" }})
-            )"#,
-            device_key, device_key_type
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<EntanglementProof> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let proof = sign_device_key(device_key, device_key_type);
+
+        Ok(proof)
     }
 
     async fn agent_generate(

@@ -6,4 +6,8 @@ declare global {
     deleteEntanglementProofs: (proofs: string[]) => Promise<void>;
     getEntanglementProofs: () => Promise<string[]>;
   }
+
+  const ENTANGLEMENT_SERVICE: EntanglementProofService;
 }
+
+export {};

@@ -7,12 +7,11 @@ import { AsyncQueue } from './Queue'
 import { decode, encode } from "@msgpack/msgpack"
 
 import { HolochainUnlockConfiguration } from '../../Ad4mCore'
-import EntanglementProofController from '../../EntanglementProof'
 import AgentService from '../../agent/AgentService'
 
 export interface HolochainConfiguration {
-    conductorPath?: string, 
-    dataPath: string, 
+    conductorPath?: string,
+    dataPath: string,
     resourcePath: string
     hcProxyUrl: string,
     hcBootstrapUrl: string,
@@ -31,10 +30,9 @@ export default class HolochainService {
     #queue: Map<string, AsyncQueue>
     #languageDnaHashes: Map<string, Uint8Array[]>
     #agentService: AgentService
-    #entanglementProofController?: EntanglementProofController
     #dataPath: string
 
-    constructor(config: HolochainConfiguration, agentService: AgentService, entanglementProofController?: EntanglementProofController) {
+    constructor(config: HolochainConfiguration, agentService: AgentService) {
         let {
             resourcePath,
             useBootstrap,
@@ -46,7 +44,6 @@ export default class HolochainService {
 
         this.#dataPath = dataPath
         this.#agentService = agentService;
-        this.#entanglementProofController = entanglementProofController;
 
         this.#signalCallbacks = [];
 
@@ -121,7 +118,7 @@ export default class HolochainService {
         } as ConductorConfig);
 
         console.log("Holochain run complete");
-        
+
         resolveReady!()
     }
 
@@ -182,7 +179,7 @@ export default class HolochainService {
                 const agentKey = await HOLOCHAIN_SERVICE.getAgentKey();
                 if(did) {
                     const signedDid = await HOLOCHAIN_SERVICE.signString(did).toString();
-                    const didHolochainEntanglement = await this.#entanglementProofController!.generateHolochainProof(agentKey.toString(), signedDid);
+                    const didHolochainEntanglement = await ENTANGLEMENT_SERVICE.generateHolochainProof(agentKey.toString(), signedDid);
                     membraneProof = {"ad4mDidEntanglement": Buffer.from(JSON.stringify(didHolochainEntanglement))};
                 } else {
                     membraneProof = {};
@@ -201,7 +198,7 @@ export default class HolochainService {
                 } as InstallAppRequest)
 
                 appInfo = installAppResult
-                
+
                 console.log("HolochainService: Installed DNA's:", roles)
                 console.log(" with result:");
                 console.dir(installAppResult);
