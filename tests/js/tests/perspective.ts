@@ -149,14 +149,14 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(queryLinksAll.length).to.equal(5);
 
 
-                // Get all the links in ascending order
+                // Get 3 of the links in descending order
                 let queryLinksAsc = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(), untilDate: new Date("August 19, 1975 23:15:30"), limit: 3}));
                 expect(queryLinksAsc.length).to.equal(3);
-                expect(queryLinksAsc[0].data.target).to.equal(addLink3.data.target)
+                expect(queryLinksAsc[0].data.target).to.equal(addLink5.data.target)
                 expect(queryLinksAsc[1].data.target).to.equal(addLink4.data.target)
-                expect(queryLinksAsc[2].data.target).to.equal(addLink5.data.target)
+                expect(queryLinksAsc[2].data.target).to.equal(addLink3.data.target)
 
-                // Get all the links in ascending order
+                // Get 3 of the links in descending order
                 let queryLinksDesc = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date("August 19, 1975 23:15:30"), untilDate: new Date(), limit: 3}));
                 expect(queryLinksDesc.length).to.equal(3);
                 expect(queryLinksDesc[0].data.target).to.equal(addLink.data.target)

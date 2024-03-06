@@ -416,6 +416,7 @@ impl PerspectiveInstance {
                 link_date <= *until_date
             });
         }
+        /*
 
         if let Some(limit) = query.limit {
             let limit = limit as usize;
@@ -431,31 +432,45 @@ impl PerspectiveInstance {
             } else { 
                 limit.min(result_length) 
             } as usize;
-
-            result = result[start_limit..end_limit].to_vec();
+            
+            result = result[..limit as usize].to_vec();
         }
- 
+        */
         Ok(result)
     }
 
-    pub async fn get_links(&self, query: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let mut links = self.get_links_local(query).await?;
+    pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        let mut reverse = false;
+        let mut query = q.clone();
 
-        let until_date: Option<chrono::DateTime<chrono::Utc>> = query.until_date.clone().map(|d| d.into());
-        let from_date: Option<chrono::DateTime<chrono::Utc>> = query.from_date.clone().map(|d| d.into());
+        if let Some(until_date) = query.until_date.as_ref() {
+            if let Some(from_date) = query.from_date.as_ref() {
+                let chrono_from_date: chrono::DateTime<chrono::Utc> = from_date.clone().into();
+                let chrono_until_date: chrono::DateTime<chrono::Utc> = until_date.clone().into(); 
+                if chrono_from_date > chrono_until_date {
+                    reverse = true;
+                    query.from_date = q.until_date.clone();
+                    query.until_date = q.from_date.clone();
+                }
+            }
+        }
 
-        let reverse = from_date >= until_date;
+        let mut links = self.get_links_local(&query).await?;
 
         links.sort_by(|(a, _), (b, _)| {
             let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
             let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
-            a_time.cmp(&b_time)
+            if reverse {
+                b_time.cmp(&a_time)
+                
+            } else {
+                a_time.cmp(&b_time)
+            }
         });
 
         if let Some(limit) = query.limit {
-            let start_limit = if reverse { links.len().saturating_sub(limit as usize) } else { 0 };
-            let end_limit = if reverse { links.len() } else { limit.min(links.len() as i32) as usize };
-            links = links[start_limit..end_limit].to_vec();
+            let limit = links.len().min(limit as usize);
+            links = links[..limit as usize].to_vec();
         } 
 
         Ok(links
@@ -671,15 +686,17 @@ mod tests {
 
         // Add links with timestamps spread out by one minute intervals
         for i in 0..5 {
-            let mut link = create_signed_expression(create_link()).expect("Failed to create link");
-            link.timestamp = (now - chrono::Duration::minutes(i as i64)).to_rfc3339();
+            let mut link = create_link();
+            link.target = format!("lang://test-target {}",i);
+            let mut link = create_signed_expression(link).expect("Failed to create link");
+            link.timestamp = (now - chrono::Duration::minutes(5) + chrono::Duration::minutes(i as i64)).to_rfc3339();
             let expression = perspective.add_link_expression(link.clone(), LinkStatus::Shared).await.unwrap();
             all_links.push(expression);
             println!("Added link with timestamp: {}, {:?}", link.timestamp, link);
         }
 
-        // Query for links with a from_date set to 3 minutes ago
-        let from_date = (now - chrono::Duration::minutes(2) - chrono::Duration::seconds(30)).into();
+        // Query for links with a from_date set to 3 minutes in
+        let from_date = (now - chrono::Duration::minutes(5) + chrono::Duration::minutes(3)).into();
         let query_with_from_date = LinkQuery {
             from_date: Some(from_date),
             ..Default::default()
@@ -687,16 +704,16 @@ mod tests {
         //println!("Query with from_date: {:?}", query_with_from_date);
         let links_from_date = perspective.get_links(&query_with_from_date).await.unwrap();
         //println!("Links from date: {:?}", links_from_date);
-        assert_eq!(links_from_date.len(), 3);
+        assert_eq!(links_from_date.len(), 2);
 
-        // Query for links with an until_date set to 3 minutes ago
-        let until_date = (now - chrono::Duration::minutes(3)).into();
+        // Query for links with an until_date set to 3 minutes in
+        let until_date = (now - chrono::Duration::minutes(5) + chrono::Duration::minutes(3)).into();
         let query_with_until_date = LinkQuery {
             until_date: Some(until_date),
             ..Default::default()
         };
         let links_until_date = perspective.get_links(&query_with_until_date).await.unwrap();
-        assert_eq!(links_until_date.len(), 2);
+        assert_eq!(links_until_date.len(), 4);
 
         // Query for links with both from_date and until_date set to filter a range
         let from_date = (now - chrono::Duration::minutes(4)).into();
@@ -708,6 +725,66 @@ mod tests {
         };
         let links_date_range = perspective.get_links(&query_with_date_range).await.unwrap();
         assert_eq!(links_date_range.len(), 2);
+
+
+        // reverse for descending order
+        let from_date = (now).into();
+        let until_date = (now - chrono::Duration::minutes(10)).into();
+        
+        let query_with_date_range = LinkQuery {
+            from_date: Some(from_date),
+            until_date: Some(until_date),
+            ..Default::default()
+        };
+
+        let links_date_desc = perspective.get_links(&query_with_date_range).await.unwrap();
+        assert_eq!(links_date_desc.len(), 5);
+        assert_eq!(links_date_desc[0].data.target, all_links[4].data.target);
+        assert_eq!(links_date_desc[1].data.target, all_links[3].data.target);
+        assert_eq!(links_date_desc[2].data.target, all_links[2].data.target);
+        assert_eq!(links_date_desc[3].data.target, all_links[1].data.target);
+        assert_eq!(links_date_desc[4].data.target, all_links[0].data.target);
+
+
+        // reverse for descending order with limit
+        let from_date = (now).into();
+        let until_date = (now - chrono::Duration::minutes(10)).into();
+        
+        let query_with_date_range = LinkQuery {
+            from_date: Some(from_date),
+            until_date: Some(until_date),
+            limit: Some(3),
+            ..Default::default()
+        };
+
+        let links_date_desc = perspective.get_links(&query_with_date_range).await.unwrap();
+        assert_eq!(links_date_desc.len(), 3);
+        links_date_desc.iter().for_each(|l| println!("Link: {:?}", l.data.target));
+        assert_eq!(links_date_desc[0].data.target, all_links[4].data.target);
+        assert_eq!(links_date_desc[1].data.target, all_links[3].data.target);
+        assert_eq!(links_date_desc[2].data.target, all_links[2].data.target);
+
+
+        // ascending order with limit
+        let from_date = (now - chrono::Duration::minutes(10)).into();
+        let until_date = (now).into();
+
+        let query_with_date_range = LinkQuery {
+            from_date: Some(from_date),
+            until_date: Some(until_date),
+            limit: Some(3),
+            ..Default::default()
+        };
+
+        let links_date_desc = perspective.get_links(&query_with_date_range).await.unwrap();
+        assert_eq!(links_date_desc.len(), 3);
+        links_date_desc.iter().for_each(|l| println!("Link: {:?}", l.data.target));
+        assert_eq!(links_date_desc[0].data.target, all_links[0].data.target);
+        assert_eq!(links_date_desc[1].data.target, all_links[1].data.target);
+        assert_eq!(links_date_desc[2].data.target, all_links[2].data.target);
+
+        
+
     }
 
     // Additional tests for updateLink, removeLink, syncWithSharingAdapter, etc. would go here
