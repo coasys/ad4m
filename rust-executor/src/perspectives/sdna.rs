@@ -48,6 +48,9 @@ async fn node_facts(all_links: &Vec<&DecoratedLinkExpression>) -> Result<Vec<Str
     expr_addrs.push(":- discontiguous(expressionAddress/2).".to_string());
 
     for node in nodes.iter() {
+        if node == "false" || node == "true" {
+            continue;
+        }
         match ExpressionRef::try_from(node.clone()) {
             Ok(expression_ref) => {
                 let lang = if expression_ref.language.name.is_empty() {
