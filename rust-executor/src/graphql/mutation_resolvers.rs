@@ -1,11 +1,10 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, graphql_value, FieldResult};
 
-use crate::{perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective}, types::{DecoratedLinkExpression, LinkExpression, PerspectiveDiff}};
+use crate::{perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, LinkExpression, PerspectiveDiff}};
 
 use super::graphql_types::*;
 use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
-use ad4m_client::literal::Literal;
 pub struct Mutation;
 
 fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<PerspectiveInstance> {
@@ -745,10 +744,10 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let mut handle = perspective.persisted.as_ref().clone();
         handle.name = Some(name);
-        perspective.update_from_handle(handle.clone());
+        update_perspective(&handle)?;
         Ok(handle)
     }
 

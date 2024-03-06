@@ -165,7 +165,7 @@ impl Ad4mDb {
 
     pub fn update_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?3, shared_url = ?4, state = ?5 WHERE uuid = ?6",
+            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4 WHERE uuid = ?5",
             params![
                 perspective.name,
                 perspective.neighbourhood.as_ref().map(|n| serde_json::to_string(n).ok()).flatten(),

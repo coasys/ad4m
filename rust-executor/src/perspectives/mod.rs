@@ -74,6 +74,10 @@ pub fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String> {
     if let Some(instance_lock) = perspectives.get(&handle.uuid) {
         let mut instance = instance_lock.write().unwrap();
         instance.update_from_handle(handle.clone());
+        Ad4mDb::with_global_instance(|db| {
+            db.update_perspective(&handle)
+                .map_err(|e| e.to_string())
+        })?;
         Ok(())
     } else {
         Err(format!("Perspective with uuid {} not found", &handle.uuid))
