@@ -24,8 +24,8 @@ pub fn add_entanglement_proofs(#[serde] proofs: Vec<EntanglementProof>) -> Resul
 }
 
 #[op2]
-pub fn delete_entanglement_proof(#[serde] proof: EntanglementProof) -> Result<(), AnyError> {
-  Ok(delete_entanglement_proof(proof))
+pub fn delete_entanglement_proof(#[serde] proofs: Vec<EntanglementProof>) -> Result<(), AnyError> {
+  Ok(delete_entanglement_proof(proofs))
 }
 
 #[op2]

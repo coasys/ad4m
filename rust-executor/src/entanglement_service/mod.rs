@@ -61,7 +61,7 @@ pub fn add_entanglement_proofs(proofs: Vec<EntanglementProof>) {
   file.write_all(serde_json::to_string(&entanglement_proofs).unwrap().as_bytes()).unwrap();
 }
 
-pub fn delete_entanglement_proof(proof: EntanglementProof) {
+pub fn delete_entanglement_proof(proofs: Vec<EntanglementProof>) {
   let file_path = ENTANGLEMENT_PROOF_FILE.lock().unwrap().clone();
   let mut entanglement_proofs: HashSet<EntanglementProof> = HashSet::new();
 
@@ -71,7 +71,9 @@ pub fn delete_entanglement_proof(proof: EntanglementProof) {
     entanglement_proofs = serde_json::from_reader(reader).unwrap();
   }
 
-  entanglement_proofs.remove(&proof);
+  for proof in proofs {
+    entanglement_proofs.remove(&proof);
+  }
 
   let mut file = File::create(&file_path).unwrap();
   file.write_all(serde_json::to_string(&entanglement_proofs).unwrap().as_bytes()).unwrap();
