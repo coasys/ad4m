@@ -8,6 +8,7 @@ use perspective_instance::PerspectiveInstance;
 use crate::graphql::graphql_types::PerspectiveHandle;
 
 use crate::db::Ad4mDb;
+use crate::pubsub::{get_global_pubsub, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC};
 use crate::types::PerspectiveDiff;
 
 lazy_static! {
@@ -31,7 +32,7 @@ pub fn initialize_from_db() {
     }
 }
 
-pub fn add_perspective(handle: PerspectiveHandle) -> Result<(), String> {
+pub async fn add_perspective(handle: PerspectiveHandle) -> Result<(), String> {
     if PERSPECTIVES.read().unwrap().contains_key(&handle.uuid) {
         return Err(format!("Perspective with uuid {} already exists", &handle.uuid));
     }
@@ -44,11 +45,21 @@ pub fn add_perspective(handle: PerspectiveHandle) -> Result<(), String> {
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
-    let mut perspectives = PERSPECTIVES.write().unwrap();
-    perspectives.insert(
-        handle.uuid.clone(), 
-        RwLock::new(PerspectiveInstance::new(handle.clone(), None))
-    );
+    {
+        let mut perspectives = PERSPECTIVES.write().unwrap();
+        perspectives.insert(
+            handle.uuid.clone(), 
+            RwLock::new(PerspectiveInstance::new(handle.clone(), None))
+        );
+    }
+    
+    get_global_pubsub()
+        .await
+        .publish(
+            &PERSPECTIVE_ADDED_TOPIC,
+            &serde_json::to_string(&handle).unwrap(),
+        )
+        .await;
     Ok(())
 }
 
@@ -69,22 +80,32 @@ pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         .map(|lock| lock.read().expect("Couldn't get read lock on PerspectiveInstance").clone())
 }
 
-pub fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String> {
-    let perspectives = PERSPECTIVES.read().unwrap();
-    if let Some(instance_lock) = perspectives.get(&handle.uuid) {
-        let mut instance = instance_lock.write().unwrap();
-        instance.update_from_handle(handle.clone());
-        Ad4mDb::with_global_instance(|db| {
-            db.update_perspective(&handle)
-                .map_err(|e| e.to_string())
-        })?;
-        Ok(())
-    } else {
-        Err(format!("Perspective with uuid {} not found", &handle.uuid))
+pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String> {
+    {
+        let perspectives = PERSPECTIVES.read().unwrap();
+        if let Some(instance_lock) = perspectives.get(&handle.uuid) {
+            let mut instance = instance_lock.write().unwrap();
+            instance.update_from_handle(handle.clone());
+            Ad4mDb::with_global_instance(|db| {
+                db.update_perspective(&handle)
+                    .map_err(|e| e.to_string())
+            })?;
+        } else {
+            return Err(format!("Perspective with uuid {} not found", &handle.uuid))
+        }
     }
+
+    get_global_pubsub()
+        .await
+        .publish(
+            &PERSPECTIVE_UPDATED_TOPIC,
+            &serde_json::to_string(&handle).unwrap(),
+        )
+        .await;
+    Ok(())
 }
 
-pub fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
+pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     if let Err(e) = Ad4mDb::global_instance()
         .lock()
         .expect("Couldn't get write lock on Ad4mDb")
@@ -93,8 +114,20 @@ pub fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         .remove_perspective(uuid) {
             log::error!("Error removing perspective from db: {}", e);
         }
-    let mut perspectives = PERSPECTIVES.write().unwrap();
-    perspectives.remove(uuid).and_then(|instance_lock| instance_lock.into_inner().ok())
+    
+    let removed_instance = {
+        let mut perspectives = PERSPECTIVES.write().unwrap();
+        perspectives.remove(uuid).and_then(|instance_lock| instance_lock.into_inner().ok())
+    };
+
+    get_global_pubsub()
+        .await
+        .publish(
+            &PERSPECTIVE_REMOVED_TOPIC,
+            &String::from(uuid),
+        )
+        .await;
+    removed_instance
 }
 
 pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, language_address: String) {
@@ -113,23 +146,22 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::perspective_instance::PerspectiveInstance;
 
     fn setup() {
         //setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
     }
 
-    #[test]
-    fn test_perspective_persistence_roundtrip() {
+    #[tokio::test]
+    async fn test_perspective_persistence_roundtrip() {
         setup();
         assert!(all_perspectives().is_empty());
 
         let handle1 = PerspectiveHandle::new_from_name("Test Perspective 1".to_string());
         let handle2 = PerspectiveHandle::new_from_name("Test Perspective 2".to_string());
 
-        add_perspective(handle1.clone()).expect("Failed to add perspective");
-        add_perspective(handle2.clone()).expect("Failed to add perspective");
+        add_perspective(handle1.clone()).await.expect("Failed to add perspective");
+        add_perspective(handle2.clone()).await.expect("Failed to add perspective");
         // Test the get_all_perspectives function
         let perspectives = all_perspectives();
         
@@ -144,7 +176,7 @@ mod tests {
 
         let mut handle_updated = handle1.clone();
         handle_updated.name = Some("Test Perspective 1 Updated".to_string());
-        update_perspective(&handle_updated).expect("Failed to update perspective");
+        update_perspective(&handle_updated).await.expect("Failed to update perspective");
 
         let p1_updated = get_perspective(&handle1.uuid).unwrap();
         assert_eq!(p1_updated.persisted.name, Some("Test Perspective 1 Updated".to_string()));
@@ -156,7 +188,7 @@ mod tests {
 
 
         // Clean up test perspectives
-        remove_perspective(handle1.uuid.as_str());
+        remove_perspective(handle1.uuid.as_str()).await;
         let perspectives = all_perspectives();
         assert_eq!(perspectives.len(), 1);
         assert!(perspectives.iter().any(|p| p.persisted.uuid == handle2.uuid));

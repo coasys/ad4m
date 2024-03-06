@@ -601,7 +601,7 @@ impl Mutation {
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)?;
         let handle = PerspectiveHandle::new_from_name(name.clone());
-        add_perspective(handle.clone())?;
+        add_perspective(handle.clone()).await?;
         Ok(handle)
     }
 
@@ -695,7 +695,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_delete_capability(vec![uuid.clone()]),
         )?;
-        Ok(remove_perspective(&uuid).is_some())
+        Ok(remove_perspective(&uuid).await.is_some())
     }
 
     async fn perspective_remove_link(
@@ -747,7 +747,7 @@ impl Mutation {
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let mut handle = perspective.persisted.as_ref().clone();
         handle.name = Some(name);
-        update_perspective(&handle)?;
+        update_perspective(&handle).await?;
         Ok(handle)
     }
 
