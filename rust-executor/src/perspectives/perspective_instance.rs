@@ -327,8 +327,8 @@ impl PerspectiveInstance {
         Ok(new_link_expression)
     }
 
-    pub async fn remove_link(&mut self, link_expression: LinkExpression) -> Result<(), AnyError> {
-        if let Some((_, status)) = Ad4mDb::with_global_instance(|db| db.get_link(&self.persisted.uuid, &link_expression))? {
+    pub async fn remove_link(&mut self, link_expression: LinkExpression) -> Result<DecoratedLinkExpression, AnyError> {
+        if let Some((link_from_db, status)) = Ad4mDb::with_global_instance(|db| db.get_link(&self.persisted.uuid, &link_expression))? {
             Ad4mDb::with_global_instance(|db| db.remove_link(&self.persisted.uuid, &link_expression))?;
 
             let diff = PerspectiveDiff {
@@ -348,12 +348,12 @@ impl PerspectiveInstance {
                     &PERSPECTIVE_LINK_REMOVED_TOPIC,
                     &serde_json::to_string(&PerspectiveLinkFilter {
                         perspective: self.persisted.as_ref().clone(),
-                        link: DecoratedLinkExpression::from((link_expression, status)),
+                        link: DecoratedLinkExpression::from((link_expression.clone(), status.clone())),
                     }).unwrap(),
                 )
                 .await;
 
-            Ok(())
+            Ok(DecoratedLinkExpression::from((link_from_db, status)))
         } else {
             Err(anyhow!("Link not found"))
         }

@@ -726,13 +726,13 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut removed_links = Vec::new();
         for link in links.into_iter() {
             let link = crate::types::LinkExpression::try_from(link)?;
-            perspective.remove_link(link.into()).await?;
+            removed_links.push(perspective.remove_link(link.into()).await?);
         }
         
-        // TODO: change this return type. why should we return all the deleted links again?
-        Ok(Vec::new())
+        Ok(removed_links)
     }
 
     async fn perspective_update(
