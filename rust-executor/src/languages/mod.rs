@@ -48,7 +48,7 @@ impl LanguageController {
             r#"
             await core
                     .languageController
-                    .getNeigbourhoodLanguage()
+                    .getNeighbourhoodLanguage()
                     .expressionAdapter
                     .putAdapter
                     .createPublic({}) 
