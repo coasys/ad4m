@@ -44,11 +44,10 @@ pub struct PerspectiveInstance {
     //agent: AgentService,
     //language_controller: LanguageController,
     //update_controllers_handle_sync_status: Box<dyn Fn(String, PerspectiveState)>,
-    prolog_engine: Arc<Option<PrologEngine>>,
-    prolog_needs_rebuild: bool,
+    prolog_engine: Arc<Mutex<Option<PrologEngine>>>,
+    prolog_needs_rebuild: Arc<Mutex<bool>>,
     //polling_interval: Option<tokio::time::Interval>,
     //pending_diff_polling_interval: Option<tokio::time::Interval>,
-    prolog_mutex: Arc<Mutex<()>>,
     is_teardown: bool,
     sdna_change_mutex: Arc<Mutex<()>>,
 }
@@ -65,9 +64,8 @@ impl PerspectiveInstance {
             created_from_join: created_from_join.unwrap_or(false),
             is_fast_polling: false,
             retries: 0,
-            prolog_engine: Arc::new(None),
-            prolog_needs_rebuild: false,
-            prolog_mutex: Arc::new(Mutex::new(())),
+            prolog_engine: Arc::new(Mutex::new(None)),
+            prolog_needs_rebuild: Arc::new(Mutex::new(true)),
             is_teardown: false,
             sdna_change_mutex: Arc::new(Mutex::new(())),
         }
@@ -84,6 +82,10 @@ impl PerspectiveInstance {
     pub async fn add_link(&mut self, link: Link, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expression = create_signed_expression(link)?;
         self.add_link_expression(link_expression, status).await
+    }
+
+    async fn set_prolog_rebuild_flag(&self) {
+        *self.prolog_needs_rebuild.lock().await = true;
     }
 
     pub async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {    
@@ -113,7 +115,7 @@ impl PerspectiveInstance {
         }
 
         let link_expression = DecoratedLinkExpression::from((link_expression, status));
-        self.prolog_needs_rebuild = true;
+        self.set_prolog_rebuild_flag().await;
 
         get_global_pubsub()
             .await
@@ -163,7 +165,7 @@ impl PerspectiveInstance {
             .map(|l| DecoratedLinkExpression::from((l, status.clone())))
             .collect::<Vec<DecoratedLinkExpression>>();
 
-        self.prolog_needs_rebuild = true;
+            self.set_prolog_rebuild_flag().await;
 
         for link in &decorated_link_expressions {
             get_global_pubsub()
@@ -177,7 +179,7 @@ impl PerspectiveInstance {
                 )
                 .await;
         }
-        self.prolog_needs_rebuild = true;
+        self.set_prolog_rebuild_flag().await;
 
         Ok(decorated_link_expressions)
     }
@@ -207,7 +209,7 @@ impl PerspectiveInstance {
                 .remove_link(&self.persisted.uuid, link)?;
         }
 
-        self.prolog_needs_rebuild = true;
+        self.set_prolog_rebuild_flag().await;
 
         let diff = PerspectiveDiff {
             additions: additions.clone(),
@@ -256,7 +258,7 @@ impl PerspectiveInstance {
                 .await;
         }
 
-        self.prolog_needs_rebuild = true;
+        self.set_prolog_rebuild_flag().await;
 
         Ok(diff)
     }
@@ -310,7 +312,7 @@ impl PerspectiveInstance {
         let new_link_expression = DecoratedLinkExpression::from((new_link_expression, LinkStatus::Shared));
         let old_link = DecoratedLinkExpression::from((old_link, LinkStatus::Shared));
 
-        self.prolog_needs_rebuild = true;
+        self.set_prolog_rebuild_flag().await;
         get_global_pubsub()
             .await
             .publish(
@@ -341,7 +343,7 @@ impl PerspectiveInstance {
                 Ad4mDb::with_global_instance(|db| db.add_pending_diff(&self.persisted.uuid, &diff))?;
             }
 
-            self.prolog_needs_rebuild = true;
+            self.set_prolog_rebuild_flag().await;
             get_global_pubsub()
                 .await
                 .publish(
@@ -360,9 +362,6 @@ impl PerspectiveInstance {
     }
 
     async fn get_links_local(&self, query: &LinkQuery) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
-        println!("Query: {:?}", query);
-        
-
         let mut result = if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
             Ad4mDb::with_global_instance(|db| {
                 db.get_all_links(&self.persisted.uuid)
@@ -537,23 +536,24 @@ impl PerspectiveInstance {
 
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&mut self, query: String) -> Result<String, AnyError> {
-        let _guard = self.prolog_mutex.lock().await;
-        if self.prolog_engine.is_none() {
+        let mut maybe_prolog_engine = self.prolog_engine.lock().await;
+        if maybe_prolog_engine.is_none() {
             let mut engine = PrologEngine::new();
             engine.spawn().await.map_err(|e| anyhow!("Failed to spawn Prolog engine: {}", e))?;
-            self.prolog_engine = Arc::new(Some(engine));
-            self.prolog_needs_rebuild = true;
+            *maybe_prolog_engine = Some(engine);
+            self.set_prolog_rebuild_flag().await;
         }
 
-        if self.prolog_needs_rebuild {
+        let prolog_enging_option_ref = maybe_prolog_engine.as_ref();
+        let prolog_engine = prolog_enging_option_ref.as_ref().expect("Must be some since we initialized the engine above");
+
+        let mut needs_rebuild = self.prolog_needs_rebuild.lock().await;
+
+        if *needs_rebuild {
             let all_links = self.get_links(&LinkQuery::default()).await?;
             let facts = init_engine_facts(all_links, self.persisted.neighbourhood.as_ref().map(|n| n.author.clone())).await?;
-            self.prolog_engine
-                .as_ref()
-                .as_ref()
-                .expect("Must be some since we initialized the engine above")
-                .load_module_string("facts".to_string(), facts).await?;
-            self.prolog_needs_rebuild = false;
+            prolog_engine.load_module_string("facts".to_string(), facts).await?;
+            *needs_rebuild = false;
         }
 
         let query = if !query.ends_with(".") {
@@ -562,10 +562,7 @@ impl PerspectiveInstance {
             query
         };
         
-        let result = self.prolog_engine
-            .as_ref()
-            .as_ref()
-            .expect("Must be some since we initialized the engine above")
+        let result = prolog_engine
             .run_query(query).await?.map_err(|e| anyhow!(e))?;
         Ok(prolog_resolution_to_string(result))
     }
