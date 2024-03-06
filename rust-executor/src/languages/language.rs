@@ -1,7 +1,9 @@
+use serde_json::Value;
+
 use crate::js_core::{self, JsCoreHandle};
 
 pub struct Language {
-    address: String;
+    address: String,
     js_core: JsCoreHandle,
 }
 
@@ -13,7 +15,7 @@ impl Language {
         }
     }
 
-    pub async fn create_public(&self, data: JsonValue) -> Result<String, AnyError> {
+    pub async fn create_public(&self, data: Value) -> Result<String, AnyError> {
         let script = format!(
             r#"JSON.stringify(
             await core.callResolver(

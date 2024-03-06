@@ -81,7 +81,7 @@ impl PerspectiveInstance {
 
     pub async fn add_link(&mut self, link: Link, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expression = create_signed_expression(link)?;
-        self.add_link_expression(link_expression, status).await
+        self.add_link_expression(link_expression.into(), status).await
     }
 
     async fn set_prolog_rebuild_flag(&self) {
@@ -134,7 +134,7 @@ impl PerspectiveInstance {
 
     pub async fn add_links(&mut self, links: Vec<Link>, status: LinkStatus) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let link_expressions = links.into_iter()
-            .map(|l| create_signed_expression(l))
+            .map(|l| create_signed_expression(l).map(|l| LinkExpression::from(l)))
             .collect::<Result<Vec<LinkExpression>, AnyError>>();
 
         let link_expressions = link_expressions?;
@@ -188,6 +188,7 @@ impl PerspectiveInstance {
         let additions = mutations.additions.into_iter()
             .map(Link::from)
             .map(create_signed_expression)
+            .map(|r| r.map(LinkExpression::from)) 
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         let removals = mutations.removals.into_iter()
             .map(LinkExpression::try_from)
@@ -284,7 +285,7 @@ impl PerspectiveInstance {
             }
         };
 
-        let new_link_expression = create_signed_expression(new_link)?;
+        let new_link_expression = LinkExpression::from(create_signed_expression(new_link)?);
 
         Ad4mDb::global_instance()
                 .lock()
@@ -687,7 +688,7 @@ mod tests {
             link.target = format!("lang://test-target {}",i);
             let mut link = create_signed_expression(link).expect("Failed to create link");
             link.timestamp = (now - chrono::Duration::minutes(5) + chrono::Duration::minutes(i as i64)).to_rfc3339();
-            let expression = perspective.add_link_expression(link.clone(), LinkStatus::Shared).await.unwrap();
+            let expression = perspective.add_link_expression(LinkExpression::from(link.clone()), LinkStatus::Shared).await.unwrap();
             all_links.push(expression);
             println!("Added link with timestamp: {}, {:?}", link.timestamp, link);
         }

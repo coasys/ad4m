@@ -17,6 +17,7 @@ mod db;
 pub mod init;
 mod pubsub;
 mod neighbourhoods;
+mod languages;
 
 #[cfg(test)]
 mod test_utils;

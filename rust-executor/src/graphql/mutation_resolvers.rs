@@ -415,7 +415,7 @@ impl Mutation {
         url: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        install_neighbourhood(url).await
+        Ok(install_neighbourhood(url).await?)
     }
 
     async fn neighbourhood_publish_from_perspective(
@@ -428,7 +428,11 @@ impl Mutation {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let meta_json = serde_json::to_string(&meta)?;
-        neighbourhoods::neighbourhood_publish_from_perspective(&perspectiveUUID, link_language, meta).await?
+        Ok(neighbourhoods::neighbourhood_publish_from_perspective(
+            &perspectiveUUID, 
+            link_language, 
+            meta.into()
+        ).await?)
     }
 
     async fn neighbourhood_send_broadcast(

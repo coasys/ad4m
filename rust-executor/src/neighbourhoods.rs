@@ -11,16 +11,9 @@ pub async fn neighbourhood_publish_from_perspective(
     link_language: String,
     meta: Perspective,
 ) -> Result<String, AnyError> {
-    let perspective = get_perspective(uuid).ok_or("Perspective not found")?;
+    let perspective = get_perspective(uuid).ok_or(anyhow!("Perspective not found"))?;
 
-    let global_instance = LanguageController::global_instance();
-    let language_controller_lock = global_instance.lock();
-    let mut language_controller_guard = language_controller_lock.expect("Couldn't get lock on LanguageController");
-    let language_controller = language_controller_guard
-        .as_mut()
-        .expect("LanguageController not initialized");
-
-    language_controller.install_language(link_language.clone()).await?;
+    LanguageController::install_language(link_language.clone()).await?;
 
     let neighbourhood = Neighbourhood {
         link_language, 
@@ -28,23 +21,19 @@ pub async fn neighbourhood_publish_from_perspective(
     };
 
     // Create neighbourhood
-    let neighbourhood_address = language_controller
-        .create_neighbourhood(neighbourhood)
-        .await?;
-
+    let neighbourhood_address = LanguageController::create_neighbourhood(neighbourhood).await?;
     
     let neighbourhood_url = format!("neighbourhood://{}", neighbourhood_address);
-    let neighbourhood_exp = language_controller
-        .get_neighbourhood(neighbourhood_address)
+    let neighbourhood_exp = LanguageController::get_neighbourhood(neighbourhood_address)
         .await?
-        .ok_or("Could not retrieve NeigbourhoodExpression which was just created. Problem with Neighbourhood language")?;
+        .ok_or(anyhow!("Could not retrieve NeigbourhoodExpression which was just created. Problem with Neighbourhood language"))?;
 
     let mut perspective_handle = perspective.persisted.as_ref().clone();
     // Add shared perspective to original perspective and then update controller
     perspective_handle.shared_url = Some(neighbourhood_url.clone());
     perspective_handle.neighbourhood = Some(neighbourhood_exp);
     perspective_handle.state = PerspectiveState::Synced;
-    update_perspective(&perspective_handle).await?;
+    update_perspective(&perspective_handle).await.map_err(|e| anyhow!(e))?;
     Ok(neighbourhood_url)
 }
 
@@ -52,19 +41,12 @@ pub async fn install_neighbourhood(
     url: String,
 ) -> Result<PerspectiveHandle, AnyError> {
     let perspectives = all_perspectives();
-    if perspectives.iter().any(|p| p.persisted.shared_url == Some(url)) {
+    if perspectives.iter().any(|p| p.persisted.shared_url == Some(url.clone())) {
         return Err(anyhow!("Neighbourhood with URL {} already installed", url));
     }
 
-    let global_instance = LanguageController::global_instance();
-    let language_controller_lock = global_instance.lock();
-    let mut language_controller_guard = language_controller_lock.expect("Couldn't get lock on LanguageController");
-    let language_controller = language_controller_guard
-        .as_mut()
-        .expect("LanguageController not initialized");
-
     let expression_ref = ExpressionRef::try_from(url.to_string())?;
-    let neighbourhood_exp = language_controller.get_neighbourhood(expression_ref.expression).await?;
+    let neighbourhood_exp = LanguageController::get_neighbourhood(expression_ref.expression).await?;
     if neighbourhood_exp.is_none() {
         return Err(anyhow!("Could not find neighbourhood with URL {}", url));
     }
@@ -73,7 +55,7 @@ pub async fn install_neighbourhood(
     let mut state = PerspectiveState::NeighbourhoodJoinInitiated;
 
 
-    state = if language_controller.language_by_address(neighbourhood.data.link_language.clone()).await? {
+    state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone()).await? {
         PerspectiveState::LinkLanguageInstalledButNotSynced
     } else {
         PerspectiveState::LinkLanguageFailedToInstall
@@ -88,7 +70,7 @@ pub async fn install_neighbourhood(
         neighbourhood: Some(neighbourhood),
         state,
     };
-    add_perspective(handle.clone()).await?;
+    add_perspective(handle.clone()).await.map_err(|e| anyhow!(e))?;
 
     Ok(handle)
 }

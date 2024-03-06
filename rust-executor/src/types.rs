@@ -6,7 +6,7 @@ use juniper::{
     GraphQLEnum, GraphQLObject, GraphQLValue,
 };
 
-use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput}};
+use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, PerspectiveInput}};
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -82,7 +82,13 @@ impl From<LinkInput> for Link {
     }
 }
 
-pub type LinkExpression = Expression<Link>;
+#[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct LinkExpression {
+    pub author: String,
+    pub timestamp: String,
+    pub data: Link,
+    pub proof: ExpressionProof,
+}
 
 impl TryFrom<LinkExpressionInput> for LinkExpression {
     type Error = AnyError;
@@ -92,7 +98,7 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
             source: input.data.source,
             target: input.data.target,
         };
-        Ok(Expression {
+        Ok(LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
             data: data,
@@ -111,7 +117,7 @@ impl LinkExpression {
             source: input.data.source,
             target: input.data.target,
         };
-        Expression {
+        LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
             data,
@@ -119,6 +125,30 @@ impl LinkExpression {
         }
     }
 }
+
+impl From<LinkExpression> for Expression<Link> {
+    fn from(expr: LinkExpression) -> Self {
+        Expression {
+            author: expr.author,
+            timestamp: expr.timestamp,
+            data: expr.data,
+            proof: expr.proof,
+        }
+    }
+}
+
+impl From<Expression<Link>> for LinkExpression {
+    fn from(expr: Expression<Link>) -> Self {
+        LinkExpression {
+            author: expr.author,
+            timestamp: expr.timestamp,
+            data: expr.data,
+            proof: expr.proof,
+        }
+    }
+}
+
+
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +162,7 @@ pub struct DecoratedLinkExpression {
 
 impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
     fn from((expr, status): (LinkExpression, LinkStatus)) -> Self {
+        let expr: Expression<Link> = expr.into();
         let verified_expr: VerifiedExpression<Link> = expr.into();
         DecoratedLinkExpression {
             author: verified_expr.author,
@@ -171,9 +202,19 @@ pub enum LinkStatus {
 }
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
-
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
+}
+
+impl From<PerspectiveInput> for Perspective {
+    fn from(input: PerspectiveInput) -> Self {
+        let links = input.links
+            .into_iter()
+            .map(|link| LinkExpression::try_from(link))
+            .filter_map(Result::ok)
+            .collect();
+        Perspective { links }
+    }
 }
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
