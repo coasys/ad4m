@@ -33,7 +33,7 @@ use js_core::JsCore;
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 
-use crate::{dapp_server::serve_dapp, db::Ad4mDb, prolog_service::init_prolog_service};
+use crate::{dapp_server::serve_dapp, db::Ad4mDb, prolog_service::init_prolog_service, languages::LanguageController};
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
@@ -73,6 +73,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     let mut js_core_handle = JsCore::start(config.clone()).await;
     js_core_handle.initialized().await;
     info!("js_core initialized.");
+
+    LanguageController::init_global_instance(js_core_handle.clone());
 
     info!("Starting GraphQL...");
 
