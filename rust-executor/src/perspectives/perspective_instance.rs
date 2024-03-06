@@ -392,6 +392,14 @@ impl PerspectiveInstance {
             result.retain(|(link, _status)| link.data.predicate.as_ref() == Some(predicate));
         }
 
+        if let Some(target) = &query.target {
+            result.retain(|(link, _status)| link.data.target == *target);
+        }
+
+        if let Some(source) = &query.source {
+            result.retain(|(link, _status)| link.data.source == *source);
+        }
+
         let until_date: Option<chrono::DateTime<chrono::Utc>> = query.until_date.clone().map(|d| d.into());
         let from_date: Option<chrono::DateTime<chrono::Utc>> = query.from_date.clone().map(|d| d.into());
 
