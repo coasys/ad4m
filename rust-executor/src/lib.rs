@@ -19,6 +19,7 @@ mod db;
 pub mod types;
 pub mod perspectives;
 pub mod languages;
+mod neighbourhoods;
 #[cfg(test)]
 mod test_utils;
 

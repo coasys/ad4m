@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 use juniper::{graphql_object, graphql_value, FieldResult};
 
-use crate::{perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, LinkExpression, PerspectiveDiff}};
+use crate::{neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, LinkExpression, PerspectiveDiff}};
 
 use super::graphql_types::*;
 use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
@@ -415,19 +415,7 @@ impl Mutation {
         url: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "neighbourhoodJoinFromUrl",
-                {{ url: "{}" }},
-            ))"#,
-            url
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<PerspectiveHandle> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        install_neighbourhood(url).await
     }
 
     async fn neighbourhood_publish_from_perspective(
@@ -440,18 +428,7 @@ impl Mutation {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let meta_json = serde_json::to_string(&meta)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "neighbourhoodPublishFromPerspective",
-                {{ linkLanguage: "{}", meta: {}, perspectiveUUID: "{}" }},
-            ))"#,
-            link_language, meta_json, perspectiveUUID
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        neighbourhoods::neighbourhood_publish_from_perspective(&perspectiveUUID, link_language, meta).await?
     }
 
     async fn neighbourhood_send_broadcast(

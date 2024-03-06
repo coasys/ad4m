@@ -1,6 +1,6 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::js_core::JsCoreHandle;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, ExpressionProof, Link, LinkExpression};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, NeighbourhoodExpression};
 use juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -310,7 +310,7 @@ pub struct Neighbourhood {
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct NeighbourhoodExpression {
+pub struct DecoratedNeighbourhoodExpression {
     pub author: String,
     pub data: Neighbourhood,
     pub proof: DecoratedExpressionProof,

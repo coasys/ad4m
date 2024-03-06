@@ -170,19 +170,19 @@ pub enum LinkStatus {
     Local,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NeighbourhoodExpression {
     pub author: String,
     pub data: Neighbourhood,
@@ -190,7 +190,7 @@ pub struct NeighbourhoodExpression {
     pub timestamp: String,
 }
 
-type Address = String;
+pub type Address = String;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LanguageRef {

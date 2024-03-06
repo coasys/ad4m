@@ -16,6 +16,7 @@ mod perspectives;
 mod db;
 pub mod init;
 mod pubsub;
+mod neighbourhoods;
 
 #[cfg(test)]
 mod test_utils;
