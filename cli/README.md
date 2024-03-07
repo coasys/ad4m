@@ -13,15 +13,21 @@ cargo build
 
 ## Start & Run AD4M Agent
 
+Ad4m comes with two binaries
+- `ad4m` - one for using the client to interact with execuror
+- `ad4m-executor` - one for running the executor
+
+## Usage with executor
+
 ```
-ad4m init
+ad4m-executor init
 ```
 
 ```
-ad4m run
+ad4m-executor run
 ```
 
-## Usage
+## Usage with client
 
 Show all perspectives:
 ```

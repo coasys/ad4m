@@ -14,8 +14,8 @@ on the user's machine.
 
 The easiest way to get that is to use ad4m-cli:
 ```sh
-npm install -g @coasys/ad4m-cli
-ad4m executor run &
+cargo install ad4m
+ad4m-executor run
 ```
 
 Then use `Ad4mClient` to connect to and work with the running ad4m-executor like this:

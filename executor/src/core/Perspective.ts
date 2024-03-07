@@ -9,12 +9,10 @@ import { MainConfig } from "./Config";
 import { Mutex } from 'async-mutex'
 import { DID } from "@coasys/ad4m/lib/src/DID";
 import { Ad4mDb } from "./db";
-import { getPubSub } from "./utils";
-import Signatures from "./agent/Signatures";
+import { getPubSub, tagExpressionSignatureStatus, removeSignatureTags } from "./utils";
 
 const maxRetries = 10;
 const backoffStep = 200;
-
 export default class Perspective {
     name?: string;
     uuid?: string;
@@ -191,7 +189,7 @@ export default class Perspective {
     }
 
     linkToExpression(link: Link): Expression {
-        return this.#agent.createSignedExpression(link)
+        return AGENT.createSignedExpression(link)
     }
 
     ensureLinkExpression(maybeLink: any): Expression {
@@ -205,6 +203,12 @@ export default class Perspective {
 
         throw new Error(`NH [${this.sharedUrl}] (${this.name}): Object is neither Link nor Expression: ${JSON.stringify(maybeLink)}`)
     }
+
+    sanitizeLinkInput(link: (LinkInput | LinkExpressionInput)): LinkExpression {
+        removeSignatureTags(link)
+        return this.ensureLinkExpression(link)
+    }
+    
 
     private async getLinksAdapter(): Promise<LinkSyncAdapter | undefined> {
         if(!this.neighbourhood || !this.neighbourhood.data.linkLanguage) {
@@ -421,7 +425,7 @@ export default class Perspective {
     }
 
     async addLink(link: LinkInput | LinkExpressionInput, status: LinkStatus = 'shared'): Promise<LinkExpression> {
-        const linkExpression = this.ensureLinkExpression(link);
+        const linkExpression = this.sanitizeLinkInput(link);
 
         if (status === 'shared') {
             const diff = {
@@ -441,19 +445,20 @@ export default class Perspective {
         let perspectivePlain = this.plain();
 
         linkExpression.status = status;
+        tagExpressionSignatureStatus(linkExpression);
 
         await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
             perspective: perspectivePlain,
             link: linkExpression
         })
         this.#prologNeedsRebuild = true
-
-
+        
         return linkExpression
     }
 
     async addLinks(links: (LinkInput | LinkExpressionInput)[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
-        const linkExpressions = links.map(l => this.ensureLinkExpression(l));
+        let linkExpressions = links.map(l => this.sanitizeLinkInput(l))
+
         const diff = {
             additions: linkExpressions,
             removals: []
@@ -466,6 +471,12 @@ export default class Perspective {
 
         await this.#db.addManyLinks(this.uuid!, linkExpressions, status);
         this.#prologNeedsRebuild = true;
+
+        linkExpressions = linkExpressions.map(l => {
+            tagExpressionSignatureStatus(l);
+            return {...l, status} as LinkExpression
+        })
+
         let perspectivePlain = this.plain();
         for (const link of linkExpressions) {
             await this.#pubSub.publish(PubSubDefinitions.LINK_ADDED_TOPIC, {
@@ -476,11 +487,11 @@ export default class Perspective {
         this.#prologNeedsRebuild = true
 
         // @ts-ignore
-        return linkExpressions.map(l => ({...l, status}))
+        return linkExpressions
     }
 
     async removeLinks(links: LinkInput[]): Promise<LinkExpression[]> {
-        const linkExpressions = links.map(l => this.ensureLinkExpression(l));
+        const linkExpressions = links.map(l => this.sanitizeLinkInput(l));
         const diff = {
             additions: [],
             removals: linkExpressions
@@ -536,10 +547,10 @@ export default class Perspective {
     }
 
     async updateLink(oldLink: LinkExpressionInput, newLink: LinkInput) {
+        this.sanitizeLinkInput(oldLink);
         const link = await this.#db.getLink(this.uuid!, oldLink);
         if (!link) {
-            const allLinks = await this.#db.getAllLinks(this.uuid!);
-            throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain()}": ${JSON.stringify(oldLink)}`)
+            throw new Error(`NH [${this.sharedUrl}] (${this.name}) Link not found in perspective "${this.plain().uuid}": ${JSON.stringify(oldLink)}`)
         }
 
         const newLinkExpression = this.ensureLinkExpression(newLink)
@@ -556,6 +567,8 @@ export default class Perspective {
             await this.#db.addPendingDiff(this.uuid!, diff);
         }
 
+        tagExpressionSignatureStatus(newLinkExpression);
+
         const perspective = this.plain();
         this.#prologNeedsRebuild = true;
         await this.#pubSub.publish(PubSubDefinitions.LINK_UPDATED_TOPIC, {
@@ -567,6 +580,8 @@ export default class Perspective {
         if (link.status) {
             newLinkExpression.status = link.status
         }
+
+        
 
         return newLinkExpression
     }
@@ -694,7 +709,7 @@ export default class Perspective {
 
         for(const link of values) {
             try {
-                await Signatures.tagExpressionSignatureStatus(link)
+                await tagExpressionSignatureStatus(link)
             } catch (e) {
                 console.error(`Perspective.getLinks(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to tag expression signature status: ${e}`);
                 link.proof.invalid = true;

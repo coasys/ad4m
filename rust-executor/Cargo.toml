@@ -74,7 +74,10 @@ scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client" }
+sha2 = "0.10.8"
+
+
 [dev-dependencies]
 maplit = "1.0.2"
-
 lazy_static = "1.4.0"
+itertools = "0.10.1"

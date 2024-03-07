@@ -1,9 +1,11 @@
 extern crate remove_dir_all;
+use crate::app_state::{AgentList, LauncherState};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 
 use remove_dir_all::*;
 
+use tauri::api::path::home_dir;
 use tauri::{LogicalSize, Manager};
 use tauri::Size;
 use tauri_plugin_positioner::{Position, WindowExt};
@@ -36,6 +38,44 @@ pub fn open_tray(app_handle: tauri::AppHandle) {
         let _ = window.set_decorations(false);
         let _ = window.set_always_on_top(true);
     }
+}
+
+#[tauri::command]
+pub fn add_app_agent_state(agent: AgentList) {
+    let mut state = LauncherState::load().unwrap();
+
+    let mut new_agent = agent.clone();
+
+    new_agent.path = home_dir().unwrap().join(agent.path);
+
+    state.add_agent(new_agent);
+    
+    state.save().unwrap();
+}
+
+#[tauri::command]
+pub fn remove_app_agent_state(agent: AgentList) {
+    let mut state = LauncherState::load().unwrap();
+
+    state.remove_agent(agent.clone());
+    
+    state.save().unwrap();
+}
+
+#[tauri::command]
+pub fn set_selected_agent(agent: AgentList) {
+    let mut state = LauncherState::load().unwrap();
+
+    state.selected_agent = Some(agent);
+    
+    state.save().unwrap();
+}
+
+#[tauri::command]
+pub fn get_app_agent_list() -> Option<String> {
+    let state = LauncherState::load().unwrap();
+
+    serde_json::to_string(&state).ok()
 }
 
 #[tauri::command]
