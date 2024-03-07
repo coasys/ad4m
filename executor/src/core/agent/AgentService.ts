@@ -13,71 +13,27 @@ import { getPubSub } from "../utils";
 
 
 export default class AgentService {
-  #did?: string;
-  #didDocument?: string;
-  #signingKeyId?: string;
-  #file: string;
-  #fileProfile: string;
-  #agent?: Agent;
   #agentLanguage?: Language;
   #pubSub: PubSub;
 
-
-  #readyPromise: Promise<void>;
-  #readyPromiseResolve?: (value: void | PromiseLike<void>) => void;
-
   constructor(rootConfigPath: string, adminCredential?: string) {
-    this.#file = path.join(rootConfigPath, "agent.json");
-    this.#fileProfile = path.join(rootConfigPath, "agentProfile.json");
     this.#pubSub = getPubSub();
-    this.#readyPromise = new Promise((resolve) => {
-      this.#readyPromiseResolve = resolve;
-    });
-  }
-
-  get did() {
-    return this.#did;
-  }
-
-  get agent() {
-    return this.#agent;
-  }
-
-  get ready(): Promise<void> {
-    return this.#readyPromise;
-  }
-
-  get signingKeyId(): string {
-    if (!this.#signingKeyId) {
-        throw new Error("No signing key id on AgentService")
-    }
-    return this.#signingKeyId!
-  }
-
-  signingChecks() {
-    if (!this.isInitialized) {
-      throw new Error("Can't sign without keystore");
-    }
-    if (!this.isUnlocked()) {
-      throw new Error("Can't sign with locked keystore");
-    }
-    if (!this.#signingKeyId) {
-      throw new Error("Can't sign without signingKeyId");
-    }
   }
 
   createSignedExpression(data: any): Expression {
-    this.signingChecks()
     return AGENT.createSignedExpression(data);
   }
 
-  signString(data: string): string {
-    this.signingChecks()
-    return AGENT.signStringHex(data);
+  get did(): string {
+    return AGENT.did();
+  }
+
+  get agent(): Agent {
+    return AGENT.agent();
   }
 
   async updateAgent(a: Agent) {
-    this.#agent = a;
+    AGENT.save_agent_profile(a);
     await this.storeAgentProfile();
     await this.#pubSub.publish(PubSubDefinitions.AGENT_UPDATED, a);
   }
@@ -94,8 +50,8 @@ export default class AgentService {
   }
 
   async ensureAgentExpression() {
-    const currentAgent = this.agent;
-    const agentDid = currentAgent?.did;
+    const currentAgent = AGENT.agent();
+    const agentDid = AGENT.did();
     if (!agentDid) throw Error("No agent did found");
 
     const agentLanguage = this.getAgentLanguage();
@@ -116,11 +72,13 @@ export default class AgentService {
   }
 
   async storeAgentProfile() {
-    fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent));
+    let agent = AGENT.agent();
+
+    console.log("Storing agent profile", JSON.stringify(agent));
 
     const agentLanguage = this.getAgentLanguage();
 
-    if (this.#agent?.did) {
+    if (agent?.did) {
       let adapter = agentLanguage.expressionAdapter!.putAdapter;
 
       let isPublic = function isPublic(
@@ -131,7 +89,7 @@ export default class AgentService {
 
       try {
         if (isPublic(adapter)) {
-          await adapter.createPublic(this.#agent);
+          await adapter.createPublic(agent);
         } else {
           console.warn("Got a ReadOnlyLanguage for agent language");
         }
@@ -143,30 +101,18 @@ export default class AgentService {
     }
   }
 
-  async createNewKeys() {
-    WALLET.createMainKey()
-    const didDocument = WALLET.getMainKeyDocument()
-    const key = didDocument.verificationMethod[0]
-    
-    this.#did = key.controller;
-    this.#didDocument = JSON.stringify(await resolver.resolve(this.#did));
-    this.#agent = new Agent(this.#did);
-    this.#signingKeyId = key.id;
-  }
-
+  // TODO: need to be removed once runtime stuff gets merged
   isInitialized() {
-    return fs.existsSync(this.#file);
+    return AGENT.isInitialized();
   }
 
+  // TODO: need to be removed once runtime stuff gets merged
   isUnlocked() {
-    return WALLET.isUnlocked()
+    return AGENT.isUnlocked();
   }
 
   async unlock(password: string) {
-    // @ts-ignore
-    WALLET.unlock(password);
-    await this.#pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, this.dump());
-    this.#readyPromiseResolve!();
+    AGENT.unlock(password);
     try {
       await this.storeAgentProfile();
     } catch (e) {
@@ -177,52 +123,6 @@ export default class AgentService {
       console.debug("Continuing anyway...");
     }
   }
-
-  async lock(password: string) {
-    // @ts-ignore
-    WALLET.lock(password);
-    await this.#pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, this.dump());
-  }
-
-  async save(password: string) {
-    const dump = {
-      did: this.#did,
-      didDocument: this.#didDocument,
-      signingKeyId: this.#signingKeyId,
-      // @ts-ignore
-      keystore: WALLET.export(password),
-      agent: this.#agent,
-    };
-
-    fs.writeFileSync(this.#file, JSON.stringify(dump));
-    this.#readyPromiseResolve!();
-  }
-
-  load() {
-    if (!this.isInitialized()) return;
-
-    const dump = JSON.parse(fs.readFileSync(this.#file).toString());
-
-    this.#did = dump.did;
-    this.#didDocument = dump.didDocument;
-    this.#signingKeyId = dump.signingKeyId;
-    WALLET.load(dump.keystore);
-    if (fs.existsSync(this.#fileProfile))
-      this.#agent = JSON.parse(fs.readFileSync(this.#fileProfile).toString());
-    else {
-      this.#agent = new Agent(this.#did!);
-    }
-  }
-
-  dump() {
-    return {
-      agent: this.#agent,
-      isInitialized: this.isInitialized(),
-      isUnlocked: WALLET.isUnlocked(),
-      did: this.#did,
-      didDocument: this.#didDocument,
-    };
-  }
 }
 
 export function init(
@@ -230,6 +130,6 @@ export function init(
   adminCredential?: string
 ): AgentService {
   const agent = new AgentService(rootConfigPath, adminCredential);
-  agent.load();
+  AGENT.load();
   return agent;
 }
