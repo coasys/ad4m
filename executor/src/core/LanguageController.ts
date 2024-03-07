@@ -1,6 +1,6 @@
-import { 
-    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta, 
-    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, 
+import {
+    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta,
+    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression,
     parseExprUrl, Literal, TelepresenceAdapter, PerspectiveState
 } from '@coasys/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@coasys/ad4m';
@@ -24,17 +24,17 @@ function cloneWithoutCircularReferences(obj: any, seen: WeakSet<any> = new WeakS
         return;
       }
       seen.add(obj);
-  
+
       const clonedObj: any = Array.isArray(obj) ? [] : {};
       for (const key in obj) {
         if (obj.hasOwnProperty(key)) {
           clonedObj[key] = cloneWithoutCircularReferences(obj[key], seen);
         }
       }
-  
+
       return clonedObj;
     }
-  
+
     return obj;
 }
 
@@ -136,7 +136,7 @@ export default class LanguageController {
             }
             const agentLanguage = await this.installLanguage(this.#config.languageAliases[Config.agentLanguageAlias], null);
             this.#agentLanguage = agentLanguage!;
-            ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
+            ((this.#context as LanguageContext).agent as unknown as AgentService).setAgentLanguage(agentLanguage!)
 
             //Install the neighbourhood language and set
             if (this.#config.neighbourhoodLanguageSettings) {
@@ -382,7 +382,7 @@ export default class LanguageController {
         const language = this.#languages.get(address)
         if (language) return language
 
-        if(!languageMeta) { 
+        if(!languageMeta) {
             //Check that the metafile already exists with language with this address to avoid refetch
             const metaFile = path.join(path.join(this.#config.languagesPath, address), "meta.json");
 
@@ -407,7 +407,7 @@ export default class LanguageController {
                 languageMeta = {data: {}};
             }
         }
-       
+
 
         console.log("LanguageController.installLanguage: INSTALLING LANGUAGE:", languageMeta.data)
         let bundlePath = path.join(path.join(this.#config.languagesPath, address), "bundle.js");
@@ -462,7 +462,7 @@ export default class LanguageController {
     async languageRemove(hash: String): Promise<void> {
         //Teardown any intervals the language has running
         const language = this.#languages.get(hash as string);
-        if (language?.teardown) { 
+        if (language?.teardown) {
             language.teardown();
         }
 
@@ -506,9 +506,9 @@ export default class LanguageController {
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
             const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
-            const agentService = (this.#context as LanguageContext).agent as AgentService;
+            const agentService = (this.#context as LanguageContext).agent as unknown as AgentService;
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
-            if (trustedAgents.find((agent) => agent === languageAuthor) || agentService.agent! === languageAuthor) {
+            if (trustedAgents.find((agent) => agent === languageAuthor) || AGENT.did() === languageAuthor) {
                 //Get the language source so we can generate a hash and check against the hash given in the language meta information
                 const languageSource = await this.getLanguageSource(address);
                 if (!languageSource) {
@@ -1059,7 +1059,7 @@ export default class LanguageController {
                 if (!lang.expressionAdapter) {
                     throw Error("Language does not have an expresionAdapter!")
                 };
-                
+
                 const langIsImmutable = await this.isImmutableExpression(ref);
                 if (langIsImmutable) {
                     console.log("Calling cache for expression...");
