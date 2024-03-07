@@ -215,6 +215,7 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
         )
         .unwrap()
         .tag_prefix(LinkTag::new("message"))
+        .get_options(GetStrategy::Network)
         .build();
 
         for link in get_links(input)? {
@@ -223,7 +224,7 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
                 link.target
                     .into_entry_hash()
                     .expect("Could not get entry hash"),
-                GetOptions::latest(),
+                GetOptions::network(),
             )? {
                 //debug!("fetch_inbox link got");
                 let header_address = message_entry.action_address().clone();
