@@ -39,7 +39,7 @@
             return core.ops.agent_lock();
         },
         save_agent_profile: (profile) => {
-            return core.ops.agent_save_profile(profile);
+            return core.ops.save_agent_profile(profile);
         }
     };
 })(globalThis);
