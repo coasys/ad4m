@@ -102,8 +102,8 @@ impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
 
 #[derive(Debug, Serialize, Deserialize, Clone,)]
 pub struct AgentService {
-    pub did: String,
-    pub did_document: did_key::Document,
+    pub did: Option<String>,
+    pub did_document: Option<did_key::Document>,
     pub signing_key_id: Option<String>,
     file: String,
     file_profile: String,
@@ -120,8 +120,8 @@ impl AgentService {
         let agent_profile_path = format!("{}/ad4m/agent_profile.json", std::env::var("APPS_DATA_PATH").unwrap());
 
         AgentService {
-            did: did(),
-            did_document: did_document(),
+            did: None,
+            did_document: None,
             file: agent_path,
             file_profile: agent_profile_path,
             agent: None,
@@ -184,56 +184,48 @@ impl AgentService {
         // TODO: once language controller is moved add updating agent profile here
     }
 
+    pub fn save_agent_profile(&mut self, agent: Agent) {
+        self.agent = Some(agent);
+        self.store_agent_profile();
+    }
+
     pub fn create_new_keys(&mut self) -> Result<(), AnyError> {
         let wallet_instance = Wallet::instance();
-        let mut wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-        wallet_ref.generate_keypair("main".to_string());
+        {
+            let mut wallet = wallet_instance.lock().expect("wallet lock");
+            let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+            wallet_ref.generate_keypair("main".to_string());
+        }
 
-        self.did_document = did_document();
-        self.did = did();
+        self.did_document = Some(did_document());
+        self.did = Some(did());
         self.agent = Some(Agent {
             did: did(),
             perspective: None,
             direct_message_language: None,
         });
         self.signing_key_id = Some(signing_key_id());
-
         Ok(())
     }
 
-    pub async fn unlock(&self, password: String) -> Result<(), AnyError> {
+    pub fn unlock(&self, password: String) -> Result<(), AnyError> {
         let wallet_instance = Wallet::instance();
         let mut wallet = wallet_instance.lock().expect("wallet lock");
         let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
         wallet_ref.unlock(password);
-
-        get_global_pubsub()
-            .await
-            .publish(
-                &AGENT_STATUS_CHANGED_TOPIC,
-                &serde_json::to_string(&self.dump()).unwrap(),
-            )
-            .await;
 
         // TODO store agent proifle
 
         Ok(())
     }
 
-    pub async fn lock(&self, password: String) -> Result<(), AnyError> {
+    pub fn lock(&self, password: String) -> Result<(), AnyError> {
         let wallet_instance = Wallet::instance();
-        let mut wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-        wallet_ref.lock(password);
-
-        get_global_pubsub()
-            .await
-            .publish(
-                &AGENT_STATUS_CHANGED_TOPIC,
-                &serde_json::to_string(&self.dump()).unwrap(),
-            )
-            .await;
+        {
+            let mut wallet = wallet_instance.lock().expect("wallet lock");
+            let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+            wallet_ref.lock(password);
+        }
 
         Ok(())
     }
@@ -246,8 +238,8 @@ impl AgentService {
         let keystore = wallet_ref.export(password);
 
         let store = AgentStore {
-            did: self.did.clone(),
-            did_document: self.did_document.clone(),
+            did: self.did.clone().unwrap().clone(),
+            did_document: self.did_document.clone().unwrap().clone(),
             signing_key_id: self.signing_key_id.clone().unwrap(),
             keystore,
             agent: self.agent.clone(),
@@ -257,21 +249,26 @@ impl AgentService {
     }
 
     pub fn load(&mut self) {
-        let wallet_instance = Wallet::instance();
-        let mut wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_mut().expect("wallet instance");
-
         if !self.is_initialized() {
             return;
         }
 
         let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
-        let dump: AgentStore = serde_json::from_str(&self.file).unwrap();
+        let dump: AgentStore = serde_json::from_str(&file).unwrap();
 
-        self.did = dump.did;
-        self.did_document = dump.did_document;
+        self.did = Some(dump.did);
+        self.did_document = Some(dump.did_document);
         self.signing_key_id = Some(dump.signing_key_id);
-        wallet_ref.load(dump.keystore);
+
+        {
+            let wallet_instance = Wallet::instance();
+            let mut wallet = match wallet_instance.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let wallet_ref = wallet.as_mut().expect("wallet instance");
+            wallet_ref.load(dump.keystore);
+        }
 
         if std::path::Path::new(self.file_profile.as_str()).exists() {
             let file_profile = std::fs::read_to_string(self.file_profile.as_str()).expect("Failed to read agent profile file");
@@ -289,7 +286,7 @@ impl AgentService {
         let document = serde_json::to_string(&self.did_document).unwrap();
 
         AgentStatus {
-            did: Some(self.did.clone()),
+            did: self.did.clone(),
             did_document: Some(document),
             is_initialized: self.is_initialized(),
             is_unlocked: self.is_unlocked(),

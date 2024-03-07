@@ -1,10 +1,10 @@
 #![allow(non_snake_case)]
-use juniper::{graphql_object, graphql_value, FieldResult};
+use juniper::{graphql_object, graphql_value, FieldError, FieldResult, Value};
 use kitsune_p2p_types::agent_info::AgentInfoSigned;
 use log::debug;
 
 use super::graphql_types::*;
-use crate::{agent::{self, capabilities::*}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, sign_device_key, get_entanglement_proofs}, holochain_service::{agent_infos_from_str, get_holochain_service}};
+use crate::{agent::{self, capabilities::*, AgentService}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key}, holochain_service::{agent_infos_from_str, get_holochain_service}, pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC}};
 use ad4m_client::literal::Literal;
 pub struct Mutation;
 
@@ -93,6 +93,15 @@ impl Mutation {
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)?;
+        let agent_instance = AgentService::instance();
+        {
+            let mut agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+
+            agent_ref.create_new_keys();
+            agent_ref.save(passphrase.clone());
+        }
+
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -100,9 +109,25 @@ impl Mutation {
             )"#,
             passphrase
         );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        js.execute(script).await?;
+
+        let agent = {
+            let mut agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+            agent_ref.dump().clone()
+        };
+
+        get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+        log::info!("AD4M init complete");
+
+        Ok(agent)
     }
 
     async fn agent_lock(
@@ -110,17 +135,30 @@ impl Mutation {
         context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
-        check_capability(&context.capabilities, &AGENT_LOCK_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentLock", {{ passphrase: "{}" }})
-            )"#,
-            passphrase
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let agent_instance = AgentService::instance();
+
+        {
+            let mut agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+
+            agent_ref.lock(passphrase);
+        }
+
+        let agent = {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            agent_ref.dump()
+        };
+
+        get_global_pubsub()
+            .await
+            .publish(
+                &AGENT_STATUS_CHANGED_TOPIC,
+                &serde_json::to_string(&agent).unwrap(),
+            )
+            .await;
+
+        Ok(agent)
     }
 
     async fn agent_remove_app(
@@ -191,16 +229,45 @@ impl Mutation {
         holochain: bool,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }})
-            )"#,
-            passphrase, holochain
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let agent_instance = AgentService::instance();
+        {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+
+            agent_ref.unlock(passphrase.clone());
+        }
+
+        if agent_instance.lock().expect("agent lock").as_ref().expect("agent instance").is_unlocked() {
+            let mut js = context.js_handle.clone();
+            let script = format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }})
+                )"#,
+                passphrase, holochain
+            );
+            js.execute(script).await?;
+        }
+
+        let mut agent = {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            agent_ref.dump().clone()
+        };
+
+        if !agent_instance.lock().expect("agent lock").as_ref().expect("agent instance").is_unlocked() {
+            agent.error = Some("Failed to unlock agent".to_string());
+        }
+
+        get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+        Ok(agent)
     }
 
     async fn agent_update_direct_message_language(

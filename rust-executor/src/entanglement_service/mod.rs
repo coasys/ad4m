@@ -16,7 +16,7 @@ pub fn sign_device_key(device_key: String, device_key_type: String) -> Entanglem
   let signed_device_key = sign_string_hex(device_key.clone()).unwrap();
 
   EntanglementProof {
-    did: agent_ref.did.clone(),
+    did: agent_ref.did.clone().unwrap(),
     did_signing_key_id: agent_ref.signing_key_id.clone().unwrap(),
     device_key_type,
     device_key,
@@ -34,7 +34,7 @@ pub fn generate_holochain_proof(holochain_key: String, signed_did: String) -> En
   let signed_holo_key = sign_string_hex(holochain_key.clone()).unwrap();
 
   EntanglementProof {
-    did: agent_ref.did.clone(),
+    did: agent_ref.did.clone().unwrap(),
     did_signing_key_id: agent_ref.signing_key_id.clone().unwrap(),
     device_key_type,
     device_key: holochain_key,
