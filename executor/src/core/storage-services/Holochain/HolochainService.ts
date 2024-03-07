@@ -29,10 +29,9 @@ export default class HolochainService {
     #signalCallbacks: [CellId, AppSignalCb, string][];
     #queue: Map<string, AsyncQueue>
     #languageDnaHashes: Map<string, Uint8Array[]>
-    #agentService: AgentService
     #dataPath: string
 
-    constructor(config: HolochainConfiguration, agentService: AgentService) {
+    constructor(config: HolochainConfiguration) {
         let {
             resourcePath,
             useBootstrap,
@@ -43,7 +42,6 @@ export default class HolochainService {
         } = config;
 
         this.#dataPath = dataPath
-        this.#agentService = agentService;
 
         this.#signalCallbacks = [];
 
@@ -172,7 +170,7 @@ export default class HolochainService {
                     }
                 });
 
-                const did = this.#agentService.did;
+                const did = AGENT.did();
                 //Did should only ever be undefined when the system DNA's get init'd before agent create occurs
                 //These system DNA's do not currently need EP proof's
                 let membraneProof = {};
