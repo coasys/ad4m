@@ -1,3 +1,5 @@
+import { AgentStatus } from "@coasys/ad4m";
+
 export interface VerificationMethod {
     id: string;
     type: string;
@@ -50,6 +52,13 @@ declare global {
         createSignedExpression: (data: any) => Expression;
         sign: (payload: Uint8Array) => Uint8Array;
         signStringHex: (payload: string) => string;
+        load: () => AgentStatus;
+        agent: () => Agent;
+        isInitialized: () => boolean;
+        isUnlocked: () => boolean;
+        unlock: (password: string) => boolean;
+        lock: () => void;
+        save_agent_profile: (agent: Agent) => void;
     }
 
     const AGENT: RustAgent;
