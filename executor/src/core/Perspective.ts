@@ -145,7 +145,7 @@ export default class Perspective {
                     console.error(`Perspective.setupPendingDiffsPublishing(): NH [${this.sharedUrl}] (${this.name}): Got error when trying to install link language: ${e}`);
                 }
             }
-            
+
             try {
                 // If LinkLanguage is connected/synced (otherwise currentRevision would be null)...
                 if (await this.getCurrentRevision()) {
@@ -153,7 +153,7 @@ export default class Perspective {
                     await this.updatePerspectiveState(PerspectiveState.Synced);
                     //Let's check if we have unpublished diffs:
                     const mutations = await this.#db.getPendingDiffs(this.uuid!);
-                    if (mutations.additions.length > 0 || mutations.removals.length > 0) {                        
+                    if (mutations.additions.length > 0 || mutations.removals.length > 0) {
                         // ...publish them...
                         await this.callLinksAdapter('commit', mutations);
                         // ...and clear the temporary storage
@@ -208,7 +208,7 @@ export default class Perspective {
         removeSignatureTags(link)
         return this.ensureLinkExpression(link)
     }
-    
+
 
     private async getLinksAdapter(): Promise<LinkSyncAdapter | undefined> {
         if(!this.neighbourhood || !this.neighbourhood.data.linkLanguage) {
@@ -433,7 +433,7 @@ export default class Perspective {
                 removals: []
             } as PerspectiveDiff
             const addLink = await this.commit(diff);
-    
+
             if (!addLink) {
                 this.#db.addPendingDiff(this.uuid!, diff);
             }
@@ -452,7 +452,7 @@ export default class Perspective {
             link: linkExpression
         })
         this.#prologNeedsRebuild = true
-        
+
         return linkExpression
     }
 
@@ -581,7 +581,7 @@ export default class Perspective {
             newLinkExpression.status = link.status
         }
 
-        
+
 
         return newLinkExpression
     }
@@ -594,7 +594,7 @@ export default class Perspective {
             removals: [linkExpression]
         } as PerspectiveDiff
         const mutation = await this.commit(diff);
-        
+
         if (!mutation) {
             await this.#db.addPendingDiff(this.uuid!, diff);
         }
@@ -728,15 +728,15 @@ export default class Perspective {
 
             if (type === 'subject_class') predicate = "ad4m://has_subject_class"
             else if (type === 'flow') predicate = "ad4m://has_flow"
-    
+
             const literalName = Literal.from(name).toUrl();
-    
+
             const links = await this.getLinks(new LinkQuery({
                 source: "ad4m://self",
                 predicate,
                 target: literalName
             }))
-    
+
             const sdnaLinks: any[] = []
 
             try {
@@ -744,21 +744,21 @@ export default class Perspective {
             } catch(e) {
                 sdnaCode = Literal.from(sdnaCode).toUrl()
             }
-            
+
             if (links.length === 0) {
                 sdnaLinks.push(new Link({
                     source: "ad4m://self",
                     predicate,
                     target: literalName
                 }));
-    
+
                 sdnaLinks.push(new Link({
                     source: literalName,
                     predicate: "ad4m://sdna",
                     target: sdnaCode
                 }))
 
-                await this.addLinks(sdnaLinks);  
+                await this.addLinks(sdnaLinks);
                 added = true
             }
         })
@@ -870,7 +870,7 @@ export default class Perspective {
         //-------------------
         lines.push(":- discontiguous(triple/3).")
         lines.push(":- discontiguous(link/5).")
-        
+
         const linksWithoutSDNA = allLinks.filter(l => !this.isSDNALink(l.data))
 
         for (const link of linksWithoutSDNA) {
@@ -883,7 +883,7 @@ export default class Perspective {
         //-------------------
         // reachable/2
         //-------------------
-        lines.push(":- discontiguous(reachable/2).")  
+        lines.push(":- discontiguous(reachable/2).")
         lines.push("reachable(A,B) :- triple(A,_,B).")
         lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).")
 
@@ -917,7 +917,7 @@ export default class Perspective {
         lines.push(":- discontiguous(property_resolve/2).")
         lines.push(":- discontiguous(property_resolve_language/3).")
         lines.push(":- discontiguous(property_named_option/4).")
-        
+
         lines.push(":- discontiguous(collection/2).")
         lines.push(":- discontiguous(collection_getter/4).")
         lines.push(":- discontiguous(collection_setter/3).")
@@ -953,31 +953,32 @@ takeN(_, 0, []).
 takeN([Item|Rest], N, [Item|PageRest]) :-
     N > 0,
     NextN is N - 1,
-    takeN(Rest, NextN, PageRest).        
+    takeN(Rest, NextN, PageRest).
         `
-        
+
         lines = lines.concat(lib.split('\n'))
 
         let seenSubjectClasses = new Map()
-        const authorAgents = [this.#agent.agent?.did, this.neighbourhood?.data.author];
+        const agent = AGENT.agent();
+        const authorAgents = [agent?.did, this.neighbourhood?.data.author];
         for(let linkExpression of allLinks) {
             let link = linkExpression.data
             if (linkExpression.proof.valid && authorAgents.includes(link.author)) {
                 if (this.isSDNALink(link)) {
                     const name = Literal.fromUrl(link.target).get();
-    
+
                     seenSubjectClasses.set(name, {
                         type: link.predicate,
                         ...seenSubjectClasses.get(name)
                     });
                 }
-    
+
                 if (link.predicate === "ad4m://sdna") {
                     const name = Literal.fromUrl(link.source).get();
                     let code = Literal.fromUrl(link.target).get()
-    
+
                     const subjectClass = seenSubjectClasses.get(name);
-    
+
                     if (subjectClass && subjectClass?.code) {
                         if ((new Date(linkExpression?.timestamp).getTime() > new Date(subjectClass?.timestamp).getTime())) {
                             seenSubjectClasses.set(name, {
@@ -985,7 +986,7 @@ takeN([Item|Rest], N, [Item|PageRest]) :-
                                 timestamp:  linkExpression.timestamp,
                                 ...seenSubjectClasses.get(name)
                             })
-                        } 
+                        }
                     } else {
                         seenSubjectClasses.set(name, {
                             code,
@@ -1037,7 +1038,7 @@ takeN([Item|Rest], N, [Item|PageRest]) :-
                 await this.#prologEngine!.consult(facts)
             }
         })
-        
+
         return await this.#prologEngine!.query(query)
     }
 
