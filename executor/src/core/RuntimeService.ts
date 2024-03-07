@@ -66,16 +66,9 @@ export interface Message {
 
 export default class RuntimeService {
     #config: MainConfig
-    #did: string
-
 
     constructor(config: MainConfig) {
         this.#config = config
-        this.#did = ""
-    }
-
-    set did(did: string) {
-        this.#did = did
     }
 
     trustedAgentsPath(): string {
@@ -103,7 +96,7 @@ export default class RuntimeService {
     }
 
     getTrustedAgents(): string[] {
-        let agents = [this.#did!, ...this.#config.trustedAgents, ..._get(this.trustedAgentsPath())]
+        let agents = [AGENT.did(), ...this.#config.trustedAgents, ..._get(this.trustedAgentsPath())]
         let dedupAgents = [...new Set(agents)]
         return dedupAgents
     }
