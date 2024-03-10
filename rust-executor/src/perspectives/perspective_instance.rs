@@ -272,7 +272,7 @@ impl PerspectiveInstance {
             .expect("Ad4mDb not initialized")
             .get_link(&self.persisted.uuid, &old_link)?;
 
-        let (link, _link_status) = match link_option {
+        let (link, link_status) = match link_option {
             Some(link) => link,
             None => {
                 return Err(AnyError::msg(format!(
@@ -309,9 +309,8 @@ impl PerspectiveInstance {
                 .add_pending_diff(&self.persisted.uuid, &diff)?;
         }
 
-        // TODO: actually get the status from the link
-        let new_link_expression = DecoratedLinkExpression::from((new_link_expression, LinkStatus::Shared));
-        let old_link = DecoratedLinkExpression::from((old_link, LinkStatus::Shared));
+        let new_link_expression = DecoratedLinkExpression::from((new_link_expression, link_status.clone()));
+        let old_link = DecoratedLinkExpression::from((old_link, link_status));
 
         self.set_prolog_rebuild_flag().await;
         get_global_pubsub()
