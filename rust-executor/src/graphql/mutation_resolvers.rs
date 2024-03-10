@@ -1,25 +1,23 @@
-#![allow(non_snake_case)]
-use juniper::{graphql_object, graphql_value, FieldResult};
-
 use crate::{neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, LinkExpression, PerspectiveDiff}};
+use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
 
 use super::graphql_types::*;
 use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
 pub struct Mutation;
 
 fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<PerspectiveInstance> {
-    get_perspective(uuid).ok_or_else(|| juniper::FieldError::new(
+    get_perspective(uuid).ok_or_else(|| FieldError::new(
         "Perspective not found",
         graphql_value!({ "uuid": uuid.clone() }),
     ))
 }
 
-fn link_status_from_input(status: Option<String>) -> Result<crate::types::LinkStatus, juniper::FieldError> {
+fn link_status_from_input(status: Option<String>) -> Result<crate::types::LinkStatus, FieldError> {
     match status.as_ref().map(|s| s.as_str()) {
         Some("shared") => Ok(crate::types::LinkStatus::Shared),
         Some("local") => Ok(crate::types::LinkStatus::Local),
         None => Ok(crate::types::LinkStatus::Shared),
-        _ => Err(juniper::FieldError::new(
+        _ => Err(FieldError::new(
             "Invalid status, must be either 'shared' or 'local'",
             graphql_value!({ "invalid_status": status }),
         )),
@@ -600,7 +598,6 @@ impl Mutation {
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         Ok(perspective.add_link(link.into(), link_status_from_input(status)?).await?)
-
     }
 
     async fn perspective_add_link_expression(
@@ -761,7 +758,7 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let sdna_type = SdnaType::from_string(&sdna_type)
-            .map_err(|e| juniper::FieldError::new(
+            .map_err(|e| FieldError::new(
                 e,
                 graphql_value!({ "invalid_sdna_type": sdna_type })
             ))?;

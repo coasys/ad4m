@@ -1,7 +1,7 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::js_core::JsCoreHandle;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, NeighbourhoodExpression};
-use juniper::{
+use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};

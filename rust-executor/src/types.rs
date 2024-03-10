@@ -1,8 +1,6 @@
-use std::default;
-
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
-use juniper::{
+use coasys_juniper::{
     GraphQLEnum, GraphQLObject, GraphQLValue,
 };
 
