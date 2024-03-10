@@ -14,6 +14,6 @@ serde = "1"
 chrono = { version = "0.4.31", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 thiserror = "1.0.20"
 
-hdk = { version = "0.3.0-beta-dev.31", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
-holo_hash =  { version = "0.3.0-beta-dev.21", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
+hdk = { version = "0.3.0-beta-dev.33" }
+holo_hash =  { version = "0.3.0-beta-dev.22" }
 agent_store_integrity = { path = "../agent_store_integrity" }

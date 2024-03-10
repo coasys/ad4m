@@ -660,6 +660,7 @@ impl Workspace {
         )
         .unwrap()
         .tag_prefix(LinkTag::new("snapshot"))
+        .get_options(GetStrategy::Network)
         .build();
         let mut snapshot_links = get_links(input)?;
 
@@ -670,7 +671,7 @@ impl Workspace {
                     .target
                     .into_entry_hash()
                     .expect("Could not get entry hash"),
-                GetOptions::latest(),
+                GetOptions::network(),
             )?
             .ok_or(SocialContextError::InternalError(
                 "Workspace::get_snapshot: Could not find entry while populating search",
@@ -796,7 +797,7 @@ impl Workspace {
     //                         base_found = true;
     //                     }
     //                 } else {
-    //                     let diff_entry = get(current.1.diff.clone(), GetOptions::latest())?
+    //                     let diff_entry = get(current.1.diff.clone(), GetOptions::network())?
     //                         .ok_or(SocialContextError::InternalError(
     //                             "Could not find diff entry for given diff entry reference",
     //                         ))?
@@ -999,7 +1000,7 @@ mod tests {
                 12 -> 6  [ label = \"()\" ]
 
                 13 -> 12 [ label = \"()\" ]
-                
+
             }",
             )
             .unwrap();
@@ -1104,12 +1105,12 @@ mod tests {
                 4 [ label = "4" ]
                 5 [ label = "5" ]
 
-                1 -> 0 
-                2 -> 1 
-                3 -> 2 
-                4 -> 3 
+                1 -> 0
+                2 -> 1
+                3 -> 2
+                4 -> 3
                 5 -> 4
-                
+
                 6
                 7
                 8
@@ -1122,7 +1123,7 @@ mod tests {
                 10 -> 9
 
                 8 -> 0
-                
+
             }"#,
             )
             .unwrap();
@@ -1176,12 +1177,12 @@ mod tests {
                 4 [ label = "4" ]
                 5 [ label = "5" ]
 
-                1 -> 0 
-                2 -> 1 
-                3 -> 2 
-                4 -> 3 
+                1 -> 0
+                2 -> 1
+                3 -> 2
+                4 -> 3
                 5 -> 4
-                
+
                 6
                 7
                 8
@@ -1244,11 +1245,11 @@ mod tests {
                 2 [ label = "2" ]
                 3 [ label = "3" ]
 
-                1 -> 0 
-                2 -> 0 
-                3 -> 1 
+                1 -> 0
+                2 -> 0
+                3 -> 1
                 3 -> 2
-                
+
             }"#,
             )
             .unwrap();

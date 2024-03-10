@@ -29,6 +29,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - Improved Docs for sdna & subject classes.
   - Added typedoc for decorators.
 - Split `ad4m` binary into two seperate binaries `ad4m` which is client & `ad4m-executor` to spawn your executor. [PR#464](https://github.com/coasys/ad4m/pull/464)
+- Updated all cargo dependency to use crates.io package instead of github. [PR#465](https://github.com/coasys/ad4m/pull/465)
 
 ### Deprecated
 

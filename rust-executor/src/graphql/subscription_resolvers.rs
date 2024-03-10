@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 use futures::stream;
 use futures::stream::Stream;
-use juniper::FieldResult;
+use coasys_juniper::FieldResult;
 use std::pin::Pin;
 
 use crate::pubsub::{
@@ -17,7 +17,7 @@ use crate::agent::capabilities::*;
 
 pub struct Subscription;
 
-#[juniper::graphql_subscription(context = RequestContext)]
+#[coasys_juniper::graphql_subscription(context = RequestContext)]
 impl Subscription {
     async fn agent_status_changed(
         &self,

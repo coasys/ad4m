@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use juniper::{graphql_object, FieldResult};
+use coasys_juniper::{graphql_object, FieldResult};
 
 use crate::holochain_service::get_holochain_service;
 
@@ -509,6 +509,6 @@ impl Query {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         signatures::verify_string_signed_by_did(&did, &data, &signed_data)
             .map_err(|e| e.to_string())
-            .map_err(|e| juniper::FieldError::new(e, juniper::Value::Null))
+            .map_err(|e| coasys_juniper::FieldError::new(e, coasys_juniper::Value::Null))
     }
 }
