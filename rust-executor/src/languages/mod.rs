@@ -65,7 +65,7 @@ impl LanguageController {
             JSON.stringify(
                 await core
                     .languageController
-                    .getPerspective({})
+                    .getPerspective("{}")
             )
             "#,
             address,
@@ -77,7 +77,7 @@ impl LanguageController {
 
     pub async fn language_by_address(address: Address) -> Result<bool, AnyError> {
         let script = format!(
-            r#"if(await core.languageController.languageByRef("{{ address: {} }}")) {{
+            r#"if(await core.languageController.languageByRef({{ address: {} }})) {{
                 return true
             }} else {{
                 return false
