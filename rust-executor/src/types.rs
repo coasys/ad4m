@@ -80,7 +80,7 @@ impl From<LinkInput> for Link {
     }
 }
 
-#[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct LinkExpression {
     pub author: String,
     pub timestamp: String,

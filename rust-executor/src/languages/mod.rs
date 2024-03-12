@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use deno_core::error::AnyError;
 
-use crate::{graphql::graphql_types::{LanguageHandle, LanguageRef}, js_core::JsCoreHandle, types::{Neighbourhood, NeighbourhoodExpression}};
+use crate::{graphql::graphql_types::{DecoratedNeighbourhoodExpression, LanguageHandle, LanguageRef}, js_core::JsCoreHandle, types::{Neighbourhood, NeighbourhoodExpression}};
 use crate::types::Address;
 
 lazy_static! {
@@ -59,7 +59,7 @@ impl LanguageController {
         Ok(result)
     }
 
-    pub async fn get_neighbourhood(address: Address) -> Result<Option<NeighbourhoodExpression>, AnyError> {
+    pub async fn get_neighbourhood(address: Address) -> Result<Option<DecoratedNeighbourhoodExpression>, AnyError> {
         let script = format!(
             r#"
             JSON.stringify(
@@ -71,7 +71,7 @@ impl LanguageController {
             address,
         );
         let result: String = Self::global_instance().js_core.execute(script).await?;
-        let neighbourhood: Option<NeighbourhoodExpression> = serde_json::from_str(&result)?;
+        let neighbourhood: Option<DecoratedNeighbourhoodExpression> = serde_json::from_str(&result)?;
         Ok(neighbourhood)
     }
 

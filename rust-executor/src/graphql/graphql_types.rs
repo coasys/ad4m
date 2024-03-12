@@ -355,16 +355,17 @@ pub enum PerspectiveState {
 pub struct PerspectiveHandle {
     pub uuid: String,
     pub name: Option<String>,
-    pub neighbourhood: Option<NeighbourhoodExpression>,
+    pub neighbourhood: Option<DecoratedNeighbourhoodExpression>,
     pub shared_url: Option<String>,
     pub state: PerspectiveState,
 }
+
 
 impl PerspectiveHandle {
     pub fn new(
         uuid: String,
         name: Option<String>,
-        neighbourhood: Option<NeighbourhoodExpression>,
+        neighbourhood: Option<DecoratedNeighbourhoodExpression>,
         shared_url: Option<String>,
         state: PerspectiveState,
     ) -> Self {
