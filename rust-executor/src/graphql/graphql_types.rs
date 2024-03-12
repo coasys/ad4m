@@ -230,9 +230,9 @@ pub struct LanguageRef {
     pub name: String,
 }
 
-
-#[derive(GraphQLEnum, Debug, Deserialize, Serialize, Clone)]
+#[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
 pub enum LinkStatus {
+    #[default]
     #[serde(rename = "shared")]
     Shared,
     #[serde(rename = "local")]

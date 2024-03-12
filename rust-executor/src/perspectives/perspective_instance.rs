@@ -9,7 +9,7 @@ use crate::agent::create_signed_expression;
 use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
-use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter};
+use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter};
 use super::sdna::init_engine_facts;
 use super::utils::prolog_resolution_to_string;
 
@@ -39,7 +39,7 @@ pub struct PerspectiveInstance {
     pub created_from_join: bool,
     pub is_fast_polling: bool,
     pub retries: u32,
-    
+
     //db: Ad4mDb,
     //agent: AgentService,
     //language_controller: LanguageController,
@@ -54,13 +54,13 @@ pub struct PerspectiveInstance {
 
 impl PerspectiveInstance {
     pub fn new(
-            handle: PerspectiveHandle, 
-            created_from_join: Option<bool>, 
+            handle: PerspectiveHandle,
+            created_from_join: Option<bool>,
         ) -> Self {
         // Constructor logic
         PerspectiveInstance {
             persisted: Arc::new(handle.clone()),
-            
+
             created_from_join: created_from_join.unwrap_or(false),
             is_fast_polling: false,
             retries: 0,
@@ -88,7 +88,7 @@ impl PerspectiveInstance {
         *self.prolog_needs_rebuild.lock().await = true;
     }
 
-    pub async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {    
+    pub async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
         Ad4mDb::global_instance()
             .lock()
             .expect("Couldn't get write lock on Ad4mDb")
@@ -120,7 +120,7 @@ impl PerspectiveInstance {
         get_global_pubsub()
             .await
             .publish(
-                &PERSPECTIVE_LINK_ADDED_TOPIC, 
+                &PERSPECTIVE_LINK_ADDED_TOPIC,
                 &serde_json::to_string(&PerspectiveLinkFilter {
                     perspective: self.persisted.as_ref().clone(),
                     link: link_expression.clone(),
@@ -188,7 +188,7 @@ impl PerspectiveInstance {
         let additions = mutations.additions.into_iter()
             .map(Link::from)
             .map(create_signed_expression)
-            .map(|r| r.map(LinkExpression::from)) 
+            .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         let removals = mutations.removals.into_iter()
             .map(LinkExpression::try_from)
@@ -277,9 +277,9 @@ impl PerspectiveInstance {
             None => {
                 return Err(AnyError::msg(format!(
                     "NH [{}] ({}) Link not found in perspective \"{}\": {:?}",
-                    self.persisted.shared_url.clone().unwrap_or("not-shared".to_string()), 
-                    self.persisted.name.clone().unwrap_or("<no name>".to_string()), 
-                    self.persisted.uuid, 
+                    self.persisted.shared_url.clone().unwrap_or("not-shared".to_string()),
+                    self.persisted.name.clone().unwrap_or("<no name>".to_string()),
+                    self.persisted.uuid,
                     old_link
                 )))
             }
@@ -420,18 +420,18 @@ impl PerspectiveInstance {
         if let Some(limit) = query.limit {
             let limit = limit as usize;
             let result_length = result.len();
-            let start_limit = if from_date >= until_date { 
-                result_length.saturating_sub(limit) 
+            let start_limit = if from_date >= until_date {
+                result_length.saturating_sub(limit)
             } else {
-                0 
+                0
             } as usize;
 
-            let end_limit = if from_date >= until_date { 
+            let end_limit = if from_date >= until_date {
                 result_length
-            } else { 
-                limit.min(result_length) 
+            } else {
+                limit.min(result_length)
             } as usize;
-            
+
             result = result[..limit as usize].to_vec();
         }
         */
@@ -445,7 +445,7 @@ impl PerspectiveInstance {
         if let Some(until_date) = query.until_date.as_ref() {
             if let Some(from_date) = query.from_date.as_ref() {
                 let chrono_from_date: chrono::DateTime<chrono::Utc> = from_date.clone().into();
-                let chrono_until_date: chrono::DateTime<chrono::Utc> = until_date.clone().into(); 
+                let chrono_until_date: chrono::DateTime<chrono::Utc> = until_date.clone().into();
                 if chrono_from_date > chrono_until_date {
                     reverse = true;
                     query.from_date = q.until_date.clone();
@@ -461,7 +461,7 @@ impl PerspectiveInstance {
             let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
             if reverse {
                 b_time.cmp(&a_time)
-                
+
             } else {
                 a_time.cmp(&b_time)
             }
@@ -470,7 +470,7 @@ impl PerspectiveInstance {
         if let Some(limit) = query.limit {
             let limit = links.len().min(limit as usize);
             links = links[..limit as usize].to_vec();
-        } 
+        }
 
         Ok(links
             .into_iter()
@@ -487,7 +487,7 @@ impl PerspectiveInstance {
         let mut added = false;
         let mutex = self.sdna_change_mutex.clone();
         let _guard = mutex.lock().await;
-        
+
         let predicate = match sdna_type {
             SdnaType::SubjectClass => "ad4m://has_subject_class",
             SdnaType::Flow => "ad4m://has_flow",
@@ -511,7 +511,7 @@ impl PerspectiveInstance {
             sdna_code = Literal::from_string(sdna_code).to_url().expect("just initialized Literal couldn't be turned into URL");
         }
 
-        
+
 
         if links.is_empty() {
             sdna_links.push(Link {
@@ -561,7 +561,7 @@ impl PerspectiveInstance {
         } else {
             query
         };
-        
+
         let result = prolog_engine
             .run_query(query).await?.map_err(|e| anyhow!(e))?;
         Ok(prolog_resolution_to_string(result))
@@ -727,7 +727,7 @@ mod tests {
         // reverse for descending order
         let from_date = (now).into();
         let until_date = (now - chrono::Duration::minutes(10)).into();
-        
+
         let query_with_date_range = LinkQuery {
             from_date: Some(from_date),
             until_date: Some(until_date),
@@ -746,7 +746,7 @@ mod tests {
         // reverse for descending order with limit
         let from_date = (now).into();
         let until_date = (now - chrono::Duration::minutes(10)).into();
-        
+
         let query_with_date_range = LinkQuery {
             from_date: Some(from_date),
             until_date: Some(until_date),
@@ -780,7 +780,7 @@ mod tests {
         assert_eq!(links_date_desc[1].data.target, all_links[1].data.target);
         assert_eq!(links_date_desc[2].data.target, all_links[2].data.target);
 
-        
+
 
     }
 

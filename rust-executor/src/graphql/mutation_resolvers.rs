@@ -12,11 +12,11 @@ fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<Perspecti
     ))
 }
 
-fn link_status_from_input(status: Option<String>) -> Result<crate::types::LinkStatus, FieldError> {
+fn link_status_from_input(status: Option<String>) -> Result<LinkStatus, FieldError> {
     match status.as_ref().map(|s| s.as_str()) {
-        Some("shared") => Ok(crate::types::LinkStatus::Shared),
-        Some("local") => Ok(crate::types::LinkStatus::Local),
-        None => Ok(crate::types::LinkStatus::Shared),
+        Some("shared") => Ok(LinkStatus::Shared),
+        Some("local") => Ok(LinkStatus::Local),
+        None => Ok(LinkStatus::Shared),
         _ => Err(FieldError::new(
             "Invalid status, must be either 'shared' or 'local'",
             graphql_value!({ "invalid_status": status }),
@@ -424,13 +424,13 @@ impl Mutation {
         perspectiveUUID: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let meta_json = serde_json::to_string(&meta)?;
-        Ok(neighbourhoods::neighbourhood_publish_from_perspective(
-            &perspectiveUUID, 
-            link_language, 
+        let url = neighbourhoods::neighbourhood_publish_from_perspective(
+            &perspectiveUUID,
+            link_language,
             meta.into()
-        ).await?)
+        ).await?;
+
+        Ok(url)
     }
 
     async fn neighbourhood_send_broadcast(
@@ -632,7 +632,7 @@ impl Mutation {
             links
                 .into_iter()
                 .map(|l| l.into())
-                .collect(), 
+                .collect(),
             link_status_from_input(status)?
         ).await?)
     }
@@ -708,7 +708,7 @@ impl Mutation {
             let link = crate::types::LinkExpression::try_from(link)?;
             removed_links.push(perspective.remove_link(link.into()).await?);
         }
-        
+
         Ok(removed_links)
     }
 

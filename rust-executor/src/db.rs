@@ -3,8 +3,8 @@ use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use crate::types::{Expression, ExpressionProof, Link, LinkExpression, LinkStatus, PerspectiveDiff};
-use crate::graphql::graphql_types::PerspectiveHandle;
+use crate::types::{Expression, ExpressionProof, Link, LinkExpression, PerspectiveDiff};
+use crate::graphql::graphql_types::{LinkStatus, PerspectiveHandle};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -137,7 +137,7 @@ impl Ad4mDb {
             .next()
             .ok_or(anyhow!("No perspective found with given uuid"))?
             .clone();
-        
+
         Ok(found_perspective)
     }
 
@@ -270,32 +270,34 @@ impl Ad4mDb {
         let link_expression: Option<(LinkExpression, LinkStatus)> = stmt.query_row(
             params![perspective_uuid, link.data.source, link.data.predicate.as_ref().unwrap_or(&"".to_string()), link.data.target, link.author, link.timestamp],
             |row| {
-                Ok((
-                    LinkExpression {
-                        data: Link {
-                            source: row.get(1)?,
-                            predicate: row.get(2).map(|p: Option<String>| {
-                                match p.as_ref().map(|p| p.as_str()){
-                                    Some("") => None,
-                                    _ => p
-                                }
-                            })?,
-                            target: row.get(3)?,
-                        },
-                        proof: ExpressionProof {
-                            signature: row.get(6)?,
-                            key: row.get(7)?,
-                        },
-                        author: row.get(4)?,
-                        timestamp: row.get(5)?,
+                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                    8,
+                    rusqlite::types::Type::Text,
+                    Box::new(e)
+                ))?;
+
+                let link = LinkExpression {
+                    data: Link {
+                        source: row.get(1)?,
+                        predicate: row.get(2).map(|p: Option<String>| {
+                            match p.as_ref().map(|p| p.as_str()){
+                                Some("") => None,
+                                _ => p
+                            }
+                        })?,
+                        target: row.get(3)?,
                     },
-                    serde_json::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        8,
-                        rusqlite::types::Type::Text,
-                        Box::new(e)
-                    ))?
-                ))
+                    proof: ExpressionProof {
+                        signature: row.get(6)?,
+                        key: row.get(7)?,
+                    },
+                    author: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    status: Some(status.clone())
+                };
+
+                Ok((link, status))
             }
         ).optional()?;
         Ok(link_expression)
@@ -308,6 +310,12 @@ impl Ad4mDb {
         let link_iter = stmt.query_map(
             params![perspective_uuid],
             |row| {
+                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e)
+                    ))?;
                 let link_expression = LinkExpression {
                     data: Link {
                         source: row.get(1)?,
@@ -320,13 +328,8 @@ impl Ad4mDb {
                     },
                     author: row.get(4)?,
                     timestamp: row.get(5)?,
+                    status: Some(status.clone())
                 };
-                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        8,
-                        rusqlite::types::Type::Text,
-                        Box::new(e)
-                    ))?;
                 Ok((link_expression, status))
             }
         )?;
@@ -341,6 +344,12 @@ impl Ad4mDb {
         let link_iter = stmt.query_map(
             params![perspective_uuid, source],
             |row| {
+                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e)
+                    ))?;
                 let link_expression = LinkExpression {
                     data: Link {
                         source: row.get(1)?,
@@ -353,13 +362,8 @@ impl Ad4mDb {
                     },
                     author: row.get(4)?,
                     timestamp: row.get(5)?,
+                    status: Some(status.clone())
                 };
-                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        8,
-                        rusqlite::types::Type::Text,
-                        Box::new(e)
-                    ))?;
                 Ok((link_expression, status))
             }
         )?;
@@ -374,6 +378,12 @@ impl Ad4mDb {
         let link_iter = stmt.query_map(
             params![perspective_uuid, target],
             |row| {
+                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e)
+                    ))?;
                 let link_expression = LinkExpression {
                     data: Link {
                         source: row.get(1)?,
@@ -386,13 +396,8 @@ impl Ad4mDb {
                     },
                     author: row.get(4)?,
                     timestamp: row.get(5)?,
+                    status: Some(status.clone())
                 };
-                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        8,
-                        rusqlite::types::Type::Text,
-                        Box::new(e)
-                    ))?;
                 Ok((link_expression, status))
             }
         )?;
@@ -497,7 +502,7 @@ mod tests {
     use uuid::Uuid;
     use fake::{Fake, Faker};
     use chrono::Utc;
-    use crate::types::{LinkExpression, Link, LinkStatus, ExpressionProof};
+    use crate::types::{LinkExpression, Link, ExpressionProof};
 
     fn construct_dummy_link_expression() -> LinkExpression {
         LinkExpression {
@@ -512,7 +517,7 @@ mod tests {
             },
             author: "did:test:key".to_string(),
             timestamp: Utc::now().to_rfc3339(),
-            //status: Some(LinkStatus::Shared),
+            status: Some(LinkStatus::Shared),
         }
     }
 

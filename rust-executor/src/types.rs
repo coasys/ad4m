@@ -1,10 +1,10 @@
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
 use coasys_juniper::{
-    GraphQLEnum, GraphQLObject, GraphQLValue,
+    GraphQLObject, GraphQLValue,
 };
 
-use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, PerspectiveInput}};
+use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, PerspectiveInput}};
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -86,6 +86,7 @@ pub struct LinkExpression {
     pub timestamp: String,
     pub data: Link,
     pub proof: ExpressionProof,
+    pub status: Option<LinkStatus>,
 }
 
 impl TryFrom<LinkExpressionInput> for LinkExpression {
@@ -104,6 +105,7 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
                 key: input.proof.key.ok_or(anyhow!("Key is required"))?,
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
             },
+            status: input.status,
         })
     }
 }
@@ -120,6 +122,7 @@ impl LinkExpression {
             timestamp: input.timestamp,
             data,
             proof: ExpressionProof::default(),
+            status: input.status.into()
         }
     }
 }
@@ -142,6 +145,7 @@ impl From<Expression<Link>> for LinkExpression {
             timestamp: expr.timestamp,
             data: expr.data,
             proof: expr.proof,
+            status: None,
         }
     }
 }
@@ -181,23 +185,12 @@ impl From<DecoratedLinkExpression> for LinkExpression {
             proof: ExpressionProof {
                 key: decorated.proof.key,
                 signature: decorated.proof.signature,
-            }
+            },
+            status: decorated.status,
         }
     }
 }
 
-            
-
-
-
-#[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
-pub enum LinkStatus {
-    #[default]
-    #[serde(rename = "shared")]
-    Shared,
-    #[serde(rename = "local")]
-    Local,
-}
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Perspective {
