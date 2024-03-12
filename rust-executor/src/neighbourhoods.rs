@@ -16,13 +16,13 @@ pub async fn neighbourhood_publish_from_perspective(
     LanguageController::install_language(link_language.clone()).await?;
 
     let neighbourhood = Neighbourhood {
-        link_language, 
+        link_language,
         meta
     };
 
     // Create neighbourhood
     let neighbourhood_address = LanguageController::create_neighbourhood(neighbourhood).await?;
-    
+
     let neighbourhood_url = format!("neighbourhood://{}", neighbourhood_address);
     let neighbourhood_exp = LanguageController::get_neighbourhood(neighbourhood_address)
         .await?

@@ -2,7 +2,7 @@
 use deno_core::anyhow;
 use coasys_juniper::{graphql_object, FieldError, FieldResult};
 
-use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::DecoratedLinkExpression};
+use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::{DecoratedLinkExpression }};
 
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
@@ -35,8 +35,8 @@ impl Query {
             .execute(
                 format!(
                     r#"JSON.stringify(
-                    await core.callResolver("Query", "agentByDID", 
-                        {{ did: "{}" }}, 
+                    await core.callResolver("Query", "agentByDID",
+                        {{ did: "{}" }},
                     )
                 )"#,
                     did,
@@ -299,8 +299,9 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        Ok(get_perspective(&uuid)
-            .map(|p| p.persisted.as_ref().clone()))
+        let perspective = get_perspective(&uuid).map(|p| p.persisted.as_ref().clone());
+
+        Ok(perspective)
     }
 
     async fn perspective_query_links(
@@ -313,7 +314,7 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        
+
         Ok(get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
             .get_links(&query)
@@ -330,7 +331,7 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        
+
         Ok(get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
             .prolog_query(query)
@@ -346,14 +347,14 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        
+
         let all_links = get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
             .get_links(&LinkQuery::default())
             .await?;
 
         Ok(Perspective {
-            links: all_links.into_iter().map(|l| l.into()).collect(),
+            links: all_links,
         })
     }
 
@@ -405,7 +406,7 @@ impl Query {
 
         let interface = get_holochain_service().await;
         let infos = interface.agent_infos().await?;
-        
+
         let encoded_infos: Vec<String> = infos
             .iter()
             .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))
