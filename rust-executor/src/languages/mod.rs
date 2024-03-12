@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use deno_core::error::AnyError;
 
-use crate::{js_core::JsCoreHandle, types::{Neighbourhood, NeighbourhoodExpression}};
+use crate::{graphql::graphql_types::{LanguageHandle, LanguageRef}, js_core::JsCoreHandle, types::{Neighbourhood, NeighbourhoodExpression}};
 use crate::types::Address;
 
 lazy_static! {
@@ -51,7 +51,7 @@ impl LanguageController {
                     .getNeighbourhoodLanguage()
                     .expressionAdapter
                     .putAdapter
-                    .createPublic({}) 
+                    .createPublic({})
             "#,
             neighbourhood_json,
         );
@@ -77,16 +77,17 @@ impl LanguageController {
 
     pub async fn language_by_address(address: Address) -> Result<bool, AnyError> {
         let script = format!(
-            r#"if(await core.languageController.languageByRef({{ address: {} }})) {{
-                return true
-            }} else {{
-                return false
-            }}
+            r#"
+            JSON.stringify(
+                await core.languageController.languageByRef({{ address: "{}" }})
             )"#,
             address,
         );
         let result: String = Self::global_instance().js_core.execute(script).await?;
-        let result: bool = serde_json::from_str(&result)?;
-        Ok(result)
+        let result = match serde_json::from_str::<LanguageRef>(&result) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false)
+        };
+        result
     }
 }
