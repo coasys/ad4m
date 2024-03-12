@@ -1,7 +1,8 @@
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use uuid::Uuid;
 
-use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState};
+use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState, Neighbourhood, Perspective};
 use crate::languages::LanguageController;
 use crate::perspectives::{add_perspective, all_perspectives, get_perspective, update_perspective};
 use crate::types::*;
@@ -54,7 +55,6 @@ pub async fn install_neighbourhood(
     let neighbourhood = neighbourhood_exp.unwrap();
     let mut state = PerspectiveState::NeighbourhoodJoinInitiated;
 
-
     state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone()).await? {
         PerspectiveState::LinkLanguageInstalledButNotSynced
     } else {
@@ -64,7 +64,7 @@ pub async fn install_neighbourhood(
     log::info!("Core.install_neighbourhood(): Creating perspective {}, {:?}, {:?}", url, neighbourhood, state);
 
     let handle = PerspectiveHandle {
-        uuid: "".to_string(),
+        uuid: Uuid::new_v4().to_string(),
         name: Some(url.clone()),
         shared_url: Some(url.clone()),
         neighbourhood: Some(neighbourhood),
