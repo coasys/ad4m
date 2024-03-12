@@ -35,8 +35,8 @@ pub struct VerifiedExpression<T: GraphQLValue + Serialize> {
 pub struct DecoratedExpressionProof {
     pub key: String,
     pub signature: String,
-    pub valid: bool,
-    pub invalid: bool,
+    pub valid: Option<bool>,
+    pub invalid: Option<bool>,
 }
 
 impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> {
@@ -53,8 +53,8 @@ impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> 
             proof: DecoratedExpressionProof {
                 key: expr.proof.key,
                 signature: expr.proof.signature,
-                valid,
-                invalid,
+                valid: Some(valid),
+                invalid: Some(invalid),
             },
         }
     }
@@ -80,7 +80,7 @@ impl From<LinkInput> for Link {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct LinkExpression {
     pub author: String,
     pub timestamp: String,

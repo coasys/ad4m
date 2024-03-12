@@ -1,9 +1,11 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::js_core::JsCoreHandle;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, NeighbourhoodExpression};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, ExpressionProof, Link};
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
+use deno_core::anyhow::anyhow;
+use deno_core::error::AnyError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Clone)]
@@ -230,6 +232,11 @@ pub struct LanguageRef {
     pub name: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Language {
+    pub name: String,
+}
+
 #[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
 pub enum LinkStatus {
     #[default]
@@ -328,6 +335,40 @@ pub struct OnlineAgent {
 #[serde(rename_all = "camelCase")]
 pub struct Perspective {
     pub links: Vec<DecoratedLinkExpression>,
+}
+
+impl From<PerspectiveInput> for Perspective {
+    fn from(input: PerspectiveInput) -> Self {
+        let links = input.links
+            .into_iter()
+            .map(|link: LinkExpressionInput| DecoratedLinkExpression::try_from(link))
+            .filter_map(Result::ok)
+            .collect();
+        Perspective { links }
+    }
+}
+
+impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
+    type Error = AnyError;
+    fn try_from(input: LinkExpressionInput) -> Result<Self, Self::Error> {
+        let data = Link {
+            predicate: input.data.predicate,
+            source: input.data.source,
+            target: input.data.target,
+        };
+        Ok(DecoratedLinkExpression {
+            author: input.author,
+            timestamp: input.timestamp,
+            data: data,
+            proof: DecoratedExpressionProof {
+                key: input.proof.key.ok_or(anyhow!("Key is required"))?,
+                signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
+                valid: input.proof.valid,
+                invalid: input.proof.invalid,
+            },
+            status: input.status,
+        })
+    }
 }
 
 

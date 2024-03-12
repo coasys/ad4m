@@ -93,7 +93,7 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     // link/5
     lines.push(":- discontiguous(triple/3).".to_string());
     lines.push(":- discontiguous(link/5).".to_string());
-    
+
     let links_without_sdna: Vec<_> = all_links.iter().filter(|l| !is_sdna_link(&l.data)).collect();
 
     for link in &links_without_sdna {
@@ -104,7 +104,7 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     }
 
     // reachable/2
-    lines.push(":- discontiguous(reachable/2).".to_string());  
+    lines.push(":- discontiguous(reachable/2).".to_string());
     lines.push("reachable(A,B) :- triple(A,_,B).".to_string());
     lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).".to_string());
 
@@ -131,7 +131,7 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     lines.push(":- discontiguous(property_resolve/2).".to_string());
     lines.push(":- discontiguous(property_resolve_language/3).".to_string());
     lines.push(":- discontiguous(property_named_option/4).".to_string());
-    
+
     lines.push(":- discontiguous(collection/2).".to_string());
     lines.push(":- discontiguous(collection_getter/4).".to_string());
     lines.push(":- discontiguous(collection_setter/3).".to_string());
@@ -167,9 +167,9 @@ takeN(_, 0, []).
 takeN([Item|Rest], N, [Item|PageRest]) :-
 N > 0,
 NextN is N - 1,
-takeN(Rest, NextN, PageRest).        
+takeN(Rest, NextN, PageRest).
     "#;
-    
+
     lines.extend(lib.split('\n').map(|s| s.to_string()));
 
     let mut author_agents = vec![agent::did()];
@@ -181,7 +181,7 @@ takeN(Rest, NextN, PageRest).
     for link_expression in all_links {
         let link = &link_expression.data;
 
-        if link_expression.proof.valid && author_agents.contains(&link_expression.author) {
+        if link_expression.proof.valid.unwrap_or(false) && author_agents.contains(&link_expression.author) {
             if is_sdna_link(link) {
                 let name = Literal::from_url(link.target.clone())?
                     .get()
