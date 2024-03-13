@@ -34,7 +34,7 @@ pub fn initialize_from_db() {
     }
 }
 
-pub async fn add_perspective(handle: PerspectiveHandle) -> Result<(), String> {
+pub async fn add_perspective(handle: PerspectiveHandle, created_from_join: Option<bool>) -> Result<(), String> {
     if PERSPECTIVES.read().unwrap().contains_key(&handle.uuid) {
         return Err(format!("Perspective with uuid {} already exists", &handle.uuid));
     }
@@ -47,7 +47,7 @@ pub async fn add_perspective(handle: PerspectiveHandle) -> Result<(), String> {
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
-    let p = PerspectiveInstance::new(handle.clone(), None);
+    let p = PerspectiveInstance::new(handle.clone(), created_from_join);
     tokio::spawn(p.clone().start_background_tasks());
 
     {
@@ -186,8 +186,8 @@ mod tests {
         let handle1 = PerspectiveHandle::new_from_name("Test Perspective 1".to_string());
         let handle2 = PerspectiveHandle::new_from_name("Test Perspective 2".to_string());
 
-        add_perspective(handle1.clone()).await.expect("Failed to add perspective");
-        add_perspective(handle2.clone()).await.expect("Failed to add perspective");
+        add_perspective(handle1.clone(), None).await.expect("Failed to add perspective");
+        add_perspective(handle2.clone(), None).await.expect("Failed to add perspective");
         // Test the get_all_perspectives function
         let perspectives = all_perspectives();
         

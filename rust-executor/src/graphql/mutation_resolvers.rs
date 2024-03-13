@@ -580,7 +580,7 @@ impl Mutation {
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)?;
         let handle = PerspectiveHandle::new_from_name(name.clone());
-        add_perspective(handle.clone()).await?;
+        add_perspective(handle.clone(), None).await?;
         Ok(handle)
     }
 

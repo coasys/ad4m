@@ -74,7 +74,7 @@ pub async fn install_neighbourhood(
         neighbourhood: Some(neighbourhood),
         state,
     };
-    add_perspective(handle.clone()).await.map_err(|e| anyhow!(e))?;
+    add_perspective(handle.clone(), Some(true)).await.map_err(|e| anyhow!(e))?;
 
     Ok(handle)
 }
