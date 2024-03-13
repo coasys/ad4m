@@ -723,7 +723,7 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        let mut handle = perspective.persisted.as_ref().clone();
+        let mut handle = perspective.persisted.lock().await.clone();
         handle.name = Some(name);
         update_perspective(&handle).await?;
         Ok(handle)

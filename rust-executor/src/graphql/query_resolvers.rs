@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 use deno_core::anyhow;
 use coasys_juniper::{graphql_object, FieldError, FieldResult};
+use futures::stream;
+use futures::stream::StreamExt;
 
 use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::{DecoratedLinkExpression }};
 
@@ -299,9 +301,11 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective(&uuid).map(|p| p.persisted.as_ref().clone());
-
-        Ok(perspective)
+        if let Some(p) = get_perspective(&uuid) {
+            Ok(Some(p.persisted.lock().await.clone()))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn perspective_query_links(
@@ -363,7 +367,13 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec!["*".into()]),
         )?;
-        Ok(all_perspectives().into_iter().map(|p| p.persisted.as_ref().clone()).collect())
+
+        let mut result = Vec::new();
+        for p in all_perspectives().iter() {
+            let handle = p.persisted.lock().await.clone();
+            result.push(handle);
+        }
+        Ok(result)
     }
 
     async fn runtime_friend_status(

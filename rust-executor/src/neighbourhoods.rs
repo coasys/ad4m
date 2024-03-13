@@ -29,7 +29,7 @@ pub async fn neighbourhood_publish_from_perspective(
         .await?
         .ok_or(anyhow!("Could not retrieve NeigbourhoodExpression which was just created. Problem with Neighbourhood language"))?;
 
-    let mut perspective_handle = perspective.persisted.as_ref().clone();
+    let mut perspective_handle = perspective.persisted.lock().await.clone();
     // Add shared perspective to original perspective and then update controller
     perspective_handle.shared_url = Some(neighbourhood_url.clone());
     perspective_handle.neighbourhood = Some(neighbourhood_exp);
@@ -42,8 +42,12 @@ pub async fn install_neighbourhood(
     url: String,
 ) -> Result<PerspectiveHandle, AnyError> {
     let perspectives = all_perspectives();
-    if perspectives.iter().any(|p| p.persisted.shared_url == Some(url.clone())) {
-        return Err(anyhow!("Neighbourhood with URL {} already installed", url));
+
+    for p in perspectives.iter() {
+        let handle = p.persisted.lock().await;
+        if handle.shared_url == Some(url.clone()) {
+            return Err(anyhow!("Neighbourhood with URL {} already installed", url));
+        }
     }
 
     let expression_ref = ExpressionRef::try_from(url.to_string())?;

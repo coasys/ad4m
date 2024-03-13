@@ -25,9 +25,11 @@ pub fn initialize_from_db() {
         .expect("Couldn't get perspectives from db");
     let mut perspectives = PERSPECTIVES.write().unwrap();
     for handle in handles {
+        let p = PerspectiveInstance::new(handle.clone(), None);
+        tokio::spawn(p.clone().start_background_tasks());
         perspectives.insert(
             handle.uuid.clone(), 
-            RwLock::new(PerspectiveInstance::new(handle, None))
+            RwLock::new(p)
         );
     }
 }
@@ -45,11 +47,14 @@ pub async fn add_perspective(handle: PerspectiveHandle) -> Result<(), String> {
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
+    let p = PerspectiveInstance::new(handle.clone(), None);
+    tokio::spawn(p.clone().start_background_tasks());
+
     {
         let mut perspectives = PERSPECTIVES.write().unwrap();
         perspectives.insert(
             handle.uuid.clone(), 
-            RwLock::new(PerspectiveInstance::new(handle.clone(), None))
+            RwLock::new(p)
         );
     }
     
@@ -82,17 +87,26 @@ pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
 pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String> {
     {
-        let perspectives = PERSPECTIVES.read().unwrap();
-        if let Some(instance_lock) = perspectives.get(&handle.uuid) {
-            let mut instance = instance_lock.write().unwrap();
-            instance.update_from_handle(handle.clone());
-            Ad4mDb::with_global_instance(|db| {
-                db.update_perspective(&handle)
-                    .map_err(|e| e.to_string())
-            })?;
-        } else {
-            return Err(format!("Perspective with uuid {} not found", &handle.uuid))
+        if PERSPECTIVES.read().unwrap().get(&handle.uuid).is_none() {
+            return Err(format!("Perspective with uuid {} not found", &handle.uuid));
         }
+
+        let instance = PERSPECTIVES
+            .read()
+            .unwrap()
+            .get(&handle.uuid)
+            .unwrap()
+            .read()
+            .unwrap()
+            .clone();
+
+        instance.update_from_handle(handle.clone()).await;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.update_perspective(&handle)
+                .map_err(|e| e.to_string())
+        })?;
+
     }
 
     get_global_pubsub()
@@ -145,11 +159,23 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
 
 #[cfg(test)]
 mod tests {
+    use tokio::runtime::Runtime;
+
     use super::*;
 
     fn setup() {
         //setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
+    }
+
+    async fn find_perspective_by_uuid(all_perspectives: &Vec<PerspectiveInstance>, uuid: &String) -> Option<PerspectiveInstance> {
+        for p in all_perspectives {
+            if p.persisted.lock().await.uuid == *uuid {
+                return Some(p.clone());
+            }
+        }
+
+        None
     }
 
     #[tokio::test]
@@ -167,11 +193,14 @@ mod tests {
         
         // Assert expected results
         assert_eq!(perspectives.len(), 2);
-        assert!(perspectives.iter().any(|p| p.persisted.uuid == handle1.uuid));
-        assert!(perspectives.iter().any(|p| p.persisted.uuid == handle2.uuid));
+
+        assert!(find_perspective_by_uuid(&perspectives, &handle1.uuid).await.is_some());
+        assert!(find_perspective_by_uuid(&perspectives, &handle2.uuid).await.is_some());
         
-        let p1 = perspectives.iter().find(|p| p.persisted.uuid == handle1.uuid).unwrap().clone();
-        assert_eq!(p1.persisted.name, Some("Test Perspective 1".to_string()));
+        let p1 = find_perspective_by_uuid(&perspectives, &handle1.uuid)
+            .await
+            .expect("Failed to find perspective by uuid");
+        assert_eq!(p1.persisted.lock().await.name, Some("Test Perspective 1".to_string()));
 
 
         let mut handle_updated = handle1.clone();
@@ -179,19 +208,21 @@ mod tests {
         update_perspective(&handle_updated).await.expect("Failed to update perspective");
 
         let p1_updated = get_perspective(&handle1.uuid).unwrap();
-        assert_eq!(p1_updated.persisted.name, Some("Test Perspective 1 Updated".to_string()));
+        assert_eq!(p1_updated.persisted.lock().await.name, Some("Test Perspective 1 Updated".to_string()));
 
         let perspectives = all_perspectives();
         assert_eq!(perspectives.len(), 2);
-        let p1_updated_from_all = perspectives.iter().find(|p| p.persisted.uuid == handle1.uuid).unwrap().clone();
-        assert_eq!(p1_updated_from_all.persisted.name, Some("Test Perspective 1 Updated".to_string()));
+        let p1_updated_from_all = find_perspective_by_uuid(&perspectives, &handle1.uuid)
+            .await
+            .expect("Failed to find perspective by uuid");
+        assert_eq!(p1_updated_from_all.persisted.lock().await.name, Some("Test Perspective 1 Updated".to_string()));
 
 
         // Clean up test perspectives
         remove_perspective(handle1.uuid.as_str()).await;
         let perspectives = all_perspectives();
         assert_eq!(perspectives.len(), 1);
-        assert!(perspectives.iter().any(|p| p.persisted.uuid == handle2.uuid));
+        assert!(find_perspective_by_uuid(&perspectives, &handle2.uuid).await.is_some());
     }
 
     // Additional tests for other functions can be added here
