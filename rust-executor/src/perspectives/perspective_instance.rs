@@ -230,6 +230,59 @@ impl PerspectiveInstance {
         Err(anyhow!("Cannot commit diff. Not yet synced with neighbourhood..."))
     }
 
+    pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
+        let handle = self.persisted.lock().await.clone();
+        if !diff.additions.is_empty() {
+            Ad4mDb::global_instance()
+                .lock()
+                .expect("Couldn't get write lock on Ad4mDb")
+                .as_ref()
+                .expect("Ad4mDb not initialized")
+                .add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
+                .expect("Failed to add many links");
+        }
+
+        if !diff.removals.is_empty() {
+            for link in &diff.removals {
+                Ad4mDb::global_instance()
+                    .lock()
+                    .expect("Couldn't get write lock on Ad4mDb")
+                    .as_ref()
+                    .expect("Ad4mDb not initialized")
+                    .remove_link(&handle.uuid, link)
+                    .expect("Failed to remove link");
+            }
+        }
+        self.set_prolog_rebuild_flag().await;
+
+
+        for link in &diff.additions {
+            get_global_pubsub()
+                .await
+                .publish(
+                    &PERSPECTIVE_LINK_ADDED_TOPIC,
+                    &serde_json::to_string(&PerspectiveLinkFilter {
+                        perspective: handle.clone(),
+                        link: DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)),
+                    }).unwrap(),
+                )
+                .await;
+        }
+        
+        for link in &diff.removals {
+            get_global_pubsub()
+                .await
+                .publish(
+                    &PERSPECTIVE_LINK_REMOVED_TOPIC,
+                    &serde_json::to_string(&PerspectiveLinkFilter {
+                        perspective: handle.clone(),
+                        link: DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)),
+                    }).unwrap(),
+                )
+                .await;
+        }
+    }
+
     pub async fn add_link(&mut self, link: Link, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expression = create_signed_expression(link)?;
         self.add_link_expression(link_expression.into(), status).await

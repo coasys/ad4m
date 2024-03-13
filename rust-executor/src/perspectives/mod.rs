@@ -144,16 +144,18 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     removed_instance
 }
 
-pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, language_address: String) {
+pub async fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, language_address: String) {
     let perspectives = PERSPECTIVES.read().unwrap();
-    perspectives.iter().for_each(|(_, perspective_lock)| {
+    for (_uuid, perspective_lock) in perspectives.iter() {
         let perspective = perspective_lock.read().unwrap();
-        //if perspective.language_address == language_address {
-            // Assuming there is a method to handle diff within a PerspectiveInstance that is now behind a lock
-            // perspective.handle_diff(diff.clone());
-            // Placeholder for actual handling logic
-        //}
-    });
+        let handle = perspective.persisted.lock().await.clone();
+
+        if let Some(nh) = handle.neighbourhood {
+            if nh.data.link_language == language_address {
+                perspective.diff_from_link_language(diff.clone()).await;
+            }
+        }   
+    }
 }
 
 
