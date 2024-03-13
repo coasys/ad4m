@@ -20,16 +20,18 @@ impl Language {
     pub async fn sync(&mut self) -> Result<(), AnyError> {
         let script = format!(
             r#"
-            JSON.stringify(
-                await core
-                    .languageController
-                    .languageByRef("{}")
-                    .getLinksAdapter()
-                    .sync() 
-            )
+                JSON.stringify(
+                    await core.languageController.languageByRef({{address:"{}"}}) 
+                    ? 
+                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.sync() 
+                    : 
+                    null
+                )
             "#,
             self.address,
+            self.address,
         );
+        println!("sync script: {}", script);
         let _result: String = self.js_core.execute(script).await?;
         Ok(())
     }
@@ -37,14 +39,15 @@ impl Language {
     pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<PerspectiveDiff>, AnyError> {
         let script = format!(
             r#"
-            JSON.stringify(
-                await core
-                    .languageController
-                    .languageByRef("{}")
-                    .getLinksAdapter()
-                    .commit({}) 
-            )
+                JSON.stringify(
+                    await core.languageController.languageByRef({{address:"{}"}}) 
+                    ? 
+                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.commit({}) 
+                    : 
+                    null
+                )
             "#,
+            self.address,
             self.address,
             serde_json::to_string(&diff)?,
         );
@@ -56,14 +59,15 @@ impl Language {
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
         let script = format!(
             r#"
-            JSON.stringify(
-                await core
-                    .languageController
-                    .languageByRef("{}")
-                    .getLinksAdapter()
-                    .currentRevision() 
-            )
+                JSON.stringify(
+                    await core.languageController.languageByRef({{address:"{}"}}) 
+                    ? 
+                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.currentRevision() 
+                    : 
+                    null
+                )
             "#,
+            self.address,
             self.address,
         );
         let result: String = self.js_core.execute(script).await?;

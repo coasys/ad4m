@@ -80,12 +80,8 @@ impl LanguageController {
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
         let script = format!(
             r#"
-            if(wait core.languageController.languageByRef({{ address: "{}" }})) {{
-                true
-            }} else {{
-                false
-            }}
-            )"#,
+            await core.languageController.languageByRef({{ address: "{}" }}) ? true : false
+            "#,
             address,
         );
         let result: String = Self::global_instance().js_core.execute(script).await?;
