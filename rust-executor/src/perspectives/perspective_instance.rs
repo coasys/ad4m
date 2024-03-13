@@ -78,41 +78,96 @@ impl PerspectiveInstance {
     }
 
     pub async fn start_background_tasks(self) {
-        join!(
+        let _ = join!(
             self.ensure_link_language(),
             self.nh_sync_loop(),
+            self.pending_diffs_loop(),
         );
     }
 
-    async fn ensure_link_language(&self) -> Result<(), AnyError> {
-        if self.link_language.lock().await.is_none() && self.persisted.lock().await.neighbourhood.is_some() {
-            let nh = self.persisted.lock().await.neighbourhood.as_ref().expect("must be some").clone();
+    async fn ensure_link_language(&self) {
+        let mut interval = time::interval(Duration::from_secs(5));
+        while !self.is_teardown {
+            interval.tick().await;
 
-            let mut link_language_guard = self.link_language.lock().await;
-            *link_language_guard = LanguageController::language_by_address(nh.data.link_language.clone()).await?;
+            if self.link_language.lock().await.is_none() && self.persisted.lock().await.neighbourhood.is_some() {
+                let nh = self.persisted.lock().await.neighbourhood.as_ref().expect("must be some").clone();
 
-            //match self.link_language {
-            //    Some(_) => self.persisted.state = PerspectiveState::LinkLanguageInstalledButNotSynced,
-            //    None => self.persisted.state = PerspectiveState::LinkLanguageFailedToInstall,
-            //}
+                match  LanguageController::language_by_address(nh.data.link_language.clone()).await {
+                    Ok(Some(language)) => {
+                        let mut link_language_guard = self.link_language.lock().await;
+                        *link_language_guard = Some(language);
+                        self.update_perspective_state_log_error(PerspectiveState::LinkLanguageInstalledButNotSynced).await;
+                        break;
+                    },
+                    Ok(None) => {
+                        log::debug!("Link language {} not installed yet, retrying in 5 seconds", nh.data.link_language.clone());
+                        self.update_perspective_state_log_error(PerspectiveState::LinkLanguageFailedToInstall).await;
+                    },
+                    Err(e) => {
+                        log::error!("Error when calling language_by_address: {:?}", e);
+                        self.update_perspective_state_log_error(PerspectiveState::LinkLanguageFailedToInstall).await;
+                    }
+                }
+            }
         }
-
-        Ok(())
     }
 
-    pub async fn nh_sync_loop(&self) {
+    async fn nh_sync_loop(&self) {
         let mut interval = time::interval(Duration::from_secs(3));
-        loop {
+        while !self.is_teardown {
             interval.tick().await;
+
             let mut link_language_guard = self.link_language.lock().await;
-
             if let Some(link_language) = link_language_guard.as_mut() {
-                link_language.sync().await;
+                match link_language.sync().await {
+                    Ok(_) => {
+                        self.update_perspective_state(PerspectiveState::Synced).await.unwrap();
+                        break;
+                    },
+                    Err(e) => {
+                        log::error!("Error calling sync on link language: {:?}", e);
+                        self.update_perspective_state(PerspectiveState::LinkLanguageInstalledButNotSynced).await.unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    async fn pending_diffs_loop(&self) {
+        let mut interval = time::interval(Duration::from_secs(10));
+        let uuid = self.persisted.lock().await.uuid.clone();
+        while !self.is_teardown {
+            interval.tick().await;
+
+            if let Err(e) = (|| async {
+                let mut link_language_guard = self.link_language.lock().await;
+                if let Some(link_language) = link_language_guard.as_mut() {
+                    // We have a link language.
+                    // Let's see if we have a revision yet (otherwise we're not synced yet and should keep our diffs pending)
+                    if link_language.current_revision().await?.is_some() {
+                        // Ok, we are synced and have a revision. Let's commit our pending diffs.
+                        let pending_diffs = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid))?;
+                        let commit_result = link_language.commit(pending_diffs).await;
+                        return match commit_result {
+                            Ok(Some(_)) => {
+                                Ad4mDb::with_global_instance(|db| db.clear_pending_diffs(&uuid))?;
+                                Ok(())
+                            },
+                            Ok(None) => {
+                                Err(anyhow!("Error committing pending diffs. No diff returned."))
+                            },
+                            Err(e) => {
+                                Err(anyhow!("Error committing pending diffs: {:?}", e))
+                            }
+                        }
+                    }
+                }
+                Ok(())  
+            })().await {
+                log::error!("Error in pending_diffs_loop: {:?}", e);
             }
 
-            if self.is_teardown {
-                break;
-            }
         }
     }
 
@@ -137,13 +192,42 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    async fn update_perspective_state_log_error(&self, state: PerspectiveState) {
+        if let Err(e) = self.update_perspective_state(state).await {
+            log::error!("Error updating perspective state: {:?}", e);
+        }
+    }
+
 
     pub async fn update_from_handle(&self, handle: PerspectiveHandle) {
         *self.persisted.lock().await = handle;
     }
 
-    pub async fn commit(&self, _diff: &PerspectiveDiff) -> Result<(), AnyError> {
-        Err(AnyError::msg("Not implemented"))
+    pub async fn commit(&self, _diff: &PerspectiveDiff) -> Result<Option<PerspectiveDiff>, AnyError> {
+        let handle = self.persisted.lock().await.clone();
+        if handle.neighbourhood.is_none() {
+            return Ok(None)
+        }
+
+
+        let mut can_commit = false;
+        if !self.created_from_join {
+            can_commit = true;
+        } else {
+            if let Some(link_language) = self.link_language.lock().await.as_mut() {
+                if link_language.current_revision().await?.is_some() {
+                    can_commit = true;
+                }
+            }
+        };
+
+        if can_commit {
+            if let Some(link_language) = self.link_language.lock().await.as_mut() {
+                return Ok(link_language.commit(_diff.clone()).await?);
+            }
+        }
+
+        Err(anyhow!("Cannot commit diff. Not yet synced with neighbourhood..."))
     }
 
     pub async fn add_link(&mut self, link: Link, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {

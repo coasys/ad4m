@@ -1,7 +1,9 @@
+use deno_core::error::AnyError;
 use serde_json::Value;
 
-use crate::js_core::{self, JsCoreHandle};
+use crate::{js_core::{self, JsCoreHandle}, types::PerspectiveDiff};
 
+#[derive(Clone)]
 pub struct Language {
     address: String,
     js_core: JsCoreHandle,
@@ -15,21 +17,7 @@ impl Language {
         }
     }
 
-    pub async fn create_public(&self, data: Value) -> Result<String, AnyError> {
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeAddKnownLinkLanguageTemplates",
-                {{ addresses: {} }},
-            ))"#,
-            addresses_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-    }
-
-    pub async fn sync() -> Result<(), AnyError> {
+    pub async fn sync(&mut self) -> Result<(), AnyError> {
         let script = format!(
             r#"
             JSON.stringify(
@@ -40,13 +28,13 @@ impl Language {
                     .sync() 
             )
             "#,
-            address,
+            self.address,
         );
-        let _result: String = Self::global_instance().js_core.execute(script).await?;
-        Ok()
+        let _result: String = self.js_core.execute(script).await?;
+        Ok(())
     }
 
-    pub async fn commit(diff: PerspectiveDiff) -> Result<(), AnyError> {
+    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<PerspectiveDiff>, AnyError> {
         let script = format!(
             r#"
             JSON.stringify(
@@ -57,14 +45,15 @@ impl Language {
                     .commit({}) 
             )
             "#,
-            address,
+            self.address,
             serde_json::to_string(&diff)?,
         );
-        let _result: String = Self::global_instance().js_core.execute(script).await?;
-        Ok()
+        let result: String = self.js_core.execute(script).await?;
+        let diff: Option<PerspectiveDiff> = serde_json::from_str(&result)?;
+        Ok(diff)
     }
 
-    pub async fn currentRevision() -> Result<String, AnyError> {
+    pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
         let script = format!(
             r#"
             JSON.stringify(
@@ -75,9 +64,10 @@ impl Language {
                     .currentRevision() 
             )
             "#,
-            address,
+            self.address,
         );
-        let result: String = Self::global_instance().js_core.execute(script).await?;
-        Ok(result)
+        let result: String = self.js_core.execute(script).await?;
+        let maybe_revision = serde_json::from_str(&result)?;
+        Ok(maybe_revision)
     }
 }

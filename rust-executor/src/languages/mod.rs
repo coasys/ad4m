@@ -1,10 +1,11 @@
-//pub mod language;
+pub mod language;
 
 use std::sync::{Arc, Mutex};
 use deno_core::error::AnyError;
 
-use crate::{graphql::graphql_types::{DecoratedNeighbourhoodExpression, Language, LanguageHandle, LanguageRef, Neighbourhood}, js_core::JsCoreHandle, types::NeighbourhoodExpression};
+use crate::{graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood}, js_core::JsCoreHandle, types::NeighbourhoodExpression};
 use crate::types::Address;
+use language::Language;
 
 lazy_static! {
     static ref LANGUAGE_CONTROLLER_INSTANCE: Arc<Mutex<Option<LanguageController>>> = Arc::new(Mutex::new(None));
@@ -76,19 +77,24 @@ impl LanguageController {
         Ok(neighbourhood)
     }
 
-    pub async fn language_by_address(address: Address) -> Result<bool, AnyError> {
+    pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
         let script = format!(
             r#"
-            JSON.stringify(
-                await core.languageController.languageByRef({{ address: "{}" }})
+            if(wait core.languageController.languageByRef({{ address: "{}" }})) {{
+                true
+            }} else {{
+                false
+            }}
             )"#,
             address,
         );
         let result: String = Self::global_instance().js_core.execute(script).await?;
-        let result = match serde_json::from_str::<Language>(&result) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false)
-        };
-        result
+        let language_installed = serde_json::from_str::<bool>(&result)?;
+        if language_installed {
+            let language = Language::new(address, Self::global_instance().js_core.clone());
+            Ok(Some(language))
+        } else {
+            Ok(None)
+        }
     }
 }
