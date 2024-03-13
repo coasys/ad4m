@@ -83,7 +83,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 const snapshot = await create.snapshot();
                 expect(snapshot.links.length).to.equal(0);
             })
-            
+
             it('can make mutations using perspective addLinks(), removeLinks() & linkMutations()', async () => {
                 const ad4mClient = testContext.ad4mClient!;
 
@@ -115,7 +115,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(linksPostRemove.length).to.equal(0);
 
                 const addTwoMore = await create.addLinks(links);
-                
+
                 const linkMutation = {
                     additions: links,
                     removals: addTwoMore
@@ -174,7 +174,7 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 //Test can get only the first link
                 let queryLinksFirst = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({
-                    source: "lang://test", fromDate: new Date(addLink.timestamp), 
+                    source: "lang://test", fromDate: new Date(addLink.timestamp),
                     untilDate: new Date(new Date(addLink2.timestamp).getTime() - 1)
                 }));
                 expect(queryLinksFirst.length).to.equal(1);
@@ -211,7 +211,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(perspectiveSnaphot!.links.length).to.equal(1);
 
                 //Update the link to new link
-                const updateLink = await ad4mClient.perspective.updateLink(create.uuid, addLink, 
+                const updateLink = await ad4mClient.perspective.updateLink(create.uuid, addLink,
                     new Link({source: "lang://test2", target: "lang://test-target2", predicate: "lang://predicate2"}));
                 expect(updateLink.data.target).to.equal("lang://test-target2");
                 expect(updateLink.data.source).to.equal("lang://test2");
@@ -273,9 +273,11 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(linkUpdated.calledOnce).to.be.true;
                 expect(linkUpdated.getCall(0).args[0].newLink).to.eql(updatedLinkExpression)
 
+                const copiedUpdatedLinkExpression = {...updatedLinkExpression}
+
                 await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
                 expect(linkRemoved.calledOnce).to.be.true;
-                expect(linkRemoved.getCall(0).args[0]).to.eql(updatedLinkExpression)
+                expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
             })
 
             it('can run Prolog queries', async () => {
@@ -318,10 +320,10 @@ export default function perspectiveTests(testContext: TestContext) {
             it('can do link CRUD', async () => {
                 const all = new LinkQuery({})
                 const testLink = new Link({
-                    source: 'test://source', 
-                    predicate: 'test://predicate', 
+                    source: 'test://source',
+                    predicate: 'test://predicate',
                     target: 'test://target'
-                }) 
+                })
 
                 expect(await proxy.get(all)).to.eql([])
 
@@ -379,7 +381,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(result2.target).to.equal(link2.target)
                 expect(await proxy.getSingleTarget(new LinkQuery(link1))).to.equal('target2')
             })
-            
+
         })
     }
 }
