@@ -144,17 +144,32 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     removed_instance
 }
 
-pub async fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, language_address: String) {
-    let perspectives = PERSPECTIVES.read().unwrap();
-    for (_uuid, perspective_lock) in perspectives.iter() {
-        let perspective = perspective_lock.read().unwrap();
+pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, language_address: String) {
+    tokio::spawn(handle_perspective_diff_from_link_language_impl(diff, language_address));
+}
+
+async fn perspective_by_link_language(language_address: String) -> Option<PerspectiveInstance> {
+    let perspectives = PERSPECTIVES
+        .read()
+        .unwrap()
+        .values()
+        .map(|lock| lock.read().unwrap().clone())
+        .collect::<Vec<_>>();
+    for perspective in perspectives.into_iter() {
         let handle = perspective.persisted.lock().await.clone();
 
         if let Some(nh) = handle.neighbourhood {
             if nh.data.link_language == language_address {
-                perspective.diff_from_link_language(diff.clone()).await;
+                return Some(perspective);
             }
         }   
+    }
+    None
+}
+
+pub async fn handle_perspective_diff_from_link_language_impl(diff: PerspectiveDiff, language_address: String) {
+    if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
+        perspective.diff_from_link_language(diff).await;
     }
 }
 

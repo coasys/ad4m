@@ -199,18 +199,21 @@ export default class LanguageController {
     }
 
     callLinkObservers(diff: PerspectiveDiff, ref: LanguageRef) {
+        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, ref)
         this.#linkObservers.forEach(o => {
             o(diff, ref)
         })
     }
 
     callSyncStateChangeObservers(syncState: PerspectiveState, ref: LanguageRef) {
+        LANGUAGE_CONTROLLER.syncStateChanged(syncState, ref)
         this.#syncStateChangeObservers.forEach(o => {
             o(syncState, ref)
         })
     }
 
     callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
+        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, ref)
         this.#telepresenceSignalObservers.forEach(o => {
             o(signal, ref)
         })
