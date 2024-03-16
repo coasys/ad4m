@@ -385,6 +385,7 @@ pub struct PerspectiveExpression {
 pub enum PerspectiveState {
     #[default]
     Private,
+    NeighbourhoodCreationInitiated,
     NeighbourhoodJoinInitiated,
     LinkLanguageFailedToInstall,
     LinkLanguageInstalledButNotSynced,

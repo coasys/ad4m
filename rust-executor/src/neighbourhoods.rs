@@ -33,7 +33,7 @@ pub async fn neighbourhood_publish_from_perspective(
     // Add shared perspective to original perspective and then update controller
     perspective_handle.shared_url = Some(neighbourhood_url.clone());
     perspective_handle.neighbourhood = Some(neighbourhood_exp);
-    perspective_handle.state = PerspectiveState::Synced;
+    perspective_handle.state = PerspectiveState::NeighbourhoodCreationInitiated;
     update_perspective(&perspective_handle).await.map_err(|e| anyhow!(e))?;
     Ok(neighbourhood_url)
 }
