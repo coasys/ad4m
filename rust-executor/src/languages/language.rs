@@ -36,7 +36,7 @@ impl Language {
         Ok(())
     }
 
-    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<PerspectiveDiff>, AnyError> {
+    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -52,8 +52,8 @@ impl Language {
             serde_json::to_string(&diff)?,
         );
         let result: String = self.js_core.execute(script).await?;
-        let diff: Option<PerspectiveDiff> = serde_json::from_str(&result)?;
-        Ok(diff)
+        let rev: Option<String> = serde_json::from_str(&result)?;
+        Ok(rev)
     }
 
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {

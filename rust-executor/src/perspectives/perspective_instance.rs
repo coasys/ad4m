@@ -95,8 +95,13 @@ impl PerspectiveInstance {
 
                 match  LanguageController::language_by_address(nh.data.link_language.clone()).await {
                     Ok(Some(language)) => {
-                        let mut link_language_guard = self.link_language.lock().await;
-                        *link_language_guard = Some(language);
+                        {
+                            let mut link_language_guard = self.link_language.lock().await;
+                            *link_language_guard = Some(language);
+                        }
+                        if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
+                            self.ensure_public_links_are_shared().await;
+                        }
                         self.update_perspective_state_log_error(PerspectiveState::LinkLanguageInstalledButNotSynced).await;
                         break;
                     },
@@ -171,6 +176,56 @@ impl PerspectiveInstance {
         }
     }
 
+    async fn ensure_public_links_are_shared(&self) {
+        println!("ensure_public_links_are_shared");
+        let uuid = self.persisted.lock().await.uuid.clone();
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            let mut local_links = Ad4mDb::with_global_instance(|db| 
+                db.get_all_links(&uuid)
+            ).unwrap();
+
+            local_links.retain(|(_, status)| status == &LinkStatus::Shared);
+            
+            println!("ensure_public_links_are_shared calling render...");
+            let remote_links = link_language.render()
+                .await
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .links;
+
+            println!("ensure_public_links_are_shared got remote_links: {:?}", remote_links);
+
+            let mut links_to_commit = Vec::new();
+            for (local_link, _) in &local_links {
+                if !remote_links.iter().any(|e| 
+                    e.author == local_link.author &&
+                    e.timestamp == local_link.timestamp &&
+                    e.data.source == local_link.data.source &&
+                    e.data.target == local_link.data.target &&
+                    e.data.predicate == local_link.data.predicate
+                ) {
+                    links_to_commit.push(local_link.clone());
+                }
+            }
+
+            println!("ensure_public_links_are_shared links_to_commit: {:?}", links_to_commit);
+
+            if !links_to_commit.is_empty() {
+                let result = link_language.commit(PerspectiveDiff {
+                    additions: links_to_commit,
+                    removals: vec![],
+                }).await;
+
+                if let Err(e) = result {
+                    log::error!("Error calling link language's commit in ensure_public_links_are_shared: {:?}", e);
+                }
+            }
+
+            //Ad4mDb::with_global_instance(|db| db.add_many_links(&self.persisted.lock().await.uuid, &remote_links)).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
+        }
+    }
+
     async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
         if self.persisted.lock().await.state != state {
             let mut handle = self.persisted.lock().await.clone();
@@ -203,7 +258,7 @@ impl PerspectiveInstance {
         *self.persisted.lock().await = handle;
     }
 
-    pub async fn commit(&self, _diff: &PerspectiveDiff) -> Result<Option<PerspectiveDiff>, AnyError> {
+    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<Option<String>, AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
             return Ok(None)
@@ -223,7 +278,7 @@ impl PerspectiveInstance {
 
         if can_commit {
             if let Some(link_language) = self.link_language.lock().await.as_mut() {
-                return Ok(link_language.commit(_diff.clone()).await?);
+                return Ok(link_language.commit(diff.clone()).await?);
             }
         }
 
