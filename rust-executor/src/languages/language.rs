@@ -31,7 +31,6 @@ impl Language {
             self.address,
             self.address,
         );
-        println!("sync script: {}", script);
         let _result: String = self.js_core.execute(script).await?;
         Ok(())
     }
