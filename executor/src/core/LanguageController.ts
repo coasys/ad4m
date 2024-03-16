@@ -199,21 +199,21 @@ export default class LanguageController {
     }
 
     callLinkObservers(diff: PerspectiveDiff, ref: LanguageRef) {
-        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, ref)
+        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, ref.address)
         this.#linkObservers.forEach(o => {
             o(diff, ref)
         })
     }
 
     callSyncStateChangeObservers(syncState: PerspectiveState, ref: LanguageRef) {
-        LANGUAGE_CONTROLLER.syncStateChanged(syncState, ref)
+        LANGUAGE_CONTROLLER.syncStateChanged(syncState, ref.address)
         this.#syncStateChangeObservers.forEach(o => {
             o(syncState, ref)
         })
     }
 
     callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
-        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, ref)
+        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, ref.address)
         this.#telepresenceSignalObservers.forEach(o => {
             o(signal, ref)
         })
@@ -272,6 +272,7 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
+                console.log("LINKS CALLBACK", diff)
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
 

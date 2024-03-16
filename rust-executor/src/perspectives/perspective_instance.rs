@@ -128,7 +128,6 @@ impl PerspectiveInstance {
                 match link_language.sync().await {
                     Ok(_) => {
                         self.update_perspective_state(PerspectiveState::Synced).await.unwrap();
-                        break;
                     },
                     Err(e) => {
                         log::error!("Error calling sync on link language: {:?}", e);
