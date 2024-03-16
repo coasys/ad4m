@@ -192,7 +192,7 @@ impl From<DecoratedLinkExpression> for LinkExpression {
 }
 
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
