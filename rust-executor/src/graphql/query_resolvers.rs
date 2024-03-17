@@ -254,13 +254,12 @@ impl Query {
         context: &RequestContext,
         perspectiveUUID: String,
     ) -> FieldResult<bool> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodHasTelepresenceAdapter", {{ perspectiveUUID: "{}" }},))"#, perspectiveUUID))
-            .await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .has_telepresence_adapter() 
+            .await)
     }
 
     async fn neighbourhood_online_agents(
@@ -268,13 +267,13 @@ impl Query {
         context: &RequestContext,
         perspectiveUUID: String,
     ) -> FieldResult<Vec<OnlineAgent>> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOnlineAgents", {{ perspectiveUUID: "{}" }}))"#, perspectiveUUID))
-            .await?;
-        let result: JsResultType<Vec<OnlineAgent>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .online_agents() 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))
     }
 
     async fn neighbourhood_other_agents(
@@ -282,13 +281,13 @@ impl Query {
         context: &RequestContext,
         perspectiveUUID: String,
     ) -> FieldResult<Vec<String>> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOtherAgents", {{ perspectiveUUID: "{}" }}))"#, perspectiveUUID))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .others() 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))
     }
 
     async fn perspective(

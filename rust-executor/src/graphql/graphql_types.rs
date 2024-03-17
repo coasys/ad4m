@@ -1,6 +1,6 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::js_core::JsCoreHandle;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, ExpressionProof, Link};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link};
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -379,6 +379,22 @@ pub struct PerspectiveExpression {
     pub data: Perspective,
     pub proof: DecoratedExpressionProof,
     pub timestamp: String,
+}
+
+impl From<Expression<Perspective>> for PerspectiveExpression {
+    fn from(expr: Expression<Perspective>) -> Self {
+        PerspectiveExpression {
+            author: expr.author,
+            data: expr.data,
+            proof: DecoratedExpressionProof {
+                key: expr.proof.key,
+                signature: expr.proof.signature,
+                valid: None,
+                invalid: None,
+            },
+            timestamp: expr.timestamp,
+        }
+    }
 }
 
 #[derive(GraphQLEnum, Serialize, Deserialize, Debug, Default, Clone, PartialEq)]

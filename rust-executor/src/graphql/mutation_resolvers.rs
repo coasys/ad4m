@@ -1,4 +1,4 @@
-use crate::{neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, LinkExpression, PerspectiveDiff}};
+use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression, PerspectiveDiff}};
 use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
 
 use super::graphql_types::*;
@@ -439,21 +439,16 @@ impl Mutation {
         payload: PerspectiveInput,
         perspectiveUUID: String,
     ) -> FieldResult<bool> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let payload_json = serde_json::to_string(&payload)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "neighbourhoodSendBroadcast",
-                {{ payload: {}, perspectiveUUID: "{}" }},
-            ))"#,
-            payload_json, perspectiveUUID
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let perspective = Perspective::from(payload);
+        let perspective = create_signed_expression(perspective)?;
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .send_broadcast(perspective.into()) 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))?;
+        Ok(true)
     }
 
     async fn neighbourhood_send_broadcast_u(
@@ -462,21 +457,25 @@ impl Mutation {
         payload: PerspectiveUnsignedInput,
         perspectiveUUID: String,
     ) -> FieldResult<bool> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let payload_json = serde_json::to_string(&payload)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "neighbourhoodSendBroadcastU",
-                {{ payload: {}, perspectiveUUID: "{}" }},
-            ))"#,
-            payload_json, perspectiveUUID
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let perspective = Perspective {
+            links: payload.links
+            .into_iter()
+            .map(|l| Link::from(l))
+            .map(|l| create_signed_expression(l)) 
+            .filter_map(Result::ok)
+            .map(|l| LinkExpression::from(l))
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .collect::<Vec<DecoratedLinkExpression>>()
+        }; 
+        let perspective = create_signed_expression(perspective)?;
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .send_broadcast(perspective.into()) 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))?;
+        Ok(true)
     }
 
     async fn neighbourhood_send_signal(
@@ -486,21 +485,16 @@ impl Mutation {
         perspectiveUUID: String,
         remote_agent_did: String,
     ) -> FieldResult<bool> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let payload_json = serde_json::to_string(&payload)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "neighbourhoodSendSignal",
-                {{ payload: {}, perspectiveUUID: "{}", remoteAgentDid: "{}" }},
-            ))"#,
-            payload_json, perspectiveUUID, remote_agent_did
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let perspective = Perspective::from(payload);
+        let perspective = create_signed_expression(perspective)?;
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .send_signal(remote_agent_did, perspective.into()) 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))?;
+        Ok(true)
     }
 
     async fn neighbourhood_send_signal_u(
@@ -510,21 +504,25 @@ impl Mutation {
         perspectiveUUID: String,
         remote_agent_did: String,
     ) -> FieldResult<bool> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let payload_json = serde_json::to_string(&payload)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "neighbourhoodSendSignalU",
-                {{ payload: {}, perspectiveUUID: "{}", remoteAgentDID: "{}" }},
-            ))"#,
-            payload_json, perspectiveUUID, remote_agent_did
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let perspective = Perspective {
+            links: payload.links
+            .into_iter()
+            .map(|l| Link::from(l))
+            .map(|l| create_signed_expression(l)) 
+            .filter_map(Result::ok)
+            .map(|l| LinkExpression::from(l))
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .collect::<Vec<DecoratedLinkExpression>>()
+        }; 
+        let perspective = create_signed_expression(perspective)?;
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .send_signal(remote_agent_did, perspective.into()) 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))?;
+        Ok(true)
     }
 
     async fn neighbourhood_set_online_status(
@@ -533,21 +531,16 @@ impl Mutation {
         perspectiveUUID: String,
         status: PerspectiveInput,
     ) -> FieldResult<bool> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let status_json = serde_json::to_string(&status)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "neighbourhoodSetOnlineStatus",
-                {{ perspectiveUUID: "{}", status: {} }},
-            ))"#,
-            perspectiveUUID, status_json
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let perspective = Perspective::from(status);
+        let perspective = create_signed_expression(perspective)?;
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .set_online_status(perspective.into()) 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))?;
+        Ok(true)
     }
 
     async fn neighbourhood_set_online_status_u(
@@ -556,21 +549,25 @@ impl Mutation {
         perspectiveUUID: String,
         status: PerspectiveUnsignedInput,
     ) -> FieldResult<bool> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let status_json = serde_json::to_string(&status)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "neighbourhoodSetOnlineStatusU",
-                {{ perspectiveUUID: "{}", status: {} }},
-            ))"#,
-            perspectiveUUID, status_json
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let perspective = Perspective {
+            links: status.links
+            .into_iter()
+            .map(|l| Link::from(l))
+            .map(|l| create_signed_expression(l)) 
+            .filter_map(Result::ok)
+            .map(|l| LinkExpression::from(l))
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .collect::<Vec<DecoratedLinkExpression>>()
+        }; 
+        let perspective = create_signed_expression(perspective)?;
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .set_online_status(perspective.into()) 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))?;
+        Ok(true)
     }
 
     async fn perspective_add(
