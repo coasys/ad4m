@@ -4,21 +4,10 @@ import type Ad4mCore from '../Ad4mCore'
 import * as PubSubDefinitions from './SubscriptionDefinitions'
 import { ad4mExecutorVersion } from '../Config';
 import { OuterConfig } from '../../main';
-import Perspective from '../Perspective';
 import { getPubSub, tagExpressionSignatureStatus } from '../utils';
 
-function checkLinkLanguageInstalled(perspective: Perspective) {
-    if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {  
-        throw new Error(`Perspective ${perspective.uuid}/${perspective.name} does not have a LinkLanguage installed. State is: ${perspective.state}`) 
-    }
-}
 
 export function createResolvers(core: Ad4mCore, config: OuterConfig) {
-    function signPerspectiveDeep(input: PerspectiveUnsignedInput): PerspectiveExpression {
-        let out = new PerspectiveExpression()
-        out.links = input.links.map(l => AGENT.createSignedExpression(l))
-        return AGENT.createSignedExpression(out)
-    }
 
     return {
         Query: {
