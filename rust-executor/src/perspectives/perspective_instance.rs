@@ -8,7 +8,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Serialize, Deserialize};
 use crate::agent::create_signed_expression;
-use crate::languages::language::Language;
+use crate::languages::language::{Hash, Language};
 use crate::languages::LanguageController;
 use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC};
@@ -257,7 +257,7 @@ impl PerspectiveInstance {
         *self.persisted.lock().await = handle;
     }
 
-    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<Option<String>, AnyError> {
+    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<Option<Hash>, AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
             return Ok(None)

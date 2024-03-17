@@ -1,5 +1,7 @@
 use deno_core::error::AnyError;
 use serde_json::Value;
+use holochain_types::dna::{hash_type, HoloHash};
+pub type Hash = HoloHash<hash_type::Action>;
 
 use crate::{js_core::{self, JsCoreHandle}, types::{Perspective, PerspectiveDiff}};
 
@@ -35,7 +37,7 @@ impl Language {
         Ok(())
     }
 
-    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
+    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<Hash>, AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -51,7 +53,7 @@ impl Language {
             serde_json::to_string(&diff)?,
         );
         let result: String = self.js_core.execute(script).await?;
-        let rev: Option<String> = serde_json::from_str(&result)?;
+        let rev: Option<Hash> = serde_json::from_str(&result)?;
         Ok(rev)
     }
 
