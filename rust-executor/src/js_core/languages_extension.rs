@@ -19,7 +19,7 @@ fn sync_state_changed(
     #[serde] state: PerspectiveState, 
     #[string] language_address: String
 )  {
-    //crate::perspectives::handle_sync_state_changed_from_link_language(diff, language_address);
+    crate::perspectives::handle_sync_state_changed_from_link_language(state, language_address);
 }
 
 
@@ -29,7 +29,7 @@ fn telepresence_signal_received(
     #[serde] signal: PerspectiveExpression,
     #[string] language_address: String
 ) {
-    //crate::perspectives::handle_signal_from_neighbourhood(signal, language_address);
+    crate::perspectives::handle_telepresence_signal_from_link_language(signal, language_address);
 }
 
 

@@ -5,7 +5,7 @@ use std::sync::{RwLock, RwLockWriteGuard};
 use std::collections::HashMap;
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
-use crate::graphql::graphql_types::PerspectiveHandle;
+use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState, PerspectiveExpression};
 
 use crate::db::Ad4mDb;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC};
@@ -170,6 +170,29 @@ async fn perspective_by_link_language(language_address: String) -> Option<Perspe
 pub async fn handle_perspective_diff_from_link_language_impl(diff: PerspectiveDiff, language_address: String) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
         perspective.diff_from_link_language(diff).await;
+    }
+}
+
+pub fn handle_sync_state_changed_from_link_language(state: PerspectiveState, language_address: String) {
+    tokio::spawn(handle_sync_state_changed_from_link_language_impl(state, language_address));
+}
+
+pub async fn handle_sync_state_changed_from_link_language_impl(state: PerspectiveState, language_address: String) {
+    if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
+        match perspective.update_perspective_state(state).await {
+            Ok(_) => (),
+            Err(e) => log::error!("Error updating perspective state from link language: {}", e)
+        }
+    }
+}
+
+pub fn handle_telepresence_signal_from_link_language(signal: PerspectiveExpression, language_address: String) {
+    tokio::spawn(handle_telepresence_signal_from_link_language_impl(signal, language_address));
+}
+
+pub async fn handle_telepresence_signal_from_link_language_impl(signal: PerspectiveExpression, language_address: String) {
+    if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
+        perspective.telepresence_signal_from_link_language(signal).await;
     }
 }
 

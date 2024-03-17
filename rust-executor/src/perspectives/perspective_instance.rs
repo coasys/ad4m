@@ -11,9 +11,9 @@ use crate::agent::create_signed_expression;
 use crate::languages::language::{Hash, Language};
 use crate::languages::LanguageController;
 use crate::prolog_service::engine::PrologEngine;
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC};
+use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC};
 use crate::{db::Ad4mDb, types::*};
-use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
+use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
 use super::sdna::init_engine_facts;
 use super::update_perspective;
 use super::utils::prolog_resolution_to_string;
@@ -225,7 +225,7 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
+    pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
         if self.persisted.lock().await.state != state {
             let mut handle = self.persisted.lock().await.clone();
             handle.state = state.clone();
@@ -335,6 +335,21 @@ impl PerspectiveInstance {
                 )
                 .await;
         }
+    }
+
+    pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
+        signal.verify_signatures();
+        let handle = self.persisted.lock().await.clone();
+        get_global_pubsub()
+            .await
+            .publish(
+                &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective: handle,
+                    signal,
+                }).unwrap(),
+            )
+            .await;
     }
 
     pub async fn add_link(&mut self, link: Link, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
