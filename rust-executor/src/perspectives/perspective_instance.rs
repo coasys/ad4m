@@ -88,8 +88,6 @@ impl PerspectiveInstance {
     async fn ensure_link_language(&self) {
         let mut interval = time::interval(Duration::from_secs(5));
         while !self.is_teardown {
-            interval.tick().await;
-
             if self.link_language.lock().await.is_none() && self.persisted.lock().await.neighbourhood.is_some() {
                 let nh = self.persisted.lock().await.neighbourhood.as_ref().expect("must be some").clone();
 
@@ -115,14 +113,13 @@ impl PerspectiveInstance {
                     }
                 }
             }
+            interval.tick().await;
         }
     }
 
     async fn nh_sync_loop(&self) {
         let mut interval = time::interval(Duration::from_secs(3));
         while !self.is_teardown {
-            interval.tick().await;
-
             let mut link_language_guard = self.link_language.lock().await;
             if let Some(link_language) = link_language_guard.as_mut() {
                 match link_language.sync().await {
@@ -133,6 +130,7 @@ impl PerspectiveInstance {
                     }
                 }
             }
+            interval.tick().await;
         }
     }
 
@@ -140,8 +138,6 @@ impl PerspectiveInstance {
         let mut interval = time::interval(Duration::from_secs(10));
         let uuid = self.persisted.lock().await.uuid.clone();
         while !self.is_teardown {
-            interval.tick().await;
-
             if let Err(e) = (|| async {
                 let mut link_language_guard = self.link_language.lock().await;
                 if let Some(link_language) = link_language_guard.as_mut() {
@@ -169,7 +165,7 @@ impl PerspectiveInstance {
             })().await {
                 log::error!("Error in pending_diffs_loop: {:?}", e);
             }
-
+            interval.tick().await;
         }
     }
 
