@@ -58,7 +58,7 @@ impl Language {
         Ok(rev)
     }
 
-    pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
+    pub async fn current_revision(&mut self) -> Result<Option<Hash>, AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
