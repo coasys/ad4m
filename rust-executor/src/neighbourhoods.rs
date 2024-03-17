@@ -57,9 +57,8 @@ pub async fn install_neighbourhood(
     }
     log::info!("Core.install_neighbourhood(): Got neighbourhood {:?}", neighbourhood_exp);
     let neighbourhood = neighbourhood_exp.unwrap();
-    let mut state = PerspectiveState::NeighbourhoodJoinInitiated;
 
-    state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone()).await?.is_some() {
+    let state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone()).await?.is_some() {
         PerspectiveState::LinkLanguageInstalledButNotSynced
     } else {
         PerspectiveState::LinkLanguageFailedToInstall
