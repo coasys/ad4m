@@ -13,7 +13,7 @@ use crate::languages::LanguageController;
 use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC};
 use crate::{db::Ad4mDb, types::*};
-use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
+use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
 use super::sdna::init_engine_facts;
 use super::update_perspective;
 use super::utils::prolog_resolution_to_string;
@@ -831,6 +831,80 @@ impl PerspectiveInstance {
             .run_query(query).await?.map_err(|e| anyhow!(e))?;
         Ok(prolog_resolution_to_string(result))
     }
+
+    async fn no_link_language_error(&self) -> AnyError {
+        let handle = self.persisted.lock().await.clone();
+        anyhow!("Perspective {} has no link language installed. State is: {:?}", handle.uuid, handle.state)
+    }
+
+    pub async fn others(&self) -> Result<Vec<String>, AnyError> {
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            link_language.others().await
+        } else {
+            Err(self.no_link_language_error().await)
+        }
+    }
+
+    pub async fn has_telepresence_adapter(&self) -> bool {
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            match link_language.has_telepresence_adapter().await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::error!("Error calling has_telepresence_adapter: {:?}", e);
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            link_language.get_online_agents().await
+        } else {
+            Err(self.no_link_language_error().await)
+        }
+    }
+
+    pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            link_language.set_online_status(status).await
+        } else {
+            Err(self.no_link_language_error().await)
+        }
+    }
+
+    pub async fn send_signal(
+        &self, 
+        remote_agent_did: String, 
+        payload: PerspectiveExpression
+    ) -> Result<(), AnyError> {
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            link_language.send_signal(remote_agent_did, payload).await
+        } else {
+            Err(self.no_link_language_error().await)
+        }
+    }
+
+    pub async fn send_broadcast(
+        &self, 
+        payload: PerspectiveExpression
+    ) -> Result<(), AnyError> {
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            link_language.send_broadcast(payload).await
+        } else {
+            Err(self.no_link_language_error().await)
+        }
+    }
+
+
 }
 
 
