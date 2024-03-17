@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 extern crate ad4m_client;
 extern crate anyhow;
 extern crate chrono;
