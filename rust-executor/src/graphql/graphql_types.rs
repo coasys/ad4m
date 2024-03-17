@@ -1,4 +1,5 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
+use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link};
 use coasys_juniper::{
@@ -337,6 +338,14 @@ pub struct Perspective {
     pub links: Vec<DecoratedLinkExpression>,
 }
 
+impl Perspective {
+    pub fn verify_link_signatures(&mut self) {
+        for link in &mut self.links {
+            link.verify_signature();
+        }
+    }
+}
+
 impl From<PerspectiveInput> for Perspective {
     fn from(input: PerspectiveInput) -> Self {
         let links = input.links
@@ -394,6 +403,30 @@ impl From<Expression<Perspective>> for PerspectiveExpression {
             },
             timestamp: expr.timestamp,
         }
+    }
+}
+
+impl PerspectiveExpression {
+    pub fn verify_signatures(&mut self) {
+        self.data.verify_link_signatures();
+
+        let perspective_expression = Expression::<Perspective> {
+            author: self.author.clone(),
+            data: self.data.clone(),
+            proof: ExpressionProof {
+                key: self.proof.key.clone(),
+                signature: self.proof.signature.clone(),
+            },
+            timestamp: self.timestamp.clone(),
+        };
+
+        let valid = match verify(&perspective_expression) {
+            Ok(valid) => valid,
+            Err(_) => false,
+        };
+        
+        self.proof.valid = Some(valid);
+        self.proof.invalid = Some(!valid);
     }
 }
 

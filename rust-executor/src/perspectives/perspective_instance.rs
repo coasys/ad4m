@@ -864,7 +864,14 @@ impl PerspectiveInstance {
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
         let mut link_language_guard = self.link_language.lock().await;
         if let Some(link_language) = link_language_guard.as_mut() {
-            link_language.get_online_agents().await
+            Ok(link_language.get_online_agents()
+                .await?
+                .into_iter()
+                .map(|mut a| {
+                    a.status.verify_signatures();
+                    a
+                })
+                .collect())
         } else {
             Err(self.no_link_language_error().await)
         }

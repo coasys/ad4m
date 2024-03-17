@@ -177,6 +177,26 @@ pub struct DecoratedLinkExpression {
     pub status: Option<LinkStatus>,
 }
 
+impl DecoratedLinkExpression {
+    pub fn verify_signature(&mut self) {
+        let link_expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: ExpressionProof {
+                key: self.proof.key.clone(),
+                signature: self.proof.signature.clone(),
+            },
+        };
+        let valid = match verify(&link_expr) {
+            Ok(valid) => valid,
+            Err(_) => false,
+        };
+        self.proof.valid = Some(valid);
+        self.proof.invalid = Some(!valid);
+    }
+}
+
 impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
     fn from((expr, status): (LinkExpression, LinkStatus)) -> Self {
         let mut expr: Expression<Link> = expr.into();

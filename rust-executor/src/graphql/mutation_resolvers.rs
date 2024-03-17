@@ -554,7 +554,7 @@ impl Mutation {
         let perspective = Perspective {
             links: status.links
             .into_iter()
-            .map(|l| Link::from(l))
+            .map(|l| Link::from(l).normalize())
             .map(|l| create_signed_expression(l)) 
             .filter_map(Result::ok)
             .map(|l| LinkExpression::from(l))
