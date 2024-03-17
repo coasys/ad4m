@@ -54,7 +54,7 @@ fn inner_verify(did: &str, message: &[u8], signature: &[u8]) -> bool {
         match key_pair.verify(message, signature) {
             Ok(_) => true,
             Err(e) => {
-                error!("Signature verification failed: {:?}", e);
+                //debug!("Signature verification failed: {:?}", e);
                 false
             }
         }
