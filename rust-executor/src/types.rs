@@ -80,6 +80,21 @@ impl From<LinkInput> for Link {
     }
 }
 
+impl Link {
+    pub fn normalize(&self) -> Link {
+        let predicate = match self.predicate.as_ref().map(String::as_str) {
+            Some("") => None,
+            _ => self.predicate.clone(),
+        };
+
+        Link {
+            predicate,
+            source: self.source.clone(),
+            target: self.target.clone(),
+        }
+    }
+}
+
 #[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct LinkExpression {
     pub author: String,
@@ -96,7 +111,7 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
             predicate: input.data.predicate,
             source: input.data.source,
             target: input.data.target,
-        };
+        }.normalize();
         Ok(LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
@@ -116,7 +131,7 @@ impl LinkExpression {
             predicate: input.data.predicate,
             source: input.data.source,
             target: input.data.target,
-        };
+        }.normalize();
         LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
@@ -143,7 +158,7 @@ impl From<Expression<Link>> for LinkExpression {
         LinkExpression {
             author: expr.author,
             timestamp: expr.timestamp,
-            data: expr.data,
+            data: expr.data.normalize(),
             proof: expr.proof,
             status: None,
         }
@@ -164,7 +179,8 @@ pub struct DecoratedLinkExpression {
 
 impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
     fn from((expr, status): (LinkExpression, LinkStatus)) -> Self {
-        let expr: Expression<Link> = expr.into();
+        let mut expr: Expression<Link> = expr.into();
+        expr.data = expr.data.normalize();
         let verified_expr: VerifiedExpression<Link> = expr.into();
         DecoratedLinkExpression {
             author: verified_expr.author,
@@ -181,7 +197,7 @@ impl From<DecoratedLinkExpression> for LinkExpression {
         LinkExpression {
             author: decorated.author,
             timestamp: decorated.timestamp,
-            data: decorated.data,
+            data: decorated.data.normalize(),
             proof: ExpressionProof {
                 key: decorated.proof.key,
                 signature: decorated.proof.signature,
