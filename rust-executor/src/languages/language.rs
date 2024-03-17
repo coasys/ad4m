@@ -4,7 +4,7 @@ use holochain_types::dna::{hash_type, HoloHash};
 use crate::{graphql::graphql_types::{OnlineAgent, PerspectiveExpression}, js_core::{JsCoreHandle}, types::{Perspective, PerspectiveDiff}};
 
 pub type Hash = HoloHash<hash_type::Action>;
-
+use super::byte_array::ByteArray;
 
 #[derive(Clone)]
 pub struct Language {
@@ -58,7 +58,7 @@ impl Language {
         Ok(rev)
     }
 
-    pub async fn current_revision(&mut self) -> Result<Option<Hash>, AnyError> {
+    pub async fn current_revision(&mut self) -> Result<Option<Vec<u8>>, AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -73,8 +73,9 @@ impl Language {
             self.address,
         );
         let result: String = self.js_core.execute(script).await?;
-        let maybe_revision = serde_json::from_str(&result)?;
-        Ok(maybe_revision)
+        println!("current_revision result: {}", result);
+        let maybe_revision: Option<ByteArray> = serde_json::from_str(&result)?;
+        Ok(maybe_revision.map(|rev| rev.into()))
     }
 
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {

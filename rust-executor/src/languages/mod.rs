@@ -1,4 +1,5 @@
 pub mod language;
+mod byte_array;
 
 use std::sync::{Arc, Mutex};
 use deno_core::error::AnyError;
