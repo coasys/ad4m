@@ -438,6 +438,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         payload: PerspectiveInput,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
@@ -456,6 +457,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         payload: PerspectiveUnsignedInput,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
@@ -483,6 +485,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         payload: PerspectiveInput,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
         remote_agent_did: String,
     ) -> FieldResult<bool> {
@@ -502,6 +505,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         payload: PerspectiveUnsignedInput,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
         remote_agent_did: String,
     ) -> FieldResult<bool> {
@@ -529,6 +533,7 @@ impl Mutation {
     async fn neighbourhood_set_online_status(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
         status: PerspectiveInput,
     ) -> FieldResult<bool> {
@@ -547,6 +552,7 @@ impl Mutation {
     async fn neighbourhood_set_online_status_u(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
         status: PerspectiveUnsignedInput,
     ) -> FieldResult<bool> {
