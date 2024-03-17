@@ -246,12 +246,14 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 const name = "Subscription Test Perspective"
                 const p = await ad4mClient.perspective.add(name)
+                await sleep(1000)
                 expect(perspectiveAdded.calledOnce).to.be.true;
                 const pSeenInAddCB = perspectiveAdded.getCall(0).args[0];
                 expect(pSeenInAddCB.uuid).to.equal(p.uuid)
                 expect(pSeenInAddCB.name).to.equal(p.name)
 
                 const p1 = await ad4mClient.perspective.update(p.uuid , "New Name")
+                await sleep(1000)
                 expect(perspectiveUpdated.calledOnce).to.be.true;
                 const pSeenInUpdateCB = perspectiveUpdated.getCall(0).args[0];
                 expect(pSeenInUpdateCB.uuid).to.equal(p1.uuid)
@@ -266,10 +268,12 @@ export default function perspectiveTests(testContext: TestContext) {
                 await ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
 
                 const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'root', target: 'lang://123'})
+                await sleep(1000)
                 expect(linkAdded.calledOnce).to.be.true;
                 expect(linkAdded.getCall(0).args[0]).to.eql(linkExpression)
 
                 const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'root', target: 'lang://456'})
+                await sleep(1000)
                 expect(linkUpdated.calledOnce).to.be.true;
                 expect(linkUpdated.getCall(0).args[0].newLink).to.eql(updatedLinkExpression)
 
