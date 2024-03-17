@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{join, time};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;

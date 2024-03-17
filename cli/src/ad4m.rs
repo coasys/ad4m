@@ -24,7 +24,7 @@ mod repl;
 mod runtime;
 
 use crate::{
-    agent::*, dev::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
+    agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
 };
 use ad4m_client::*;
 use anyhow::{Context, Result};

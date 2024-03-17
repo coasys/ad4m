@@ -1,9 +1,8 @@
 use crate::agent;
-use crate::types::{DecoratedLinkExpression, ExpressionRef, LanguageRef, Link, LinkExpression};
-use ad4m_client::literal::{Literal, LiteralValue};
+use crate::types::{DecoratedLinkExpression, ExpressionRef, LanguageRef, Link};
+use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::error::AnyError;
-use kitsune_p2p_types::dependencies::proptest::prelude::prop;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use log;
@@ -213,7 +212,7 @@ takeN(Rest, NextN, PageRest).
         }
     }
 
-    for (name, properties) in seen_subject_classes.iter() {
+    for (_name, properties) in seen_subject_classes.iter() {
         if let Some(code) = properties.get(&"code".to_string()) {
             lines.extend(code.split('\n').map(|s| s.to_string()));
         }

@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
+use deno_core::{include_js_files, op2, Extension, Op};
 
 use crate::{graphql::graphql_types::{PerspectiveExpression, PerspectiveState}, types::PerspectiveDiff};
 

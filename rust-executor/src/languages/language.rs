@@ -1,7 +1,7 @@
 use deno_core::error::AnyError;
 use holochain_types::dna::{hash_type, HoloHash};
 
-use crate::{graphql::graphql_types::{OnlineAgent, PerspectiveExpression}, js_core::{self, JsCoreHandle}, types::{Perspective, PerspectiveDiff}};
+use crate::{graphql::graphql_types::{OnlineAgent, PerspectiveExpression}, js_core::{JsCoreHandle}, types::{Perspective, PerspectiveDiff}};
 
 pub type Hash = HoloHash<hash_type::Action>;
 

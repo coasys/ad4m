@@ -1,7 +1,7 @@
 pub mod perspective_instance;
 pub mod sdna;
 pub mod utils;
-use std::sync::{RwLock, RwLockWriteGuard};
+use std::sync::RwLock;
 use std::collections::HashMap;
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;

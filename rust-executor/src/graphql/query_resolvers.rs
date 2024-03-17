@@ -1,8 +1,6 @@
 #![allow(non_snake_case)]
-use deno_core::anyhow;
 use coasys_juniper::{graphql_object, FieldError, FieldResult};
-use futures::stream;
-use futures::stream::StreamExt;
+
 
 use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::{DecoratedLinkExpression }};
 
@@ -252,6 +250,7 @@ impl Query {
     async fn neighbourhood_has_telepresence_adapter(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
@@ -265,6 +264,7 @@ impl Query {
     async fn neighbourhood_online_agents(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<Vec<OnlineAgent>> {
         let uuid = perspectiveUUID;
@@ -279,6 +279,7 @@ impl Query {
     async fn neighbourhood_other_agents(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<Vec<String>> {
         let uuid = perspectiveUUID;

@@ -94,8 +94,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::agent::signatures::{verify_string_signed_by_did, verify};
-    use crate::types::ExpressionProof;
+    use crate::agent::signatures::verify_string_signed_by_did;
     use itertools::Itertools;
     use crate::test_utils::setup_wallet;
 

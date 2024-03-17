@@ -3,7 +3,7 @@ pub mod language;
 use std::sync::{Arc, Mutex};
 use deno_core::error::AnyError;
 
-use crate::{graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood}, js_core::JsCoreHandle, types::NeighbourhoodExpression};
+use crate::{graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood}, js_core::JsCoreHandle};
 use crate::types::Address;
 use language::Language;
 
