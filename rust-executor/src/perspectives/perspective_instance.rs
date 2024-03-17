@@ -126,12 +126,10 @@ impl PerspectiveInstance {
             let mut link_language_guard = self.link_language.lock().await;
             if let Some(link_language) = link_language_guard.as_mut() {
                 match link_language.sync().await {
-                    Ok(_) => {
-                        self.update_perspective_state(PerspectiveState::Synced).await.unwrap();
-                    },
+                    Ok(_) => (),
                     Err(e) => {
                         log::error!("Error calling sync on link language: {:?}", e);
-                        self.update_perspective_state(PerspectiveState::LinkLanguageInstalledButNotSynced).await.unwrap();
+                        let _ = self.update_perspective_state(PerspectiveState::LinkLanguageInstalledButNotSynced).await;
                     }
                 }
             }
