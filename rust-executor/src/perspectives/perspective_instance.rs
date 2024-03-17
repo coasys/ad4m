@@ -174,7 +174,6 @@ impl PerspectiveInstance {
     }
 
     async fn ensure_public_links_are_shared(&self) {
-        println!("ensure_public_links_are_shared");
         let uuid = self.persisted.lock().await.uuid.clone();
         let mut link_language_guard = self.link_language.lock().await;
         if let Some(link_language) = link_language_guard.as_mut() {
@@ -183,15 +182,15 @@ impl PerspectiveInstance {
             ).unwrap();
 
             local_links.retain(|(_, status)| status == &LinkStatus::Shared);
-            
-            println!("ensure_public_links_are_shared calling render...");
-            let remote_links = link_language.render()
-                .await
-                .unwrap_or(None)
-                .unwrap_or_default()
-                .links;
 
-            println!("ensure_public_links_are_shared got remote_links: {:?}", remote_links);
+            let remote_links = match link_language.current_revision().await {
+                Ok(Some(_)) => link_language.render()
+                    .await
+                    .unwrap_or(None)
+                    .unwrap_or_default()
+                    .links,
+                _ => vec![],
+            };
 
             let mut links_to_commit = Vec::new();
             for (local_link, _) in &local_links {
@@ -205,8 +204,6 @@ impl PerspectiveInstance {
                     links_to_commit.push(local_link.clone());
                 }
             }
-
-            println!("ensure_public_links_are_shared links_to_commit: {:?}", links_to_commit);
 
             if !links_to_commit.is_empty() {
                 let result = link_language.commit(PerspectiveDiff {
