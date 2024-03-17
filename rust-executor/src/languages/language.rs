@@ -1,9 +1,5 @@
 use deno_core::error::AnyError;
-use holochain_types::dna::{hash_type, HoloHash};
-
-use crate::{graphql::graphql_types::{OnlineAgent, PerspectiveExpression}, js_core::{JsCoreHandle}, types::{Perspective, PerspectiveDiff}};
-
-pub type Hash = HoloHash<hash_type::Action>;
+use crate::{graphql::graphql_types::{OnlineAgent, PerspectiveExpression}, js_core::JsCoreHandle, types::{Perspective, PerspectiveDiff}};
 use super::byte_array::ByteArray;
 
 #[derive(Clone)]
@@ -38,7 +34,7 @@ impl Language {
         Ok(())
     }
 
-    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<Hash>, AnyError> {
+    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<Vec<u8>>, AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -54,8 +50,8 @@ impl Language {
             serde_json::to_string(&diff)?,
         );
         let result: String = self.js_core.execute(script).await?;
-        let rev: Option<Hash> = serde_json::from_str(&result)?;
-        Ok(rev)
+        let rev: Option<ByteArray> = serde_json::from_str(&result)?;
+        Ok(rev.map(|rev| rev.into()))
     }
 
     pub async fn current_revision(&mut self) -> Result<Option<Vec<u8>>, AnyError> {
@@ -73,7 +69,6 @@ impl Language {
             self.address,
         );
         let result: String = self.js_core.execute(script).await?;
-        println!("current_revision result: {}", result);
         let maybe_revision: Option<ByteArray> = serde_json::from_str(&result)?;
         Ok(maybe_revision.map(|rev| rev.into()))
     }
