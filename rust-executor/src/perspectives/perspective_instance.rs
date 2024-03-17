@@ -45,15 +45,9 @@ pub struct PerspectiveInstance {
     pub is_fast_polling: bool,
     pub retries: u32,
 
-    //db: Ad4mDb,
-    //agent: AgentService,
-    //language_controller: LanguageController,
-    //update_controllers_handle_sync_status: Box<dyn Fn(String, PerspectiveState)>,
     prolog_engine: Arc<Mutex<Option<PrologEngine>>>,
     prolog_needs_rebuild: Arc<Mutex<bool>>,
-    //polling_interval: Option<tokio::time::Interval>,
-    //pending_diff_polling_interval: Option<tokio::time::Interval>,
-    is_teardown: bool,
+    is_teardown: Arc<Mutex<bool>>,
     sdna_change_mutex: Arc<Mutex<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
 }
@@ -71,7 +65,7 @@ impl PerspectiveInstance {
             retries: 0,
             prolog_engine: Arc::new(Mutex::new(None)),
             prolog_needs_rebuild: Arc::new(Mutex::new(true)),
-            is_teardown: false,
+            is_teardown: Arc::new(Mutex::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
             link_language: Arc::new(Mutex::new(None)),
         }
@@ -85,9 +79,13 @@ impl PerspectiveInstance {
         );
     }
 
+    pub async fn teardown_background_tasks(&self) {
+        *self.is_teardown.lock().await = true;
+    }
+
     async fn ensure_link_language(&self) {
         let mut interval = time::interval(Duration::from_secs(5));
-        while !self.is_teardown {
+        while !self.is_teardown.lock().await.clone() {
             if self.link_language.lock().await.is_none() && self.persisted.lock().await.neighbourhood.is_some() {
                 let nh = self.persisted.lock().await.neighbourhood.as_ref().expect("must be some").clone();
 
@@ -119,7 +117,7 @@ impl PerspectiveInstance {
 
     async fn nh_sync_loop(&self) {
         let mut interval = time::interval(Duration::from_secs(3));
-        while !self.is_teardown {
+        while !self.is_teardown.lock().await.clone() {
             let mut link_language_guard = self.link_language.lock().await;
             if let Some(link_language) = link_language_guard.as_mut() {
                 match link_language.sync().await {
@@ -137,7 +135,7 @@ impl PerspectiveInstance {
     async fn pending_diffs_loop(&self) {
         let mut interval = time::interval(Duration::from_secs(10));
         let uuid = self.persisted.lock().await.uuid.clone();
-        while !self.is_teardown {
+        while !self.is_teardown.lock().await.clone() {
             if let Err(e) = (|| async {
                 let mut link_language_guard = self.link_language.lock().await;
                 if let Some(link_language) = link_language_guard.as_mut() {

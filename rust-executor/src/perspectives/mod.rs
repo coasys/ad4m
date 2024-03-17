@@ -134,6 +134,10 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         perspectives.remove(uuid).and_then(|instance_lock| instance_lock.into_inner().ok())
     };
 
+    if let Some(ref instance) = removed_instance {
+        instance.teardown_background_tasks().await;
+    }
+
     get_global_pubsub()
         .await
         .publish(
