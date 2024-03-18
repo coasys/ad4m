@@ -30,7 +30,7 @@ pub fn generate_snapshot(
     let mut all_removals = BTreeSet::new();
 
     loop {
-        let diff = get(search_position.hash.clone(), GetOptions::latest())?
+        let diff = get(search_position.hash.clone(), GetOptions::network())?
             .ok_or(SocialContextError::InternalError(
                 "generate_snapshot(): Could not find entry while populating search",
             ))?
@@ -47,6 +47,7 @@ pub fn generate_snapshot(
             )
             .unwrap()
             .tag_prefix(LinkTag::new("snapshot"))
+            .get_options(GetStrategy::Network)
             .build();
             let mut snapshot_links = get_links(input)?;
             let after = get_now()?.time();
@@ -73,7 +74,7 @@ pub fn generate_snapshot(
                         .target
                         .into_entry_hash()
                         .expect("Could not get entry_hash"),
-                    GetOptions::latest(),
+                    GetOptions::network(),
                 )?
                 .ok_or(SocialContextError::InternalError(
                     "Could not find diff entry for given diff entry reference",
@@ -146,7 +147,7 @@ fn handle_parents(
     //Check if entry is already in graph
     if !seen.contains(&search_position.hash) {
         seen.insert(search_position.hash.clone());
-        let diff_entry = get(diff.diff.clone(), GetOptions::latest())?
+        let diff_entry = get(diff.diff.clone(), GetOptions::network())?
             .ok_or(SocialContextError::InternalError(
                 "Could not find diff entry for given diff entry reference",
             ))?

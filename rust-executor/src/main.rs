@@ -13,9 +13,15 @@ mod prolog_service;
 mod utils;
 mod wallet;
 mod types;
-
+mod perspectives;
+mod db;
 pub mod init;
 mod pubsub;
+mod neighbourhoods;
+mod languages;
+
+#[cfg(test)]
+mod test_utils;
 
 use log::{error, info};
 use rust_executor::Ad4mConfig;

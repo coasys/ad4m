@@ -6,7 +6,6 @@ import * as Db from './db'
 import type { Ad4mDb } from './db'
 import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService';
 import AgentService from './agent/AgentService'
-import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
@@ -57,7 +56,6 @@ export default class Ad4mCore {
     #db: Ad4mDb
     #didResolver: DIDResolver
 
-    #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
 
     #languagesReady: Promise<void>
@@ -126,13 +124,6 @@ export default class Ad4mCore {
         return this.#runtimeService
     }
 
-    get perspectivesController(): PerspectivesController {
-        if (!this.#perspectivesController) {
-            throw Error("No perspectiveController")
-        }
-        return this.#perspectivesController
-    }
-
     get languageController(): LanguageController {
         if (!this.#languageController) {
             throw Error("No languageController")
@@ -140,19 +131,8 @@ export default class Ad4mCore {
         return this.#languageController!
     }
 
-    get database(): Ad4mDb {
-        return this.#db
-    }
-
     async exit() {
         console.log("Exiting gracefully...")
-        console.log("Stopping Prolog engines")
-        for(let ph of this.perspectivesController.allPerspectiveHandles()) {
-            const perspective = this.perspectivesController.perspective(ph.uuid)
-            perspective.clearPolling()
-        }
-        console.log("Stopping IPFS")
-        //await this.#IPFS?.stop({timeout: 15});
         console.log("Stopping Holochain conductor")
         await this.#holochain?.stop();
         console.log("Done.")
@@ -210,67 +190,11 @@ export default class Ad4mCore {
             ad4mSignal: this.languageSignal,
             config: this.#config,
         }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, db: this.#db } )
-
-        this.#perspectivesController = new PerspectivesController(this.#config.rootConfigPath, {
-            db: this.#db,
-            agentService: this.agentService,
-            languageController: this.#languageController,
-            config: this.#config
-        })
     }
 
     async initLanguages() {
         await this.#languageController!.loadLanguages()
         this.#resolveLanguagesReady()
-    }
-
-    async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<string> {
-        // We only work on the PerspectiveID object.
-        // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
-        // instance object here
-        const perspectiveID = this.#perspectivesController!.perspective(uuid).plain()
-
-        const neighbourhood = new Neighbourhood(linkLanguage, meta);
-        let language = await this.#languageController!.installLanguage(linkLanguage, null)
-        if (!language!.linksAdapter) {
-            throw Error("Language used is not a link language");
-        }
-
-        // Create neighbourhood
-        const neighbourhoodAddress = await (this.languageController.getNeighbourhoodLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
-        const neighbourhoodUrl = `${Config.neighbourhoodLanguageAlias}://${neighbourhoodAddress}`
-
-        let neighbourHoodExp: NeighbourhoodExpression = await this.languageController.getPerspective(neighbourhoodAddress);
-
-        //Add shared perspective to original perpspective and then update controller
-        perspectiveID.sharedUrl = neighbourhoodUrl
-        perspectiveID.neighbourhood = neighbourHoodExp;
-        perspectiveID.state = PerspectiveState.Synced;
-        await this.#perspectivesController!.replace(perspectiveID, neighbourHoodExp, false, PerspectiveState.Synced)
-        return neighbourhoodUrl
-    }
-
-    async installNeighbourhood(url: Address): Promise<PerspectiveHandle> {
-        const perspectives = this.#perspectivesController!.allPerspectiveHandles();
-        if (perspectives.some(p => p.sharedUrl === url)) {
-            throw Error(`Neighbourhood with URL ${url} already installed`);
-        }
-
-        let neighbourHoodExp = await this.languageController.getPerspective(parseExprUrl(url).expression);
-        if (neighbourHoodExp == null) {
-            throw Error(`Could not find neighbourhood with URL ${url}`);
-        };
-        console.log("Core.installNeighbourhood(): Got neighbourhood", JSON.stringify(neighbourHoodExp));
-        let neighbourhood: NeighbourhoodExpression = neighbourHoodExp;
-        let state = PerspectiveState.NeighbourhoodJoinInitiated;
-        try {
-            await this.languageController.languageByRef({address: neighbourhood.data.linkLanguage} as LanguageRef)
-            state = PerspectiveState.LinkLanguageInstalledButNotSynced;
-        } catch (e) {
-            state = PerspectiveState.LinkLanguageFailedToInstall;
-        }
-        console.log("Core.installNeighbourhood(): Creating perspective", url, neighbourhood, state);
-        return await this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {

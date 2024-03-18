@@ -4,7 +4,7 @@ use url::Url;
 
 use super::{
     pubsub_extension, string_module_loader::StringModuleLoader, utils_extension,
-    wallet_extension, signature_extension, agent_extension,
+    wallet_extension, signature_extension, agent_extension, languages_extension,
 };
 use crate::entanglement_service::entanglement_service_extension;
 use crate::holochain_service::holochain_service_extension;
@@ -41,6 +41,7 @@ pub fn main_worker_options() -> WorkerOptions {
     let signature_ext = signature_extension::build();
     let agent_ext = agent_extension::build();
     let entanglement_ext = entanglement_service_extension::build();
+    let languages_ext = languages_extension::build();
 
     WorkerOptions {
         extensions: vec![
@@ -52,6 +53,7 @@ pub fn main_worker_options() -> WorkerOptions {
             signature_ext,
             agent_ext,
             entanglement_ext
+            languages_ext,
         ],
         module_loader: Rc::new(loader),
         ..Default::default()

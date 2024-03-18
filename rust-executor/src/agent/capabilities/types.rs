@@ -1,4 +1,4 @@
-use juniper::GraphQLObject;
+use coasys_juniper::GraphQLObject;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 

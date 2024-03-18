@@ -64,7 +64,7 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
     debug!("PerspectiveDiffSync.create_did_pub_key_link({:?})", did);
     let agent_key = agent_info()?.agent_latest_pubkey;
     debug!("PerspectiveDiffSync.create_did_pub_key_link() agent_key: {:?}", agent_key);
-    let input = GetLinksInputBuilder::try_new(agent_key.clone(), LinkTypes::DidLink).unwrap().build();
+    let input = GetLinksInputBuilder::try_new(agent_key.clone(), LinkTypes::DidLink).unwrap().get_options(GetStrategy::Network).build();
     let did_links = get_links(input)?;
     debug!("PerspectiveDiffSync.create_did_pub_key_link() did_links: {:?}", did_links);
     if did_links.len() == 0 {
@@ -94,6 +94,7 @@ pub fn get_my_did() -> SocialContextResult<Option<String>> {
         LinkTypes::DidLink
     )
     .unwrap()
+    .get_options(GetStrategy::Network)
     .build();
     let mut did_links = get_links(input)?;
     if did_links.len() > 0 {
@@ -103,7 +104,7 @@ pub fn get_my_did() -> SocialContextResult<Option<String>> {
                 .target
                 .into_entry_hash()
                 .expect("Could not get entry_hash"),
-            GetOptions::latest(),
+            GetOptions::network(),
         )?
         .ok_or(SocialContextError::InternalError(
             "Could not find did entry for given did entry reference",
@@ -127,6 +128,7 @@ pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey
         LinkTypes::DidLink
     )
     .unwrap()
+    .get_options(GetStrategy::Network)
     .build();
     let did_links = get_links(input)?;
     debug!("PerspectiveDiffSync.get_dids_agent_key() did_links: {:?}", did_links);
@@ -144,6 +146,7 @@ pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<Stri
         LinkTypes::DidLink
     )
     .unwrap()
+    .get_options(GetStrategy::Network)
     .build();
     let mut did_links = get_links(input)?;
     if did_links.len() > 0 {
@@ -153,7 +156,7 @@ pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<Stri
                 .target
                 .into_entry_hash()
                 .expect("Could not get entry_hash"),
-            GetOptions::latest(),
+            GetOptions::network(),
         )?
         .ok_or(SocialContextError::InternalError(
             "Could not find did entry for given did entry reference",

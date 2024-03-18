@@ -303,16 +303,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::agent::signatures::{verify_string_signed_by_did, verify};
-    use crate::types::ExpressionProof;
+    use crate::agent::signatures::verify_string_signed_by_did;
     use itertools::Itertools;
+    use crate::test_utils::setup_wallet;
 
-    fn setup_wallet() {
-        let wallet_instance = Wallet::instance();
-        let mut wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_mut().expect("wallet instance");
-        wallet_ref.generate_keypair("main".to_string());
-    }
 
     #[test]
     fn test_sign_and_verify_string_hex_roundtrip() {

@@ -7,7 +7,7 @@
   "types": "",
   "scripts": {
     "build": "cargo build --release",
-    "test": "cargo test --release"
+    "test": "cargo test --release -- --test-threads=1"
   },
   "repository": {
     "type": "git",

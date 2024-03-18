@@ -42,7 +42,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(perspective?.neighbourhood).not.to.be.undefined;
                 expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
                 expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
-                expect(perspective?.state).to.be.equal(PerspectiveState.Synced);
+                expect(perspective?.state).to.be.equal(PerspectiveState.NeighboudhoodCreationInitiated);
             })
 
             it('can be created by Alice and joined by Bob', async () => {

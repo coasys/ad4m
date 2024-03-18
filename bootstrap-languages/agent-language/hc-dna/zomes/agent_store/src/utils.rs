@@ -8,10 +8,11 @@ pub(crate) fn err(reason: &str) -> WasmError {
 pub(crate) fn get_latest_link(base: EntryHash, tag: Option<LinkTag>) -> ExternResult<Option<Link>> {
     let input = GetLinksInputBuilder::try_new(
         base,
-        LinkTypes::ProfileLink
+        LinkTypes::ProfileLink,
     )
     .unwrap()
     .tag_prefix(tag.unwrap())
+    .get_options(GetStrategy::Network)
     .build();
 
     let profile_info = get_links(input)?;
