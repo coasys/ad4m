@@ -60,7 +60,7 @@
     "@types/yargs": "*"
   },
   "patchedDependencies": {},
-  "version": "0.9.0-prerelease",
+  "version": "0.9.0-rc2",
   "pnpm": {
     "patchedDependencies": {
       "graphql@15.7.2": "patches/graphql@15.7.2.patch"
