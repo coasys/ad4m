@@ -28,7 +28,7 @@ export function useAgent<T>(props: Props<T>) {
   const getData = useCallback(() => {
     if (didRef) {
         if (props.formatter) {
-            getProfile(didRef).then(profile => setProfile(props.formatter(profile)))
+            getProfile(didRef).then(profile => setProfile(props.formatter(profile.perspective.links)))
         }
 
       props.client
