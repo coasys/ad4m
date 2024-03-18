@@ -48,6 +48,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     admin_credential: Some(String::from("*")),
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
+                    localhost: None,
                 })
                 .await
                 .join()
@@ -178,6 +179,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     admin_credential: None,
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
+                    localhost: None
                 })
                 .await
                 .join()
