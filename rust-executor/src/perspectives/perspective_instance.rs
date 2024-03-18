@@ -359,6 +359,20 @@ impl PerspectiveInstance {
             .expect("Ad4mDb not initialized")
             .add_link(&handle.uuid, &link_expression, &status)?;
 
+        let decorated_link_expression = DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
+        self.set_prolog_rebuild_flag().await;
+
+        get_global_pubsub()
+            .await
+            .publish(
+                &PERSPECTIVE_LINK_ADDED_TOPIC,
+                &serde_json::to_string(&PerspectiveLinkFilter {
+                    perspective: handle.clone(),
+                    link: decorated_link_expression.clone(),
+                }).unwrap(),
+            )
+            .await;
+
         if status == LinkStatus::Shared {
             let diff = PerspectiveDiff {
                 additions: vec![link_expression.clone()],
@@ -377,21 +391,7 @@ impl PerspectiveInstance {
             }
         }
 
-        let link_expression = DecoratedLinkExpression::from((link_expression, status));
-        self.set_prolog_rebuild_flag().await;
-
-        get_global_pubsub()
-            .await
-            .publish(
-                &PERSPECTIVE_LINK_ADDED_TOPIC,
-                &serde_json::to_string(&PerspectiveLinkFilter {
-                    perspective: handle,
-                    link: link_expression.clone(),
-                }).unwrap(),
-            )
-            .await;
-
-        Ok(link_expression)
+        Ok(decorated_link_expression)
     }
 
 
@@ -403,6 +403,28 @@ impl PerspectiveInstance {
             .collect::<Result<Vec<LinkExpression>, AnyError>>();
 
         let link_expressions = link_expressions?;
+
+
+        let decorated_link_expressions = link_expressions.clone().into_iter()
+            .map(|l| DecoratedLinkExpression::from((l, status.clone())))
+            .collect::<Vec<DecoratedLinkExpression>>();
+
+            self.set_prolog_rebuild_flag().await;
+
+        for link in &decorated_link_expressions {
+            get_global_pubsub()
+                .await
+                .publish(
+                    &PERSPECTIVE_LINK_ADDED_TOPIC,
+                    &serde_json::to_string(&PerspectiveLinkFilter {
+                        perspective: handle.clone(),
+                        link: link.clone(),
+                    }).unwrap(),
+                )
+                .await;
+        }
+        self.set_prolog_rebuild_flag().await;
+
 
         let diff = PerspectiveDiff {
             additions: link_expressions.clone(),
@@ -425,26 +447,6 @@ impl PerspectiveInstance {
             .as_ref()
             .expect("Ad4mDb not initialized")
             .add_many_links(&uuid, link_expressions.clone(), &status)?;
-
-        let decorated_link_expressions = link_expressions.into_iter()
-            .map(|l| DecoratedLinkExpression::from((l, status.clone())))
-            .collect::<Vec<DecoratedLinkExpression>>();
-
-            self.set_prolog_rebuild_flag().await;
-
-        for link in &decorated_link_expressions {
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_LINK_ADDED_TOPIC,
-                    &serde_json::to_string(&PerspectiveLinkFilter {
-                        perspective: handle.clone(),
-                        link: link.clone(),
-                    }).unwrap(),
-                )
-                .await;
-        }
-        self.set_prolog_rebuild_flag().await;
 
         Ok(decorated_link_expressions)
     }
@@ -483,23 +485,12 @@ impl PerspectiveInstance {
             removals: removals.clone()
         };
 
-        let mutation_result = self.commit(&diff).await;
-
-        if mutation_result.is_err() {
-            Ad4mDb::global_instance()
-                .lock()
-                .expect("Couldn't get write lock on Ad4mDb")
-                .as_ref()
-                .expect("Ad4mDb not initialized")
-                .add_pending_diff(&handle.uuid, &diff)?;
-        }
-
-        let diff = DecoratedPerspectiveDiff {
+        let decorated_diff = DecoratedPerspectiveDiff {
             additions: additions.into_iter().map(|l| DecoratedLinkExpression::from((l, status.clone()))).collect::<Vec<DecoratedLinkExpression>>(),
             removals: removals.clone().into_iter().map(|l| DecoratedLinkExpression::from((l, status.clone()))).collect::<Vec<DecoratedLinkExpression>>(),
         };
 
-        for link in &diff.additions {
+        for link in &decorated_diff.additions {
             get_global_pubsub()
                 .await
                 .publish(
@@ -512,7 +503,7 @@ impl PerspectiveInstance {
                 .await;
         }
 
-        for link in &diff.removals {
+        for link in &decorated_diff.removals {
             get_global_pubsub()
                 .await
                 .publish(
@@ -525,9 +516,20 @@ impl PerspectiveInstance {
                 .await;
         }
 
+        let mutation_result = self.commit(&diff).await;
+
+        if mutation_result.is_err() {
+            Ad4mDb::global_instance()
+                .lock()
+                .expect("Couldn't get write lock on Ad4mDb")
+                .as_ref()
+                .expect("Ad4mDb not initialized")
+                .add_pending_diff(&handle.uuid, &diff)?;
+        }
+
         self.set_prolog_rebuild_flag().await;
 
-        Ok(diff)
+        Ok(decorated_diff)
     }
 
     pub async fn update_link(&mut self, old_link: LinkExpression, new_link: Link) -> Result<DecoratedLinkExpression, AnyError> {
@@ -561,6 +563,22 @@ impl PerspectiveInstance {
                 .expect("Ad4mDb not initialized")
                 .update_link(&handle.uuid, &link, &new_link_expression)?;
 
+        let decorated_new_link_expression = DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
+        let decorated_old_link = DecoratedLinkExpression::from((old_link.clone(), link_status));
+
+        self.set_prolog_rebuild_flag().await;
+        get_global_pubsub()
+            .await
+            .publish(
+                &PERSPECTIVE_LINK_UPDATED_TOPIC,
+                &serde_json::to_string(&PerspectiveLinkUpdatedFilter {
+                    perspective: handle.clone(),
+                    old_link: decorated_old_link,
+                    new_link: decorated_new_link_expression.clone(),
+                }).unwrap(),
+            )
+            .await;
+
         let diff = PerspectiveDiff {
             additions: vec![new_link_expression.clone()],
             removals: vec![old_link.clone()],
@@ -576,30 +594,25 @@ impl PerspectiveInstance {
                 .add_pending_diff(&handle.uuid, &diff)?;
         }
 
-        let new_link_expression = DecoratedLinkExpression::from((new_link_expression, link_status.clone()));
-        let old_link = DecoratedLinkExpression::from((old_link, link_status));
-
-        self.set_prolog_rebuild_flag().await;
-        get_global_pubsub()
-            .await
-            .publish(
-                &PERSPECTIVE_LINK_UPDATED_TOPIC,
-                &serde_json::to_string(&PerspectiveLinkUpdatedFilter {
-                    perspective: handle,
-                    old_link,
-                    new_link: new_link_expression.clone(),
-                }).unwrap(),
-            )
-            .await;
-
-
-        Ok(new_link_expression)
+        Ok(decorated_new_link_expression)
     }
 
     pub async fn remove_link(&mut self, link_expression: LinkExpression) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
         if let Some((link_from_db, status)) = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))? {
             Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, &link_expression))?;
+
+            self.set_prolog_rebuild_flag().await;
+            get_global_pubsub()
+                .await
+                .publish(
+                    &PERSPECTIVE_LINK_REMOVED_TOPIC,
+                    &serde_json::to_string(&PerspectiveLinkFilter {
+                        perspective: handle.clone(),
+                        link: DecoratedLinkExpression::from((link_expression.clone(), status.clone())),
+                    }).unwrap(),
+                )
+                .await;
 
             let diff = PerspectiveDiff {
                 additions: vec![],
@@ -610,18 +623,6 @@ impl PerspectiveInstance {
             if mutation_result.is_err() {
                 Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, &diff))?;
             }
-
-            self.set_prolog_rebuild_flag().await;
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_LINK_REMOVED_TOPIC,
-                    &serde_json::to_string(&PerspectiveLinkFilter {
-                        perspective: handle,
-                        link: DecoratedLinkExpression::from((link_expression.clone(), status.clone())),
-                    }).unwrap(),
-                )
-                .await;
 
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
         } else {
