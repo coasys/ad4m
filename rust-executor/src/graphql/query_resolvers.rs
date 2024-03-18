@@ -3,7 +3,7 @@ use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 
 use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::{DecoratedLinkExpression }};
 
-use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs, holochain_service::get_holochain_service};
+use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
 

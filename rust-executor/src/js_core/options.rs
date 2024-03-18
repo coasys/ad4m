@@ -52,7 +52,7 @@ pub fn main_worker_options() -> WorkerOptions {
             prolog_ext,
             signature_ext,
             agent_ext,
-            entanglement_ext
+            entanglement_ext,
             languages_ext,
         ],
         module_loader: Rc::new(loader),

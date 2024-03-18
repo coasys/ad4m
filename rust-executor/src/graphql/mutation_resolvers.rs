@@ -2,7 +2,8 @@ use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neig
 use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
 
 use super::graphql_types::*;
-use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
+use crate::{agent::{self, capabilities::*, AgentService}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key}, holochain_service::{agent_infos_from_str, get_holochain_service}, pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC}};
+
 pub struct Mutation;
 
 fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<PerspectiveInstance> {

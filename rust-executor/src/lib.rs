@@ -9,7 +9,6 @@ mod js_core;
 mod prolog_service;
 mod utils;
 mod wallet;
-mod types;
 mod entanglement_service;
 
 pub mod init;
@@ -43,6 +42,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     config.prepare();
 
     info!("Initializing Ad4mDb...");
+
+    let data_path = config.app_data_path.clone().unwrap_or(String::from(".ad4m"));
+
+    env::set_var("APPS_DATA_PATH", data_path.clone());
 
     Ad4mDb::init_global_instance(
         config.app_data_path
