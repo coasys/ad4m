@@ -75,6 +75,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("js_core initialized.");
 
     LanguageController::init_global_instance(js_core_handle.clone());
+    perspectives::initialize_from_db();
 
     info!("Starting GraphQL...");
 
