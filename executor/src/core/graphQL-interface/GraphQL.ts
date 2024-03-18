@@ -381,23 +381,23 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 }
 
                 if(core.agentService.isUnlocked()) {
-                    try {
-                        core.perspectivesController;
-                        await core.waitForAgent();
-                        core.initControllers()
-                        await core.initLanguages();
-                    } catch (e) {
+                    //try {
+                    //    core.perspectivesController;
+                    //    await core.waitForAgent();
+                    //    core.initControllers()
+                    //    await core.initLanguages();
+                    //} catch (e) {
                         // @ts-ignore
                         const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
-                        if (args.holochain === "true") {
+                        //if (args.holochain === "true") {
                             await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
-                        }
+                        //}
                         await core.waitForAgent();
                         core.initControllers()
                         await core.initLanguages()
     
                         console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
-                    }
+                    //}
 
                     try {
                         await core.agentService.ensureAgentExpression();    
