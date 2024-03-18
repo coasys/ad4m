@@ -1,7 +1,8 @@
 #![allow(non_snake_case)]
-use coasys_juniper::{graphql_object, FieldResult};
+use coasys_juniper::{graphql_object, FieldError, FieldResult};
 
-use crate::holochain_service::get_holochain_service;
+
+use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::{DecoratedLinkExpression }};
 
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
@@ -34,8 +35,8 @@ impl Query {
             .execute(
                 format!(
                     r#"JSON.stringify(
-                    await core.callResolver("Query", "agentByDID", 
-                        {{ did: "{}" }}, 
+                    await core.callResolver("Query", "agentByDID",
+                        {{ did: "{}" }},
                     )
                 )"#,
                     did,
@@ -249,43 +250,45 @@ impl Query {
     async fn neighbourhood_has_telepresence_adapter(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<bool> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodHasTelepresenceAdapter", {{ perspectiveUUID: "{}" }},))"#, perspectiveUUID))
-            .await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .has_telepresence_adapter() 
+            .await)
     }
 
     async fn neighbourhood_online_agents(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<Vec<OnlineAgent>> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOnlineAgents", {{ perspectiveUUID: "{}" }}))"#, perspectiveUUID))
-            .await?;
-        let result: JsResultType<Vec<OnlineAgent>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .online_agents() 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))
     }
 
     async fn neighbourhood_other_agents(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<Vec<String>> {
+        let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOtherAgents", {{ perspectiveUUID: "{}" }}))"#, perspectiveUUID))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .others() 
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))
     }
 
     async fn perspective(
@@ -297,15 +300,12 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspective", {{ uuid: "{}" }}))"#,
-                uuid,
-            ))
-            .await?;
-        let result: JsResultType<Option<PerspectiveHandle>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        if let Some(p) = get_perspective(&uuid) {
+            Ok(Some(p.persisted.lock().await.clone()))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn perspective_query_links(
@@ -313,20 +313,16 @@ impl Query {
         context: &RequestContext,
         query: LinkQuery,
         uuid: String,
-    ) -> FieldResult<Vec<LinkExpression>> {
-        let query_string = serde_json::to_string(&query)?;
+    ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryLinks", {{ query: {}, uuid: "{}" }}))"#,
-            query_string, uuid
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .get_links(&query)
+            .await?)
     }
 
     async fn perspective_query_prolog(
@@ -339,14 +335,11 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryProlog", {{ query: '{}', uuid: "{}" }}))"#,
-            query, uuid
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .prolog_query(query)
+            .await?)
     }
 
     async fn perspective_snapshot(
@@ -358,15 +351,15 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspectiveSnapshot", {{ uuid: "{}" }}))"#,
-                uuid,
-            ))
+
+        let all_links = get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .get_links(&LinkQuery::default())
             .await?;
-        let result: JsResultType<Perspective> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        Ok(Perspective {
+            links: all_links,
+        })
     }
 
     async fn perspectives(&self, context: &RequestContext) -> FieldResult<Vec<PerspectiveHandle>> {
@@ -374,14 +367,13 @@ impl Query {
             &context.capabilities,
             &perspective_query_capability(vec!["*".into()]),
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspectives"))"#,
-            ))
-            .await?;
-        let result: JsResultType<Vec<PerspectiveHandle>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let mut result = Vec::new();
+        for p in all_perspectives().iter() {
+            let handle = p.persisted.lock().await.clone();
+            result.push(handle);
+        }
+        Ok(result)
     }
 
     async fn runtime_friend_status(
@@ -424,7 +416,7 @@ impl Query {
 
         let interface = get_holochain_service().await;
         let infos = interface.agent_infos().await?;
-        
+
         let encoded_infos: Vec<String> = infos
             .iter()
             .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))

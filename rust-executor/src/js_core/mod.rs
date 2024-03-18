@@ -22,6 +22,7 @@ use options::{main_module_url, main_worker_options};
 mod agent_extension;
 mod futures;
 mod options;
+mod languages_extension;
 mod pubsub_extension;
 mod signature_extension;
 mod string_module_loader;
@@ -102,6 +103,7 @@ impl JsCoreHandle {
 #[derive(Debug)]
 struct JsCoreRequest {
     script: String,
+    #[allow(dead_code)]
     id: String,
     response_tx: oneshot::Sender<JsCoreResponse>
 }

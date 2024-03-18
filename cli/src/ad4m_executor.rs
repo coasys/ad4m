@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 extern crate ad4m_client;
 extern crate anyhow;
 extern crate chrono;
@@ -24,11 +25,10 @@ mod repl;
 mod runtime;
 
 use ad4m_client::*;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dev::DevFunctions;
 use rust_executor::Ad4mConfig;
-use startup::executor_data_path;
 
 /// AD4M command line interface.
 /// https://ad4m.dev
