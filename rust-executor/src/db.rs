@@ -149,9 +149,9 @@ impl Ad4mDb {
             Ok(PerspectiveHandle {
                 name: row.get(0)?,
                 uuid: row.get(1)?,
-                neighbourhood: row.get::<usize, Option<String>>(4)?.map(|n| serde_json::from_str(&n).ok()).flatten(),
-                shared_url: row.get(5)?,
-                state: serde_json::from_str(row.get::<usize, String>(6)?.as_str()).expect("Could not deserialize perspective state from DB"),
+                neighbourhood: row.get::<usize, Option<String>>(2)?.map(|n| serde_json::from_str(&n).ok()).flatten(),
+                shared_url: row.get(3)?,
+                state: serde_json::from_str(row.get::<usize, String>(4)?.as_str()).expect("Could not deserialize perspective state from DB"),
             })
         })?;
 
