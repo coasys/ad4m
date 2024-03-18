@@ -128,6 +128,6 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
     .or(homepage)
     .with(log);
 
-    warp::serve(routes).run(([127, 0, 0, 1], port)).await;
+    warp::serve(routes).run(([0, 0, 0, 0], port)).await;
     Ok(())
 }
