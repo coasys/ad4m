@@ -68,8 +68,8 @@ export async function startExecutor(dataPath: string,
     hcAppPort: number,
     languageLanguageOnly: boolean = false,
     adminCredential?: string,
-    proxyUrl: string = "ws://207.148.16.17:42697",
-    bootstrapUrl: string = "http://207.148.16.17:38245",
+    proxyUrl: string = "wss://signal.holotest.net",
+    bootstrapUrl: string = "https://bootstrap.holo.host",
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
