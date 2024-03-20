@@ -159,7 +159,7 @@ impl PerspectiveInstance {
                         }
                     }
                 }
-                Ok(())  
+                Ok(())
             })().await {
                 log::error!("Error in pending_diffs_loop: {:?}", e);
             }
@@ -171,7 +171,7 @@ impl PerspectiveInstance {
         let uuid = self.persisted.lock().await.uuid.clone();
         let mut link_language_guard = self.link_language.lock().await;
         if let Some(link_language) = link_language_guard.as_mut() {
-            let mut local_links = Ad4mDb::with_global_instance(|db| 
+            let mut local_links = Ad4mDb::with_global_instance(|db|
                 db.get_all_links(&uuid)
             ).unwrap();
 
@@ -188,7 +188,7 @@ impl PerspectiveInstance {
 
             let mut links_to_commit = Vec::new();
             for (local_link, _) in &local_links {
-                if !remote_links.iter().any(|e| 
+                if !remote_links.iter().any(|e|
                     e.author == local_link.author &&
                     e.timestamp == local_link.timestamp &&
                     e.data.source == local_link.data.source &&
@@ -220,7 +220,7 @@ impl PerspectiveInstance {
             handle.state = state.clone();
 
             update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
-            
+
             get_global_pubsub()
                 .await
                 .publish(
@@ -311,7 +311,7 @@ impl PerspectiveInstance {
                 )
                 .await;
         }
-        
+
         for link in &diff.removals {
             get_global_pubsub()
                 .await
@@ -343,7 +343,8 @@ impl PerspectiveInstance {
 
     pub async fn add_link(&mut self, link: Link, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expression = create_signed_expression(link)?;
-        self.add_link_expression(link_expression.into(), status).await
+        let link = self.add_link_expression(link_expression.into(), status).await;
+        link
     }
 
     async fn set_prolog_rebuild_flag(&self) {
@@ -359,7 +360,7 @@ impl PerspectiveInstance {
             .expect("Ad4mDb not initialized")
             .add_link(&handle.uuid, &link_expression, &status)?;
 
-        let decorated_link_expression = DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
+            let decorated_link_expression = DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
         self.set_prolog_rebuild_flag().await;
 
         get_global_pubsub()
@@ -373,22 +374,33 @@ impl PerspectiveInstance {
             )
             .await;
 
-        if status == LinkStatus::Shared {
+            if status == LinkStatus::Shared {
             let diff = PerspectiveDiff {
                 additions: vec![link_expression.clone()],
                 removals: vec![],
             };
-            match self.commit(&diff).await {
-                Ok(_) => (),
-                Err(_) => {
-                    Ad4mDb::global_instance()
-                        .lock()
-                        .expect("Couldn't get write lock on Ad4mDb")
-                        .as_ref()
-                        .expect("Ad4mDb not initialized")
-                        .add_pending_diff(&handle.uuid, &diff)?;
+
+            let self_clone = self.clone();
+            let diff_clone = diff.clone();
+            let handle_clone = handle.clone();
+
+            tokio::spawn(async move {
+                match self_clone.commit(&diff_clone).await {
+                    Ok(_) => (),
+                    Err(_) => {
+                        let global_instance = Ad4mDb::global_instance();
+                        let mut db = global_instance.lock().expect("Couldn't get write lock on Ad4mDb");
+
+                        if let Some(db) = db.as_ref() {
+                            db.add_pending_diff(&handle_clone.uuid, &diff_clone).unwrap_or_else(|e| {
+                                eprintln!("Failed to add pending diff: {}", e);
+                            });
+                        } else {
+                            panic!("Ad4mDb not initialized");
+                        }
+                    }
                 }
-            }
+            });
         }
 
         Ok(decorated_link_expression)
@@ -892,8 +904,8 @@ impl PerspectiveInstance {
     }
 
     pub async fn send_signal(
-        &self, 
-        remote_agent_did: String, 
+        &self,
+        remote_agent_did: String,
         payload: PerspectiveExpression
     ) -> Result<(), AnyError> {
         let mut link_language_guard = self.link_language.lock().await;
@@ -905,7 +917,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn send_broadcast(
-        &self, 
+        &self,
         payload: PerspectiveExpression
     ) -> Result<(), AnyError> {
         let mut link_language_guard = self.link_language.lock().await;
