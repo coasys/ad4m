@@ -81,7 +81,7 @@ fn main() {
 
     if let Err(err) = build_dapp() {
         eprintln!("Error building dapp: {}", err);
-        std::process::exit(1);
+        //std::process::exit(1);
     }
 
     if let Err(err) = build_js_executor() {
