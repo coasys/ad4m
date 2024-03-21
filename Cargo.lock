@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m"
-version = "0.9.0-prerelease.0"
+version = "0.9.0-rc2"
 dependencies = [
  "ad4m-client",
  "anyhow",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.9.0-prerelease"
+version = "0.9.0-rc2"
 dependencies = [
  "anyhow",
  "async-tungstenite",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.9.0-prerelease.0"
+version = "0.9.0-rc2"
 dependencies = [
  "ad4m-client",
  "chrono",
@@ -10930,7 +10930,7 @@ dependencies = [
 
 [[package]]
 name = "rust-executor"
-version = "0.9.0-prerelease"
+version = "0.9.0-rc2"
 dependencies = [
  "ad4m-client",
  "argon2",
