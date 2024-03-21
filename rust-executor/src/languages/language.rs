@@ -54,7 +54,7 @@ impl Language {
         Ok(rev.map(|rev| rev.into()))
     }
 
-    pub async fn current_revision(&mut self) -> Result<Option<Vec<u8>>, AnyError> {
+    pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -69,8 +69,17 @@ impl Language {
             self.address,
         );
         let result: String = self.js_core.execute(script).await?;
-        let maybe_revision: Option<ByteArray> = serde_json::from_str(&result)?;
-        Ok(maybe_revision.map(|rev| rev.into()))
+        if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&result) {
+            if let Some(revision) = maybe_revision {
+                let vec: Vec<u8> = revision.into();
+                let string = String::from_utf8(vec).unwrap();
+                return Ok(Some(string))
+            }
+            return Ok(None)
+        } 
+        
+        let maybe_revision = serde_json::from_str::<Option<String>>(&result)?;
+        Ok(maybe_revision)
     }
 
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
