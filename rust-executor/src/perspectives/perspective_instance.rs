@@ -389,7 +389,7 @@ impl PerspectiveInstance {
                     Ok(_) => (),
                     Err(_) => {
                         let global_instance = Ad4mDb::global_instance();
-                        let mut db = global_instance.lock().expect("Couldn't get write lock on Ad4mDb");
+                        let db = global_instance.lock().expect("Couldn't get write lock on Ad4mDb");
 
                         if let Some(db) = db.as_ref() {
                             db.add_pending_diff(&handle_clone.uuid, &diff_clone).unwrap_or_else(|e| {
