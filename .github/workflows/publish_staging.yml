@@ -450,6 +450,11 @@ jobs:
      - uses: actions/setup-node@v3
        with:
          node-version: '18.x'
+
+     - name: Install Deno
+       uses: denoland/setup-deno@v1
+       with:
+        deno-version: v1.32.4
   
      - name: Cache cargo
        id: cache-cargo
