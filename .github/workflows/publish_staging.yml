@@ -463,6 +463,7 @@ jobs:
          key: ${{ runner.os }}-cargo
          restore-keys: ${{ runner.os }}-cargo
      - run: rustup target add wasm32-unknown-unknown
+     - run: pnpm install
      - run: cd core && pnpm install && pnpm build && cd ../
      - run: cd executor && pnpm build && cd ../
      - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
