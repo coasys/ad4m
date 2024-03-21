@@ -1,4 +1,5 @@
 use std::net::Ipv4Addr;
+use std::path::Path;
 
 use rocket::fs::{FileServer, relative};
 use rocket::Config;
@@ -9,6 +10,11 @@ pub(crate) async fn serve_dapp(port: u16) -> Result<(), Box<dyn std::error::Erro
         address: Ipv4Addr::new(127, 0, 0, 1).into(),
         ..Config::debug_default()
     };
+
+    let dir = relative!("dapp");
+    if !Path::new(dir).exists() {
+        return Err("Dapp directory not found".into());
+    }
 
     rocket::build()
         .configure(&config)
