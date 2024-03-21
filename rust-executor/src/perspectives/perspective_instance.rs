@@ -246,7 +246,7 @@ impl PerspectiveInstance {
         *self.persisted.lock().await = handle;
     }
 
-    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<Option<Vec<u8>>, AnyError> {
+    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<Option<String>, AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
             return Ok(None)
