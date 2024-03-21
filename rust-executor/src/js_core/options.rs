@@ -21,7 +21,7 @@ pub fn module_map() -> HashMap<String, String> {
     );
     map.insert(
         "https://ad4m.runtime/executor".to_string(),
-        include_str!("../../../executor/lib/bundle.js").to_string(),
+        include_str!("../../executor/lib/bundle.js").to_string(),
     );
     map
 }

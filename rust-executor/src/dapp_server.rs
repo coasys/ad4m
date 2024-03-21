@@ -11,14 +11,14 @@ pub(crate) async fn serve_dapp(port: u16) -> Result<(), Box<dyn std::error::Erro
         ..Config::debug_default()
     };
 
-    let dir = relative!("dapp");
+    let dir = relative!("dapp/dist");
     if !Path::new(dir).exists() {
         return Err("Dapp directory not found".into());
     }
 
     rocket::build()
         .configure(&config)
-        .mount("/", FileServer::from(relative!("dapp")))
+        .mount("/", FileServer::from(dir))
         .launch()
         .await?;
 

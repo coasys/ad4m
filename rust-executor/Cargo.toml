@@ -11,6 +11,14 @@ repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
 
+include = [
+    "src/**/*",
+    "dapp", # Symlink to the dapp directory
+    "executor", # Symlink to the executor directory
+    "build.rs",
+    "Cargo.toml"
+]
+
 [lib]
 name = "rust_executor"
 path = "src/lib.rs"
