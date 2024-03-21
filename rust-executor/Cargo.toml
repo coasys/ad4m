@@ -73,7 +73,7 @@ kitsune_p2p_types = { version = "0.3.0-beta-dev.22" }
 scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client" }
+ad4m-client = { path = "../rust-client", version="0.9.0-rc3" }
 
 rusqlite = { version = "0.29.0", features = ["bundled"] }
 fake = { version = "2.9.2", features = ["derive"] }
