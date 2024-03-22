@@ -22,6 +22,7 @@ pub struct Ad4mConfig {
     pub hc_bootstrap_url: Option<String>,
     pub connect_holochain: Option<bool>,
     pub admin_credential: Option<String>,
+    pub auto_permit_cap_requests: Option<bool>,
 }
 
 impl Ad4mConfig {
@@ -96,6 +97,7 @@ impl Default for Ad4mConfig {
             hc_bootstrap_url: None,
             connect_holochain: None,
             admin_credential: None,
+            auto_permit_cap_requests: None,
         };
         config.prepare();
         config
