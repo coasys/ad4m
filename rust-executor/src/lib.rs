@@ -42,11 +42,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     config.prepare();
 
     info!("Initializing Ad4mDb...");
-    
+
     Ad4mDb::init_global_instance(
         config.app_data_path
             .as_ref()
-            .map(|path| std::path::Path::new(path).join("ad4m_db.sqlite").to_string_lossy().into_owned())    
+            .map(|path| std::path::Path::new(path).join("ad4m_db.sqlite").to_string_lossy().into_owned())
             .expect("App data path not set in Ad4mConfig")
             .as_str()
     ).expect("Failed to initialize Ad4mDb");
@@ -79,16 +79,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Starting GraphQL...");
 
-    // if let Some(true) = config.run_dapp_server {
-    //     std::thread::spawn(|| {
-    //         let runtime = tokio::runtime::Builder::new_multi_thread()
-    //             .thread_name(String::from("dapp_server"))
-    //             .enable_all()
-    //             .build()
-    //             .unwrap();
-    //         let _ = runtime.block_on(serve_dapp(8080));
-    //     });
-    // };
+    if let Some(true) = config.run_dapp_server {
+        std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .thread_name(String::from("dapp_server"))
+                .enable_all()
+                .build()
+                .unwrap();
+            let _ = runtime.block_on(serve_dapp(8080));
+        });
+    };
 
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
