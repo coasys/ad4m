@@ -387,9 +387,9 @@ impl HolochainService {
             .build()
             .await;
 
-        if conductor.is_err() {
-            info!("Could not start holochain conductor: {:#?}", conductor.err());
-            panic!("Could not start holochain conductor");
+        if let Err(e) = conductor {
+            info!("Could not start holochain conductor: {:#?}", e);
+            panic!("Could not start holochain conductor: {:#?}", e);
         }
 
         info!("Started holochain conductor");
