@@ -79,16 +79,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Starting GraphQL...");
 
-    if let Some(true) = config.run_dapp_server {
-        std::thread::spawn(|| {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .thread_name(String::from("dapp_server"))
-                .enable_all()
-                .build()
-                .unwrap();
-            let _ = runtime.block_on(serve_dapp(8080));
-        });
-    };
+    // if let Some(true) = config.run_dapp_server {
+    //     std::thread::spawn(|| {
+    //         let runtime = tokio::runtime::Builder::new_multi_thread()
+    //             .thread_name(String::from("dapp_server"))
+    //             .enable_all()
+    //             .build()
+    //             .unwrap();
+    //         let _ = runtime.block_on(serve_dapp(8080));
+    //     });
+    // };
 
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
