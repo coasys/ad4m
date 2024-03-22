@@ -16,7 +16,7 @@ pub(crate) async fn serve_dapp(port: u16) -> Result<(), Box<dyn std::error::Erro
 
     let dir = relative!("dapp/dist");
     if !Path::new(dir).exists() {
-        return Err("Dapp directory not found".into());
+        DAPP.extract("dapp/dist")?;
     }
 
     rocket::build()
