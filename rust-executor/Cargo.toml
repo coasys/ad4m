@@ -13,8 +13,8 @@ readme = "README.md"
 
 include = [
     "src/**/*",
-    "dapp", # Symlink to the dapp directory
-    "executor", # Symlink to the executor directory
+    "dapp/dist", # Symlink to the dapp directory
+    "executor/lib/bundle.js", # Symlink to the executor directory
     "build.rs",
     "Cargo.toml"
 ]
