@@ -13,6 +13,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 pub struct RequestContext {
     pub capabilities: Result<Vec<Capability>, String>,
     pub js_handle: JsCoreHandle,
+    pub auto_permit_cap_requests: bool,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

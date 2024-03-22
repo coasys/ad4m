@@ -144,7 +144,13 @@ impl PerspectiveInstance {
                     if link_language.current_revision().await.map_err(|e| anyhow!("current_revision error: {}",e))?.is_some() {
                         // Ok, we are synced and have a revision. Let's commit our pending diffs.
                         let pending_diffs = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid)).map_err(|e| anyhow!("get_pending_diffs error: {}",e))?;
+                        
+                        if pending_diffs.additions.is_empty() && pending_diffs.removals.is_empty() {
+                            return Ok(());
+                        }
+                        log::info!("Found pending diffs: {:?}\n Committing...", pending_diffs);
                         let commit_result = link_language.commit(pending_diffs).await;
+                        log::info!("Pending diffs commit result: {:?}", commit_result);
                         return match commit_result {
                             Ok(Some(_)) => {
                                 Ad4mDb::with_global_instance(|db| db.clear_pending_diffs(&uuid)).map_err(|e| anyhow!("clear_pending_diffs error: {}",e))?;

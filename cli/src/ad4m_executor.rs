@@ -181,7 +181,8 @@ async fn main() -> Result<()> {
                 hc_proxy_url,
                 hc_bootstrap_url,
                 connect_holochain,
-                admin_credential
+                admin_credential,
+                auto_permit_cap_requests: Some(true)
             }).await;
         }).await;
         
