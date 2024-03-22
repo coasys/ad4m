@@ -12,7 +12,7 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
     if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&js_result) {
         Ok(maybe_revision.map(|revision| {
             let vec: Vec<u8> = revision.into();
-            String::from_utf8(vec).unwrap()
+            base64::encode(&vec)
         }))
     } else {
         Ok(serde_json::from_str::<Option<String>>(&js_result)?)
