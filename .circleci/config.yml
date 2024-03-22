@@ -54,7 +54,7 @@ jobs:
           command: pnpm install --no-frozen-lockfile
       - run:
           name: Build dapp
-          command: cd ./dapp && pnpm build
+          command: cd ./dapp && pnpm install && pnpm build
       - run:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
