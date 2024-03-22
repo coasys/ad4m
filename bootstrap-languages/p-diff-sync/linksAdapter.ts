@@ -90,10 +90,10 @@ export class LinkAdapter implements LinkSyncAdapter {
       peers.push(this.me);
       
       // Lexically sort the peers
-      peers.sort();
+      peers = peers.sort();
 
       // If we are the first peer, we are the scribe
-      let is_scribe = peers[0] == this.me;
+      let is_scribe = (peers[0] == this.me);
       
       // Get a deduped set of all peer's current revisions
       let revisions = new Set<Buffer>();
@@ -136,12 +136,16 @@ export class LinkAdapter implements LinkSyncAdapter {
       await checkSyncState(this.syncStateChangeCallback);
 
       for (const hash of Array.from(revisions)) {
+        console.log("GOSSIP processing other revision", hash.toString('base64'));
         if(!hash) continue
         if (this.myCurrentRevision && hash.equals(this.myCurrentRevision)) continue
+        console.log("GOSSIP other revision different to ours", this.myCurrentRevision.toString('base64'));
+        console.log("Pulling with is_scribe =", is_scribe)
         let pullResult = await this.hcDna.call(DNA_NICK, ZOME_NAME, "pull", { 
           hash,
           is_scribe 
         });
+        console.log("GOSSIP pullResult", pullResult);
         if (pullResult) {
           if (pullResult.current_revision && Buffer.isBuffer(pullResult.current_revision)) {
             let myRevision = pullResult.current_revision;
