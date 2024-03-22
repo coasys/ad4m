@@ -6,7 +6,7 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-libs": {
-      "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/ad4m-executor#build", "@coasys/ad4m-cli#build", "@coasys/dapp#build"],
+      "dependsOn": ["@coasys/dapp#build", "@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/ad4m-executor#build", "@coasys/ad4m-cli#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-core-executor": {
