@@ -7,6 +7,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use holochain::conductor::api::{AppInfo, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
+use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
@@ -36,6 +37,23 @@ pub(crate) use interface::{
 };
 
 use self::interface::set_holochain_service;
+
+const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#"["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"]"#;
+
+pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, AnyError> {
+    let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
+    let agent_infos: Vec<AgentInfoSigned> = agent_infos
+        .into_iter()
+        .map(|encoded_info| {
+            let info_bytes = base64::decode(encoded_info)
+                .expect("Failed to decode base64 AgentInfoSigned");
+            AgentInfoSigned::decode(&info_bytes)
+                .expect("Failed to decode AgentInfoSigned")
+        })
+        .collect();
+
+    Ok(agent_infos)
+}
 
 #[derive(Clone)]
 pub struct HolochainService {
@@ -114,7 +132,7 @@ impl HolochainService {
                             match message {
                                 HolochainServiceRequest::InstallApp(payload, response) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(10), 
+                                        std::time::Duration::from_secs(10),
                                         service.install_app(payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; InstallApp call")) {
                                         Ok(result) => {
@@ -134,7 +152,7 @@ impl HolochainService {
                                     response,
                                 } => {
                                     match timeout(
-                                        std::time::Duration::from_secs(5), 
+                                        std::time::Duration::from_secs(5),
                                         service.call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; Call Zome Function")) {
                                         Ok(result) => {
@@ -147,7 +165,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(10), 
+                                        std::time::Duration::from_secs(10),
                                         service.remove_app(app_id)
                                     ).await.map_err(|_| anyhow!("Timeout error; Remove App")) {
                                         Ok(result) => {
@@ -160,7 +178,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AgentInfos(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.agent_infos()
                                     ).await.map_err(|_| anyhow!("Timeout error; AgentInfos")) {
                                         Ok(result) => {
@@ -173,7 +191,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.add_agent_infos(agent_infos)
                                     ).await.map_err(|_| anyhow!("Timeout error; AddAgentInfos")) {
                                         Ok(result) => {
@@ -186,7 +204,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::Sign(data, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.sign(data)
                                     ).await.map_err(|_| anyhow!("Timeout error; Sign")) {
                                         Ok(result) => {
@@ -199,7 +217,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::Shutdown(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.shutdown()
                                     ).await.map_err(|_| anyhow!("Timeout error Shutdown")) {
                                         Ok(result) => {
@@ -212,7 +230,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::GetAgentKey(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.get_agent_key()
                                     ).await.map_err(|_| anyhow!("Timeout error; GetAgentKey")) {
                                         Ok(result) => {
@@ -225,7 +243,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::GetAppInfo(app_id, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.get_app_info(app_id)
                                     ).await.map_err(|_| anyhow!("Timeout error; GetAppInfo")) {
                                         Ok(result) => {
@@ -238,7 +256,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::LogNetworkMetrics(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         service.log_network_metrics()
                                     ).await.map_err(|_| anyhow!("Timeout error; LogNetworkMetrics")) {
                                         Ok(result) => {
@@ -251,7 +269,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::PackDna(path, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         HolochainService::pack_dna(path)
                                     ).await.map_err(|_| anyhow!("Timeout error; PackDna")) {
                                         Ok(result) => {
@@ -264,7 +282,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::UnPackDna(path, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3), 
+                                        std::time::Duration::from_secs(3),
                                         HolochainService::unpack_dna(path)
                                     ).await.map_err(|_| anyhow!("Timeout error; UnpackDna")) {
                                         Ok(result) => {
@@ -295,6 +313,8 @@ impl HolochainService {
             _ => unreachable!(),
         };
 
+        inteface.add_agent_infos(agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO).expect("Couldn't deserialize hard-wired AgentInfo")).await?;
+
         set_holochain_service(inteface).await;
 
         Ok(())
@@ -308,17 +328,18 @@ impl HolochainService {
             config
         } else {
         let mut config = ConductorConfig::default();
-            config.environment_path = PathBuf::from(local_config.conductor_path.clone()).into();
+        let data_root_path: DataRootPath = PathBuf::from(local_config.conductor_path.clone()).into();
+            config.data_root_path = Some(data_root_path);
             config.admin_interfaces = None;
 
             let mut kitsune_config = KitsuneP2pConfig::default();
-            let mut tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
+            let tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
 
             // How long should we hold off talking to a peer
             // we've previously gotten errors speaking to.
             // [Default: 5 minute; now updated to 2 minutes]
             // tuning_params.gossip_peer_on_error_next_gossip_delay_ms = 1000 * 60 * 2;
-            
+
             // How often should we update and publish our agent info?
             // [Default: 5 minutes; now updated to 2 minutes]
             // tuning_params.gossip_agent_info_update_interval_ms = 1000 * 60 * 2;
@@ -326,6 +347,10 @@ impl HolochainService {
             kitsune_config.tuning_params = Arc::new(tuning_params);
 
             if local_config.use_bootstrap {
+                // prod - https://bootstrap.holo.host
+                // staging - https://bootstrap-staging.holo.host
+                // dev - https://bootstrap-dev.holohost.workers.dev
+                // own - http://207.148.16.17:38245
                 kitsune_config.bootstrap_service = Some(Url2::parse(local_config.bootstrap_url));
             } else {
                 kitsune_config.bootstrap_service = None;
@@ -337,6 +362,9 @@ impl HolochainService {
             }
             if local_config.use_proxy {
                 kitsune_config.transport_pool = vec![TransportConfig::WebRTC {
+                    // prod - wss://signal.holo.host
+                    // dev - wss://signal.holotest.net
+                    // our - ws://207.148.16.17:42697
                     signal_url: local_config.proxy_url,
                 }];
             } else {
@@ -347,9 +375,7 @@ impl HolochainService {
                     },
                 ];
             }
-            config.network = Some(kitsune_config);
-
-            println!("wow 1 {:?}", config);
+            config.network = kitsune_config;
 
             config
         };
@@ -361,9 +387,9 @@ impl HolochainService {
             .build()
             .await;
 
-        if conductor.is_err() {
-            info!("Could not start holochain conductor: {:#?}", conductor.err());
-            panic!("Could not start holochain conductor");
+        if let Err(e) = conductor {
+            info!("Could not start holochain conductor: {:#?}", e);
+            panic!("Could not start holochain conductor: {:#?}", e);
         }
 
         info!("Started holochain conductor");
@@ -566,10 +592,11 @@ impl HolochainService {
 
     pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
         let metrics = self.conductor.dump_network_metrics(None).await?;
-        info!("Network metrics: {}", serde_json::to_string_pretty(&serde_json::Value::try_from(metrics)?)?);
+        info!("Network metrics: {}",metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
-        info!("Network stats: {}", serde_json::to_string_pretty(&serde_json::Value::try_from(stats)?)?);
+        info!("Network stats: {}", stats);
+
         Ok(())
     }
 

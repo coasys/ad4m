@@ -4,10 +4,10 @@
   "type": "module",
   "dependencies": {
     "@apollo/client": "3.7.10",
-    "@junto-foundation/junto-elements": "^0.5.5",
     "@coasys/ad4m": "link:../core",
+    "@junto-foundation/junto-elements": "^0.5.5",
     "@preact/preset-vite": "^2.4.0",
-    "@tauri-apps/api": "^1.4.0",
+    "@tauri-apps/api": "^1.5.3",
     "apollo-boost": "^0.4.9",
     "graphql": "15.7.2",
     "graphql-ws": "5.12.0",
@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@prefresh/vite": "^2.2.9",
-    "@tauri-apps/cli": "1.4.0",
+    "@tauri-apps/cli": "1.5.11",
     "@testing-library/jest-dom": "^5.16.2",
     "@testing-library/react": "^12.1.4",
     "@testing-library/user-event": "^13.5.0",
@@ -65,11 +65,11 @@
     "customize-cra": "1.0.0",
     "react-app-rewired": "^2.2.1",
     "react-error-overlay": "6.0.9",
-    "vite": "^4.0.1",
-    "run-script-os": "^1.1.6"
+    "run-script-os": "^1.1.6",
+    "vite": "^4.0.1"
   },
   "resolutions": {
     "react-error-overlay": "6.0.9"
   },
-  "version": "0.8.1"
+  "version": "0.9.0"
 }

@@ -1,9 +1,7 @@
 use std::borrow::Cow;
 
 use base64::{engine::general_purpose as base64engine, Engine as _};
-use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op, Extension, Op};
-use did_key::{CoreSign, PatchedKeyPair};
-use log::error;
+use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op2, Extension, Op};
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
@@ -16,7 +14,8 @@ pub struct Key {
     pub encoding: String,
 }
 
-#[op]
+#[op2]
+#[serde]
 fn wallet_get_main_key() -> Result<Key, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
@@ -35,7 +34,8 @@ fn wallet_get_main_key() -> Result<Key, AnyError> {
     })
 }
 
-#[op]
+#[op2]
+#[serde]
 fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
@@ -46,7 +46,8 @@ fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
         .ok_or(anyhow!("main key not found. call createMainKey() first"))
 }
 
-#[op]
+#[op2]
+#[serde]
 fn wallet_create_main_key() -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
@@ -55,7 +56,7 @@ fn wallet_create_main_key() -> Result<(), AnyError> {
     Ok(())
 }
 
-#[op]
+#[op2(fast)]
 fn wallet_is_unlocked() -> Result<bool, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
@@ -63,64 +64,46 @@ fn wallet_is_unlocked() -> Result<bool, AnyError> {
     Ok(wallet_ref.is_unlocked())
 }
 
-#[op]
-fn wallet_unlock(passphrase: String) -> Result<(), AnyError> {
+#[op2]
+#[serde]
+fn wallet_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
     wallet_ref.unlock(passphrase).map_err(|e| e.into())
 }
 
-#[op]
-fn wallet_lock(passphrase: String) -> Result<(), AnyError> {
+#[op2]
+#[serde]
+fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
     Ok(wallet_ref.lock(passphrase))
 }
 
-#[op]
-fn wallet_export(passphrase: String) -> Result<String, AnyError> {
+#[op2]
+#[string]
+fn wallet_export(#[string] passphrase: String) -> Result<String, AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
     Ok(wallet_ref.export(passphrase))
 }
 
-#[op]
-fn wallet_load(data: String) -> Result<(), AnyError> {
+#[op2]
+#[serde]
+fn wallet_load(#[string] data: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
     Ok(wallet_ref.load(data))
 }
 
-#[op]
-fn wallet_sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
-    let wallet_instance = Wallet::instance();
-    let wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let name = "main".to_string();
-    let signature = wallet_ref
-        .sign(&name, payload)
-        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
-    Ok(signature)
-}
-
-#[op]
-fn wallet_verify(did: String, message: &[u8], signature: &[u8]) -> bool {
-    if let Ok(key_pair) = PatchedKeyPair::try_from(did.as_str()) {
-        match key_pair.verify(message, signature) {
-            Ok(_) => true,
-            Err(e) => {
-                error!("Signature verification failed: {:?}", e);
-                false
-            }
-        }
-    } else {
-        error!("Failed to parse DID as key method: {}", did);
-        false
-    }
+#[op2]
+#[serde]
+fn wallet_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
+    crate::agent::sign(payload)
 }
 
 pub fn build() -> Extension {
@@ -137,7 +120,6 @@ pub fn build() -> Extension {
             wallet_export::DECL,
             wallet_load::DECL,
             wallet_sign::DECL,
-            wallet_verify::DECL,
         ]),
         ..Default::default()
     }

@@ -46,8 +46,11 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
 
 #[hdk_extern]
 pub fn commit(diff: PerspectiveDiff) -> ExternResult<Hash> {
-    link_adapter::commit::commit::<retriever::HolochainRetreiver>(diff)
-        .map_err(|error| utils::err(&format!("{}", error)))
+    info!("commit");
+    let commit_result = link_adapter::commit::commit::<retriever::HolochainRetreiver>(diff)
+        .map_err(|error| utils::err(&format!("{}", error)));
+    info!("commit_result: {:?}", commit_result);
+    commit_result
 }
 
 #[hdk_extern]
@@ -59,14 +62,20 @@ pub fn current_revision(_: ()) -> ExternResult<Option<Hash>> {
 
 #[hdk_extern]
 pub fn sync(_: ()) -> ExternResult<Option<Hash>> {
-    link_adapter::commit::broadcast_current::<retriever::HolochainRetreiver>()
-        .map_err(|error| utils::err(&format!("{}", error)))
+    info!("sync");
+    let broadcast_result = link_adapter::commit::broadcast_current::<retriever::HolochainRetreiver>()
+        .map_err(|error| utils::err(&format!("{}", error)));
+    info!("broadcast_result: {:?}", broadcast_result);
+    broadcast_result
 }
 
 #[hdk_extern]
 pub fn pull(args: PullArguments) -> ExternResult<PullResult> {
-    link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
-        .map_err(|error| utils::err(&format!("{}", error)))
+    info!("pull");
+    let pull_result = link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
+        .map_err(|error| utils::err(&format!("{}", error)));
+    info!("pull_result: {:?}", pull_result);
+    pull_result
 }
 
 #[hdk_extern]
@@ -95,6 +104,7 @@ fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
     //Check if its a normal diff expression signal
     match HashBroadcast::try_from(signal.clone()) {
         Ok(broadcast) => {
+            info!("recv_remote_signal broadcast: {:?}", broadcast);
             link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
                 .map_err(|err| utils::err(&format!("{}", err)))?;
         }
@@ -167,8 +177,10 @@ pub fn get_active_agents(_: ()) -> ExternResult<Vec<AgentPubKey>> {
 
 #[hdk_extern]
 pub fn get_others(_: ()) -> ExternResult<Vec<String>> {
+    info!("get_others");
     let res =
         telepresence::status::get_others().map_err(|error| utils::err(&format!("{}", error)))?;
+    info!("get_others res: {:?}", res);
     Ok(res)
 }
 

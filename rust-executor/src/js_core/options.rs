@@ -3,8 +3,8 @@ use std::{collections::HashMap, rc::Rc};
 use url::Url;
 
 use super::{
-    jwt_extension, pubsub_extension, string_module_loader::StringModuleLoader, utils_extension,
-    wallet_extension,
+    pubsub_extension, string_module_loader::StringModuleLoader, utils_extension,
+    wallet_extension, signature_extension, agent_extension, languages_extension,
 };
 use crate::holochain_service::holochain_service_extension;
 use crate::prolog_service::prolog_service_extension;
@@ -21,7 +21,7 @@ pub fn module_map() -> HashMap<String, String> {
     );
     map.insert(
         "https://ad4m.runtime/executor".to_string(),
-        include_str!("../../../executor/lib/bundle.js").to_string(),
+        include_str!("../../executor/lib/bundle.js").to_string(),
     );
     map
 }
@@ -36,8 +36,10 @@ pub fn main_worker_options() -> WorkerOptions {
     let utils_ext = utils_extension::build();
     let sub_ext = pubsub_extension::build();
     let holochain_ext = holochain_service_extension::build();
-    let jwt_ext = jwt_extension::build();
     let prolog_ext = prolog_service_extension::build();
+    let signature_ext = signature_extension::build();
+    let agent_ext = agent_extension::build();
+    let languages_ext = languages_extension::build();
 
     WorkerOptions {
         extensions: vec![
@@ -45,8 +47,10 @@ pub fn main_worker_options() -> WorkerOptions {
             utils_ext,
             sub_ext,
             holochain_ext,
-            jwt_ext,
             prolog_ext,
+            signature_ext,
+            agent_ext,
+            languages_ext,
         ],
         module_loader: Rc::new(loader),
         ..Default::default()

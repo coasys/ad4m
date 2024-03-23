@@ -91,7 +91,7 @@ describe("Apps integration tests", () => {
       const oldApps = await adminAd4mClient!.agent.getApps();
   
       expect(oldApps.length).to.be.equal(1);
-      expect(oldApps[0].revoked).to.be.equal(null);
+      expect(oldApps[0].revoked).to.be.false;
   
       const newApps = await adminAd4mClient!.agent.revokeToken(requestId);
   

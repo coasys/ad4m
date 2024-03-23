@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-launcher"
-version = "0.8.1"
+version = "0.9.0"
 description = "Administration of ad4m services"
 authors = ["Kaichao Sun"]
 license = ""
@@ -13,7 +13,7 @@ publish = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-tauri-build = { version = "1.0.4", features = [] }
+tauri-build = { version = "1.5.1", features = [] }
 
 [dependencies]
 serde_json = "1.0"
@@ -27,15 +27,15 @@ directories = "4.0.1"
 opener = "0.5.0"
 open = "2.0.1"
 sysinfo = "0.29.7"
-tauri = { version = "1.4.1", features = [ "updater", "api-all", "system-tray"] }
+tauri = { version = "1.6.1", features = [ "updater", "api-all", "system-tray"] }
 uuid = { version = "0.8", features = ["v4"] }
 localtunnel-client = "0.0.12"
 tokio = { version = "1.19.2", features = ["full"] }
 tauri-plugin-positioner = { version = "1.0", features = ["system-tray"] }
 remove_dir_all = "0.7.0"
-reqwest = { version = "0.11.17", features = ["json", "native-tls"] }
+reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 ad4m-client = { path = "../../rust-client" }
-rust-executor = { path = "../../rust-executor" }
+ad4m-executor = { path = "../../rust-executor" }
 chrono = "0.4"
 env_logger = "0.10.0"
 colored = "2.0"

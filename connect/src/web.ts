@@ -451,7 +451,7 @@ export class Ad4mConnectElement extends LitElement {
 
   // TODO: localstorage doesnt work here
   @property({ type: String })
-  token = getForVersion("ad4murl") || "";
+  token = getForVersion("ad4mToken") || "";
 
   // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
@@ -648,7 +648,10 @@ export class Ad4mConnectElement extends LitElement {
     if (this.uiState === "qr") {
       return ScanQRCode({
         changeState: this.changeUIState,
-        onSuccess: (url) => this._client.connect(url),
+        onSuccess: (url) => {
+          this.changeUrl(url);
+          this._client.connect(url)
+        },
         uiState: this.uiState,
       });
     }

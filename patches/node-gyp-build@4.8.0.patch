@@ -1,0 +1,15 @@
+diff --git a/node-gyp-build.js b/node-gyp-build.js
+index 76b96e107474cdd79394262b65ac286db36353e8..152e090ba03b36dbbe4d6b2ffe91a34664d23cfd 100644
+--- a/node-gyp-build.js
++++ b/node-gyp-build.js
+@@ -1,7 +1,6 @@
+-var fs = require('fs')
+-var path = require('path')
+-var os = require('os')
+-
++import fs from 'node:fs'
++import path from 'node:path'
++import os from 'node:os'
+ // Workaround to fix webpack's build warnings: 'the request of a dependency is an expression'
+ var runtimeRequire = typeof __webpack_require__ === 'function' ? __non_webpack_require__ : require // eslint-disable-line
+ 

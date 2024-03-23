@@ -145,13 +145,13 @@ mod prolog_test {
         let query = String::from("non_existant_predicate(\"a\",\"p1\",\"b\").");
 
         let result = service
-            .run_query(engine_name.clone(), query)
+           .run_query(engine_name.clone(), query)
             .await
             .expect("Error running query");
 
         assert_eq!(
             result,
-            Err(String::from("error(existence_error(procedure,non_existant_predicate/3),non_existant_predicate/3)."))
+            Err(String::from("error existence_error procedure / non_existant_predicate 3 / non_existant_predicate 3"))
         );    
     
     }

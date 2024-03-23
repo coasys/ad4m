@@ -3,10 +3,11 @@ import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, La
 import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
 import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
+import { encodeBase64 } from "https://deno.land/std@0.220.1/encoding/base64.ts";
 
 class PeerInfo {
   //@ts-ignore
-  currentRevision: Buffer;
+  currentRevision: Uint8Array;
   //@ts-ignore
   lastSeen: Date;
 };
@@ -19,7 +20,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   generalMutex: Mutex = withTimeout(new Mutex(), 10000, new Error('PerspectiveDiffSync: generalMutex timeout'));
   me: DID
   gossipLogCount: number = 0;
-  myCurrentRevision: Buffer | null = null;
+  myCurrentRevision: Uint8Array | null = null;
 
   constructor(context: LanguageContext) {
     //@ts-ignore
@@ -37,12 +38,15 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async others(): Promise<DID[]> {
     //@ts-ignore
-    return await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_others", null);
+    let others = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_others", null);
+    console.log("PerspectiveDiffSync.others(); others", others);
+    return others as DID[];
   }
 
   async currentRevision(): Promise<string> {
     //@ts-ignore
     let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "current_revision", null);
+    console.log("PerspectiveDiffSync.currentRevision(); res", res);
     return res as string;
   }
 
@@ -53,7 +57,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     try {
       //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
-      if (current_revision && Buffer.isBuffer(current_revision)) {
+      if (current_revision && current_revision instanceof Uint8Array) {
         this.myCurrentRevision = current_revision; 
       }
     } catch (e) {
@@ -86,13 +90,13 @@ export class LinkAdapter implements LinkSyncAdapter {
       peers.push(this.me);
       
       // Lexically sort the peers
-      peers.sort();
+      peers = peers.sort();
 
       // If we are the first peer, we are the scribe
-      let is_scribe = peers[0] == this.me;
+      let is_scribe = (peers[0] == this.me);
       
       // Get a deduped set of all peer's current revisions
-      let revisions = new Set<Buffer>();
+      let revisions = new Set<Uint8Array>();
       for(const peerInfo of this.peers.values()) {
         if (peerInfo.currentRevision) revisions.add(peerInfo.currentRevision);
       }
@@ -103,15 +107,15 @@ export class LinkAdapter implements LinkSyncAdapter {
       //Get a copied array of revisions that are different than mine
       let differentRevisions;
 
-      function generateRevisionStates(myCurrentRevision: Buffer) {
+      function generateRevisionStates(myCurrentRevision: Uint8Array) {
         sameRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
-          return myCurrentRevision && revision.equals(myCurrentRevision);
+          return myCurrentRevision && (encodeBase64(revision) == encodeBase64(myCurrentRevision));
         });
         if (myCurrentRevision) {
           sameRevisions.push(myCurrentRevision);
         };
         differentRevisions = revisions.size == 0 ? [] : Array.from(revisions).filter( (revision) => {
-          return myCurrentRevision && !revision.equals(myCurrentRevision);
+          return myCurrentRevision && !(encodeBase64(revision) == encodeBase64(myCurrentRevision));
         });
       }
 
@@ -133,11 +137,13 @@ export class LinkAdapter implements LinkSyncAdapter {
 
       for (const hash of Array.from(revisions)) {
         if(!hash) continue
-        if (this.myCurrentRevision && hash.equals(this.myCurrentRevision)) continue
+        if (this.myCurrentRevision && (encodeBase64(hash) == encodeBase64(this.myCurrentRevision))) continue;
+        
         let pullResult = await this.hcDna.call(DNA_NICK, ZOME_NAME, "pull", { 
           hash,
           is_scribe 
         });
+
         if (pullResult) {
           if (pullResult.current_revision && Buffer.isBuffer(pullResult.current_revision)) {
             let myRevision = pullResult.current_revision;
@@ -153,6 +159,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
       //Only show the gossip log every 10th iteration
       if (this.gossipLogCount == 10) {
+        let others = await this.others();
         console.log(`
         ======
         GOSSIP
@@ -160,14 +167,16 @@ export class LinkAdapter implements LinkSyncAdapter {
         me: ${this.me}
         is scribe: ${is_scribe}
         --
+        others: ${others.join(', ')}
+        --
         ${Array.from(this.peers.entries()).map( ([peer, peerInfo]) => {
           //@ts-ignore
-          return `${peer}: ${peerInfo.currentRevision.toString('base64')} ${peerInfo.lastSeen.toISOString()}\n`
+          return `${peer}: ${encodeBase64(peerInfo.currentRevision)} ${peerInfo.lastSeen.toISOString()}\n`
         })}
         --
         revisions: ${Array.from(revisions).map( (hash) => {
           //@ts-ignore
-          return hash.toString('base64')
+          return encodeBase64(hash)
         })}
         `);
         this.gossipLogCount = 0;

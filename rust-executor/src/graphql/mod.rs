@@ -2,7 +2,6 @@ pub mod graphql_types;
 mod mutation_resolvers;
 mod query_resolvers;
 mod subscription_resolvers;
-mod utils;
 
 use graphql_types::RequestContext;
 use mutation_resolvers::*;
@@ -10,6 +9,8 @@ use query_resolvers::*;
 use subscription_resolvers::*;
 
 use crate::js_core::JsCoreHandle;
+use crate::Ad4mConfig;
+use crate::agent::capabilities::capabilities_from_token;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,13 +18,13 @@ use std::{convert::Infallible, io::Write};
 
 use deno_core::error::AnyError;
 use futures::FutureExt as _;
-use juniper::{InputValue, RootNode};
-use juniper_graphql_transport_ws::ConnectionConfig;
-use juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
+use coasys_juniper::{InputValue, RootNode};
+use coasys_juniper_graphql_transport_ws::ConnectionConfig;
+use coasys_juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
 use std::path::Path;
 
-impl juniper::Context for RequestContext {}
+impl coasys_juniper::Context for RequestContext {}
 
 type Schema = RootNode<'static, Query, Mutation, Subscription>;
 
@@ -31,8 +32,11 @@ fn schema() -> Schema {
     Schema::new(Query, Mutation, Subscription)
 }
 
-pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path: String) -> Result<(), AnyError> {
+pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> Result<(), AnyError> {
+    let port = config.gql_port.expect("Did not get gql port");
+    let app_data_path = config.app_data_path.expect("Did not get app data path");
     let log = warp::log("warp::server");
+    let admin_credential = config.admin_credential.clone();
 
     let mut file = std::fs::File::create(
         Path::new(&app_data_path).join("schema.gql")
@@ -57,27 +61,32 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path
         .and(warp::header::<String>("authorization"))
         .or(default_auth)
         .unify()
-        .map(move |header| {
+        .map(move |auth_header| {
             //println!("Request body: {}", std::str::from_utf8(body_data::bytes()).expect("error converting bytes to &str"));
+            let capabilities = capabilities_from_token(auth_header, admin_credential.clone());
             RequestContext {
-                capability: header,
+                capabilities,
                 js_handle: js_core_handle_cloned1.clone(),
+                auto_permit_cap_requests: config.auto_permit_cap_requests.clone().unwrap_or(false),
             }
         });
-    let qm_graphql_filter = juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
+    let qm_graphql_filter = coasys_juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
 
     let root_node = Arc::new(schema());
 
+    let admin_credential_arc = Arc::new(config.admin_credential.clone());
     let routes = (warp::path("graphql")
         .and(warp::ws())
         .map(move |ws: warp::ws::Ws| {
             let root_node = root_node.clone();
             let js_core_handle = js_core_handle.clone();
+            let admin_credential_arc = admin_credential_arc.clone();
+            let auto_permit_cap_requests = config.auto_permit_cap_requests.clone().unwrap_or(false);
             ws.on_upgrade(move |websocket| async move {
                 serve_graphql_transport_ws(
                     websocket,
                     root_node,
-                    |val: HashMap<String, InputValue>| async move {
+                    move |val: HashMap<String, InputValue>| async move {
                         let mut auth_header = String::from("");
 
                         if let Some(headers) = val.get("headers") {
@@ -90,9 +99,12 @@ pub async fn start_server(js_core_handle: JsCoreHandle, port: u16, app_data_path
                             }
                         };
 
+                        let capabilities = capabilities_from_token(auth_header, admin_credential_arc.as_ref().clone());
+
                         let context = RequestContext {
-                            capability: auth_header,
+                            capabilities,
                             js_handle: js_core_handle.clone(),
+                            auto_permit_cap_requests: auto_permit_cap_requests
                         };
                         Ok(ConnectionConfig::new(context))
                             as Result<ConnectionConfig<_>, Infallible>

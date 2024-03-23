@@ -1,3 +1,8 @@
+#[macro_use]
+extern crate lazy_static;
+
+pub mod agent;
+mod config;
 mod globals;
 mod graphql;
 mod holochain_service;
@@ -6,10 +11,16 @@ mod prolog;
 mod prolog_service;
 mod utils;
 mod wallet;
-mod config;
-
+mod types;
+mod perspectives;
+mod db;
 pub mod init;
 mod pubsub;
+mod neighbourhoods;
+mod languages;
+
+#[cfg(test)]
+mod test_utils;
 
 use log::{error, info};
 use rust_executor::Ad4mConfig;
@@ -22,7 +33,10 @@ use js_core::JsCore;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     prolog::run();
-    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
+    env::set_var(
+        "RUST_LOG",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server",
+    );
     env_logger::try_init().expect("could not logger");
 
     let mut config = Ad4mConfig::default();
@@ -38,13 +52,7 @@ async fn main() {
     info!("js_core initialized.");
 
     info!("Starting GraphQL...");
-    match graphql::start_server(
-        js_core_handle,
-        config.gql_port.expect("Did not get gql port"),
-        config.app_data_path.expect("Did not get app data path"),
-    )
-    .await
-    {
+    match graphql::start_server(js_core_handle, config).await {
         Ok(_) => {
             info!("GraphQL server stopped.");
             std::process::exit(0);

@@ -7,6 +7,7 @@ extern crate rand;
 extern crate regex;
 extern crate rustyline;
 extern crate tokio;
+extern crate kitsune_p2p_types;
 
 mod formatting;
 mod startup;
@@ -69,6 +70,10 @@ struct ClapApp {
     /// Override default executor URL look-up and provide custom URL
     #[arg(short, long)]
     executor_url: Option<String>,
+
+    /// Provide admin credential to gain all capabilities
+    #[arg(short, long)]
+    admin_credential: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,7 +164,9 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
         crate::startup::get_executor_url()?
     };
 
-    let cap_token = if args.no_capability {
+    let cap_token = if let Some(admin_credential) = &args.admin_credential {
+        admin_credential.clone()
+    } else if args.no_capability {
         "".to_string()
     } else {
         match &args.domain {
@@ -222,7 +229,7 @@ async fn main() -> Result<()> {
     } = args.domain
     {
         let _ = tokio::spawn(async move {
-            rust_executor::run_with_tokio(Ad4mConfig {
+            rust_executor::run(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
                 language_language_only,

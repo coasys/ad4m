@@ -179,7 +179,7 @@ fn inbox(did_filter: Option<String>) -> ExternResult<Vec<PerspectiveExpression>>
 #[hdk_extern]
 pub fn send_p2p(message: PerspectiveExpression) -> ExternResult<()> {
     //debug!("SENDING MESSAGE...");
-    remote_signal(
+    send_remote_signal(
         SerializedBytes::try_from(message)
             .map_err(|err| wasm_error!(WasmErrorInner::Host(err.to_string())))?,
         vec![recipient()?.0],
@@ -215,6 +215,7 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
         )
         .unwrap()
         .tag_prefix(LinkTag::new("message"))
+        .get_options(GetStrategy::Network)
         .build();
 
         for link in get_links(input)? {
@@ -223,7 +224,7 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
                 link.target
                     .into_entry_hash()
                     .expect("Could not get entry hash"),
-                GetOptions::latest(),
+                GetOptions::network(),
             )? {
                 //debug!("fetch_inbox link got");
                 let header_address = message_entry.action_address().clone();

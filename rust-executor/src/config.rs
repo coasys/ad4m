@@ -21,7 +21,8 @@ pub struct Ad4mConfig {
     pub hc_proxy_url: Option<String>,
     pub hc_bootstrap_url: Option<String>,
     pub connect_holochain: Option<bool>,
-    pub admin_credential: Option<String>
+    pub admin_credential: Option<String>,
+    pub auto_permit_cap_requests: Option<bool>,
 }
 
 impl Ad4mConfig {
@@ -57,10 +58,10 @@ impl Ad4mConfig {
             self.connect_holochain = Some(false);
         }
         if self.hc_proxy_url.is_none() {
-            self.hc_proxy_url = Some("ws://207.148.16.17:42697".to_string());
+            self.hc_proxy_url = Some("wss://signal.holo.host".to_string());
         }
         if self.hc_bootstrap_url.is_none() {
-            self.hc_bootstrap_url = Some("http://207.148.16.17:38245".to_string());
+            self.hc_bootstrap_url = Some("https://bootstrap.holo.host/".to_string());
         }
         if self.hc_use_bootstrap.is_none() {
             self.hc_use_bootstrap = Some(true);
@@ -95,7 +96,8 @@ impl Default for Ad4mConfig {
             hc_proxy_url: None,
             hc_bootstrap_url: None,
             connect_holochain: None,
-            admin_credential: None
+            admin_credential: None,
+            auto_permit_cap_requests: None,
         };
         config.prepare();
         config

@@ -2,7 +2,7 @@ use crate::formatting::{print_message_perspective, print_sent_message_perspectiv
 use ad4m_client::Ad4mClient;
 use anyhow::Result;
 use clap::Subcommand;
-
+use kitsune_p2p_types::{agent_info::AgentInfoSigned, dependencies::lair_keystore_api::dependencies::base64};
 use crate::util::string_2_perspective_snapshot;
 
 #[derive(Debug, Subcommand)]
@@ -32,7 +32,7 @@ pub enum RuntimeFunctions {
     Friends,
     HcAgentInfos,
     HcAddAgentInfos {
-        infos: String,
+        infos_file: Option<String>,
     },
     VerifySignature {
         did: String,
@@ -118,11 +118,46 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         }
         RuntimeFunctions::HcAgentInfos => {
             let infos = ad4m_client.runtime.hc_agent_infos().await?;
-            println!("{}", infos);
+            println!("\x1b[36mAll AgentInfos encoded:\n \x1b[32m{}\n\n", infos);
+
+            let encoded_agent_infos: Vec<String> = serde_json::from_str(&infos)?;
+            let agent_infos: Vec<(AgentInfoSigned, String)> = encoded_agent_infos
+                .into_iter()
+                .map(|encoded_info| {
+                    let info_bytes = base64::decode(encoded_info.clone())
+                        .expect("Failed to decode base64 AgentInfoSigned");
+                    (
+                        AgentInfoSigned::decode(&info_bytes)
+                            .expect("Failed to decode AgentInfoSigned"),
+                        encoded_info,
+                    )
+
+                })
+                .collect();
+
+            println!("\x1b[36mSeparate AgentInfos:\n");
+            for agent_info in &agent_infos {
+                println!("\x1b[36mAgent: \x1b[37m{:?}", agent_info.0.agent);
+                println!("\x1b[36mURL List: \x1b[94m{:?}", agent_info.0.url_list);
+                println!("\x1b[36mEncoded:\n\x1b[32m[{:?}]\n\n", agent_info.1);
+            }
         }
-        RuntimeFunctions::HcAddAgentInfos { infos } => {
-            ad4m_client.runtime.hc_add_agent_infos(infos).await?;
-            println!("Holochain agent infos added!");
+        RuntimeFunctions::HcAddAgentInfos { infos_file } => {
+            if let Some(infos_file) = infos_file {
+                let infos = std::fs::read_to_string(infos_file)?;
+                ad4m_client.runtime.hc_add_agent_infos(infos).await?;
+                println!("Holochain agent infos added!");
+            } else {
+            let mut rl = rustyline::Editor::<()>::new()?;
+            let readline = rl.readline("Please enter the encoded agent infos string: ");
+            match readline {
+                Ok(line) => {
+                    ad4m_client.runtime.hc_add_agent_infos(line).await?;
+                    println!("Holochain agent infos added!");
+                },
+                Err(_) => println!("Failed to read line"),
+            }
+            }
         }
         RuntimeFunctions::VerifySignature {
             did,

@@ -1,13 +1,14 @@
 {
   "package": {
     "productName": "ADAM Launcher",
-    "version": "0.8.1"
+    "version": "0.9.0"
   },
   "build": {
     "distDir": "../dist",
     "devPath": "http://127.0.0.1:3000",
     "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "",
+    "withGlobalTauri": true
   },
   "tauri": {
     "systemTray": {
@@ -80,7 +81,7 @@
         "center": true,
         "focus": true,
         "visible": true,
-        "decorations": false,
+        "decorations": true,
         "url": "/splashscreen"
       }
     ],

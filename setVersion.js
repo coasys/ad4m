@@ -62,6 +62,21 @@ console.log("Core version: " + core.version + " -> " + VERSION)
 core.version = VERSION
 fs.writeFileSync('core/package.json', JSON.stringify(core, null, 2) + '\n')
 
+const hookHelpers = JSON.parse(fs.readFileSync('ad4m-hooks/helpers/package.json', 'utf8'))
+console.log("Hook Helpers version: " + core.version + " -> " + VERSION)
+hookHelpers.version = VERSION
+fs.writeFileSync('ad4m-hooks/helpers/package.json', JSON.stringify(hookHelpers, null, 2) + '\n')
+
+const reactHooks = JSON.parse(fs.readFileSync('ad4m-hooks/react/package.json', 'utf8'))
+console.log("Ad4m React hook version: " + reactHooks.version + " -> " + VERSION)
+reactHooks.version = VERSION
+fs.writeFileSync('ad4m-hooks/react/package.json', JSON.stringify(reactHooks, null, 2) + '\n')
+
+const vueHooks = JSON.parse(fs.readFileSync('ad4m-hooks/vue/package.json', 'utf8'))
+console.log("Ad4m Vue hook version: " + vueHooks.version + " -> " + VERSION)
+vueHooks.version = VERSION
+fs.writeFileSync('ad4m-hooks/vue/package.json', JSON.stringify(vueHooks, null, 2) + '\n')
+
 const executor = JSON.parse(fs.readFileSync('executor/package.json', 'utf8'))
 console.log("Executor version: " + executor.version + " -> " + VERSION)
 executor.version = VERSION

@@ -1,11 +1,11 @@
 extern crate remove_dir_all;
-use std::time::{Duration, SystemTime};
-
-use crate::Payload;
+use crate::app_state::{AgentList, LauncherState};
+use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 
 use remove_dir_all::*;
 
+use tauri::api::path::home_dir;
 use tauri::{LogicalSize, Manager};
 use tauri::Size;
 use tauri_plugin_positioner::{Position, WindowExt};
@@ -41,26 +41,64 @@ pub fn open_tray(app_handle: tauri::AppHandle) {
 }
 
 #[tauri::command]
+pub fn add_app_agent_state(agent: AgentList) {
+    let mut state = LauncherState::load().unwrap();
+
+    let mut new_agent = agent.clone();
+
+    new_agent.path = home_dir().unwrap().join(agent.path);
+
+    state.add_agent(new_agent);
+    
+    state.save().unwrap();
+}
+
+#[tauri::command]
+pub fn remove_app_agent_state(agent: AgentList) {
+    let mut state = LauncherState::load().unwrap();
+
+    state.remove_agent(agent.clone());
+    
+    state.save().unwrap();
+}
+
+#[tauri::command]
+pub fn set_selected_agent(agent: AgentList) {
+    let mut state = LauncherState::load().unwrap();
+
+    state.selected_agent = Some(agent);
+    
+    state.save().unwrap();
+}
+
+#[tauri::command]
+pub fn get_app_agent_list() -> Option<String> {
+    let state = LauncherState::load().unwrap();
+
+    serde_json::to_string(&state).ok()
+}
+
+#[tauri::command]
+#[cfg(feature = "custom-protocol")]
 pub fn open_tray_message(app_handle: tauri::AppHandle) {
-    let tray_window = app_handle.get_window("TrayMessage").unwrap();
-    let _ = tray_window.show();
-
-    let _ = tray_window.emit("tray_message_open", Payload {message: "".to_string()});
-
-    let seconds = Duration::from_secs(5);
-
-    let start = SystemTime::now();
-    loop {
-        std::thread::sleep(Duration::new(5, 0));
-
-        match start.elapsed() {
-            Ok(elapsed) if elapsed > seconds => {
+    match app_handle.get_window("TrayMessage") {
+        Some(tray_window) => {
+            if let Ok(true) = tray_window.is_visible() {
                 let _ = tray_window.hide();
-                return;
+            } else {
+                let _ = tray_window.show();
             }
-            _ => (),
+        },
+        None => {
+            create_tray_message_windows(&app_handle);
         }
     }
+}
+
+#[tauri::command]
+#[cfg(not(feature = "custom-protocol"))]
+pub fn open_tray_message(app_handle: tauri::AppHandle) {
+    println!("In debug mode won't open tray message");
 }
 
 #[tauri::command]

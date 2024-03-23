@@ -10,10 +10,13 @@ packages:
   - 'rust-executor'
   - 'cli'
   - 'dapp'
+  - 'ad4m-hooks/react'
+  - 'ad4m-hooks/vue'
+  - 'ad4m-hooks/helpers'
   # exclude packages that are inside test directories
   - '!**/test/**'
 hoist: false
-
+public-hoist-pattern: '!core'
 overrides:
   core:
     hoist: false
