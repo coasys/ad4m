@@ -12,7 +12,7 @@ use crate::prolog_service::prolog_service_extension;
 pub fn main_module_url() -> Url {
     Url::parse("https://ad4m.runtime/main").unwrap()
 }
-
+#[cfg(not(target_os = "windows"))]
 pub fn module_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
     map.insert(
@@ -20,17 +20,25 @@ pub fn module_map() -> HashMap<String, String> {
         include_str!("main.js").to_string(),
     );
 
-    if cfg!(target_os = "windows") {
-        map.insert(
-            "https://ad4m.runtime/executor".to_string(),
-            include_str!("../../../executor/lib/bundle.js").to_string(),
-        );
-    } else {
-        map.insert(
-            "https://ad4m.runtime/executor".to_string(),
-            include_str!("../../executor/lib/bundle.js").to_string(),
-        );
-    }
+    map.insert(
+        "https://ad4m.runtime/executor".to_string(),
+        include_str!("../../executor/lib/bundle.js").to_string(),
+    );
+    map
+}
+
+#[cfg(target_os = "windows")]
+pub fn module_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    map.insert(
+        "https://ad4m.runtime/main".to_string(),
+        include_str!("main.js").to_string(),
+    );
+
+    map.insert(
+        "https://ad4m.runtime/executor".to_string(),
+        include_str!("../../../executor/lib/bundle.js").to_string(),
+    );
     map
 }
 
