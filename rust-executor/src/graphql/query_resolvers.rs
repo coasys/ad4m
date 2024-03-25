@@ -16,10 +16,14 @@ impl Query {
         let agent_instance = AgentService::instance();
         let agent_service = agent_instance.lock().expect("agent lock");
         let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
-        let agent = agent_ref.agent.clone().ok_or(FieldError::new(
+        let mut agent = agent_ref.agent.clone().ok_or(FieldError::new(
             "Agent not found",
             Value::null(),
         ))?;
+
+        if agent.perspective.is_some() {
+            agent.perspective.as_mut().unwrap().verify_link_signatures();
+        }
 
         Ok(agent)
     }

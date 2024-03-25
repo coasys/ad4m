@@ -82,7 +82,11 @@ fn agent() -> Result<Agent, AnyError> {
     let mut agent_service = agent_instance.lock().expect("agent lock");
     let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
 
-    let agent = agent_ref.agent.clone().unwrap();
+    let mut agent = agent_ref.agent.clone().unwrap();
+
+    if agent.perspective.is_some() {
+        agent.perspective.as_mut().unwrap().verify_link_signatures();
+    }
 
     Ok(agent)
 }
