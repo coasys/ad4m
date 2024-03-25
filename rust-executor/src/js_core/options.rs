@@ -19,10 +19,18 @@ pub fn module_map() -> HashMap<String, String> {
         "https://ad4m.runtime/main".to_string(),
         include_str!("main.js").to_string(),
     );
-    map.insert(
-        "https://ad4m.runtime/executor".to_string(),
-        include_str!("../../../executor/lib/bundle.js").to_string(),
-    );
+
+    if cfg!(target_os = "windows") {
+        map.insert(
+            "https://ad4m.runtime/executor".to_string(),
+            include_str!("../../../executor/lib/bundle.js").to_string(),
+        );
+    } else {
+        map.insert(
+            "https://ad4m.runtime/executor".to_string(),
+            include_str!("../../executor/lib/bundle.js").to_string(),
+        );
+    }
     map
 }
 
