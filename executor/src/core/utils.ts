@@ -21,17 +21,11 @@ export function getPubSub(): PubSub {
 
 export async function tagExpressionSignatureStatus(expression: Expression) {
   if(!expression) throw "tagExpressionSignatureStatus - expression is undefined"
-  try {
-    if(typeof expression == "string") expression = JSON.parse(expression)
-  } catch(e) {
-    throw "tagExpressionSignatureStatus - got a string, and it's not parsable JSON: " + expression
-  }
-  
-  if(!expression.author || !expression.data || !expression.timestamp) throw "tagExpressionSignatureStatus got a non-Expression to tag: " + JSON.stringify(expression)
 
   let verified
 
   try {
+    if(typeof expression == "string") expression = JSON.parse(expression)
     verified = SIGNATURE.verify(expression)
   } catch(e) {
     verified = false

@@ -453,7 +453,15 @@ export default class LanguageController {
         const {languagePath, sourcePath} = await this.saveLanguageBundle(source, languageMeta, hash);
         console.log(new Date(), "LanguageController.installLanguage: installed language");
         try {
-            return (await this.loadLanguage(sourcePath)).language
+            const {language} = await this.loadLanguage(sourcePath);
+
+            let newLang = {
+                ...language,
+                linksAdapter: cloneWithoutCircularReferences(language).linksAdapter,
+                telepresenceAdapter: cloneWithoutCircularReferences(language).telepresenceAdapter
+            };
+
+            return newLang
         } catch(e) {
             console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
             console.error("LanguageController.installLanguage: ======================================")
@@ -527,13 +535,8 @@ export default class LanguageController {
                 if (languageHash == languageMetaData.address) {
                     //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                     const lang = await this.installLanguage(address, languageMeta)
-
-                      let newLang = {
-                        ...lang,
-                        linksAdapter: cloneWithoutCircularReferences(lang).linksAdapter
-                      };
                     // @ts-ignore
-                    return newLang
+                    return lang
                 } else {
                     throw new Error("Calculated languageHash did not match address found in meta information")
                 }
@@ -580,12 +583,8 @@ export default class LanguageController {
                     if (sourceLanguageTemplated.meta.address === languageHash) {
                         //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                         const lang = await this.installLanguage(address, languageMeta)
-                        let newLang = {
-                            ...lang,
-                            linksAdapter: cloneWithoutCircularReferences(lang).linksAdapter
-                        };
                           // @ts-ignore
-                        return newLang!
+                        return lang!
                     } else {
                         throw new Error(`Templating of original source language did not result in the same language hash of un-trusted language trying to be installed... aborting language install. Expected hash: ${languageHash}. But got: ${sourceLanguageTemplated.meta.address}`)
                     }

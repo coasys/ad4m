@@ -109,10 +109,7 @@ export default class Ad4mCore {
       }
     }
 
-    get holochainService(): HolochainService {
-        if (!this.#holochain) {
-            throw Error("No holochain service")
-        }
+    get holochainService(): HolochainService | undefined {
         return this.#holochain
     }
 

@@ -194,7 +194,21 @@ impl Mutation {
         auth_info: AuthInfoInput,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        Ok(agent::capabilities::request_capability(auth_info.into()).await)
+        let auth_info: AuthInfo = auth_info.into();
+        let request_id = agent::capabilities::request_capability(auth_info.clone()).await;
+        if true == context.auto_permit_cap_requests {
+            println!("======================================");
+            println!("Got capability request: \n{:?}", auth_info);
+            let random_number_challenge = agent::capabilities::permit_capability(AuthInfoExtended {
+                request_id: request_id.clone(), 
+                auth: auth_info
+            })?;
+            println!("--------------------------------------");
+            println!("Random number challenge: {}", random_number_challenge);
+            println!("======================================");
+        } 
+
+        Ok(request_id)
     }
 
     //NOTE: all the functions from here on out have not been tested by calling the cli <-> rust graphql server

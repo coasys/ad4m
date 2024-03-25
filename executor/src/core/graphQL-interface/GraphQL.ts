@@ -325,24 +325,31 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             agentUnlock: async (args, context) => {
                 try {
-                    core.initControllers()
-                    await core.initLanguages();
-                } catch (e) {
-                    // @ts-ignore
-                    const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
-                    if (args.holochain === "true") {
+                    await core.agentService.unlock(args.passphrase)
+                } catch(e) {
+                    console.log("Error unlocking agent: ", e)
+                }
+
+                if(core.agentService.isUnlocked()) {
+                    if(!core.holochainService) {
+                        console.log("Holochain service not initialized. Initializing...")
+                        // @ts-ignore
+                        const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
                         await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
+                    } else {
+                        console.log("Holo service already initialized")
                     }
+
                     core.initControllers()
                     await core.initLanguages()
 
                     console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
-                }
 
-                try {
-                    await core.agentService.ensureAgentExpression();
-                } catch (e) {
-                    console.log("Error ensuring public agent expression: ", e)
+                    try {
+                        await core.agentService.ensureAgentExpression();
+                    } catch (e) {
+                        console.log("Error ensuring public agent expression: ", e)
+                    }
                 }
             },
             //@ts-ignore

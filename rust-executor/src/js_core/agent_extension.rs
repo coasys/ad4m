@@ -31,6 +31,16 @@ fn agent_create_signed_expression(#[serde] data: serde_json::Value) -> Result<se
 }
 
 #[op2]
+#[string]
+fn agent_create_signed_expression_stringified(#[string] data: String) -> Result<String, AnyError> {
+    let data: serde_json::Value = serde_json::from_str(&data)?;
+    let sorted_json = sort_json_value(&data);
+    let signed_expression = create_signed_expression(sorted_json)?;
+    let stringified = serde_json::to_string(&signed_expression)?;
+    Ok(stringified)
+}
+
+#[op2]
 #[serde]
 fn agent_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
     sign(payload)
@@ -135,6 +145,7 @@ pub fn build() -> Extension {
             agent_signing_key_id::DECL,
             agent_did::DECL,
             agent_create_signed_expression::DECL,
+            agent_create_signed_expression_stringified::DECL,
             agent_sign::DECL,
             agent_sign_string_hex::DECL,
             agent_is_initialized::DECL,

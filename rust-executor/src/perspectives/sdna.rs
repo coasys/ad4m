@@ -110,7 +110,7 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     // hiddenExpression/1
     lines.push(":- discontiguous(hiddenExpression/1).".to_string());
 
-    lines.extend(node_facts(&links_without_sdna).await?);
+    // lines.extend(node_facts(&links_without_sdna).await?);
 
     // Social DNA zomes
     lines.push(":- discontiguous(register_sdna_flow/2).".to_string());

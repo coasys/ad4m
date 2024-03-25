@@ -26,7 +26,7 @@ mod test_utils;
 
 use tokio;
 use std::{env, thread::JoinHandle};
-use log::{info, warn};
+use log::{info, warn, error};
 
 use js_core::JsCore;
 
@@ -79,17 +79,25 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("js_core initialized.");
 
     LanguageController::init_global_instance(js_core_handle.clone());
+    perspectives::initialize_from_db();
 
     info!("Starting GraphQL...");
 
-    if config.run_dapp_server.unwrap() {
+    let app_dir = config.app_data_path
+        .as_ref()
+        .expect("App data path not set in Ad4mConfig")
+        .clone();
+
+    if let Some(true) = config.run_dapp_server {
         std::thread::spawn(|| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .thread_name(String::from("dapp_server"))
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(serve_dapp(8080)).unwrap();
+            if let Err(e) = runtime.block_on(serve_dapp(8080, app_dir)) {
+                error!("Failed to start dapp server: {:?}", e);
+            }
         });
     };
 
