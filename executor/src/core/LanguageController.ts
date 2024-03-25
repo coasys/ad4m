@@ -1,6 +1,6 @@
-import { 
-    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta, 
-    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, 
+import {
+    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta,
+    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression,
     parseExprUrl, Literal, TelepresenceAdapter, PerspectiveState
 } from '@coasys/ad4m';
 import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@coasys/ad4m';
@@ -24,17 +24,17 @@ function cloneWithoutCircularReferences(obj: any, seen: WeakSet<any> = new WeakS
         return;
       }
       seen.add(obj);
-  
+
       const clonedObj: any = Array.isArray(obj) ? [] : {};
       for (const key in obj) {
         if (obj.hasOwnProperty(key)) {
           clonedObj[key] = cloneWithoutCircularReferences(obj[key], seen);
         }
       }
-  
+
       return clonedObj;
     }
-  
+
     return obj;
 }
 
@@ -387,7 +387,7 @@ export default class LanguageController {
         const language = this.#languages.get(address)
         if (language) return language
 
-        if(!languageMeta) { 
+        if(!languageMeta) {
             //Check that the metafile already exists with language with this address to avoid refetch
             const metaFile = path.join(path.join(this.#config.languagesPath, address), "meta.json");
 
@@ -412,7 +412,7 @@ export default class LanguageController {
                 languageMeta = {data: {}};
             }
         }
-       
+
 
         console.log("LanguageController.installLanguage: INSTALLING LANGUAGE:", languageMeta.data)
         let bundlePath = path.join(path.join(this.#config.languagesPath, address), "bundle.js");
@@ -453,7 +453,15 @@ export default class LanguageController {
         const {languagePath, sourcePath} = await this.saveLanguageBundle(source, languageMeta, hash);
         console.log(new Date(), "LanguageController.installLanguage: installed language");
         try {
-            return (await this.loadLanguage(sourcePath)).language
+            const {language} = await this.loadLanguage(sourcePath);
+
+            let newLang = {
+                ...language,
+                linksAdapter: cloneWithoutCircularReferences(language).linksAdapter,
+                telepresenceAdapter: cloneWithoutCircularReferences(language).telepresenceAdapter
+            };
+
+            return newLang
         } catch(e) {
             console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
             console.error("LanguageController.installLanguage: ======================================")
@@ -467,7 +475,7 @@ export default class LanguageController {
     async languageRemove(hash: String): Promise<void> {
         //Teardown any intervals the language has running
         const language = this.#languages.get(hash as string);
-        if (language?.teardown) { 
+        if (language?.teardown) {
             language.teardown();
         }
 
@@ -527,13 +535,8 @@ export default class LanguageController {
                 if (languageHash == languageMetaData.address) {
                     //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                     const lang = await this.installLanguage(address, languageMeta)
-
-                      let newLang = {
-                        ...lang,
-                        linksAdapter: cloneWithoutCircularReferences(lang).linksAdapter
-                      };
                     // @ts-ignore
-                    return newLang
+                    return lang
                 } else {
                     throw new Error("Calculated languageHash did not match address found in meta information")
                 }
@@ -580,12 +583,8 @@ export default class LanguageController {
                     if (sourceLanguageTemplated.meta.address === languageHash) {
                         //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                         const lang = await this.installLanguage(address, languageMeta)
-                        let newLang = {
-                            ...lang,
-                            linksAdapter: cloneWithoutCircularReferences(lang).linksAdapter
-                        };
                           // @ts-ignore
-                        return newLang!
+                        return lang!
                     } else {
                         throw new Error(`Templating of original source language did not result in the same language hash of un-trusted language trying to be installed... aborting language install. Expected hash: ${languageHash}. But got: ${sourceLanguageTemplated.meta.address}`)
                     }
@@ -1064,7 +1063,7 @@ export default class LanguageController {
                 if (!lang.expressionAdapter) {
                     throw Error("Language does not have an expresionAdapter!")
                 };
-                
+
                 const langIsImmutable = await this.isImmutableExpression(ref);
                 if (langIsImmutable) {
                     console.log("Calling cache for expression...");

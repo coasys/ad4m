@@ -65,13 +65,13 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         lang = { address: "literal", name: "literal" }
                     } else {
                         try {
-                            lang = await core.languageController.languageForExpression(expression.ref) as any    
+                            lang = await core.languageController.languageForExpression(expression.ref) as any
                         } catch(e) {
                             console.error("While trying to get language for expression", expression, ":", e)
                             lang = {}
                         }
                     }
-                    
+
                     lang.address = expression.ref.language.address
                     expression.language = lang
                 }
@@ -103,12 +103,12 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         }
 
                         try {
-                            lang = await core.languageController.languageForExpression(expression.ref) as any    
+                            lang = await core.languageController.languageForExpression(expression.ref) as any
                         } catch(e) {
                             console.error("While trying to get language for expression", expression, ":", e)
                             lang = {}
                         }
-                        
+
                         lang.address = expression.ref.language.address
                         expression.language = lang
                     }
@@ -294,7 +294,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             agentDeleteEntanglementProofs: (args, context) => {
                 const { proofs } = args;
                 core.entanglementProofController.deleteEntanglementProofs(proofs);
-                return core.entanglementProofController.getEntanglementProofs();  
+                return core.entanglementProofController.getEntanglementProofs();
             },
             //@ts-ignore
             agentEntanglementProofPreFlight: (args, context) => {
@@ -381,26 +381,23 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 }
 
                 if(core.agentService.isUnlocked()) {
-                    try {
-                        core.perspectivesController;
-                        await core.waitForAgent();
-                        core.initControllers()
-                        await core.initLanguages();
-                    } catch (e) {
+                    if(!core.holochainService) {
+                        console.log("Holochain service not initialized. Initializing...")
                         // @ts-ignore
                         const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
-                        if (args.holochain === "true") {
-                            await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
-                        }
-                        await core.waitForAgent();
-                        core.initControllers()
-                        await core.initLanguages()
-    
-                        console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
+                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
+                    } else {
+                        console.log("Holo service already initialized")
                     }
+   
+                    await core.waitForAgent();
+                    core.initControllers()
+                    await core.initLanguages()
+
+                    console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
 
                     try {
-                        await core.agentService.ensureAgentExpression();    
+                        await core.agentService.ensureAgentExpression();
                     } catch (e) {
                         console.log("Error ensuring public agent expression: ", e)
                     }
@@ -438,7 +435,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     links: perspective.links.map((l: any) => {
                         const link = {...l};
                         delete link.status
-                  
+
                         return link
                     })
                 };

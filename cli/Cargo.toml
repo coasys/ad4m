@@ -1,15 +1,15 @@
 [package]
 name = "ad4m"
 
-version = "0.9.0-rc2"
+version = "0.9.0"
 
 edition = "2021"
-authors = ["Nicolas Luck <nicolas@coasys.org>"]
-description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
-keywords = ["ad4m", "perspect3vism", "cli"]
+authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
+description = "Executables for running, developing and debugging an ADAM node/agent"
+keywords = ["ad4m", "coasys", "cli", "holochain"]
 license = "CAL-1.0"
 homepage = "https://ad4m.dev"
-repository = "https://github.com/perspect3vism/ad4m"
+repository = "https://github.com/coasys/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
 
@@ -24,8 +24,8 @@ path = "src/ad4m_executor.rs"
 [dependencies]
 
 
-ad4m-client = { path = "../rust-client"}
-rust-executor = { path = "../rust-executor" }
+ad4m-client = { path = "../rust-client", version="0.9.0"}
+ad4m-executor = { path = "../rust-executor", version="0.9.0" }
 anyhow = "1.0.65"
 clap = { version = "4.0.8", features = ["derive"] }
 futures = "0.3"

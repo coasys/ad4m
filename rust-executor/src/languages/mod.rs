@@ -34,6 +34,8 @@ impl LanguageController {
     }
 
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
+        Self::global_instance().js_core.execute("await core.waitForLanguages()".into()).await?;
+
         let script = format!(
             r#"JSON.stringify(
                 await core.languageController.installLanguage("{}")
@@ -45,6 +47,8 @@ impl LanguageController {
     }
 
     pub async fn create_neighbourhood(neighbourhood: Neighbourhood) -> Result<Address, AnyError> {
+        Self::global_instance().js_core.execute("await core.waitForLanguages()".into()).await?;
+
         let neighbourhood_json = serde_json::to_string(&neighbourhood)?;
         let script = format!(
             r#"
@@ -62,6 +66,8 @@ impl LanguageController {
     }
 
     pub async fn get_neighbourhood(address: Address) -> Result<Option<DecoratedNeighbourhoodExpression>, AnyError> {
+        Self::global_instance().js_core.execute("await core.waitForLanguages()".into()).await?;
+
         let script = format!(
             r#"
             JSON.stringify(
@@ -79,6 +85,8 @@ impl LanguageController {
     }
 
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
+        Self::global_instance().js_core.execute("await core.waitForLanguages()".into()).await?;
+
         let script = format!(
             r#"
             await core.languageController.languageByRef({{ address: "{}" }}) ? true : false

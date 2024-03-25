@@ -8,6 +8,16 @@ pub struct Language {
     js_core: JsCoreHandle,
 }
 
+fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
+    if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&js_result) {
+        Ok(maybe_revision.map(|revision| {
+            let vec: Vec<u8> = revision.into();
+            base64::encode(&vec)
+        }))
+    } else {
+        Ok(serde_json::from_str::<Option<String>>(&js_result)?)
+    }
+}
 impl Language {
     pub fn new(address: String, js_core: JsCoreHandle) -> Self {
         Self {
@@ -34,7 +44,7 @@ impl Language {
         Ok(())
     }
 
-    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<Vec<u8>>, AnyError> {
+    pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -50,11 +60,10 @@ impl Language {
             serde_json::to_string(&diff)?,
         );
         let result: String = self.js_core.execute(script).await?;
-        let rev: Option<ByteArray> = serde_json::from_str(&result)?;
-        Ok(rev.map(|rev| rev.into()))
+        parse_revision(result)
     }
 
-    pub async fn current_revision(&mut self) -> Result<Option<Vec<u8>>, AnyError> {
+    pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -69,8 +78,7 @@ impl Language {
             self.address,
         );
         let result: String = self.js_core.execute(script).await?;
-        let maybe_revision: Option<ByteArray> = serde_json::from_str(&result)?;
-        Ok(maybe_revision.map(|rev| rev.into()))
+        parse_revision(result)
     }
 
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {

@@ -1,15 +1,23 @@
 [package]
-name = "rust-executor"
-version = "0.9.0-rc2"
+name = "ad4m-executor"
+version = "0.9.0"
 edition = "2021"
-authors = ["Nicolas Luck <nicolas@coasys.org>"]
-description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
+authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
+description = "Runtime implementation of AD4M as library - https://ad4m.dev"
 keywords = ["ad4m", "perspect3vism", "cli"]
 license = "CAL-1.0"
 homepage = "https://ad4m.dev"
 repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
+
+include = [
+    "src/**/*",
+    "dapp/dist", # Symlink to the dapp directory
+    "executor/lib/bundle.js", # Symlink to the executor directory
+    "build.rs",
+    "Cargo.toml"
+]
 
 [lib]
 name = "rust_executor"
@@ -73,12 +81,14 @@ kitsune_p2p_types = { version = "0.3.0-beta-dev.22" }
 scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client" }
+ad4m-client = { path = "../rust-client", version="0.9.0" }
 
 rusqlite = { version = "0.29.0", features = ["bundled"] }
 fake = { version = "2.9.2", features = ["derive"] }
 sha2 = "0.10.8"
 regex = "1.5.4"
+
+include_dir = "0.6.0"
 
 [dev-dependencies]
 maplit = "1.0.2"

@@ -11,6 +11,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Hard-wired Hosted ad4m client `AgentInfo` in the executor. [PR#453](https://github.com/coasys/ad4m/pull/453)
  - Added ability to handle multiple agents in launcher. [PR#459](https://github.com/coasys/ad4m/pull/459)
  - Added a way to show & add new `AgentInfo` in launcher. [PR#463](https://github.com/coasys/ad4m/pull/463)
+ - `ad4m-executor` binary prints capability request challange to stdout to enable app hand-shake [PR#471](https://github.com/coasys/ad4m/pull/471)
 
 ### Changed
  - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):
@@ -43,6 +44,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - Fixed value returns as undefined if the property was boolean and set to false in `SubjectEntity.
   - Fixed links in docs.
 - Fixed flaky integration tests [PR#462](https://github.com/coasys/ad4m/pull/462)
+- Fixed `p-diff-sync`'s Deno incompatibilities [PR#471](https://github.com/coasys/ad4m/pull/471)
 
 ## [0.8.0] - 12/12/2023
 
