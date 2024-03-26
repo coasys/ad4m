@@ -36,7 +36,7 @@ fn telepresence_signal_received(
 pub fn build() -> Extension {
     Extension {
         name: "agent",
-        js_files: Cow::Borrowed(&include_js_files!(rust_executor "src/js_core/languages_extension.js",)),
+        js_files: Cow::Owned(include_js_files!(rust_executor "src/js_core/languages_extension.js").to_vec()),
         ops: Cow::Borrowed(&[
             perspective_diff_received::DECL,
             sync_state_changed::DECL,

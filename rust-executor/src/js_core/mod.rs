@@ -1,7 +1,8 @@
+use deno_core::v8::{self, Global, Value};
 use ::futures::Future;
-use deno_core::anyhow::anyhow;
+use deno_core::anyhow::{anyhow, Error};
 use deno_core::error::AnyError;
-use deno_core::resolve_url_or_path;
+use deno_core::{resolve_url_or_path, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
@@ -174,21 +175,33 @@ impl JsCore {
         event_loop
     }
 
-    async fn execute_async_smart(
-        &self,
+    fn execute_async_smart<'a>(
+        &'a self,
         script: String
-    ) -> Result<SmartGlobalVariableFuture, AnyError> {
-        let mut worker = self.worker.lock().await;
-        let wrapped_script = format!(
-            r#"
-            (async () => {{
-                return ({});
-            }})();
-            "#, script
-        );
-        //info!("Sending script: {}", wrapped_script);
-        let execute_async = worker.execute_script("js_core", wrapped_script.into())?;
-        Ok(SmartGlobalVariableFuture::new(self.worker.clone(), execute_async))
+    ) -> impl Future<Output = Result<String, AnyError>> + 'a {
+        let worker = self.worker.clone();
+        async move {
+            let mut worker = worker.lock().await;
+            let wrapped_script = format!(
+                r#"
+                (async () => {{
+                    return ({});
+                }})();
+                "#, script
+            );
+            let execute_async = worker.execute_script("js_core", wrapped_script.into())?;
+            let poll_value = worker.js_runtime.resolve(execute_async);
+            let value = worker.js_runtime
+            .with_event_loop_promise(poll_value, PollEventLoopOptions::default())
+            .await?;
+    
+            let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
+            let context = v8::Context::new(scope);
+            let scope = &mut v8::ContextScope::new(scope, context);
+            let value = value.open(scope).to_rust_string_lossy(scope);
+    
+            Ok(value)
+        }
     }
 
     fn generate_execution_slot(
@@ -211,9 +224,9 @@ impl JsCore {
                         // info!("Spawn local driving: {}", id);
                         //let local_variable_name = uuid_to_valid_variable_name(&id);
                         let script_fut =
-                            js_core_cloned.execute_async_smart(script).await.unwrap();
+                            js_core_cloned.execute_async_smart(script).await;
                         //info!("Script fut created: {}", id);
-                        match script_fut.await {
+                        match script_fut {
                             Ok(res) => {
                                 //info!("Script execution completed Succesfully: {}", id);
                                 response_tx
@@ -263,7 +276,7 @@ impl JsCore {
 
                 let init_core_future = js_core
                     .execute_async_smart(format!("initCore({})", config.get_json()).into());
-                let result = init_core_future.await.unwrap().await;
+                let result = init_core_future.await;
 
                 match result {
                     Ok(res) => {
