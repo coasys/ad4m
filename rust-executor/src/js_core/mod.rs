@@ -151,7 +151,7 @@ impl JsCore {
     async fn load_module(&self, file_path: String) -> Result<(), AnyError> {
         let mut worker = self.worker.lock().await;
         let url = resolve_url_or_path(&file_path, current_dir()?.as_path())?;
-        let _module_id = worker.js_runtime.load_side_module(&url, None).await?;
+        let _module_id = worker.js_runtime.load_side_es_module(&url).await?;
         //TODO; this likely needs to be run (although might be handled by the import in the js code when import() is called)
         //worker.js_runtime.mod_evaluate(module_id);
         Ok(())

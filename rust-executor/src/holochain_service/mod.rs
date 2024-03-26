@@ -11,6 +11,7 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
+use holochain_types::websocket::AllowedOrigins;
 use kitsune_p2p_types::config::{KitsuneP2pTuningParams, KitsuneP2pConfig, NetworkType, TransportConfig};
 use kitsune_p2p_types::dependencies::url2::Url2;
 use holochain::prelude::{
@@ -398,7 +399,7 @@ impl HolochainService {
 
         let interface = conductor
             .clone()
-            .add_app_interface(Either::Left(local_config.app_port))
+            .add_app_interface(Either::Left(local_config.app_port), AllowedOrigins::Any)
             .await;
 
         info!("Added app interface: {:?}", interface);

@@ -1,5 +1,5 @@
 use deno_core::error::AnyError;
-use deno_core::v8;
+use deno_core::{v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use std::future::Future;
 use std::pin::Pin;
@@ -25,7 +25,7 @@ impl Future for EventLoopFuture {
         sleep(std::time::Duration::from_millis(1));
         let worker = self.worker.try_lock();
         if let Ok(mut worker) = worker {
-            let res = worker.poll_event_loop(cx, false);
+            let res = worker.js_runtime.poll_event_loop(cx, PollEventLoopOptions::default());
             cx.waker().wake_by_ref();
             res
         } else {
@@ -51,25 +51,21 @@ impl Future for SmartGlobalVariableFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         //println!("Trying to get the worker lock: {}", self.name);
         let mut worker = self.worker.try_lock().expect("Failed to lock worker");
-        let poll_value = worker.js_runtime.poll_value(&self.value, cx);
+        let poll_value = worker.js_runtime.resolve(self.value);
 
-        match poll_value {
-            Poll::Pending => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
+        let value = worker.js_runtime
+        .with_event_loop_promise(poll_value, PollEventLoopOptions::default())
+        .await;
+
+        match value {
+            Ok(value) => {
+                let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
+                let context = v8::Context::new(scope);
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let value = value.open(scope).to_rust_string_lossy(scope);
+                Poll::Ready(Ok(value))
             },
-            Poll::Ready(value) => {
-                match value {
-                    Ok(value) => {
-                        let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
-                        let context = v8::Context::new(scope);
-                        let scope = &mut v8::ContextScope::new(scope, context);
-                        let value = value.open(scope).to_rust_string_lossy(scope);
-                        Poll::Ready(Ok(value))
-                    },
-                    Err(err) => Poll::Ready(Err(err))
-                }
-            }
+            Err(err) => Poll::Ready(Err(err))
         }
     }
 }

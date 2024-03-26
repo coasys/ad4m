@@ -5,9 +5,21 @@ use rocket::fs::FileServer;
 use rocket::Config;
 use include_dir::{include_dir, Dir};
 
-const DAPP: Dir = include_dir!("dapp/dist");
+#[cfg(target_os = "windows")]
+fn get_dapp_dir() -> Dir<'static> {
+    let dapp: Dir = include_dir!("../dapp/dist");
+    dapp
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_dapp_dir() -> Dir<'static> {
+    let dapp: Dir = include_dir!("dapp/dist");
+    dapp
+}
 
 pub(crate) async fn serve_dapp(port: u16, app_dir: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dapp = get_dapp_dir();
+    
     let config = Config {
         port,
         address: Ipv4Addr::new(127, 0, 0, 1).into(),
@@ -16,7 +28,7 @@ pub(crate) async fn serve_dapp(port: u16, app_dir: String) -> Result<(), Box<dyn
 
     let dir = Path::new(&app_dir).join("dapp");
     if !dir.exists() {
-        DAPP.extract(dir.clone())?;
+        dapp.extract(dir.clone())?;
     }
 
     rocket::build()

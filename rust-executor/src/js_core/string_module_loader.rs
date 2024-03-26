@@ -1,10 +1,13 @@
 use deno_core::anyhow;
 use deno_core::error::generic_error;
+use deno_core::ModuleLoadResponse;
 use deno_core::ModuleLoader;
 use deno_core::ModuleSource;
+use deno_core::ModuleSourceCode;
 use deno_core::ModuleSourceFuture;
 use deno_core::ModuleSpecifier;
 use deno_core::ModuleType;
+use deno_core::RequestedModuleType;
 use deno_core::ResolutionKind;
 use deno_runtime::deno_core::error::AnyError;
 use log::info;
@@ -44,7 +47,8 @@ impl ModuleLoader for StringModuleLoader {
         module_specifier: &ModuleSpecifier,
         _maybe_referrer: std::option::Option<&Url>,
         _is_dyn_import: bool,
-    ) -> Pin<Box<ModuleSourceFuture>> {
+        requested_module_type: RequestedModuleType
+    ) -> ModuleLoadResponse {
         let path = module_specifier.to_file_path().map_err(|_| {
             generic_error(format!(
                 "Provided module specifier \"{module_specifier}\" is not a file URL."
@@ -67,9 +71,9 @@ impl ModuleLoader for StringModuleLoader {
                     std::fs::read_to_string(path).expect("Could not read file path to string");
                 let module_specifier = module_specifier.clone();
                 let fut = async move {
-                    Ok(ModuleSource::new(module_type, code.into(), &module_specifier))
+                    Ok(ModuleSource::new(module_type, ModuleSourceCode::String(code.into()), &module_specifier))
                 };
-                Box::pin(fut)
+                deno_core::ModuleLoadResponse::Async(Box::pin(fut))
             }
             Err(_err) => {
                 info!("Module is not a file path, importing as raw module string");
@@ -77,11 +81,11 @@ impl ModuleLoader for StringModuleLoader {
                 let module_specifier = module_specifier.clone();
                 let fut = async move {
                     match module_code {
-                        Some(code) => Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, code.into(), &module_specifier)),
+                        Some(code) => Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, ModuleSourceCode::String(code.into()), &module_specifier)),
                         None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
                     }
                 };
-                Box::pin(fut)
+                deno_core::ModuleLoadResponse::Async(Box::pin(fut))
             }
         }
     }
