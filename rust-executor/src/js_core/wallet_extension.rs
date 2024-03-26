@@ -109,7 +109,7 @@ fn wallet_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
 pub fn build() -> Extension {
     Extension {
         name: "wallet",
-        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/wallet_extension.js",)),
+        js_files: Cow::Owned(include_js_files!(holochain_service "src/js_core/wallet_extension.js").to_vec()),
         ops: Cow::Borrowed(&[
             wallet_get_main_key::DECL,
             wallet_get_main_key_document::DECL,

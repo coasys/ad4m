@@ -73,7 +73,7 @@ async fn load_module(#[string] path: String) -> Result<String, AnyError> {
 pub fn build() -> Extension {
     Extension {
         name: "utils",
-        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/utils_extension.js",)),
+        js_files: Cow::Owned(include_js_files!(holochain_service "src/js_core/utils_extension.js").to_vec()),
         ops: Cow::Borrowed(&[
             hash::DECL,
             load_module::DECL,

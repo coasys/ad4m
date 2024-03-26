@@ -57,7 +57,7 @@ fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyError> 
 pub fn build() -> Extension {
     Extension {
         name: "agent",
-        js_files: Cow::Borrowed(&include_js_files!(rust_executor "src/js_core/agent_extension.js",)),
+        js_files: Cow::Owned(include_js_files!(rust_executor "src/js_core/agent_extension.js").to_vec()),
         ops: Cow::Borrowed(&[
             agent_did_document::DECL,
             agent_signing_key_id::DECL,

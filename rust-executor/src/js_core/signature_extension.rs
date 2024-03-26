@@ -41,7 +41,7 @@ fn signature_verify(
 pub fn build() -> Extension {
     Extension {
         name: "signature",
-        js_files: Cow::Borrowed(&include_js_files!(rust_executor "src/js_core/signature_extension.js",)),
+        js_files: Cow::Owned(include_js_files!(rust_executor "src/js_core/signature_extension.js").to_vec()),
         ops: Cow::Borrowed(&[
             signature_verify_string_signed_by_did::DECL,
             signature_verify::DECL,

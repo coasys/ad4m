@@ -15,7 +15,7 @@ async fn publish(#[string] topic: String, #[string] data: String) -> Result<(), 
 pub fn build() -> Extension {
     Extension {
         name: "pubsub",
-        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/pubsub_extension.js",)),
+        js_files: Cow::Owned(include_js_files!(holochain_service "src/js_core/pubsub_extension.js").to_vec()),
         ops: Cow::Borrowed(&[
             publish::DECL
         ]),

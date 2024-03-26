@@ -187,7 +187,7 @@ async fn unpack_dna(#[string] path: String) -> Result<String, AnyError> {
 pub fn build() -> Extension {
     Extension {
         name: "holochain_service",
-        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/holochain_service/holochain_service_extension.js",)),
+        js_files: Cow::Owned(include_js_files!(holochain_service "src/holochain_service/holochain_service_extension.js").to_vec()),
         ops: Cow::Borrowed(&[
             start_holochain_conductor::DECL,
             log_dht_status::DECL,
