@@ -31,7 +31,7 @@ mod utils_extension;
 mod wallet_extension;
 mod utils;
 
-use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
+use self::futures::{EventLoopFuture};
 use crate::holochain_service::maybe_get_holochain_service;
 use crate::Ad4mConfig;
 
