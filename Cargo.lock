@@ -92,7 +92,7 @@ dependencies = [
  "include_dir",
  "itertools 0.10.5",
  "jsonwebtoken",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "lazy_static",
  "log",
  "maplit",
@@ -273,10 +273,11 @@ dependencies = [
 [[package]]
 name = "aitia"
 version = "0.2.0-beta-dev.6"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "anyhow",
  "derive_more",
- "holochain_trace 0.3.0-beta-dev.8",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "parking_lot 0.10.2",
  "petgraph",
  "regex",
@@ -4515,6 +4516,7 @@ checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 [[package]]
 name = "fixt"
 version = "0.3.0-beta-dev.2"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "holochain_serialized_bytes",
  "lazy_static",
@@ -5589,12 +5591,13 @@ dependencies = [
 [[package]]
 name = "hc_sleuth"
 version = "0.2.0-beta-dev.11"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "aitia",
  "anyhow",
  "derive_more",
  "holochain_state_types",
- "holochain_trace 0.3.0-beta-dev.8",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_types",
  "kitsune_p2p",
  "once_cell",
@@ -5610,6 +5613,7 @@ dependencies = [
 [[package]]
 name = "hdi"
 version = "0.4.0-beta-dev.31"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "getrandom 0.2.12",
  "hdk_derive",
@@ -5626,6 +5630,7 @@ dependencies = [
 [[package]]
 name = "hdk"
 version = "0.3.0-beta-dev.35"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "getrandom 0.2.12",
  "hdi",
@@ -5644,6 +5649,7 @@ dependencies = [
 [[package]]
 name = "hdk_derive"
 version = "0.3.0-beta-dev.29"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "darling 0.14.4",
  "heck 0.4.1",
@@ -5802,6 +5808,7 @@ dependencies = [
 [[package]]
 name = "holo_hash"
 version = "0.3.0-beta-dev.24"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "arbitrary",
  "base64 0.13.1",
@@ -5810,9 +5817,9 @@ dependencies = [
  "fixt",
  "futures",
  "holochain_serialized_bytes",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_wasmer_common",
- "kitsune_p2p_dht_arc 0.3.0-beta-dev.17",
+ "kitsune_p2p_dht_arc 0.3.0-beta-dev.17 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "must_future",
  "proptest",
  "proptest-derive",
@@ -5826,6 +5833,7 @@ dependencies = [
 [[package]]
 name = "holochain"
 version = "0.3.0-beta-dev.42"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "aitia",
  "anyhow",
@@ -5864,9 +5872,9 @@ dependencies = [
  "holochain_sqlite",
  "holochain_state",
  "holochain_test_wasm_common",
- "holochain_trace 0.3.0-beta-dev.8",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_types",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_wasm_test_utils",
  "holochain_wasmer_host",
  "holochain_websocket",
@@ -5875,11 +5883,11 @@ dependencies = [
  "human-panic",
  "itertools 0.10.5",
  "kitsune_p2p",
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "kitsune_p2p_block",
  "kitsune_p2p_bootstrap",
  "kitsune_p2p_bootstrap_client",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "lair_keystore",
  "lazy_static",
  "matches",
@@ -5933,6 +5941,7 @@ dependencies = [
 [[package]]
 name = "holochain_cascade"
 version = "0.3.0-beta-dev.41"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "async-trait",
  "derive_more",
@@ -5949,9 +5958,9 @@ dependencies = [
  "holochain_serialized_bytes",
  "holochain_sqlite",
  "holochain_state",
- "holochain_trace 0.3.0-beta-dev.8",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_types",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_zome_types",
  "kitsune_p2p",
  "mockall",
@@ -5968,13 +5977,14 @@ dependencies = [
 [[package]]
 name = "holochain_cli_bundle"
 version = "0.3.0-beta-dev.38"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "anyhow",
  "clap 4.4.18",
  "futures",
  "holochain_serialized_bytes",
  "holochain_types",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_wasmer_host",
  "mr_bundle",
  "serde",
@@ -5989,10 +5999,11 @@ dependencies = [
 [[package]]
 name = "holochain_cli_run_local_services"
 version = "0.3.0-beta-dev.24"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "clap 4.4.18",
  "futures",
- "holochain_trace 0.3.0-beta-dev.8",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "if-addrs 0.10.2",
  "kitsune_p2p_bootstrap",
  "tokio",
@@ -6003,6 +6014,7 @@ dependencies = [
 [[package]]
 name = "holochain_conductor_api"
 version = "0.3.0-beta-dev.41"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "derive_more",
  "directories 2.0.2",
@@ -6012,8 +6024,8 @@ dependencies = [
  "holochain_state_types",
  "holochain_types",
  "holochain_zome_types",
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "serde",
  "serde_derive",
  "serde_yaml 0.9.31",
@@ -6027,6 +6039,7 @@ dependencies = [
 [[package]]
 name = "holochain_conductor_services"
 version = "0.2.0-beta-dev.11"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6043,14 +6056,15 @@ dependencies = [
 [[package]]
 name = "holochain_integrity_types"
 version = "0.3.0-beta-dev.28"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "arbitrary",
  "derive_builder",
  "holo_hash",
  "holochain_secure_primitive",
  "holochain_serialized_bytes",
- "holochain_util 0.3.0-beta-dev.5",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "paste",
  "proptest",
  "proptest-derive",
@@ -6064,6 +6078,7 @@ dependencies = [
 [[package]]
 name = "holochain_keystore"
 version = "0.3.0-beta-dev.31"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "base64 0.13.1",
  "derive_more",
@@ -6071,9 +6086,9 @@ dependencies = [
  "holo_hash",
  "holochain_secure_primitive",
  "holochain_serialized_bytes",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_zome_types",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "lair_keystore",
  "must_future",
  "nanoid 0.4.0",
@@ -6091,6 +6106,7 @@ dependencies = [
 [[package]]
 name = "holochain_metrics"
 version = "0.3.0-beta-dev.9"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "influxive",
  "opentelemetry_api",
@@ -6102,15 +6118,17 @@ dependencies = [
 [[package]]
 name = "holochain_nonce"
 version = "0.3.0-beta-dev.25"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "getrandom 0.2.12",
  "holochain_secure_primitive",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
 ]
 
 [[package]]
 name = "holochain_p2p"
 version = "0.3.0-beta-dev.40"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "aitia",
  "async-trait",
@@ -6123,12 +6141,12 @@ dependencies = [
  "holochain_keystore",
  "holochain_nonce",
  "holochain_serialized_bytes",
- "holochain_trace 0.3.0-beta-dev.8",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_types",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_zome_types",
  "kitsune_p2p",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "mockall",
  "rand 0.8.5",
  "serde",
@@ -6142,6 +6160,7 @@ dependencies = [
 [[package]]
 name = "holochain_secure_primitive"
 version = "0.3.0-beta-dev.22"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "paste",
  "serde",
@@ -6179,6 +6198,7 @@ dependencies = [
 [[package]]
 name = "holochain_sqlite"
 version = "0.3.0-beta-dev.37"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6190,13 +6210,13 @@ dependencies = [
  "holo_hash",
  "holochain_nonce",
  "holochain_serialized_bytes",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_zome_types",
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
- "kitsune_p2p_dht 0.3.0-beta-dev.19",
- "kitsune_p2p_dht_arc 0.3.0-beta-dev.17",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_dht 0.3.0-beta-dev.19 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_dht_arc 0.3.0-beta-dev.17 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "num_cpus",
  "once_cell",
  "opentelemetry_api",
@@ -6221,6 +6241,7 @@ dependencies = [
 [[package]]
 name = "holochain_state"
 version = "0.3.0-beta-dev.40"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "aitia",
  "async-recursion",
@@ -6243,7 +6264,7 @@ dependencies = [
  "holochain_sqlite",
  "holochain_state_types",
  "holochain_types",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_zome_types",
  "kitsune_p2p",
  "mockall",
@@ -6264,6 +6285,7 @@ dependencies = [
 [[package]]
 name = "holochain_state_types"
 version = "0.3.0-beta-dev.35"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "holo_hash",
  "holochain_integrity_types",
@@ -6273,25 +6295,10 @@ dependencies = [
 [[package]]
 name = "holochain_test_wasm_common"
 version = "0.3.0-beta-dev.35"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "hdk",
  "serde",
-]
-
-[[package]]
-name = "holochain_trace"
-version = "0.3.0-beta-dev.8"
-dependencies = [
- "chrono",
- "derive_more",
- "inferno",
- "once_cell",
- "serde_json",
- "thiserror",
- "tracing",
- "tracing-core",
- "tracing-serde",
- "tracing-subscriber 0.3.18",
 ]
 
 [[package]]
@@ -6313,8 +6320,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "holochain_trace"
+version = "0.3.0-beta-dev.8"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
+dependencies = [
+ "chrono",
+ "derive_more",
+ "inferno",
+ "once_cell",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "tracing-core",
+ "tracing-serde",
+ "tracing-subscriber 0.3.18",
+]
+
+[[package]]
 name = "holochain_types"
 version = "0.3.0-beta-dev.37"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -6337,13 +6362,13 @@ dependencies = [
  "holochain_nonce",
  "holochain_serialized_bytes",
  "holochain_sqlite",
- "holochain_trace 0.3.0-beta-dev.8",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "holochain_wasmer_host",
  "holochain_zome_types",
  "isotest",
  "itertools 0.10.5",
- "kitsune_p2p_dht 0.3.0-beta-dev.19",
+ "kitsune_p2p_dht 0.3.0-beta-dev.19 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "lazy_static",
  "mockall",
  "mr_bundle",
@@ -6374,6 +6399,22 @@ dependencies = [
 [[package]]
 name = "holochain_util"
 version = "0.3.0-beta-dev.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14d6225aded80caf004c2214e38b39fb2459ee9a7a8fcd0d09146f49ae0771f0"
+dependencies = [
+ "cfg-if 0.1.10",
+ "derive_more",
+ "dunce",
+ "futures",
+ "getrandom 0.2.12",
+ "num_cpus",
+ "once_cell",
+]
+
+[[package]]
+name = "holochain_util"
+version = "0.3.0-beta-dev.5"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "backtrace",
  "cfg-if 0.1.10",
@@ -6389,26 +6430,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "holochain_util"
-version = "0.3.0-beta-dev.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14d6225aded80caf004c2214e38b39fb2459ee9a7a8fcd0d09146f49ae0771f0"
-dependencies = [
- "cfg-if 0.1.10",
- "derive_more",
- "dunce",
- "futures",
- "getrandom 0.2.12",
- "num_cpus",
- "once_cell",
-]
-
-[[package]]
 name = "holochain_wasm_test_utils"
 version = "0.3.0-beta-dev.39"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "holochain_types",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "strum 0.18.0",
  "strum_macros 0.18.0",
  "toml 0.5.11",
@@ -6465,6 +6492,7 @@ dependencies = [
 [[package]]
 name = "holochain_websocket"
 version = "0.3.0-beta-dev.16"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "futures",
  "holochain_serialized_bytes",
@@ -6479,6 +6507,7 @@ dependencies = [
 [[package]]
 name = "holochain_zome_types"
 version = "0.3.0-beta-dev.30"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "arbitrary",
  "contrafact",
@@ -6491,10 +6520,10 @@ dependencies = [
  "holochain_secure_primitive",
  "holochain_serialized_bytes",
  "holochain_wasmer_common",
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "kitsune_p2p_block",
- "kitsune_p2p_dht 0.3.0-beta-dev.19",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
+ "kitsune_p2p_dht 0.3.0-beta-dev.19 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "nanoid 0.3.0",
  "num_enum",
  "once_cell",
@@ -7415,6 +7444,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "kitsune_p2p"
 version = "0.3.0-beta-dev.34"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "arrayref",
  "base64 0.21.7",
@@ -7426,17 +7456,17 @@ dependencies = [
  "futures",
  "ghost_actor",
  "governor",
- "holochain_trace 0.3.0-beta-dev.8",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "itertools 0.11.0",
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "kitsune_p2p_block",
  "kitsune_p2p_bootstrap_client",
  "kitsune_p2p_fetch",
  "kitsune_p2p_mdns",
  "kitsune_p2p_proxy",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "kitsune_p2p_transport_quic",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "maplit",
  "mockall",
  "must_future",
@@ -7460,23 +7490,6 @@ dependencies = [
 [[package]]
 name = "kitsune_p2p_bin_data"
 version = "0.3.0-beta-dev.18"
-dependencies = [
- "arbitrary",
- "base64 0.13.1",
- "derive_more",
- "fixt",
- "holochain_util 0.3.0-beta-dev.5",
- "kitsune_p2p_dht_arc 0.3.0-beta-dev.17",
- "proptest",
- "proptest-derive",
- "serde",
- "serde_bytes",
- "shrinkwraprs",
-]
-
-[[package]]
-name = "kitsune_p2p_bin_data"
-version = "0.3.0-beta-dev.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "396bb848a20db92dfcf7d712a73a82fc2c88f7206479136247e8363f1f635b21"
 dependencies = [
@@ -7490,22 +7503,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitsune_p2p_bin_data"
+version = "0.3.0-beta-dev.18"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
+dependencies = [
+ "arbitrary",
+ "base64 0.13.1",
+ "derive_more",
+ "fixt",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_dht_arc 0.3.0-beta-dev.17 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "proptest",
+ "proptest-derive",
+ "serde",
+ "serde_bytes",
+ "shrinkwraprs",
+]
+
+[[package]]
 name = "kitsune_p2p_block"
 version = "0.3.0-beta-dev.20"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "serde",
 ]
 
 [[package]]
 name = "kitsune_p2p_bootstrap"
 version = "0.2.0-beta-dev.23"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "clap 4.4.18",
  "futures",
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "parking_lot 0.12.1",
  "rand 0.8.5",
  "reqwest",
@@ -7519,40 +7552,18 @@ dependencies = [
 [[package]]
 name = "kitsune_p2p_bootstrap_client"
 version = "0.3.0-beta-dev.29"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "ed25519-dalek",
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "kitsune_p2p_bootstrap",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "once_cell",
  "reqwest",
  "serde",
  "serde_bytes",
  "tokio",
  "url2",
-]
-
-[[package]]
-name = "kitsune_p2p_dht"
-version = "0.3.0-beta-dev.19"
-dependencies = [
- "arbitrary",
- "colored",
- "derivative",
- "derive_more",
- "futures",
- "kitsune_p2p_dht_arc 0.3.0-beta-dev.17",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
- "must_future",
- "num-traits",
- "once_cell",
- "proptest",
- "proptest-derive",
- "rand 0.8.5",
- "serde",
- "statrs",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -7577,19 +7588,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "kitsune_p2p_dht_arc"
-version = "0.3.0-beta-dev.17"
+name = "kitsune_p2p_dht"
+version = "0.3.0-beta-dev.19"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "arbitrary",
+ "colored",
+ "derivative",
  "derive_more",
- "gcollections",
- "intervallum",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
+ "futures",
+ "kitsune_p2p_dht_arc 0.3.0-beta-dev.17 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "must_future",
  "num-traits",
+ "once_cell",
  "proptest",
  "proptest-derive",
- "rusqlite",
+ "rand 0.8.5",
  "serde",
+ "statrs",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -7607,14 +7626,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitsune_p2p_dht_arc"
+version = "0.3.0-beta-dev.17"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
+dependencies = [
+ "arbitrary",
+ "derive_more",
+ "gcollections",
+ "intervallum",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "num-traits",
+ "proptest",
+ "proptest-derive",
+ "rusqlite",
+ "serde",
+]
+
+[[package]]
 name = "kitsune_p2p_fetch"
 version = "0.3.0-beta-dev.26"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "backon",
  "derive_more",
  "indexmap 2.2.2",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "serde",
  "tokio",
  "tracing",
@@ -7623,6 +7660,7 @@ dependencies = [
 [[package]]
 name = "kitsune_p2p_mdns"
 version = "0.3.0-beta-dev.2"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "base64 0.21.7",
  "err-derive 0.3.1",
@@ -7636,31 +7674,18 @@ dependencies = [
 [[package]]
 name = "kitsune_p2p_proxy"
 version = "0.3.0-beta-dev.23"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "base64 0.21.7",
  "derive_more",
  "futures",
- "holochain_trace 0.3.0-beta-dev.8",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "kitsune_p2p_transport_quic",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "serde",
  "serde_bytes",
  "structopt",
  "tokio",
-]
-
-[[package]]
-name = "kitsune_p2p_timestamp"
-version = "0.3.0-beta-dev.8"
-dependencies = [
- "arbitrary",
- "chrono",
- "once_cell",
- "proptest",
- "proptest-derive",
- "rand 0.8.5",
- "rusqlite",
- "serde",
 ]
 
 [[package]]
@@ -7674,51 +7699,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitsune_p2p_timestamp"
+version = "0.3.0-beta-dev.8"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
+dependencies = [
+ "arbitrary",
+ "chrono",
+ "once_cell",
+ "proptest",
+ "proptest-derive",
+ "rand 0.8.5",
+ "rusqlite",
+ "serde",
+]
+
+[[package]]
 name = "kitsune_p2p_transport_quic"
 version = "0.3.0-beta-dev.23"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "blake2b_simd 1.0.2",
  "futures",
  "if-addrs 0.8.0",
- "kitsune_p2p_types 0.3.0-beta-dev.23",
+ "kitsune_p2p_types 0.3.0-beta-dev.23 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "quinn",
  "rustls 0.20.9",
  "tokio",
  "webpki",
-]
-
-[[package]]
-name = "kitsune_p2p_types"
-version = "0.3.0-beta-dev.23"
-dependencies = [
- "arbitrary",
- "base64 0.21.7",
- "derive_more",
- "fixt",
- "futures",
- "ghost_actor",
- "holochain_trace 0.3.0-beta-dev.8",
- "kitsune_p2p_bin_data 0.3.0-beta-dev.18",
- "kitsune_p2p_dht 0.3.0-beta-dev.19",
- "kitsune_p2p_dht_arc 0.3.0-beta-dev.17",
- "kitsune_p2p_timestamp 0.3.0-beta-dev.8",
- "lair_keystore_api",
- "mockall",
- "once_cell",
- "parking_lot 0.12.1",
- "paste",
- "proptest",
- "proptest-derive",
- "rmp-serde",
- "rustls 0.20.9",
- "serde",
- "serde_bytes",
- "serde_json",
- "sysinfo 0.29.11",
- "thiserror",
- "tokio",
- "url 2.4.1",
- "url2",
 ]
 
 [[package]]
@@ -7740,6 +7747,41 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.1",
  "paste",
+ "rmp-serde",
+ "rustls 0.20.9",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sysinfo 0.29.11",
+ "thiserror",
+ "tokio",
+ "url 2.4.1",
+ "url2",
+]
+
+[[package]]
+name = "kitsune_p2p_types"
+version = "0.3.0-beta-dev.23"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
+dependencies = [
+ "arbitrary",
+ "base64 0.21.7",
+ "derive_more",
+ "fixt",
+ "futures",
+ "ghost_actor",
+ "holochain_trace 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_bin_data 0.3.0-beta-dev.18 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_dht 0.3.0-beta-dev.19 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_dht_arc 0.3.0-beta-dev.17 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "kitsune_p2p_timestamp 0.3.0-beta-dev.8 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
+ "lair_keystore_api",
+ "mockall",
+ "once_cell",
+ "parking_lot 0.12.1",
+ "paste",
+ "proptest",
+ "proptest-derive",
  "rmp-serde",
  "rustls 0.20.9",
  "serde",
@@ -8652,6 +8694,7 @@ checksum = "7843ec2de400bcbc6a6328c958dc38e5359da6e93e72e37bc5246bf1ae776389"
 [[package]]
 name = "mr_bundle"
 version = "0.3.0-beta-dev.7"
+source = "git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f#a4d99206130b678fea0b7434f3bf7ed3c5f35e9f"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -8659,7 +8702,7 @@ dependencies = [
  "either",
  "flate2",
  "futures",
- "holochain_util 0.3.0-beta-dev.5",
+ "holochain_util 0.3.0-beta-dev.5 (git+https://github.com/coasys/holochain.git?rev=a4d99206130b678fea0b7434f3bf7ed3c5f35e9f)",
  "proptest",
  "proptest-derive",
  "reqwest",
