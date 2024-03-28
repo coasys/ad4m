@@ -161,7 +161,7 @@ pnpm test
 
 Only integration tests:
 ```
-pnpm install
+pnpm install && cd core && pnpm install && cd ../
 pnpm build
 cd tests/js
 pnpm install
