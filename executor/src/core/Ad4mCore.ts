@@ -115,10 +115,6 @@ export default class Ad4mCore {
         return this.#agentService
     }
 
-    get runtimeService(): RuntimeService {
-        return this.#runtimeService
-    }
-
     get languageController(): LanguageController {
         if (!this.#languageController) {
             throw Error("No languageController")
