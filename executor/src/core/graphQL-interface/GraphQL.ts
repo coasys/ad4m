@@ -439,36 +439,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 await core.languageController.putSettings(languageAddress, JSON.parse(settings))
                 return true
             },
-            //@ts-ignore
-            runtimeOpenLink: (args) => {
-                const { url } = args
-                console.log("openLinkExtern:", url)
-                //shell.openExternal(url)
-                return true
-            },
-            //@ts-ignore
-            runtimeQuit: (context) => {
-                process.exit(0)
-                return true
-            },
-            //@ts-ignore
-            runtimeHcAddAgentInfos: async (args, context) => {
-                const { agentInfos } = args
-                //@ts-ignore
-                const parsed = JSON.parse(agentInfos).map(info => {
-                    return {
-                        //@ts-ignore
-                        agent: Buffer.from(Object.values(info.agent)),
-                        //@ts-ignore
-                        signature: Buffer.from(Object.values(info.signature)),
-                        //@ts-ignore
-                        agent_info: Buffer.from(Object.values(info.agent_info))
-                    }
-                })
-
-                await core.holochainAddAgentInfos(parsed)
-                return true
-            },
 
             //@ts-ignore
             runtimeSetStatus: async (args, context) => {
