@@ -155,7 +155,7 @@ pnpm run package-ad4m
 
 Full test run of all packages:
 ```
-pnpm install
+pnpm install && cd core && pnpm install && cd ../
 pnpm test
 ```
 
