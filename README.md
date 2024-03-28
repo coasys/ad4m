@@ -132,7 +132,7 @@ cargo install holochain_cli@=0.3.0-beta-dev.39
 
 In order to build everyting that goes into the `ad4m` and `ad4m-executor` binaries, including all the boostrap Languages, run:
 ```
-pnpm install
+pnpm install && cd core && pnpm install && cd ../
 pnpm run build
 ```
 
