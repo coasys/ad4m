@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use crate::types::{Expression, ExpressionProof, Link, LinkExpression, PerspectiveDiff};
-use crate::graphql::graphql_types::{LinkStatus, PerspectiveHandle};
+use crate::graphql::graphql_types::{LinkStatus, PerspectiveExpression, PerspectiveHandle, SentMessage};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -100,7 +100,171 @@ impl Ad4mDb {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS trusted_agent (
+                id INTEGER PRIMARY KEY,
+                agent TEXT NOT NULL UNIQUE
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS known_link_languages (
+                id INTEGER PRIMARY KEY,
+                language TEXT NOT NULL UNIQUE
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS friends (
+                id INTEGER PRIMARY KEY,
+                friend TEXT NOT NULL UNIQUE
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS outbox (
+                id INTEGER PRIMARY KEY,
+                message TEXT NOT NULL,
+                recipient TEXT NOT NULL
+             )",
+            [],
+        )?;
+
         Ok(Self { conn })
+    }
+
+    pub fn add_to_outbox(&self, message: &PerspectiveExpression, recipient: String) -> Result<(), rusqlite::Error> {
+        let message_json = serde_json::to_string(message).unwrap();
+        self.conn.execute(
+            "INSERT INTO outbox (message, recipient) VALUES (?, ?)",
+            [message_json, recipient],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_all_from_outbox(&self) -> Result<Vec<SentMessage>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT message, recipient FROM outbox")?;
+        let outbox_iter = stmt.query_map([], |row| {
+            let message_json: String = row.get(0)?;
+            let message: PerspectiveExpression = serde_json::from_str(&message_json).unwrap();
+            let recipient: String = row.get(1)?;
+            Ok(SentMessage {
+                message,
+                recipient,
+            })
+        })?;
+
+        let mut outbox = Vec::new();
+        for message in outbox_iter {
+            outbox.push(message?);
+        }
+        Ok(outbox)
+    }
+
+    pub fn add_friends(&self, friends: Vec<String>) -> Result<(), rusqlite::Error> {
+        for friend in friends {
+            self.conn.execute(
+                "INSERT INTO friends (friend) VALUES (?)",
+                [friend],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_friends(&self, friends: Vec<String>) -> Result<(), rusqlite::Error> {
+        for friend in friends {
+            self.conn.execute(
+                "DELETE FROM friends WHERE friend = ?",
+                [friend],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_all_friends(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT friend FROM friends")?;
+        let friend_iter = stmt.query_map([], |row| row.get(0))?;
+
+        let mut friends = Vec::new();
+        for friend in friend_iter {
+            friends.push(friend?);
+        }
+
+        friends.sort();
+
+        friends.dedup();
+
+        Ok(friends)
+    }
+
+    pub fn add_known_link_languages(&self, languages: Vec<String>) -> Result<(), rusqlite::Error> {
+        for language in languages {
+            self.conn.execute(
+                "INSERT INTO known_link_languages (language) VALUES (?)",
+                [language],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_known_link_languages(&self, languages: Vec<String>) -> Result<(), rusqlite::Error> {
+        for language in languages {
+            self.conn.execute(
+                "DELETE FROM known_link_languages WHERE language = ?",
+                [language],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_all_known_link_languages(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT language FROM known_link_languages")?;
+        let language_iter = stmt.query_map([], |row| row.get(0))?;
+
+        let mut languages = Vec::new();
+        for language in language_iter {
+            languages.push(language?);
+        }
+
+        languages.sort();
+
+        languages.dedup();
+
+        Ok(languages)
+    }
+
+    pub fn add_trusted_agents(&self, agents: Vec<String>) -> Result<(), rusqlite::Error> {
+        for agent in agents {
+            self.conn.execute(
+                "INSERT INTO trusted_agents (agent) VALUES (?)",
+                [agent],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_all_trusted_agents(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT agent FROM trusted_agent")?;
+        let agent_iter = stmt.query_map([], |row| row.get(0))?;
+
+        let mut agents = Vec::new();
+        for agent in agent_iter {
+            agents.push(agent?);
+        }
+        Ok(agents)
+    }
+
+    pub fn remove_trusted_agents(&self, agents: Vec<String>) -> Result<(), rusqlite::Error> {
+        for agent in agents {
+            self.conn.execute(
+                "DELETE FROM trusted_agents WHERE agent = ?",
+                [agent],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn add_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
