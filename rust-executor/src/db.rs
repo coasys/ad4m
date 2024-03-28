@@ -103,7 +103,7 @@ impl Ad4mDb {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS trusted_agent (
                 id INTEGER PRIMARY KEY,
-                agent TEXT NOT NULL UNIQUE
+                agent TEXT NOT NULL
              )",
             [],
         )?;
@@ -111,7 +111,7 @@ impl Ad4mDb {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS known_link_languages (
                 id INTEGER PRIMARY KEY,
-                language TEXT NOT NULL UNIQUE
+                language TEXT NOT NULL
              )",
             [],
         )?;
@@ -119,7 +119,7 @@ impl Ad4mDb {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS friends (
                 id INTEGER PRIMARY KEY,
-                friend TEXT NOT NULL UNIQUE
+                friend TEXT NOT NULL
              )",
             [],
         )?;
@@ -239,7 +239,7 @@ impl Ad4mDb {
     pub fn add_trusted_agents(&self, agents: Vec<String>) -> Result<(), rusqlite::Error> {
         for agent in agents {
             self.conn.execute(
-                "INSERT INTO trusted_agents (agent) VALUES (?)",
+                "INSERT INTO trusted_agent (agent) VALUES (?)",
                 [agent],
             )?;
         }
@@ -260,7 +260,7 @@ impl Ad4mDb {
     pub fn remove_trusted_agents(&self, agents: Vec<String>) -> Result<(), rusqlite::Error> {
         for agent in agents {
             self.conn.execute(
-                "DELETE FROM trusted_agents WHERE agent = ?",
+                "DELETE FROM trusted_agent WHERE agent = ?",
                 [agent],
             )?;
         }
