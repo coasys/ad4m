@@ -9,6 +9,61 @@ as well as programatic setup and running of ADAM agents.
 
 ## Installation
 
+This crate is published to crates.io and can be installed via `cargo install ad4m`. 
+But several dependent crates have non-Rust dependencies which need to be installed.
+
+### Build dependencies
+
+#### Rust version
+Make sure you have `rustup` installed (follow instructions [here](https://www.rust-lang.org/tools/install)).
+Use rustup to install the latest stable Rust version.
+
+ADAM currently needs at least Rust version:
+```
+1.77.0
+```
+
+#### Rust WASM target for Holochain based Languages
+For building Holochain DNAs, which are part of the ADAM bootstrap languages included here
+you need your Rust toolchain to be able to compile to WASM.
+
+Run the following command to install the WASM target:
+```
+rustup target add wasm32-unknown-unknown
+```
+
+#### Go
+Holochain currently depends on [Go](https://go.dev) being installed at version 1.21 or later.
+Follow the installation instructions on [https://go.dev/doc/install](https://go.dev/doc/install).
+
+Make sure `go` is in your `$PATH` before you continue. Output of `go version` should look like this:
+```
+go version go1.21.0 darwin/arm64
+```
+
+#### Platform specific dependencies
+Run the following commands depending on your operating system to get all the system libraries installed that are needed by some of the Rust crates that Holochain and ADAM depend on.
+
+##### macOS
+Ensure you have [Homebrew](https://brew.sh/) installed and then run:
+```
+brew install protobuf cmake
+```
+
+##### Linux (Ubuntu / Debian)
+```
+sudo apt-get update
+sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
+```
+
+##### Windows
+Ensure you have [Chocolatey](https://chocolatey.org/) installed and then run:
+```
+choco install strawberryperl protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
+```
+
+
+### Install command
 Install AD4M using Cargo, Rust's package manager:
 ```
 cargo install ad4m
@@ -17,6 +72,7 @@ cargo install ad4m
 This command installs two binaries:
 - `ad4m`: The client for interacting with the executor.
 - `ad4m-executor`: The executor that runs the AD4M agent.
+
 
 ## Getting Started
 
