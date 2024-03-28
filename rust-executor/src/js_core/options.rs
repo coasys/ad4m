@@ -69,7 +69,7 @@ pub fn main_worker_options() -> WorkerOptions {
             prolog_ext,
             signature_ext,
             agent_ext,
-            runtime_ext
+            runtime_ext,
             languages_ext,
         ],
         module_loader: Rc::new(loader),

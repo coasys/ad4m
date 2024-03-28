@@ -420,7 +420,7 @@ impl Query {
             .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))
             .collect();
 
-        Ok(serde_json::to_string(&encoded_agents)?)
+        Ok(serde_json::to_string(&encoded_infos)?)
     }
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
