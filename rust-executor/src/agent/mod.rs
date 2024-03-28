@@ -6,7 +6,7 @@ use deno_core::error::AnyError;
 use deno_core::anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
-use crate::graphql::graphql_types::{Agent, AgentStatus};
+use crate::graphql::graphql_types::{Agent, AgentStatus, Perspective};
 use crate::pubsub::{self, get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};
 use crate::types::{Expression, ExpressionProof};
 use crate::wallet::{self, Wallet};
@@ -201,7 +201,9 @@ impl AgentService {
         self.did = Some(did());
         self.agent = Some(Agent {
             did: did(),
-            perspective: None,
+            perspective: Some(Perspective {
+                links: vec![]
+            }),
             direct_message_language: None,
         });
         self.signing_key_id = Some(signing_key_id());
@@ -276,7 +278,9 @@ impl AgentService {
         } else {
             self.agent = Some(Agent {
                 did: did(),
-                perspective: None,
+                perspective: Some(Perspective {
+                    links: vec![]
+                }),
                 direct_message_language: None,
             });
         }
