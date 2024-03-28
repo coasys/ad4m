@@ -15,27 +15,27 @@ export default function runtimeTests(testContext: TestContext) {
             const initalAgents = await ad4mClient.runtime.getTrustedAgents();
             console.warn(initalAgents);
             console.warn([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ]);
-            expect(initalAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
-            
+            expect(initalAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ].sort())
+
             const addAgents = await ad4mClient.runtime.addTrustedAgents(["agentPubKey", "agentPubKey2"]);
-            expect(addAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(addAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ].sort())
 
             //Add the agents again to be sure we cannot get any duplicates
             const addAgentsDuplicate = await ad4mClient.runtime.addTrustedAgents(["agentPubKey", "agentPubKey2"]);
-            expect(addAgentsDuplicate).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(addAgentsDuplicate).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ].sort())
 
             const getAgents = await ad4mClient.runtime.getTrustedAgents();
-            expect(getAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(getAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ].sort())
 
             const deleteAgents1 = await ad4mClient.runtime.deleteTrustedAgents(["agentPubKey2"])
-            expect(deleteAgents1).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, "agentPubKey" ])
+            expect(deleteAgents1).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, "agentPubKey" ].sort())
 
             const deleteAgents2 = await ad4mClient.runtime.deleteTrustedAgents(["agentPubKey", "agentPubKey2"])
-            expect(deleteAgents2).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
+            expect(deleteAgents2).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ].sort())
 
             const getAgentsPostDelete = await ad4mClient.runtime.getTrustedAgents();
-            expect(getAgentsPostDelete).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
-        })    
+            expect(getAgentsPostDelete).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ].sort())
+        })
 
 
         it('CRUD for known LinkLanguage templates', async () => {
@@ -43,19 +43,19 @@ export default function runtimeTests(testContext: TestContext) {
 
             const addresses = await ad4mClient.runtime.knownLinkLanguageTemplates();
             expect(addresses).to.eql([ DIFF_SYNC_OFFICIAL ])
-            
+
             const addAddresses = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
-            expect(addAddresses).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(addAddresses).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
 
             //Add the agents again to be sure we cannot get any duplicates
             const addDuplicate = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
-            expect(addDuplicate).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(addDuplicate).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
 
             const get = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(get).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(get).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
 
             const deleted = await ad4mClient.runtime.removeKnownLinkLanguageTemplates(["Qm123"])
-            expect(deleted).to.eql([ DIFF_SYNC_OFFICIAL, "Qmabc" ])
+            expect(deleted).to.eql([ DIFF_SYNC_OFFICIAL, "Qmabc" ].sort())
 
             const deleted2 = await ad4mClient.runtime.removeKnownLinkLanguageTemplates(["Qm123", "Qmabc"])
             expect(deleted2).to.eql([ DIFF_SYNC_OFFICIAL ])
@@ -69,7 +69,7 @@ export default function runtimeTests(testContext: TestContext) {
 
             const dids = await ad4mClient.runtime.friends();
             expect(dids).to.eql([ ])
-            
+
             const added = await ad4mClient.runtime.addFriends(["did:test:1", "did:test:2"]);
             expect(added).to.eql(["did:test:1", "did:test:2"])
 
@@ -100,27 +100,27 @@ export default function runtimeTests(testContext: TestContext) {
             expect(addresses).to.eql([ DIFF_SYNC_OFFICIAL ])
 
             const initalAgents = await ad4mClient.runtime.getTrustedAgents();
-            expect(initalAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ])
+            expect(initalAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ].sort())
 
 
             const addAddresses = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
-            expect(addAddresses).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(addAddresses).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
 
             const addAgents = await ad4mClient.runtime.addTrustedAgents(["agentPubKey", "agentPubKey2"]);
-            expect(addAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(addAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ].sort())
 
             const dids = await ad4mClient.runtime.friends()
-            expect(dids).to.eql(["did:test:1", "did:test:2"])
+            expect(dids).to.eql(["did:test:1", "did:test:2"].sort())
 
 
             const deleted = await ad4mClient.runtime.removeFriends(["did:test:1", "agentPubKey", "Qm123"])
-            expect(deleted).to.eql([ ])
+            expect(deleted).to.eql(["did:test:2" ])
 
             const postDeleteAddresses = await ad4mClient.runtime.knownLinkLanguageTemplates()
-            expect(postDeleteAddresses).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ])
+            expect(postDeleteAddresses).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
 
             const postDeleteAgents = await ad4mClient.runtime.getTrustedAgents()
-            expect(postDeleteAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ])
+            expect(postDeleteAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ].sort())
         })
 
         it("can deal with Holochain's agent_infos", async () => {

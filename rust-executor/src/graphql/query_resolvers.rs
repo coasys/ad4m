@@ -1,11 +1,10 @@
 #![allow(non_snake_case)]
+use std::{env, path};
 use coasys_juniper::{graphql_object, FieldError, FieldResult};
-
-
 use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::{DecoratedLinkExpression }};
-
 use super::graphql_types::*;
-use crate::agent::{capabilities::*, signatures};
+use base64::{encode};
+use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime_service, wallet::{self, Wallet}};
 
 pub struct Query;
 
@@ -168,14 +167,9 @@ impl Query {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "getTrustedAgents"))"#,
-            ))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let agents = runtime_service::get_trusted_agents();
+
+        Ok(agents)
     }
 
     async fn language(
@@ -257,7 +251,7 @@ impl Query {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         Ok(get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .has_telepresence_adapter() 
+            .has_telepresence_adapter()
             .await)
     }
 
@@ -271,7 +265,7 @@ impl Query {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .online_agents() 
+            .online_agents()
             .await
             .map_err(|e| FieldError::from(e.to_string()))
     }
@@ -286,7 +280,7 @@ impl Query {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .others() 
+            .others()
             .await
             .map_err(|e| FieldError::from(e.to_string()))
     }
@@ -385,6 +379,14 @@ impl Query {
             &context.capabilities,
             &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
         )?;
+        let friends = runtime_service::get_friends();
+
+        if !friends.contains(&did.clone()) {
+            log::error!("Friend not found: {}", did);
+
+            return Ok(PerspectiveExpression::default());
+        }
+
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
@@ -393,19 +395,15 @@ impl Query {
             ))
             .await?;
         let result: JsResultType<PerspectiveExpression> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let get_graphql_result = result.get_graphql_result()?;
+        Ok(get_graphql_result)
     }
 
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriends"))"#,
-            ))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let friends = runtime_service::get_friends();
+        Ok(friends)
     }
 
     async fn runtime_hc_agent_infos(&self, context: &RequestContext) -> FieldResult<String> {
@@ -427,13 +425,20 @@ impl Query {
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
         let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeInfo", null))"#,
-            ))
-            .await?;
-        let result: JsResultType<RuntimeInfo> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let agent_path = format!("{}/ad4m/agent.json", env::var("APPS_DATA_PATH").unwrap_or_else(|_| "".to_string()));
+
+        let wallet_instance = Wallet::instance();
+        let wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_ref().expect("wallet instance");
+        let is_unlocked = wallet_ref.is_unlocked();
+        let is_initialized: bool = path::Path::new(&agent_path).exists();
+
+        Ok(RuntimeInfo {
+            is_initialized,
+            is_unlocked,
+            ad4m_executor_version: env!("CARGO_PKG_VERSION").to_string(),
+        })
     }
 
     async fn runtime_known_link_language_templates(
@@ -444,12 +449,8 @@ impl Query {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeKnownLinkLanguageTemplates"))"#))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let runtime = runtime_service::get_know_link_languages();
+        Ok(runtime)
     }
 
     async fn runtime_message_inbox(
@@ -477,17 +478,8 @@ impl Query {
         filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
-        let filter_str = filter
-            .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
-            .unwrap_or_else(|| String::from("{ filter: null }"));
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageOutbox", {}))"#,
-            filter_str,
-        );
-        let mut js = context.js_handle.clone();
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<SentMessage>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let outbox = runtime_service::get_outbox();
+        Ok(outbox)
     }
 
     async fn runtime_verify_string_signed_by_did(

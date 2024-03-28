@@ -1,16 +1,18 @@
+use serde::{Deserialize, Serialize};
+
 use crate::agent::by_did::{ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks};
 use crate::agent::me::{MeAgent, MeAgentPerspectiveLinks};
 use crate::perspectives::query_links::QueryLinksPerspectiveQueryLinks;
 use crate::perspectives::subscription_link_added::SubscriptionLinkAddedPerspectiveLinkAdded;
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Link {
     pub predicate: Option<String>,
     pub source: String,
     pub target: String,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ExpressionProof {
     pub invalid: Option<bool>,
     pub key: Option<String>,
@@ -18,7 +20,7 @@ pub struct ExpressionProof {
     pub valid: Option<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LinkExpression {
     pub author: String,
     pub data: Link,
@@ -27,7 +29,7 @@ pub struct LinkExpression {
     pub status: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PerspectiveExpression {
     pub author: String,
     pub data: Perspective,
@@ -240,7 +242,7 @@ impl From<AllPerspectivesNeighbourhoodDataMetaLinks> for LinkExpression {
     }
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }

@@ -1,9 +1,11 @@
 # Changelog
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).  
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
 
 ## unreleased
+
+- Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 
 
 ## [0.9.0] - 23/03/2024
@@ -63,7 +65,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Used pnpm as main package manager for project [#421](https://github.com/coasys/ad4m/pull/421)
  - Upgrade to Holochain 0.3.0-dev.27 [#427](https://github.com/coasys/ad4m/pull/428)
  - Agent & File storage boostrap languages now use centralized backend by default [#430](https://github.com/coasys/ad4m/pull/430)
- 
+
 ### Deprecated
 
 ### Removed
@@ -77,7 +79,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Added
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -122,7 +124,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Whole ADAM Layer package now runs from a single binary; either ADAM CLI or ADAM Launcher
  - ADAM Languages now expected to be Deno compatible modules; not old ESM node JS
  - JS executor now builds to be a Deno bundle to be consumed by rust-executor
- 
+
 ### Deprecated
 
 ### Removed
@@ -152,7 +154,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Changed
  - Moved code that deals with the IPFS repo lock from JS to Rust, improving (in most cases: unblocking) startup of the Launcher on Windows [PR#392](https://github.com/coasys/ad4m/pull/392)
- 
+
 ### Deprecated
 
 ### Removed
@@ -172,7 +174,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Added local links support to SDNA. [PR#370](https://github.com/perspect3vism/ad4m/pull/370)
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -188,7 +190,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Added
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -204,7 +206,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Changed
  - ipfs repo.lock now handled in the executor so ad4m-host startups will not have ipfs repo.lock conflicts [PR#333](https://github.com/perspect3vism/ad4m/pull/333)
  - Perspective diff sync now uses mutex locks to ensure its not updating its internal state in conflicting ways [PR#334](https://github.com/perspect3vism/ad4m/pull/334)
- 
+
 ### Deprecated
 
 ### Removed
@@ -228,7 +230,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Improved CI workflow where holochain binaries are always downloaded and used for all tests and builds [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
 
 - Launcher automatically authenticates with the proxy on login. [PR#303](https://github.com/perspect3vism/ad4m/pull/303)
- 
+
 ### Deprecated
 
 ### Removed
