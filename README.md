@@ -139,7 +139,7 @@ pnpm run build
 You can also exclude the bootstrap Languages (which will get downloaded through the Language-language on startup anyways, if those are unchanged) and run this instead:
 
 ```
-pnpm install
+pnpm install && cd core && pnpm install && cd ../
 pnpm run build-libs
 ```
 
