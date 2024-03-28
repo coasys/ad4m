@@ -5,6 +5,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ## unreleased
 
+
+## [0.9.0] - 23/03/2024
+
 ### Added
  - Add ability to get and add Holochain agent infos through launcher [PR#463](https://github.com/coasys/ad4m/pull/463)
  - Added new packages that provide reusable hooks for `react` & `vue` to interact with ad4m `ad4m-react-hooks` & `ad4m-vue-hooks`. Also updated docs for the hooks [PR#450](https://github.com/coasys/ad4m/pull/450)
