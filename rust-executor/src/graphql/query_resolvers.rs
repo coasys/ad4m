@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
-use coasys_juniper::{graphql_object, FieldError, FieldResult};
-
+use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 
 use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::{DecoratedLinkExpression }};
 
+use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
 
@@ -13,14 +13,19 @@ pub struct Query;
 impl Query {
     async fn agent(&self, context: &RequestContext) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agent", null))"#,
-            ))
-            .await?;
-        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let agent_instance = AgentService::instance();
+        let agent_service = agent_instance.lock().expect("agent lock");
+        let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+        let mut agent = agent_ref.agent.clone().ok_or(FieldError::new(
+            "Agent not found",
+            Value::null(),
+        ))?;
+
+        if agent.perspective.is_some() {
+            agent.perspective.as_mut().unwrap().verify_link_signatures();
+        }
+
+        Ok(agent)
     }
 
     #[graphql(name = "agentByDID")]
@@ -30,22 +35,36 @@ impl Query {
         did: String,
     ) -> FieldResult<Option<Agent>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(
-                format!(
-                    r#"JSON.stringify(
-                    await core.callResolver("Query", "agentByDID",
-                        {{ did: "{}" }},
+        let agent_instance = AgentService::instance();
+        let did_match = {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            did == agent_ref.did.clone().unwrap()
+        };
+
+        if !did_match {
+            let mut js = context.js_handle.clone();
+            let result = js
+                .execute(
+                    format!(
+                        r#"JSON.stringify(
+                        await core.callResolver("Query", "agentByDID",
+                            {{ did: "{}" }},
+                        )
+                    )"#,
+                        did,
                     )
-                )"#,
-                    did,
+                    .into(),
                 )
-                .into(),
-            )
-            .await?;
-        let result: JsResultType<Option<Agent>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+                .await?;
+            let result: JsResultType<Option<Agent>> = serde_json::from_str(&result)?;
+            result.get_graphql_result()
+        } else {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            Ok(agent_ref.agent.clone())
+        }
+
     }
 
     async fn agent_get_apps(&self, context: &RequestContext) -> FieldResult<Vec<Apps>> {
@@ -57,37 +76,28 @@ impl Query {
         &self,
         context: &RequestContext,
     ) -> FieldResult<Vec<EntanglementProof>> {
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentGetEntanglementProofs", null, null))"#
-            ))
-            .await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let proofs = get_entanglement_proofs();
+        Ok(proofs)
     }
 
     async fn agent_is_locked(&self, context: &RequestContext) -> FieldResult<bool> {
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentIsLocked", null, null))"#
-            ))
-            .await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let agent_instance = AgentService::instance();
+        let agent_service = agent_instance.lock().expect("agent lock");
+        let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+        let is_unlocked = agent_ref.is_unlocked();
+
+        Ok(is_unlocked)
     }
 
     async fn agent_status(&self, context: &RequestContext) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentStatus"))"#,
-            ))
-            .await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let agent_instance = AgentService::instance();
+        let agent_service = agent_instance.lock().expect("agent lock");
+        let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+
+        let status = agent_ref.dump();
+
+        Ok(status)
     }
 
     async fn expression(
@@ -257,7 +267,7 @@ impl Query {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         Ok(get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .has_telepresence_adapter() 
+            .has_telepresence_adapter()
             .await)
     }
 
@@ -271,7 +281,7 @@ impl Query {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .online_agents() 
+            .online_agents()
             .await
             .map_err(|e| FieldError::from(e.to_string()))
     }
@@ -286,7 +296,7 @@ impl Query {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .others() 
+            .others()
             .await
             .map_err(|e| FieldError::from(e.to_string()))
     }

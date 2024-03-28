@@ -31,7 +31,7 @@ class Sharing implements PublicSharing {
 
   constructor(context: LanguageContext) {
     this.#DNA = context.Holochain as HolochainLanguageDelegate;
-    this.#agent = context.agent; 
+    this.#agent = context.agent;
   }
 
   async createPublic(content: Agent): Promise<Address> {
@@ -49,9 +49,11 @@ class Sharing implements PublicSharing {
     agent.perspective!.links.forEach(link => {
       delete link.proof.valid
       delete link.proof.invalid
+      delete link.status
     })
 
     const expression = this.#agent.createSignedExpression(agent);
+
     await this.#DNA.call(
       DNA_NICK,
       "agent_store",

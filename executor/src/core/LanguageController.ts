@@ -136,7 +136,7 @@ export default class LanguageController {
             }
             const agentLanguage = await this.installLanguage(this.#config.languageAliases[Config.agentLanguageAlias], null);
             this.#agentLanguage = agentLanguage!;
-            ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
+            ((this.#context as LanguageContext).agent as unknown as AgentService).setAgentLanguage(agentLanguage!)
 
             //Install the neighbourhood language and set
             if (this.#config.neighbourhoodLanguageSettings) {
@@ -519,9 +519,9 @@ export default class LanguageController {
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
             const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
-            const agentService = (this.#context as LanguageContext).agent as AgentService;
+            const agentService = (this.#context as LanguageContext).agent as unknown as AgentService;
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
-            if (trustedAgents.find((agent) => agent === languageAuthor) || agentService.agent! === languageAuthor) {
+            if (trustedAgents.find((agent) => agent === languageAuthor) || AGENT.did() === languageAuthor) {
                 //Get the language source so we can generate a hash and check against the hash given in the language meta information
                 const languageSource = await this.getLanguageSource(address);
                 if (!languageSource) {

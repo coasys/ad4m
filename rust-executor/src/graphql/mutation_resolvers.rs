@@ -1,8 +1,9 @@
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
-use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
+use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
 
 use super::graphql_types::*;
-use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
+use crate::{agent::{self, capabilities::*, AgentService}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key}, holochain_service::{agent_infos_from_str, get_holochain_service}, pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC}};
+
 pub struct Mutation;
 
 fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<PerspectiveInstance> {
@@ -53,16 +54,20 @@ impl Mutation {
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentAddEntanglementProofs", {{ proofs: {} }})
-            )"#,
-            serde_json::to_string(&proofs).unwrap(),
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let converted_proofs: Vec<EntanglementProof> = proofs.into_iter().map(|input| EntanglementProof {
+            did: input.did,
+            did_signing_key_id: input.did_signing_key_id,
+            device_key_type: input.device_key_type,
+            device_key: input.device_key,
+            device_key_signed_by_did: input.device_key_signed_by_did,
+            did_signed_by_device_key: Some(input.did_signed_by_device_key),
+        }).collect();
+
+        add_entanglement_proofs(converted_proofs);
+
+        let proofs = get_entanglement_proofs();
+
+        Ok(proofs)
     }
 
     async fn agent_delete_entanglement_proofs(
@@ -71,16 +76,20 @@ impl Mutation {
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentDeleteEntanglementProofs", {{ proofs: {} }})
-            )"#,
-            serde_json::to_string(&proofs).unwrap(),
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let converted_proofs: Vec<EntanglementProof> = proofs.into_iter().map(|input| EntanglementProof {
+            did: input.did,
+            did_signing_key_id: input.did_signing_key_id,
+            device_key_type: input.device_key_type,
+            device_key: input.device_key,
+            device_key_signed_by_did: input.device_key_signed_by_did,
+            did_signed_by_device_key: Some(input.did_signed_by_device_key),
+        }).collect();
+
+        delete_entanglement_proof(converted_proofs);
+
+        let proofs = get_entanglement_proofs();
+
+        Ok(proofs)
     }
 
     async fn agent_entanglement_proof_pre_flight(
@@ -90,16 +99,9 @@ impl Mutation {
         device_key_type: String,
     ) -> FieldResult<EntanglementProof> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentEntanglementProofPreFlight", {{ deviceKey: "{}", deviceKeyType: "{}" }})
-            )"#,
-            device_key, device_key_type
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<EntanglementProof> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let proof = sign_device_key(device_key, device_key_type);
+
+        Ok(proof)
     }
 
     async fn agent_generate(
@@ -108,6 +110,15 @@ impl Mutation {
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)?;
+        let agent_instance = AgentService::instance();
+        {
+            let mut agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+
+            agent_ref.create_new_keys();
+            agent_ref.save(passphrase.clone());
+        }
+
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -115,9 +126,25 @@ impl Mutation {
             )"#,
             passphrase
         );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        js.execute(script).await?;
+
+        let agent = {
+            let mut agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+            agent_ref.dump().clone()
+        };
+
+        get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+        log::info!("AD4M init complete");
+
+        Ok(agent)
     }
 
     async fn agent_lock(
@@ -125,17 +152,30 @@ impl Mutation {
         context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
-        check_capability(&context.capabilities, &AGENT_LOCK_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentLock", {{ passphrase: "{}" }})
-            )"#,
-            passphrase
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let agent_instance = AgentService::instance();
+
+        {
+            let mut agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+
+            agent_ref.lock(passphrase);
+        }
+
+        let agent = {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            agent_ref.dump()
+        };
+
+        get_global_pubsub()
+            .await
+            .publish(
+                &AGENT_STATUS_CHANGED_TOPIC,
+                &serde_json::to_string(&agent).unwrap(),
+            )
+            .await;
+
+        Ok(agent)
     }
 
     async fn agent_remove_app(
@@ -220,16 +260,45 @@ impl Mutation {
         holochain: bool,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }})
-            )"#,
-            passphrase, holochain
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let agent_instance = AgentService::instance();
+        {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+
+            agent_ref.unlock(passphrase.clone());
+        }
+
+        if agent_instance.lock().expect("agent lock").as_ref().expect("agent instance").is_unlocked() {
+            let mut js = context.js_handle.clone();
+            let script = format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }})
+                )"#,
+                passphrase, holochain
+            );
+            js.execute(script).await?;
+        }
+
+        let mut agent = {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            agent_ref.dump().clone()
+        };
+
+        if !agent_instance.lock().expect("agent lock").as_ref().expect("agent instance").is_unlocked() {
+            agent.error = Some("Failed to unlock agent".to_string());
+        }
+
+        get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+        Ok(agent)
     }
 
     async fn agent_update_direct_message_language(
@@ -461,7 +530,7 @@ impl Mutation {
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .send_broadcast(perspective.into()) 
+            .send_broadcast(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -480,16 +549,16 @@ impl Mutation {
             links: payload.links
             .into_iter()
             .map(|l| Link::from(l))
-            .map(|l| create_signed_expression(l)) 
+            .map(|l| create_signed_expression(l))
             .filter_map(Result::ok)
             .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect::<Vec<DecoratedLinkExpression>>()
-        }; 
+        };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .send_broadcast(perspective.into()) 
+            .send_broadcast(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -509,7 +578,7 @@ impl Mutation {
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .send_signal(remote_agent_did, perspective.into()) 
+            .send_signal(remote_agent_did, perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -529,16 +598,16 @@ impl Mutation {
             links: payload.links
             .into_iter()
             .map(|l| Link::from(l))
-            .map(|l| create_signed_expression(l)) 
+            .map(|l| create_signed_expression(l))
             .filter_map(Result::ok)
             .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect::<Vec<DecoratedLinkExpression>>()
-        }; 
+        };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .send_signal(remote_agent_did, perspective.into()) 
+            .send_signal(remote_agent_did, perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -557,7 +626,7 @@ impl Mutation {
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .set_online_status(perspective.into()) 
+            .set_online_status(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -576,16 +645,16 @@ impl Mutation {
             links: status.links
             .into_iter()
             .map(|l| Link::from(l).normalize())
-            .map(|l| create_signed_expression(l)) 
+            .map(|l| create_signed_expression(l))
             .filter_map(Result::ok)
             .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect::<Vec<DecoratedLinkExpression>>()
-        }; 
+        };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .set_online_status(perspective.into()) 
+            .set_online_status(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)

@@ -1,6 +1,6 @@
 use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
 use std::borrow::Cow;
-use crate::agent::{create_signed_expression, did, did_document, sign, sign_string_hex, signing_key_id};
+use crate::{agent::{create_signed_expression, did, did_document, sign, sign_string_hex, signing_key_id, AgentService}, graphql::graphql_types::{Agent, AgentStatus}};
 
 use super::utils::sort_json_value;
 
@@ -53,6 +53,92 @@ fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyError> 
     sign_string_hex(payload)
 }
 
+#[op2(fast)]
+fn agent_is_initialized() -> Result<bool, AnyError> {
+    let agent_instance = AgentService::instance();
+    let agent_service = agent_instance.lock().expect("agent lock");
+    let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+
+    let is_initialized = agent_ref.is_initialized();
+
+    Ok(is_initialized)
+}
+
+#[op2(fast)]
+fn agent_is_unlocked() -> Result<bool, AnyError> {
+    let agent_instance = AgentService::instance();
+    let agent_service = agent_instance.lock().expect("agent lock");
+    let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+
+    let is_unlocked = agent_ref.is_unlocked();
+
+    Ok(is_unlocked)
+}
+
+#[op2]
+#[serde]
+fn agent() -> Result<Agent, AnyError> {
+    let agent_instance = AgentService::instance();
+    let mut agent_service = agent_instance.lock().expect("agent lock");
+    let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+
+    let mut agent = agent_ref.agent.clone().unwrap();
+
+    if agent.perspective.is_some() {
+        agent.perspective.as_mut().unwrap().verify_link_signatures();
+    }
+
+    Ok(agent)
+}
+
+#[op2]
+#[serde]
+fn agent_load() -> Result<AgentStatus, AnyError> {
+    let agent_instance = AgentService::instance();
+    let mut agent_service = agent_instance.lock().expect("agent lock");
+    let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+
+    agent_ref.load();
+
+    let agent_status = agent_ref.dump();
+
+    Ok(agent_status)
+}
+
+#[op2(async)]
+#[serde]
+async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
+    let agent_instance = AgentService::instance();
+    let mut agent_service = agent_instance.lock().expect("agent lock");
+    let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+
+    agent_ref.unlock(passphrase).unwrap();
+
+    Ok(())
+}
+
+#[op2(async)]
+#[serde]
+async fn agent_lock(#[string] passphrase: String) -> Result<(), AnyError> {
+    let agent_instance = AgentService::instance();
+    let mut agent_service = agent_instance.lock().expect("agent lock");
+    let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+
+    agent_ref.lock(passphrase);
+
+    Ok(())
+}
+
+#[op2]
+fn save_agent_profile(#[serde] agent: Agent) -> Result<(), AnyError> {
+    let agent_instance = AgentService::instance();
+    let mut agent_service = agent_instance.lock().expect("agent lock");
+    let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+
+    agent_ref.save_agent_profile(agent);
+
+    Ok(())
+}
 
 pub fn build() -> Extension {
     Extension {
@@ -66,6 +152,13 @@ pub fn build() -> Extension {
             agent_create_signed_expression_stringified::DECL,
             agent_sign::DECL,
             agent_sign_string_hex::DECL,
+            agent_is_initialized::DECL,
+            agent_is_unlocked::DECL,
+            agent::DECL,
+            agent_load::DECL,
+            agent_unlock::DECL,
+            agent_lock::DECL,
+            save_agent_profile::DECL,
         ]),
         ..Default::default()
     }

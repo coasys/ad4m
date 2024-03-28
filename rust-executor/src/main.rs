@@ -6,6 +6,7 @@ mod config;
 mod globals;
 mod graphql;
 mod holochain_service;
+mod entanglement_service;
 mod js_core;
 mod prolog;
 mod prolog_service;

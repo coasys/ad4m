@@ -12,10 +12,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
     return {
         Query: {
             //@ts-ignore
-            agent: (context) => {
-                return core.agentService.agent
-            },
-            //@ts-ignore
             agentByDID: async (args, context) => {
                 const { did } = args;
                 if (did != core.agentService.did) {
@@ -36,14 +32,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 } else {
                     return core.agentService.agent
                 }
-            },
-            //@ts-ignore
-            agentStatus: (context) => {
-                return core.agentService.dump()
-            },
-            //@ts-ignore
-            agentIsLocked: () => {
-                return !core.agentService.isUnlocked
             },
             //@ts-ignore
             expression: async (args, context) => {
@@ -227,10 +215,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return core.languageController.filteredLanguageRefs(filter)
             },
             //@ts-ignore
-            agentGetEntanglementProofs: () => {
-                return core.entanglementProofController.getEntanglementProofs();
-            },
-            //@ts-ignore
             getTrustedAgents: (context) => {
                 return core.runtimeService.getTrustedAgents();
             },
@@ -285,23 +269,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
         },
         Mutation: {
             //@ts-ignore
-            agentAddEntanglementProofs: (args, context) => {
-                const { proofs } = args;
-                core.entanglementProofController.addEntanglementProofs(proofs);
-                return core.entanglementProofController.getEntanglementProofs();
-            },
-            //@ts-ignore
-            agentDeleteEntanglementProofs: (args, context) => {
-                const { proofs } = args;
-                core.entanglementProofController.deleteEntanglementProofs(proofs);
-                return core.entanglementProofController.getEntanglementProofs();
-            },
-            //@ts-ignore
-            agentEntanglementProofPreFlight: (args, context) => {
-                const { deviceKey, deviceKeyType } = args;
-                return core.entanglementProofController.signDeviceKey(deviceKey, deviceKeyType);
-            },
-            //@ts-ignore
             addTrustedAgents: (args, context) => {
                 const { agents } = args;
                 core.runtimeService.addTrustedAgents(agents);
@@ -341,14 +308,11 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             },
             //@ts-ignore
             agentGenerate: async (args, context) => {
-                await core.agentService.createNewKeys()
-                await core.agentService.save(args.passphrase)
                 const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
 
                 await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
                 console.log("Holochain init complete");
 
-                await core.waitForAgent();
                 console.log("Wait for agent");
                 core.initControllers()
                 await core.initLanguages()
@@ -357,20 +321,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 if (!config.languageLanguageOnly) {
                     await core.initializeAgentsDirectMessageLanguage()
                 }
-
-                const agent = core.agentService.dump();
-
-                let pubSub = getPubSub();
-                await pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, agent)
-
-                console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
-
-                return agent;
-            },
-            //@ts-ignore
-            agentLock: async (args, context) => {
-                await core.agentService.lock(args.passphrase)
-                return core.agentService.dump()
             },
             //@ts-ignore
             agentUnlock: async (args, context) => {
@@ -389,8 +339,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     } else {
                         console.log("Holo service already initialized")
                     }
-   
-                    await core.waitForAgent();
+
                     core.initControllers()
                     await core.initLanguages()
 
@@ -402,19 +351,11 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         console.log("Error ensuring public agent expression: ", e)
                     }
                 }
-
-                const dump = core.agentService.dump() as any
-
-                if(!core.agentService.isUnlocked()) {
-                    dump.error = "Wrong passphrase"
-                }
-
-                return dump
             },
             //@ts-ignore
             agentUpdateDirectMessageLanguage: async (args, context) => {
                 const { directMessageLanguage } = args;
-                let currentAgent = core.agentService.agent;
+                const currentAgent = AGENT.agent();
                 if (!currentAgent) {
                     throw Error("No current agent init'd")
                 }
@@ -425,7 +366,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             agentUpdatePublicPerspective: async (args, context) => {
                 const {perspective} = args;
-                let currentAgent = core.agentService.agent;
+                const currentAgent = AGENT.agent();
                 if (!currentAgent) {
                     throw Error("No current agent init'd")
                 }

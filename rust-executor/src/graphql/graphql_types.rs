@@ -93,7 +93,7 @@ impl From<chrono::DateTime<chrono::Utc>> for DateTime {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
     #[graphql(name = "deviceKey")]
@@ -425,7 +425,7 @@ impl PerspectiveExpression {
             Ok(valid) => valid,
             Err(_) => false,
         };
-        
+
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
     }
