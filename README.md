@@ -145,7 +145,7 @@ pnpm run build-libs
 
 In order to build and package the ADAM Launcher, run:
 ```
-pnpm install
+pnpm install && cd core && pnpm install && cd ../
 pnpm run package-ad4m
 ```
 
