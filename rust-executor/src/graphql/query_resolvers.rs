@@ -90,6 +90,7 @@ impl Query {
     }
 
     async fn agent_status(&self, context: &RequestContext) -> FieldResult<AgentStatus> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let agent_instance = AgentService::instance();
         let agent_service = agent_instance.lock().expect("agent lock");
         let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
