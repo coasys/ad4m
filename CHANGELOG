@@ -5,6 +5,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ## unreleased
 
+- Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
+
 
 ## [0.9.0] - 23/03/2024
 
@@ -24,7 +26,6 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
    - Fixed JScore service in rust crashing on windows
 - Update Holochain to 0.3.0-beta-dev.35 [PR#443](https://github.com/coasys/ad4m/pull/443)
 - Improve readability of logs [PR#443](https://github.com/coasys/ad4m/pull/443)
-- Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 - Update Holochain to 0.3.0-beta-dev.37 [PR#449](https://github.com/coasys/ad4m/pull/449)
 - Update cli to correctly show `AgentInfo` in base64 encoded format & add. Also removes the use of jscore for getting the `AgentInfo` [PR#451](https://github.com/coasys/ad4m/pull/451)
 - Expression signing & verification migrated to Rust. [PR#452](https://github.com/coasys/ad4m/pull/452)
