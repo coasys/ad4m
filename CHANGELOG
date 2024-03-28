@@ -11,6 +11,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Hard-wired Hosted ad4m client `AgentInfo` in the executor. [PR#453](https://github.com/coasys/ad4m/pull/453)
  - Added ability to handle multiple agents in launcher. [PR#459](https://github.com/coasys/ad4m/pull/459)
  - Added a way to show & add new `AgentInfo` in launcher. [PR#463](https://github.com/coasys/ad4m/pull/463)
+ - `ad4m-executor` binary prints capability request challange to stdout to enable app hand-shake [PR#471](https://github.com/coasys/ad4m/pull/471)
 
 ### Changed
  - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):
@@ -30,6 +31,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - Improved Docs for sdna & subject classes.
   - Added typedoc for decorators.
 - Split `ad4m` binary into two seperate binaries `ad4m` which is client & `ad4m-executor` to spawn your executor. [PR#464](https://github.com/coasys/ad4m/pull/464)
+- Updated all cargo dependency to use crates.io package instead of github. [PR#465](https://github.com/coasys/ad4m/pull/465)
 
 ### Deprecated
 
@@ -43,6 +45,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - Fixed value returns as undefined if the property was boolean and set to false in `SubjectEntity.
   - Fixed links in docs.
 - Fixed flaky integration tests [PR#462](https://github.com/coasys/ad4m/pull/462)
+- Fixed `p-diff-sync`'s Deno incompatibilities [PR#471](https://github.com/coasys/ad4m/pull/471)
 
 ## [0.8.0] - 12/12/2023
 

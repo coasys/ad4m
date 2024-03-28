@@ -38,7 +38,7 @@ pub(crate) use interface::{
 
 use self::interface::set_holochain_service;
 
-const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#"["g6VhZ2VudMQkjjQGnd0y3eNvqw351QN/BcffiZg6J9G14EgVJF8xtboPJ1JhqXNpZ25hdHVyZcRArigZozIINMY8dXriSrkVq4UzxYzTZXOSPTbpQDrgI2fUeomfbv14H8KraoXJzigrEcqSZXWfgb7O2K/5TPzUB6phZ2VudF9pbmZvxQEEhqVzcGFjZcQkyTpTbofXI6V7nagFNAXn3AvXHmVkCHJ7Uh3fYJWUre/zH6skpWFnZW50xCSONAad3TLd42+rDfnVA38Fx9+JmDon0bXgSBUkXzG1ug8nUmGkdXJsc5HZSXdzczovL3NpZ25hbC5ob2xvLmhvc3QvdHg1LXdzL1ZBcTE3LVZwNW8xX0syVGNBcGtwR0hjZF9sUTJNSXplNkFlVFBUWEcxVTSsc2lnbmVkX2F0X21zzwAAAY3IclNMsGV4cGlyZXNfYWZ0ZXJfbXPOABJPgKltZXRhX2luZm/EIoG7ZGh0X3N0b3JhZ2VfYXJjX2hhbGZfbGVuZ3RozoAAAAE="]"#;
+const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#"["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"]"#;
 
 pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, AnyError> {
     let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
@@ -333,7 +333,7 @@ impl HolochainService {
             config.admin_interfaces = None;
 
             let mut kitsune_config = KitsuneP2pConfig::default();
-            let mut tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
+            let tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
 
             // How long should we hold off talking to a peer
             // we've previously gotten errors speaking to.
@@ -387,9 +387,9 @@ impl HolochainService {
             .build()
             .await;
 
-        if conductor.is_err() {
-            info!("Could not start holochain conductor: {:#?}", conductor.err());
-            panic!("Could not start holochain conductor");
+        if let Err(e) = conductor {
+            info!("Could not start holochain conductor: {:#?}", e);
+            panic!("Could not start holochain conductor: {:#?}", e);
         }
 
         info!("Started holochain conductor");

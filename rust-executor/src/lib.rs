@@ -10,24 +10,31 @@ mod js_core;
 mod prolog_service;
 mod utils;
 mod wallet;
-mod types;
-use tokio;
-
+//use tokio;
 
 pub mod init;
 mod pubsub;
 mod dapp_server;
 pub mod agent;
+mod db;
+pub mod types;
+pub mod perspectives;
+pub mod languages;
+mod neighbourhoods;
+#[cfg(test)]
+mod test_utils;
 
 use std::{env, path::Path, thread::JoinHandle};
-use log::{info, warn};
+
+use tokio;
+use log::{info, warn, error};
 
 use js_core::JsCore;
 
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 
-use crate::{prolog_service::init_prolog_service, dapp_server::serve_dapp};
+use crate::{dapp_server::serve_dapp, db::Ad4mDb, prolog_service::init_prolog_service, languages::LanguageController};
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
@@ -38,6 +45,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     let data_path = config.app_data_path.clone().unwrap();
 
     env::set_var("APPS_DATA_PATH", data_path.clone());
+    info!("Initializing Ad4mDb...");
+
+    Ad4mDb::init_global_instance(
+        config.app_data_path
+            .as_ref()
+            .map(|path| std::path::Path::new(path).join("ad4m_db.sqlite").to_string_lossy().into_owned())
+            .expect("App data path not set in Ad4mConfig")
+            .as_str()
+    ).expect("Failed to initialize Ad4mDb");
 
     agent::capabilities::apps_map::set_data_file_path(
         config.app_data_path
@@ -62,16 +78,26 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     js_core_handle.initialized().await;
     info!("js_core initialized.");
 
+    LanguageController::init_global_instance(js_core_handle.clone());
+    perspectives::initialize_from_db();
+
     info!("Starting GraphQL...");
 
-    if config.run_dapp_server.unwrap() {
+    let app_dir = config.app_data_path
+        .as_ref()
+        .expect("App data path not set in Ad4mConfig")
+        .clone();
+
+    if let Some(true) = config.run_dapp_server {
         std::thread::spawn(|| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .thread_name(String::from("dapp_server"))
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(serve_dapp(8080)).unwrap();
+            if let Err(e) = runtime.block_on(serve_dapp(8080, app_dir)) {
+                error!("Failed to start dapp server: {:?}", e);
+            }
         });
     };
 

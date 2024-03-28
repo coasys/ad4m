@@ -4,21 +4,10 @@ import type Ad4mCore from '../Ad4mCore'
 import * as PubSubDefinitions from './SubscriptionDefinitions'
 import { ad4mExecutorVersion } from '../Config';
 import { OuterConfig } from '../../main';
-import Perspective from '../Perspective';
-import { getPubSub } from '../utils';
+import { getPubSub, tagExpressionSignatureStatus } from '../utils';
 
-function checkLinkLanguageInstalled(perspective: Perspective) {
-    if(perspective.state != PerspectiveState.Synced && perspective.state != PerspectiveState.LinkLanguageInstalledButNotSynced) {
-        throw new Error(`Perspective ${perspective.uuid}/${perspective.name} does not have a LinkLanguage installed. State is: ${perspective.state}`)
-    }
-}
 
 export function createResolvers(core: Ad4mCore, config: OuterConfig) {
-    function signPerspectiveDeep(input: PerspectiveUnsignedInput): PerspectiveExpression {
-        let out = new PerspectiveExpression()
-        out.links = input.links.map(l => AGENT.createSignedExpression(l))
-        return AGENT.createSignedExpression(out)
-    }
 
     return {
         Query: {
@@ -36,6 +25,10 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     }
                     const expr = await agentLanguage.get(did);
                     if (expr != null) {
+                        tagExpressionSignatureStatus(expr);
+                        for(const link of expr.data.perspective.links) {
+                            tagExpressionSignatureStatus(link)
+                        }
                         return expr.data;
                     } else {
                         return null
@@ -233,69 +226,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
             },
-
-            //@ts-ignore
-            neighbourhoodOtherAgents: async (args, context) => {
-                const { perspectiveUUID } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                return await perspective.othersInNeighbourhood()
-            },
-
-            //@ts-ignore
-            neighbourhoodHasTelepresenceAdapter: async (args, context) => {
-                const { perspectiveUUID } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
-                return telepresenceAdapter != undefined
-            },
-
-            //@ts-ignore
-            neighbourhoodOnlineAgents: async (args, context) => {
-                const { perspectiveUUID } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
-                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                return await perspective!.getOnlineAgents();
-            },
-
-            //@ts-ignore
-            perspective: (args, context) => {
-                const id = args.uuid
-                let perspective = core.perspectivesController.perspectiveID(id);
-                if (perspective == undefined) {
-                    return null;
-                } else {
-                    return perspective
-                }
-            },
-            //@ts-ignore
-            perspectiveQueryLinks: async (args, context) => {
-                const { uuid, query } = args
-                const perspective = core.perspectivesController.perspective(uuid)
-                //console.log("querying on", perspective, query, uuid);
-                return await perspective.getLinks(query)
-            },
-            //@ts-ignore
-            perspectiveQueryProlog: async (args, context) => {
-                const { uuid, query } = args
-                const perspective = core.perspectivesController.perspective(uuid)
-                return JSON.stringify(await perspective.prologQuery(query))
-            },
-            //@ts-ignore
-            perspectiveSnapshot: async (args, context) => {
-                const id = args.uuid
-                return await core.perspectivesController.perspectiveSnapshot(id)
-            },
-            //@ts-ignore
-            perspectives: (context) => {
-                return core.perspectivesController.allPerspectiveHandles()
-            },
             //@ts-ignore
             agentGetEntanglementProofs: () => {
                 return core.entanglementProofController.getEntanglementProofs();
@@ -387,23 +317,20 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 }
 
                 if(core.agentService.isUnlocked()) {
-                    try {
-                        core.perspectivesController;
-                        await core.waitForAgent();
-                        core.initControllers()
-                        await core.initLanguages();
-                    } catch (e) {
+                    if(!core.holochainService) {
+                        console.log("Holochain service not initialized. Initializing...")
                         // @ts-ignore
                         const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
-                        if (args.holochain === "true") {
-                            await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
-                        }
-                        await core.waitForAgent();
-                        core.initControllers()
-                        await core.initLanguages()
-
-                        console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
+                        await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
+                    } else {
+                        console.log("Holo service already initialized")
                     }
+
+                    await core.waitForAgent();
+                    core.initControllers()
+                    await core.initLanguages()
+
+                    console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
 
                     try {
                         await core.agentService.ensureAgentExpression();
@@ -429,7 +356,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 }
                 currentAgent.directMessageLanguage = directMessageLanguage;
                 await core.agentService.updateAgent(currentAgent);
-                return currentAgent;
+                return core.agentService.agent;
             },
             //@ts-ignore
             agentUpdatePublicPerspective: async (args, context) => {
@@ -450,7 +377,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 };
 
                 await core.agentService.updateAgent(currentAgent);
-                return currentAgent;
+                return core.agentService.agent;
             },
             //@ts-ignore
             expressionCreate: async (args, context) => {
@@ -513,180 +440,34 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 return true
             },
             //@ts-ignore
-            neighbourhoodJoinFromUrl: async (args, context) => {
-                const { url } = args;
-                try{
-                    return await core.installNeighbourhood(url);
-                } catch(e) {
-                    console.error(`Error while trying to join neighbourhood '${url}':`, e)
-                    throw e
-                }
-
-            },
-            //@ts-ignore
-            neighbourhoodPublishFromPerspective: async (args, context) => {
-                const { linkLanguage, meta, perspectiveUUID } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(perspective.neighbourhood && perspective.sharedUrl)
-                    throw new Error(`Perspective ${perspective.name} (${perspective.uuid}) is already shared`);
-
-                try{
-                    return await core.neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)
-                } catch(e) {
-                    console.error(`Error while trying to publish:`, e)
-                    throw e
-                }
-            },
-
-            //@ts-ignore
-            neighbourhoodSetOnlineStatus: async (args, context) => {
-                const { perspectiveUUID, status } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
-                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const statusExpression = AGENT.createSignedExpression(status)
-                await telepresenceAdapter!.setOnlineStatus(statusExpression)
-                return true
-            },
-
-            //@ts-ignore
-            neighbourhoodSetOnlineStatusU: async (args, context) => {
-                const { perspectiveUUID, status } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
-                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const statusExpression = signPerspectiveDeep(status)
-                await telepresenceAdapter!.setOnlineStatus(statusExpression)
-                return true
-            },
-
-            //@ts-ignore
-            neighbourhoodSendSignal: async (args, context) => {
-                const { perspectiveUUID, remoteAgentDid, payload } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
-                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const payloadExpression = AGENT.createSignedExpression(payload)
-                await telepresenceAdapter!.sendSignal(remoteAgentDid, payloadExpression)
-                return true
-            },
-
-            //@ts-ignore
-            neighbourhoodSendSignalU: async (args, context) => {
-                const { perspectiveUUID, remoteAgentDid, payload } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
-                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const payloadExpression = signPerspectiveDeep(payload)
-                await telepresenceAdapter!.sendSignal(remoteAgentDid, payloadExpression)
-                return true
-            },
-
-            //@ts-ignore
-            neighbourhoodSendBroadcast: async (args, context) => {
-                const { perspectiveUUID, payload } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
-                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const payloadExpression = AGENT.createSignedExpression(payload)
-                await telepresenceAdapter!.sendBroadcast(payloadExpression)
-                return true
-            },
-
-            //@ts-ignore
-            neighbourhoodSendBroadcastU: async (args, context) => {
-                const { perspectiveUUID, payload } = args
-                const perspective = core.perspectivesController.perspective(perspectiveUUID)
-                if(!perspective) {  throw new Error(`Perspective not found: ${perspectiveUUID}`) }
-                checkLinkLanguageInstalled(perspective)
-                const telepresenceAdapter = await perspective.getTelepresenceAdapter()
-                if(!telepresenceAdapter) {  throw new Error(`Neighbourhood ${perspective.sharedUrl} has no Telepresence Adapter.`) }
-                const payloadExpression = signPerspectiveDeep(payload)
-                await telepresenceAdapter!.sendBroadcast(payloadExpression)
-                return true
-            },
-
-            //@ts-ignore
-            perspectiveAdd: async (args, context) => {
-                const { name } = args;
-                return await core.perspectivesController.add(name)
-            },
-            //@ts-ignore
-            perspectiveAddLink: async (args, context) => {
-                let { uuid, link, status } = args
-                if (status == null) {
-                    status = 'shared'
-                };
-                const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLink(link, status)
-            },
-            //@ts-ignore
-            perspectiveAddLinks: async (args, context, info) => {
-                const { uuid, links, status } = args
-                const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLinks(links, status)
-            },
-            //@ts-ignore
-            perspectiveAddLinkExpression: async (args, context) => {
-                let { uuid, link, status } = args
-                if (status == null) {
-                    status = 'shared'
-                };
-                const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addLink(link, status)
-            },
-            //@ts-ignore
-            perspectiveRemove: async (args, context) => {
-                const { uuid } = args
-                let removeStatus = await core.perspectivesController.remove(uuid)
-                return removeStatus
-            },
-            //@ts-ignore
-            perspectiveRemoveLink: async (args, context) => {
-                // console.log("GQL| removeLink:", args)
-                const { uuid, link } = args
-                const perspective = core.perspectivesController.perspective(uuid)
-                await perspective.removeLink(link)
+            runtimeOpenLink: (args) => {
+                const { url } = args
+                console.log("openLinkExtern:", url)
+                //shell.openExternal(url)
                 return true
             },
             //@ts-ignore
-            perspectiveRemoveLinks: async (args, context) => {
-                const { uuid, links } = args
-                const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.removeLinks(links)
+            runtimeQuit: (context) => {
+                process.exit(0)
+                return true
             },
             //@ts-ignore
-            perspectiveLinkMutations: async (args, context, info) => {
-                const { uuid, mutations, status } = args
-                const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.linkMutations(mutations, status)
-            },
-            //@ts-ignore
-            perspectiveUpdate: async (args, context) => {
-                const { uuid, name } = args
-                return await core.perspectivesController.update(uuid, name);
-            },
-            //@ts-ignore
-            perspectiveUpdateLink: async (args, context) => {
-                const { uuid, oldLink, newLink } = args
-                const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.updateLink(oldLink, newLink)
-            },
-            //@ts-ignore
-            perspectiveAddSdna: async (args, context) => {
-                const { uuid, name, sdnaCode, sdnaType } = args
-                const perspective = core.perspectivesController.perspective(uuid)
-                return await perspective.addSdna(name, sdnaCode, sdnaType)
+            runtimeHcAddAgentInfos: async (args, context) => {
+                const { agentInfos } = args
+                //@ts-ignore
+                const parsed = JSON.parse(agentInfos).map(info => {
+                    return {
+                        //@ts-ignore
+                        agent: Buffer.from(Object.values(info.agent)),
+                        //@ts-ignore
+                        signature: Buffer.from(Object.values(info.signature)),
+                        //@ts-ignore
+                        agent_info: Buffer.from(Object.values(info.agent_info))
+                    }
+                })
+
+                await core.holochainAddAgentInfos(parsed)
+                return true
             },
 
             //@ts-ignore

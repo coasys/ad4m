@@ -1,15 +1,23 @@
 [package]
-name = "rust-executor"
-version = "0.9.0-prerelease"
+name = "ad4m-executor"
+version = "0.9.0"
 edition = "2021"
-authors = ["Nicolas Luck <nicolas@coasys.org>"]
-description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
+authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
+description = "Runtime implementation of AD4M as library - https://ad4m.dev"
 keywords = ["ad4m", "perspect3vism", "cli"]
 license = "CAL-1.0"
 homepage = "https://ad4m.dev"
 repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
+
+include = [
+    "src/**/*",
+    "dapp/dist", # Symlink to the dapp directory
+    "executor/lib/bundle.js", # Symlink to the executor directory
+    "build.rs",
+    "Cargo.toml"
+]
 
 [lib]
 name = "rust_executor"
@@ -56,35 +64,38 @@ rust-embed="8.0.0"
 dirs = "5.0.1"
 rocket = "0.5.0"
 
-juniper = { git = "https://github.com/graphql-rust/juniper", features = ["chrono"], rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_subscriptions = { git = "https://github.com/graphql-rust/juniper", rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_graphql_transport_ws = { git = "https://github.com/graphql-rust/juniper", rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_warp = { git = "https://github.com/graphql-rust/juniper", features = ["subscriptions"], rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
+coasys_juniper = { version="0.16.0", features = ["chrono"] }
+coasys_juniper_subscriptions = { version="0.17.0" }
+coasys_juniper_graphql_transport_ws = { version="0.4.0" }
+coasys_juniper_warp = { version="0.8.0", features = ["subscriptions"] }
 warp = "0.3.4"
 
 jsonwebtoken = "8.3.0"
 
 webbrowser = "0.8.12"
 
-# holochain = { version = "0.2.2", features = ["test_utils", "default"] }
-# holochain_cli_bundle = { version = "0.2.2" }
-# holochain_types = { version = "0.2.2" }
-# holochain_cli_run_local_services = { version = "0.2.2" }
+holochain = { version = "0.3.0-beta-dev.39", features = ["test_utils", "default"] }
+holochain_cli_bundle = { version = "0.3.0-beta-dev.36" }
+holochain_types = { version = "0.3.0-beta-dev.35" }
+holochain_cli_run_local_services = { version = "0.3.0-beta-dev.23" }
+kitsune_p2p_types = { version = "0.3.0-beta-dev.22" }
 
-holochain = { version = "0.3.0-beta-dev.37", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3", features = ["test_utils", "default"] }
-holochain_cli_bundle = { version = "0.3.0-beta-dev.34", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
-holochain_types = { version = "0.3.0-beta-dev.33", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
-holochain_cli_run_local_services = { version = "0.3.0-beta-dev.22", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
-kitsune_p2p_types = { version = "0.3.0-beta-dev.21", git = "https://github.com/coasys/holochain.git", rev = "6e0d5db22aca543c1ab217ea5edbb4d57376cde3" }
-
-scryer-prolog = { version = "0.9.3", git = "https://github.com/coasys/scryer-prolog", rev = "ce34ca8f1fe41e1f11517168394172aafae16a2b" }
+scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client" }
-sha2 = "0.10.8"
+ad4m-client = { path = "../rust-client", version="0.9.0" }
 
+rusqlite = { version = "0.29.0", features = ["bundled"] }
+fake = { version = "2.9.2", features = ["derive"] }
+sha2 = "0.10.8"
+regex = "1.5.4"
+
+include_dir = "0.6.0"
 
 [dev-dependencies]
 maplit = "1.0.2"
 lazy_static = "1.4.0"
 itertools = "0.10.1"
+
+[build-dependencies]
+fs_extra = "1.3.0"

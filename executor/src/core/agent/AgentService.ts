@@ -9,7 +9,7 @@ import {
 import { Agent, ExpressionProof, AgentSignature } from "@coasys/ad4m";
 import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
-import { getPubSub } from "../utils";
+import { getPubSub, tagExpressionSignatureStatus } from "../utils";
 
 
 export default class AgentService {
@@ -40,7 +40,19 @@ export default class AgentService {
   }
 
   get agent() {
-    return this.#agent;
+    return this.getTaggedAgentCopy();
+  }
+
+  getTaggedAgentCopy(): Agent {
+    const agent = this.#agent;
+    if (!agent) throw new Error("No agent");
+    const copy = JSON.parse(JSON.stringify(agent));
+    if(copy.perspective) {
+        for(let link of copy.perspective.links) {
+            tagExpressionSignatureStatus(link)
+        }
+    }
+    return copy;
   }
 
   get ready(): Promise<void> {
@@ -79,7 +91,7 @@ export default class AgentService {
   async updateAgent(a: Agent) {
     this.#agent = a;
     await this.storeAgentProfile();
-    await this.#pubSub.publish(PubSubDefinitions.AGENT_UPDATED, a);
+    await this.#pubSub.publish(PubSubDefinitions.AGENT_UPDATED, this.getTaggedAgentCopy());
   }
 
   setAgentLanguage(lang: Language) {

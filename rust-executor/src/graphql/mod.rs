@@ -18,13 +18,13 @@ use std::{convert::Infallible, io::Write};
 
 use deno_core::error::AnyError;
 use futures::FutureExt as _;
-use juniper::{InputValue, RootNode};
-use juniper_graphql_transport_ws::ConnectionConfig;
-use juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
+use coasys_juniper::{InputValue, RootNode};
+use coasys_juniper_graphql_transport_ws::ConnectionConfig;
+use coasys_juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
 use std::path::Path;
 
-impl juniper::Context for RequestContext {}
+impl coasys_juniper::Context for RequestContext {}
 
 type Schema = RootNode<'static, Query, Mutation, Subscription>;
 
@@ -67,9 +67,10 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
             RequestContext {
                 capabilities,
                 js_handle: js_core_handle_cloned1.clone(),
+                auto_permit_cap_requests: config.auto_permit_cap_requests.clone().unwrap_or(false),
             }
         });
-    let qm_graphql_filter = juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
+    let qm_graphql_filter = coasys_juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
 
     let root_node = Arc::new(schema());
 
@@ -80,11 +81,12 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
             let root_node = root_node.clone();
             let js_core_handle = js_core_handle.clone();
             let admin_credential_arc = admin_credential_arc.clone();
+            let auto_permit_cap_requests = config.auto_permit_cap_requests.clone().unwrap_or(false);
             ws.on_upgrade(move |websocket| async move {
                 serve_graphql_transport_ws(
                     websocket,
                     root_node,
-                    |val: HashMap<String, InputValue>| async move {
+                    move |val: HashMap<String, InputValue>| async move {
                         let mut auth_header = String::from("");
 
                         if let Some(headers) = val.get("headers") {
@@ -102,6 +104,7 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
                         let context = RequestContext {
                             capabilities,
                             js_handle: js_core_handle.clone(),
+                            auto_permit_cap_requests: auto_permit_cap_requests
                         };
                         Ok(ConnectionConfig::new(context))
                             as Result<ConnectionConfig<_>, Infallible>

@@ -53,8 +53,8 @@ fn inner_verify(did: &str, message: &[u8], signature: &[u8]) -> bool {
     if let Ok(key_pair) = PatchedKeyPair::try_from(did) {
         match key_pair.verify(message, signature) {
             Ok(_) => true,
-            Err(e) => {
-                error!("Signature verification failed: {:?}", e);
+            Err(_) => {
+                //debug!("Signature verification failed: {:?}", e);
                 false
             }
         }

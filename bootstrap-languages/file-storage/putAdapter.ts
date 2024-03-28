@@ -51,7 +51,20 @@ export class FileStoragePutAdapter implements PublicSharing {
         const expression: FileExpression = this.#agent.createSignedExpression(fileMetadata)
         //Remove the data_base64 from the expression, since this is already stored above
         delete expression.data.data_base64;
-
+        expression.data.chunks_hashes = expression.data.chunks_hashes.map((chunk: { [key: string]: number }) => {
+            // Create an array of the correct size filled with zeros
+            const byteArray = new Uint8Array(Object.keys(chunk).length);
+        
+            // Iterate over the keys of the chunk object
+            for (const key in chunk) {
+                // Convert the key to an integer index and assign the value to the byteArray
+                const index = parseInt(key, 10);
+                byteArray[index] = chunk[key];
+            }
+        
+            return byteArray;
+        });
+        
         //Store the FileMetadataExpression
         let address = await storage.storeFileExpression(expression)
         if (!Buffer.isBuffer(address)) {

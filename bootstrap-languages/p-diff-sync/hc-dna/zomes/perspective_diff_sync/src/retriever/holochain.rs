@@ -18,7 +18,7 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
     where
         T: TryFrom<SerializedBytes, Error = SerializedBytesError>,
     {
-        get(hash, GetOptions::latest())?
+        get(hash, GetOptions::network())?
             .ok_or(SocialContextError::InternalError(
                 "HolochainRetreiver: Could not find entry",
             ))?
@@ -33,7 +33,7 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
     where
         T: TryFrom<SerializedBytes, Error = SerializedBytesError>,
     {
-        let element = get(hash, GetOptions::latest())?;
+        let element = get(hash, GetOptions::network())?;
         let element = element.ok_or(SocialContextError::InternalError(
             "HolochainRetreiver: Could not find entry",
         ))?;
@@ -105,6 +105,7 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
             LinkTypes::Index
         )
         .unwrap()
+        .get_options(GetStrategy::Network)
         .build();
         let mut latest_revision_links = get_links(input)?;
 
@@ -175,6 +176,7 @@ pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
     )
     .unwrap()
     .tag_prefix(LinkTag::new("active_agent"))
+    .get_options(GetStrategy::Network)
     .build();
     let recent_agents = get_links(input)?;
 
