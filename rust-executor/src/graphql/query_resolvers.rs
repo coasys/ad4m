@@ -401,13 +401,13 @@ impl Query {
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriendStatus", {{ did: "{}" }}))"#,
+                r#"JSON.stringify(await core.friendsDirectMessageLanguage("{}") ? await (await core.friendsDirectMessageLanguage("{}")).directMessageAdapter.status()  : null)"#,
+                did,
                 did
             ))
             .await?;
-        let result: JsResultType<PerspectiveExpression> = serde_json::from_str(&result)?;
-        let get_graphql_result = result.get_graphql_result()?;
-        Ok(get_graphql_result)
+        let result: PerspectiveExpression = serde_json::from_str(&result)?;
+        Ok(result)
     }
 
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
@@ -474,13 +474,14 @@ impl Query {
             .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
             .unwrap_or_else(|| String::from("{ filter: null }"));
         let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageInbox", {}))"#,
+             r#"JSON.stringify(await (await core.myDirectMessageLanguage()).directMessageAdapter.inbox("{}"))"#,
             filter_str,
         );
         let mut js = context.js_handle.clone();
         let result = js.execute(script).await?;
-        let result: JsResultType<Vec<PerspectiveExpression>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let result: Vec<PerspectiveExpression> = serde_json::from_str(&result)?;
+        println!("llllll inbox result: {:?}", result);
+        Ok(result)
     }
 
     async fn runtime_message_outbox(

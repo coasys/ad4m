@@ -214,22 +214,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
             },
-            //@ts-ignore
-            runtimeFriendStatus: async (args, context) => {
-                const { did } = args
-                const dmLang = await core.friendsDirectMessageLanguage(did)
-                if(dmLang)
-                    return await dmLang.directMessageAdapter!.status()
-                else
-                    return undefined
-            },
-
-            //@ts-ignore
-            runtimeMessageInbox: async (args, context) => {
-                const { filter } = args
-                const dmLang = await core.myDirectMessageLanguage()
-                return await dmLang.directMessageAdapter!.inbox(filter)
-            },
         },
         Mutation: {
             //@ts-ignore
@@ -376,14 +360,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             languageWriteSettings: async (args, context) => {
                 const { languageAddress, settings } = args
                 await core.languageController.putSettings(languageAddress, JSON.parse(settings))
-                return true
-            },
-
-            //@ts-ignore
-            runtimeSetStatus: async (args, context) => {
-                const { status } = args
-                const dmLang = await core.myDirectMessageLanguage()
-                await dmLang.directMessageAdapter!.setStatus(status)
                 return true
             },
 
