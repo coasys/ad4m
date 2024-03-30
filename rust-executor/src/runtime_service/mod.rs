@@ -44,14 +44,9 @@ fn load_mainnet_seed_from_file() -> io::Result<BootstrapSeed> {
 pub fn get_trusted_agents() -> Vec<String> {
     let seed = load_mainnet_seed_from_file().unwrap();
     let mut trusted_agents: Vec<String> = seed.trusted_agents.clone();
-    let mut stored_agents = Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .get_all_trusted_agents()
-        .map_err(|e| e.to_string())
-        .unwrap_or(vec![]);
+    let mut stored_agents = Ad4mDb::with_global_instance(|db| {
+        db.get_all_trusted_agents()
+    }).map_err(|e| e.to_string()).unwrap_or(vec![]);
     trusted_agents.push(did());
     trusted_agents.append(&mut stored_agents);
     trusted_agents.sort();
@@ -60,38 +55,23 @@ pub fn get_trusted_agents() -> Vec<String> {
 }
 
 pub fn add_trusted_agent(new_agents: Vec<String>) {
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .add_trusted_agents(new_agents)
-        .map_err(|e| e.to_string())
-        .unwrap_or(());
+    let _ = Ad4mDb::with_global_instance(|db| {
+        db.add_trusted_agents(new_agents)
+    }).map_err(|e| e.to_string());
 }
 
 pub fn remove_trusted_agent(agents_to_remove: Vec<String>) {
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .remove_trusted_agents(agents_to_remove)
-        .map_err(|e| e.to_string())
-        .unwrap_or(());
+    let _ = Ad4mDb::with_global_instance(|db| {
+        db.remove_trusted_agents(agents_to_remove)
+    }).map_err(|e| e.to_string());
 }
 
 pub fn get_know_link_languages() -> Vec<String> {
     let seed = load_mainnet_seed_from_file().unwrap();
     let mut languages: Vec<String> = seed.known_link_languages.clone();
-    let mut stored_languages = Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .get_all_known_link_languages()
-        .map_err(|e| e.to_string())
-        .unwrap_or(vec![]);
+    let mut stored_languages = Ad4mDb::with_global_instance(|db| {
+        db.get_all_known_link_languages()
+    }).map_err(|e| e.to_string()).unwrap_or(vec![]);
     languages.append(&mut stored_languages);
     languages.sort();
     languages.dedup();
@@ -99,82 +79,47 @@ pub fn get_know_link_languages() -> Vec<String> {
 }
 
 pub fn add_know_link_language(language: Vec<String>) {
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .add_known_link_languages(language)
-        .map_err(|e| e.to_string())
-        .unwrap_or(());
+    let _ = Ad4mDb::with_global_instance(|db| {
+        db.add_known_link_languages(language)
+    }).map_err(|e| e.to_string());
 }
 
 pub fn remove_know_link_language(language_to_remove: Vec<String>) {
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .remove_known_link_languages(language_to_remove)
-        .map_err(|e| e.to_string())
-        .unwrap_or(());
+    let _ = Ad4mDb::with_global_instance(|db| {
+        db.remove_known_link_languages(language_to_remove)
+    }).map_err(|e| e.to_string());
 }
 
 pub fn get_friends() -> Vec<String> {
-    let friends = Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .get_all_friends()
-        .map_err(|e| e.to_string())
-        .unwrap_or(vec![]);
+    let friends = Ad4mDb::with_global_instance(|db| {
+        db.get_all_friends()
+    }).map_err(|e| e.to_string()).unwrap_or(vec![]);
 
     friends
 }
 
-pub fn add_friend(friend: Vec<String>) {
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .add_friends(friend)
-        .map_err(|e| e.to_string())
-        .unwrap_or(());
+pub fn add_friend(friends: Vec<String>) {
+    let _ = Ad4mDb::with_global_instance(|db| {
+        db.add_friends(friends)
+    }).map_err(|e| e.to_string());
 }
 
 pub fn remove_friend(friend_to_remove: Vec<String>) {
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .remove_friends(friend_to_remove)
-        .map_err(|e| e.to_string())
-        .unwrap_or(());
+    let _ = Ad4mDb::with_global_instance(|db| {
+        db.remove_friends(friend_to_remove)
+    }).map_err(|e| e.to_string());
 }
 
 pub fn get_outbox() -> Vec<SentMessage> {
-    let outbox = Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .get_all_from_outbox()
-        .map_err(|e| e.to_string())
-        .unwrap_or(vec![]);
+    let outbox = Ad4mDb::with_global_instance(|db| {
+        db.get_all_from_outbox()
+    }).map_err(|e| e.to_string()).unwrap_or(vec![]);
 
     outbox
 }
 
 pub fn add_message_to_outbox(message: SentMessage) {
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .add_to_outbox(&message.message, message.recipient)
-        .map_err(|e| e.to_string())
-        .unwrap_or(());
+    let _ = Ad4mDb::with_global_instance(|db| {
+        db.add_to_outbox(&message.message, message.recipient)
+    }).map_err(|e| e.to_string());
 }
