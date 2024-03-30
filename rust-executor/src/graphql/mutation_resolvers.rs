@@ -1,3 +1,7 @@
+#![allow(non_snake_case)]
+
+use crate::{runtime_service};
+use ad4m_client::literal::Literal;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
 use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
 
@@ -36,16 +40,9 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "addTrustedAgents", {{ agents: {:?} }})
-            )"#,
-            agents
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        runtime_service::add_trusted_agent(agents);
+
+        Ok(runtime_service::get_trusted_agents())
     }
 
     async fn agent_add_entanglement_proofs(
@@ -200,13 +197,13 @@ impl Mutation {
             println!("======================================");
             println!("Got capability request: \n{:?}", auth_info);
             let random_number_challenge = agent::capabilities::permit_capability(AuthInfoExtended {
-                request_id: request_id.clone(), 
+                request_id: request_id.clone(),
                 auth: auth_info
             })?;
             println!("--------------------------------------");
             println!("Random number challenge: {}", random_number_challenge);
             println!("======================================");
-        } 
+        }
 
         Ok(request_id)
     }
@@ -347,17 +344,9 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let agents_json = serde_json::to_string(&agents)?;
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "deleteTrustedAgents", {{ agents: {} }})
-            )"#,
-            agents_json
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        runtime_service::remove_trusted_agent(agents);
+
+        Ok(runtime_service::get_trusted_agents())
     }
 
     async fn expression_create(
@@ -859,8 +848,11 @@ impl Mutation {
         dids: Vec<String>,
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)?;
+        let cloned_did = dids.clone();
+        runtime_service::add_friend(dids);
+        // TODO: remove this when language controller is moved.
         let mut js = context.js_handle.clone();
-        let dids_json = serde_json::to_string(&dids)?;
+        let dids_json = serde_json::to_string(&cloned_did)?;
         let script = format!(
             r#"JSON.stringify(
             await core.callResolver(
@@ -872,7 +864,9 @@ impl Mutation {
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        result.get_graphql_result();
+
+        Ok(runtime_service::get_friends())
     }
 
     async fn runtime_add_known_link_language_templates(
@@ -884,20 +878,8 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let addresses_json = serde_json::to_string(&addresses)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeAddKnownLinkLanguageTemplates",
-                {{ addresses: {} }},
-            ))"#,
-            addresses_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        runtime_service::add_know_link_language(addresses);
+        Ok(runtime_service::get_know_link_languages())
     }
 
     async fn runtime_friend_send_message(
@@ -907,6 +889,14 @@ impl Mutation {
         message: PerspectiveInput,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)?;
+        let friends = runtime_service::get_friends();
+
+        if !friends.contains(&did.clone()) {
+            log::error!("Friend not found: {}", did);
+
+            return Ok(false)
+        }
+
         let mut js = context.js_handle.clone();
         let message_json = serde_json::to_string(&message)?;
         let script = format!(
@@ -920,7 +910,8 @@ impl Mutation {
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let get_graphql_result = result.get_graphql_result()?;
+        Ok(get_graphql_result)
     }
 
     async fn runtime_hc_add_agent_infos(
@@ -949,34 +940,21 @@ impl Mutation {
     }
 
     async fn runtime_open_link(&self, context: &RequestContext, url: String) -> FieldResult<bool> {
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeOpenLink",
-                {{ url: "{}" }},
-            ))"#,
-            url,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        if webbrowser::open(&url).is_ok() {
+            log::info!("Browser opened successfully");
+            Ok(true)
+        } else {
+            log::info!("Failed to open browser");
+            Ok(false)
+        }
     }
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeQuit",
-            ))"#,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        std::process::exit(0);
+
+        Ok(true)
     }
 
     async fn runtime_remove_friends(
@@ -985,20 +963,8 @@ impl Mutation {
         dids: Vec<String>,
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let dids_json = serde_json::to_string(&dids)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeRemoveFriends",
-                {{ dids: {} }},
-            ))"#,
-            dids_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        runtime_service::remove_friend(dids);
+        Ok(runtime_service::get_friends())
     }
 
     async fn runtime_remove_known_link_language_templates(
@@ -1010,20 +976,8 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let addresses_json = serde_json::to_string(&addresses)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeRemoveKnownLinkLanguageTemplates",
-                {{ addresses: {} }},
-            ))"#,
-            addresses_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        runtime_service::remove_know_link_language(addresses);
+        Ok(runtime_service::get_know_link_languages())
     }
 
     async fn runtime_set_status(

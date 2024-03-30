@@ -16,7 +16,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v3
         with:
-          node-version: 16
+          node-version: 18
 
       - uses: pnpm/action-setup@v2
         with:
@@ -47,11 +47,10 @@ jobs:
       fail-fast: false
       matrix:
         platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
-        node-version: [16.x]
+        node-version: [18.x]
 
     needs:
       - create-release
-      - npm-publish
 
     runs-on: ${{ matrix.platform }}
 
@@ -69,12 +68,20 @@ jobs:
     - name: Install GO
       uses: actions/setup-go@v4
       with:
-        go-version: '1.20.6'
+        go-version: '1.22.0'
+    
+    - name: Install/update node-gyp
+      run: npm install -g node-gyp
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
       with:
         deno-version: v1.32.4
+
+    - name: Use Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
 
     - uses: pnpm/action-setup@v2
       with:
@@ -307,7 +314,7 @@ jobs:
       - name: Use Node.js 16.x
         uses: actions/setup-node@v1
         with:
-          node-version: 16.x
+          node-version: 18.x
 
       - uses: pnpm/action-setup@v2
         with:

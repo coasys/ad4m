@@ -79,7 +79,6 @@ impl LanguageController {
             address,
         );
         let result: String = Self::global_instance().js_core.execute(script).await?;
-        println!("lul 4.5 {:?}", result.clone());
         let neighbourhood: Option<DecoratedNeighbourhoodExpression> = serde_json::from_str(&result)?;
         Ok(neighbourhood)
     }

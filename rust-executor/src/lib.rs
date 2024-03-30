@@ -3,6 +3,7 @@ extern crate lazy_static;
 
 pub mod config;
 mod globals;
+mod runtime_service;
 pub mod graphql;
 mod holochain_service;
 mod js_core;
@@ -23,9 +24,9 @@ mod neighbourhoods;
 #[cfg(test)]
 mod test_utils;
 
+use std::{env, path::Path, thread::JoinHandle};
 
 use tokio;
-use std::{env, thread::JoinHandle};
 use log::{info, warn, error};
 
 use js_core::JsCore;
@@ -41,6 +42,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     let _ = env_logger::try_init();
     config.prepare();
 
+    let data_path = config.app_data_path.clone().unwrap();
+
+    env::set_var("APPS_DATA_PATH", data_path.clone());
     info!("Initializing Ad4mDb...");
 
     let data_path = config.app_data_path.clone().unwrap_or(String::from(".ad4m"));
