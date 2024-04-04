@@ -21,6 +21,7 @@ import ScanQRCode from "./components/ScanQRCode";
 import Header from "./components/Header";
 import autoBind from "auto-bind";
 import { getForVersion, removeForVersion, setForVersion } from "./utils";
+import Hosting from "./components/Hosting";
 
 export { getAd4mClient } from "./utils";
 
@@ -365,6 +366,43 @@ const styles = css`
     }
   }
 
+  .md-ring {
+    display: block;
+    position: relative;
+    width: 30px;
+    height: 30px;
+    margin-right: 10px;
+  }
+  .md-ring div {
+    box-sizing: border-box;
+    display: block;
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    margin: 4px;
+    border: 2px solid var(--primary-color);
+    border-radius: 50%;
+    animation: md-ring 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+    border-color: var(--primary-color) transparent transparent transparent;
+  }
+  .md-ring div:nth-child(1) {
+    animation-delay: -0.45s;
+  }
+  .md-ring div:nth-child(2) {
+    animation-delay: -0.3s;
+  }
+  .md-ring div:nth-child(3) {
+    animation-delay: -0.15s;
+  }
+  @keyframes md-ring {
+    0% {
+      transform: rotate(0deg);
+    }
+    100% {
+      transform: rotate(360deg);
+    }
+  }
+
   .disconnected {
     position: fixed;
     top: 0;
@@ -425,6 +463,18 @@ export class Ad4mConnectElement extends LitElement {
   private _isOpen: boolean = false;
 
   @state()
+  private _hostingStep = 1;
+  
+  @state()
+  private _email = "";
+  
+  @state()
+  private _passowrd = "";
+
+  @state()
+  private _isHostingLoading = false;
+
+  @state()
   private uiState:
     | "settings"
     | "start"
@@ -432,6 +482,7 @@ export class Ad4mConnectElement extends LitElement {
     | "requestcap"
     | "verifycode"
     | "disconnected"
+    | "hosting"
     | "agentlocked" = "start";
 
   @property({ type: String, reflect: true })
@@ -494,6 +545,82 @@ export class Ad4mConnectElement extends LitElement {
     this._client.on("connectionstatechange", this.handleConnectionChange);
 
     this.loadFont();
+  }
+
+  private async loginToHosting() {
+    try {
+    const response = await fetch('http://localhost:3000/login', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            email: this._email,
+            password: this._passowrd
+        })
+    });
+
+    if (response.status === 200) {
+      const data = await response.json();
+      // @ts-ignore
+      localStorage.setItem('hosting_token', data.token);
+
+      let token = localStorage.getItem('hosting_token');
+      
+      const response2 = await fetch('http://localhost:3000/service/info', {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token
+        },
+      });
+
+      if (response2.status === 200) {
+        const data = await response2.json();
+
+        if (data.serviceId) {
+          this._client.setUrl(`ws://127.0.0.1:${data.port}/graphql`);
+          this.changeUIState("connected");
+        } else {
+          this._hostingStep = 2;
+        }
+      } else if (response2.status === 404) {
+        this._hostingStep = 2;
+      }
+    }
+    } catch (e) {
+      console.log(e)
+    }
+  }
+
+  private async startHostingService() {
+    let token = localStorage.getItem('hosting_token');
+
+    this._isHostingLoading = true;
+
+    const response = await fetch('http://localhost:3000/service/create', {
+      method: 'POST',
+      headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + token
+      },
+    });
+
+    if (response.status === 200) {
+      const data = await response.json();
+      this._client.setUrl(data.url);
+      this.changeUIState("connected");
+    }
+
+    this._isHostingLoading = false;
+  }
+
+  private changeEmail(email: string) {
+    this._email = email;
+  } 
+
+  private changePassword(passowrd: string) {
+    this._passowrd = passowrd;
   }
 
   private async unlockAgent(passcode, holochain = true) {
@@ -641,8 +768,23 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   renderViews() {
+    console.log("wowow", this.connectionState)
     if (this.connectionState === "connecting") {
       return Loading();
+    }
+
+    if (this.uiState === "hosting") {
+      return Hosting({
+        email: this._email,
+        password: this._passowrd,
+        changeEmail: this.changeEmail,
+        changePassword: this.changePassword,
+        changeState: this.changeUIState,
+        step: this._hostingStep,
+        login: this.loginToHosting,
+        startService: this.startHostingService,
+        loading: this._isHostingLoading,
+      });
     }
 
     if (this.uiState === "qr") {
