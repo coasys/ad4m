@@ -1,3 +1,4 @@
+use deno_runtime::runtime;
 use deno_runtime::worker::WorkerOptions;
 use std::{collections::HashMap, rc::Rc};
 use url::Url;
@@ -8,17 +9,34 @@ use super::{
 };
 use crate::holochain_service::holochain_service_extension;
 use crate::prolog_service::prolog_service_extension;
+use crate::runtime_service::runtime_service_extension;
 
 pub fn main_module_url() -> Url {
     Url::parse("https://ad4m.runtime/main").unwrap()
 }
-
+#[cfg(not(target_os = "windows"))]
 pub fn module_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
     map.insert(
         "https://ad4m.runtime/main".to_string(),
         include_str!("main.js").to_string(),
     );
+
+    map.insert(
+        "https://ad4m.runtime/executor".to_string(),
+        include_str!("../../executor/lib/bundle.js").to_string(),
+    );
+    map
+}
+
+#[cfg(target_os = "windows")]
+pub fn module_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    map.insert(
+        "https://ad4m.runtime/main".to_string(),
+        include_str!("main.js").to_string(),
+    );
+
     map.insert(
         "https://ad4m.runtime/executor".to_string(),
         include_str!("../../../executor/lib/bundle.js").to_string(),
@@ -39,6 +57,7 @@ pub fn main_worker_options() -> WorkerOptions {
     let prolog_ext = prolog_service_extension::build();
     let signature_ext = signature_extension::build();
     let agent_ext = agent_extension::build();
+    let runtime_ext = runtime_service_extension::build();
     let languages_ext = languages_extension::build();
 
     WorkerOptions {
@@ -50,6 +69,7 @@ pub fn main_worker_options() -> WorkerOptions {
             prolog_ext,
             signature_ext,
             agent_ext,
+            runtime_ext,
             languages_ext,
         ],
         module_loader: Rc::new(loader),

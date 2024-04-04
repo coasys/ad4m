@@ -23,6 +23,7 @@ pub struct Ad4mConfig {
     pub connect_holochain: Option<bool>,
     pub admin_credential: Option<String>,
     pub localhost: Option<bool>,
+    pub auto_permit_cap_requests: Option<bool>,
 }
 
 impl Ad4mConfig {
@@ -101,6 +102,7 @@ impl Default for Ad4mConfig {
             connect_holochain: None,
             admin_credential: None,
             localhost: None,
+            auto_permit_cap_requests: None,
         };
         config.prepare();
         config

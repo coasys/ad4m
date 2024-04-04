@@ -49,6 +49,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
                     localhost: None,
+                    auto_permit_cap_requests: Some(true),
                 })
                 .await
                 .join()
@@ -179,7 +180,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     admin_credential: None,
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
-                    localhost: None
+                    localhost: None,
+                    auto_permit_cap_requests: Some(true),
                 })
                 .await
                 .join()

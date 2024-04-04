@@ -3,6 +3,7 @@ extern crate lazy_static;
 
 pub mod config;
 mod globals;
+mod runtime_service;
 pub mod graphql;
 mod holochain_service;
 mod js_core;
@@ -23,10 +24,10 @@ mod neighbourhoods;
 #[cfg(test)]
 mod test_utils;
 
+use std::{env, path::Path, thread::JoinHandle};
 
 use tokio;
-use std::{env, thread::JoinHandle};
-use log::{info, warn};
+use log::{info, warn, error};
 
 use js_core::JsCore;
 
@@ -41,12 +42,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     let _ = env_logger::try_init();
     config.prepare();
 
+    let data_path = config.app_data_path.clone().unwrap();
+
+    env::set_var("APPS_DATA_PATH", data_path.clone());
     info!("Initializing Ad4mDb...");
-    
+
     Ad4mDb::init_global_instance(
         config.app_data_path
             .as_ref()
-            .map(|path| std::path::Path::new(path).join("ad4m_db.sqlite").to_string_lossy().into_owned())    
+            .map(|path| std::path::Path::new(path).join("ad4m_db.sqlite").to_string_lossy().into_owned())
             .expect("App data path not set in Ad4mConfig")
             .as_str()
     ).expect("Failed to initialize Ad4mDb");
@@ -75,17 +79,25 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("js_core initialized.");
 
     LanguageController::init_global_instance(js_core_handle.clone());
+    perspectives::initialize_from_db();
 
     info!("Starting GraphQL...");
 
-    if config.run_dapp_server.unwrap() {
+    let app_dir = config.app_data_path
+        .as_ref()
+        .expect("App data path not set in Ad4mConfig")
+        .clone();
+
+    if let Some(true) = config.run_dapp_server {
         std::thread::spawn(|| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .thread_name(String::from("dapp_server"))
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(serve_dapp(8080)).unwrap();
+            if let Err(e) = runtime.block_on(serve_dapp(8080, app_dir)) {
+                error!("Failed to start dapp server: {:?}", e);
+            }
         });
     };
 

@@ -12,6 +12,7 @@ mod prolog_service;
 mod utils;
 mod wallet;
 mod types;
+mod runtime_service;
 mod perspectives;
 mod db;
 pub mod init;
@@ -41,6 +42,10 @@ async fn main() {
 
     let mut config = Ad4mConfig::default();
     config.prepare();
+
+    let data_path = config.app_data_path.clone().unwrap();
+
+    env::set_var("APPS_DATA_PATH", data_path.clone());
 
     info!("Initializing Prolog service...");
     init_prolog_service().await;
