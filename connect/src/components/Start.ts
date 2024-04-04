@@ -43,6 +43,14 @@ export default function Start({
               >
                 Change connection settings
               </button>
+              or
+              <button
+                class="button button--link "
+                @click=${() => changeState("hosting")}
+              >
+                hosting
+              </button>
+
             </div>`
         : html`<div class="text-center">
             <a class="button" target="_blank" @click=${() => connect()}>
@@ -54,7 +62,7 @@ export default function Start({
             </p>
           </div>`}
 
-      <p style="height: 10px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
+      <p style="height: 60px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
         Please make sure you have the ADAM Launcher running on your computer and there are no browser restrictions ("Shields") blocking your connection to ADAM on localhost.
         (Safari users: please use a different browser for now. Safari is very strict about this and we are working on a solution.)
       </p>
