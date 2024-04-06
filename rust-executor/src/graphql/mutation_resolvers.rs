@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use crate::{runtime_service};
+use crate::runtime_service::{self, RuntimeService};
 use ad4m_client::literal::Literal;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
 use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
@@ -40,9 +40,12 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
         )?;
-        runtime_service::add_trusted_agent(agents);
 
-        Ok(runtime_service::get_trusted_agents())
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.add_trusted_agent(agents);
+
+            Ok(runtime_service.get_trusted_agents())
+        })
     }
 
     async fn agent_add_entanglement_proofs(
@@ -243,7 +246,7 @@ impl Mutation {
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
 
-        let agent_instance = AgentService::instance();
+        let agent_instance = AgentService::global_instance();
         {
             let agent_service = agent_instance.lock().expect("agent lock");
             let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
@@ -329,9 +332,12 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
         )?;
-        runtime_service::remove_trusted_agent(agents);
 
-        Ok(runtime_service::get_trusted_agents())
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.remove_trusted_agent(agents);
+
+            Ok(runtime_service.get_trusted_agents())
+        })
     }
 
     async fn expression_create(
@@ -834,7 +840,11 @@ impl Mutation {
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)?;
         let cloned_did = dids.clone();
-        runtime_service::add_friend(dids);
+        let friends = RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.add_friend(dids);
+            runtime_service.get_friends()
+        });
+
         // TODO: remove this when language controller is moved.
         let mut js = context.js_handle.clone();
         let dids_json = serde_json::to_string(&cloned_did)?;
@@ -851,7 +861,7 @@ impl Mutation {
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
         result.get_graphql_result();
 
-        Ok(runtime_service::get_friends())
+        Ok(friends)
     }
 
     async fn runtime_add_known_link_language_templates(
@@ -863,8 +873,12 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
         )?;
-        runtime_service::add_know_link_language(addresses);
-        Ok(runtime_service::get_know_link_languages())
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.add_know_link_language(addresses.clone());
+
+            Ok(runtime_service.get_know_link_languages())
+        })
     }
 
     async fn runtime_friend_send_message(
@@ -874,7 +888,10 @@ impl Mutation {
         message: PerspectiveInput,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)?;
-        let friends = runtime_service::get_friends();
+
+        let friends = RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.get_friends()
+        });
 
         if !friends.contains(&did.clone()) {
             log::error!("Friend not found: {}", did);
@@ -948,8 +965,12 @@ impl Mutation {
         dids: Vec<String>,
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)?;
-        runtime_service::remove_friend(dids);
-        Ok(runtime_service::get_friends())
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.remove_friend(dids.clone());
+
+            Ok(runtime_service.get_friends())
+        })
     }
 
     async fn runtime_remove_known_link_language_templates(
@@ -961,8 +982,12 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
         )?;
-        runtime_service::remove_know_link_language(addresses);
-        Ok(runtime_service::get_know_link_languages())
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.remove_know_link_language(addresses.clone());
+
+            Ok(runtime_service.get_know_link_languages())
+        })
     }
 
     async fn runtime_set_status(

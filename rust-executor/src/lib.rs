@@ -34,7 +34,7 @@ use js_core::JsCore;
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 
-use crate::{dapp_server::serve_dapp, db::Ad4mDb, prolog_service::init_prolog_service, languages::LanguageController};
+use crate::{agent::AgentService, dapp_server::serve_dapp, db::Ad4mDb, graphql::graphql_types::EntanglementProof, languages::LanguageController, prolog_service::init_prolog_service, runtime_service::RuntimeService};
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
@@ -42,14 +42,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     let _ = env_logger::try_init();
     config.prepare();
 
-    let data_path = config.app_data_path.clone().unwrap();
-
-    env::set_var("APPS_DATA_PATH", data_path.clone());
     info!("Initializing Ad4mDb...");
-
-    let data_path = config.app_data_path.clone().unwrap_or(String::from(".ad4m"));
-
-    env::set_var("APPS_DATA_PATH", data_path.clone());
 
     Ad4mDb::init_global_instance(
         config.app_data_path
@@ -58,6 +51,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .expect("App data path not set in Ad4mConfig")
             .as_str()
     ).expect("Failed to initialize Ad4mDb");
+
+    AgentService::init_global_instance(
+        config.app_data_path.clone().unwrap()
+    );
+
+    RuntimeService::init_global_instance(
+        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string()).join("mainnet_seed.seed").to_string_lossy().into_owned()
+    );
 
     agent::capabilities::apps_map::set_data_file_path(
         config.app_data_path

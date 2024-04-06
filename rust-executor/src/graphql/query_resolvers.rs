@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
-use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, types::{DecoratedLinkExpression }};
+use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, runtime_service::RuntimeService, types::DecoratedLinkExpression};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use std::{env, path};
 use super::graphql_types::*;
@@ -34,7 +34,7 @@ impl Query {
         did: String,
     ) -> FieldResult<Option<Agent>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let agent_instance = AgentService::instance();
+        let agent_instance = AgentService::global_instance();
         let did_match = {
             let agent_service = agent_instance.lock().expect("agent lock");
             let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
@@ -176,9 +176,11 @@ impl Query {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
         )?;
-        let agents = runtime_service::get_trusted_agents();
 
-        Ok(agents)
+        RuntimeService::with_global_instance(|runtime_service| {
+            let agents = runtime_service.get_trusted_agents();
+            Ok(agents)
+        })
     }
 
     async fn language(
@@ -388,7 +390,10 @@ impl Query {
             &context.capabilities,
             &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
         )?;
-        let friends = runtime_service::get_friends();
+
+        let friends = RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.get_friends()
+        });
 
         if !friends.contains(&did.clone()) {
             log::error!("Friend not found: {}", did);
@@ -411,8 +416,10 @@ impl Query {
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)?;
 
-        let friends = runtime_service::get_friends();
-        Ok(friends)
+        RuntimeService::with_global_instance(|runtime_service| {
+            let friends = runtime_service.get_friends();
+            Ok(friends)
+        })
     }
 
     async fn runtime_hc_agent_infos(&self, context: &RequestContext) -> FieldResult<String> {
@@ -433,20 +440,17 @@ impl Query {
     }
 
     async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
-        let mut js = context.js_handle.clone();
+        AgentService::with_global_instance(|agent_service| {
+            agent_service.agent.clone().ok_or(FieldError::new(
+                "Agent not found",
+                Value::null(),
+            ))?;
 
-        let agent_path = format!("{}/ad4m/agent.json", env::var("APPS_DATA_PATH").unwrap_or_else(|_| "".to_string()));
-
-        let wallet_instance = Wallet::instance();
-        let wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_ref().expect("wallet instance");
-        let is_unlocked = wallet_ref.is_unlocked();
-        let is_initialized: bool = path::Path::new(&agent_path).exists();
-
-        Ok(RuntimeInfo {
-            is_initialized,
-            is_unlocked,
-            ad4m_executor_version: env!("CARGO_PKG_VERSION").to_string(),
+            Ok(RuntimeInfo {
+                is_initialized: agent_service.is_initialized(),
+                is_unlocked: agent_service.is_unlocked(),
+                ad4m_executor_version: env!("CARGO_PKG_VERSION").to_string(),
+            })
         })
     }
 
@@ -458,8 +462,11 @@ impl Query {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
         )?;
-        let runtime = runtime_service::get_know_link_languages();
-        Ok(runtime)
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            let languages = runtime_service.get_know_link_languages();
+            Ok(languages)
+        })
     }
 
     async fn runtime_message_inbox(
@@ -488,8 +495,11 @@ impl Query {
         filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
-        let outbox = runtime_service::get_outbox();
-        Ok(outbox)
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            let outbox = runtime_service.get_outbox();
+            Ok(outbox)
+        })
     }
 
     async fn runtime_verify_string_signed_by_did(
