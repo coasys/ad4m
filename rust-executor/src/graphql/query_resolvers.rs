@@ -13,19 +13,18 @@ pub struct Query;
 impl Query {
     async fn agent(&self, context: &RequestContext) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let agent_instance = AgentService::instance();
-        let agent_service = agent_instance.lock().expect("agent lock");
-        let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
-        let mut agent = agent_ref.agent.clone().ok_or(FieldError::new(
-            "Agent not found",
-            Value::null(),
-        ))?;
+        AgentService::with_global_instance(|agent_service| {
+            let mut agent = agent_service.agent.clone().ok_or(FieldError::new(
+                "Agent not found",
+                Value::null(),
+            ))?;
 
-        if agent.perspective.is_some() {
-            agent.perspective.as_mut().unwrap().verify_link_signatures();
-        }
+            if agent.perspective.is_some() {
+                agent.perspective.as_mut().unwrap().verify_link_signatures();
+            }
 
-        Ok(agent)
+            Ok(agent)
+        })
     }
 
     #[graphql(name = "agentByDID")]
@@ -81,23 +80,22 @@ impl Query {
     }
 
     async fn agent_is_locked(&self, context: &RequestContext) -> FieldResult<bool> {
-        let agent_instance = AgentService::instance();
-        let agent_service = agent_instance.lock().expect("agent lock");
-        let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
-        let is_unlocked = agent_ref.is_unlocked();
+        AgentService::with_global_instance(|agent_service| {
+            let agent = agent_service.agent.clone().ok_or(FieldError::new(
+                "Agent not found",
+                Value::null(),
+            ))?;
 
-        Ok(is_unlocked)
+            Ok(agent_service.is_unlocked())
+        })
     }
 
     async fn agent_status(&self, context: &RequestContext) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let agent_instance = AgentService::instance();
-        let agent_service = agent_instance.lock().expect("agent lock");
-        let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
 
-        let status = agent_ref.dump();
-
-        Ok(status)
+        AgentService::with_global_instance(|agent_service| {
+            Ok(agent_service.dump())
+        })
     }
 
     async fn expression(

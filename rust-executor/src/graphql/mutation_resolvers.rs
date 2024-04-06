@@ -107,14 +107,12 @@ impl Mutation {
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)?;
-        let agent_instance = AgentService::instance();
-        {
-            let mut agent_service = agent_instance.lock().expect("agent lock");
-            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+            agent_service.create_new_keys();
+            agent_service.save(passphrase.clone());
 
-            agent_ref.create_new_keys();
-            agent_ref.save(passphrase.clone());
-        }
+            agent_service.dump().clone()
+        });
 
         let mut js = context.js_handle.clone();
         let script = format!(
@@ -124,12 +122,6 @@ impl Mutation {
             passphrase
         );
         js.execute(script).await?;
-
-        let agent = {
-            let mut agent_service = agent_instance.lock().expect("agent lock");
-            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
-            agent_ref.dump().clone()
-        };
 
         get_global_pubsub()
         .await
@@ -149,28 +141,21 @@ impl Mutation {
         context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
-        let agent_instance = AgentService::instance();
+        let agent = AgentService::with_global_instance(|agent_service| {
+            agent_service.lock(passphrase.clone());
 
-        {
-            let mut agent_service = agent_instance.lock().expect("agent lock");
-            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
+            let agent = agent_service.dump().clone();
 
-            agent_ref.lock(passphrase);
-        }
-
-        let agent = {
-            let agent_service = agent_instance.lock().expect("agent lock");
-            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
-            agent_ref.dump()
-        };
+            agent
+        });
 
         get_global_pubsub()
-            .await
-            .publish(
-                &AGENT_STATUS_CHANGED_TOPIC,
-                &serde_json::to_string(&agent).unwrap(),
-            )
-            .await;
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
 
         Ok(agent)
     }
