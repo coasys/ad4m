@@ -115,14 +115,20 @@ lazy_static! {
 }
 
 impl AgentService {
-    pub fn new() -> AgentService {
+    pub fn init_global_instance(app_path: String) -> Result<(), deno_core::anyhow::Error> {
+        let mut agent_instance = AGENT_SERVICE.lock().unwrap();
+        *agent_instance = Some(AgentService::new(app_path));
+        Ok(())
+    }
+
+    pub fn new(app_path: String) -> AgentService {
         let agent_path = format!(
             "{}/ad4m/agent.json",
-            std::env::var("APPS_DATA_PATH").unwrap()
+            app_path
         );
         let agent_profile_path = format!(
             "{}/ad4m/agent_profile.json",
-            std::env::var("APPS_DATA_PATH").unwrap()
+            app_path
         );
 
         AgentService {
@@ -135,22 +141,15 @@ impl AgentService {
         }
     }
 
-    pub fn instance() -> Arc<Mutex<Option<AgentService>>> {
-        let agent_service = AGENT_SERVICE.clone();
-        {
-            let mut agent_service_lock = agent_service.lock().unwrap();
-            if agent_service_lock.is_none() {
-                *agent_service_lock = Some(AgentService::new());
-            }
-        }
-        agent_service
+    pub fn global_instance() -> Arc<Mutex<Option<AgentService>>> {
+        AGENT_SERVICE.clone()
     }
 
     pub fn with_global_instance<F, R>(func: F) -> R
     where
         F: FnOnce(&AgentService) -> R,
     {
-        let global_instance_arc = AgentService::instance();
+        let global_instance_arc = AgentService::global_instance();
         let lock_result = global_instance_arc.lock();
         let agent_service_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
         let agent_service_ref = agent_service_lock.as_ref().expect("Ad4mDb not initialized");
@@ -161,7 +160,7 @@ impl AgentService {
     where
         F: FnOnce(&mut AgentService) -> R,
     {
-        let global_instance_arc = AgentService::instance();
+        let global_instance_arc = AgentService::global_instance();
         let lock_result = global_instance_arc.lock();
         let mut agent_service_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
         let agent_service_mut = agent_service_lock.as_mut().expect("Ad4mDb not initialized");
