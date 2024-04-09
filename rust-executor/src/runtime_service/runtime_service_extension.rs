@@ -3,27 +3,33 @@ use std::borrow::Cow;
 use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
 use crate::graphql::graphql_types::{PerspectiveExpression, SentMessage};
 
-use super::{get_friends, add_message_to_outbox, get_trusted_agents};
+use super::RuntimeService;
+
 
 #[op2]
 #[serde]
 pub fn friends() -> Result<Vec<String>, AnyError> {
-    Ok(get_friends())
+    RuntimeService::with_global_instance(|runtime| {
+        Ok(runtime.get_friends())
+    })
 }
 
 #[op2]
 #[serde]
 pub fn get_trusted_agents() -> Result<Vec<String>, AnyError> {
-    Ok(get_trusted_agents())
+    RuntimeService::with_global_instance(|runtime| {
+        Ok(runtime.get_trusted_agents())
+    })
 }
 
 #[op2]
 pub fn add_message_outbox(#[string] did: String, #[serde] message: PerspectiveExpression, was_sent: bool) -> Result<bool, AnyError> {
-    add_message_to_outbox({
-        SentMessage {
+    RuntimeService::with_global_instance(|runtime| {
+        runtime.add_message_to_outbox(SentMessage {
             recipient: did,
             message,
-        }
+
+        })
     });
     Ok(was_sent)
 }
