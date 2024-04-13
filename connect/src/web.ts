@@ -549,7 +549,7 @@ export class Ad4mConnectElement extends LitElement {
 
   private async loginToHosting() {
     try {
-    const response = await fetch('http://localhost:3000/login', {
+    const response = await fetch('https://hosting.ad4m.dev/login', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
@@ -567,7 +567,7 @@ export class Ad4mConnectElement extends LitElement {
 
       let token = localStorage.getItem('hosting_token');
       
-      const response2 = await fetch('http://localhost:3000/service/info', {
+      const response2 = await fetch('https://hosting.ad4m.dev/service/info', {
         method: 'GET',
         headers: {
             'Content-Type': 'application/json',
@@ -579,7 +579,8 @@ export class Ad4mConnectElement extends LitElement {
         const data = await response2.json();
 
         if (data.serviceId) {
-          this._client.setUrl(`ws://127.0.0.1:${data.port}/graphql`);
+          this._client.setPort(data.port);
+          this._client.setUrl(`wss://${data.port}.hosting.ad4m.dev/graphql`);
           this.changeUIState("connected");
         } else {
           this._hostingStep = 2;
@@ -598,7 +599,7 @@ export class Ad4mConnectElement extends LitElement {
 
     this._isHostingLoading = true;
 
-    const response = await fetch('http://localhost:3000/service/create', {
+    const response = await fetch('https://hosting.ad4m.dev/service/create', {
       method: 'POST',
       headers: {
           'Content-Type': 'application/json',
@@ -768,7 +769,6 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   renderViews() {
-    console.log("wowow", this.connectionState)
     if (this.connectionState === "connecting") {
       return Loading();
     }
