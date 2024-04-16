@@ -463,7 +463,7 @@ export class Ad4mConnectElement extends LitElement {
   private _isOpen: boolean = false;
 
   @state()
-  private _hostingStep = 1;
+  private _hostingStep = 0;
   
   @state()
   private _email = "";
@@ -547,9 +547,28 @@ export class Ad4mConnectElement extends LitElement {
     this.loadFont();
   }
 
+  private async checkEmail() {
+    try {
+      const response = await fetch(`https://hosting.ad4m.dev/api/auth/check-email?email=${this._email}`, {
+          method: 'GET',
+          headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+  
+        if (response.status === 200) {
+          this._hostingStep = 1;
+        } else {
+          this._hostingStep = 3;
+        }
+      } catch (e) {
+        console.log(e)
+      }
+  }
+
   private async loginToHosting() {
     try {
-    const response = await fetch('https://hosting.ad4m.dev/login', {
+    const response = await fetch('https://hosting.ad4m.dev/api/auth/login', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
@@ -567,7 +586,7 @@ export class Ad4mConnectElement extends LitElement {
 
       let token = localStorage.getItem('hosting_token');
       
-      const response2 = await fetch('https://hosting.ad4m.dev/service/info', {
+      const response2 = await fetch('https://hosting.ad4m.dev/api/service/info', {
         method: 'GET',
         headers: {
             'Content-Type': 'application/json',
@@ -599,7 +618,7 @@ export class Ad4mConnectElement extends LitElement {
 
     this._isHostingLoading = true;
 
-    const response = await fetch('https://hosting.ad4m.dev/service/create', {
+    const response = await fetch('https://hosting.ad4m.dev/api/service/create', {
       method: 'POST',
       headers: {
           'Content-Type': 'application/json',
@@ -784,6 +803,7 @@ export class Ad4mConnectElement extends LitElement {
         login: this.loginToHosting,
         startService: this.startHostingService,
         loading: this._isHostingLoading,
+        checkEmail: this.checkEmail,
       });
     }
 
