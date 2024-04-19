@@ -555,14 +555,9 @@ export class Ad4mConnectElement extends LitElement {
 
   private async checkEmail() {
     try {
-      const response = await fetch(`https://hosting.ad4m.dev/api/auth/check-email?email=${this._email}`, {
-          method: 'GET',
-          headers: {
-                'Content-Type': 'application/json'
-            }
-        });
-  
-        if (response.status === 200) {
+      const exist = await this._client.checkEmail(this._email);
+
+        if (exist) {
           this._hostingStep = 1;
         } else {
           this._hostingStep = 2;
@@ -574,50 +569,9 @@ export class Ad4mConnectElement extends LitElement {
 
   private async loginToHosting() {
     try {
-    const response = await fetch('https://hosting.ad4m.dev/api/auth/login', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            email: this._email,
-            password: this._passowrd
-        })
-    });
-
-    if (response.status === 200) {
-      const data = await response.json();
-      // @ts-ignore
-      localStorage.setItem('hosting_token', data.token);
-
-      let token = localStorage.getItem('hosting_token');
-      
-      const response2 = await fetch('https://hosting.ad4m.dev/api/service/info', {
-        method: 'GET',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + token
-        },
-      });
-
-      if (response2.status === 200) {
-        const data = await response2.json();
-
-        if (data.serviceId) {
-          this._client.setPort(data.port);
-          this._client.setUrl(`wss://${data.port}.hosting.ad4m.dev/graphql`);
-          this.changeUIState("connected");
-        }
-      }
-    }  else {
-      const data = await response.json();
-
-      if (data.message === 'Passwords did not match') {
-        this._passwordError = 'Passwords did not match';
-      }
-    }
+      await this._client.loginToHosting(this._email, this._passowrd);
     } catch (e) {
-      console.log(e)
+      this._passwordError = 'Passwords did not match';
     }
   }
 
