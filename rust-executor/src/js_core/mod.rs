@@ -158,15 +158,19 @@ impl JsCore {
     }
 
     async fn init_engine(&self) {
+        info!("lol 3-1");
         let mut worker = self
             .worker
             .lock()
             .await;
+        info!("lol 3-2");
         worker.bootstrap(BootstrapOptions::default());
+        info!("lol 3-3");
         worker
             .execute_main_module(&main_module_url())
             .await
             .expect("init_engine(): could not execute main module");
+        info!("lol 3-4");
     }
 
     fn event_loop(&self) -> EventLoopFuture {
@@ -255,10 +259,16 @@ impl JsCore {
                 .expect("Failed to create Tokio runtime");
             let _guard = rt.enter();
 
+            info!("lol 1");
+
             let js_core = JsCore::new();
 
+            info!("lol 2");
+
             rt.block_on(async {
+                info!("lol 3");
                 let result = js_core.init_engine().await;
+                info!("lol 4");
                 info!("AD4M JS engine init completed, with result: {:?}", result);
 
                 let init_core_future = js_core
