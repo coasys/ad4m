@@ -8,9 +8,8 @@ export default function Hosting({
     password,
     changePassword,
     login,
-    startService,
-    loading,
-    checkEmail
+    checkEmail,
+    passwordError
 }) {
     if (step === 0) {
         return html`
@@ -48,7 +47,11 @@ export default function Hosting({
                     class="input__field"
                     value=${password}
                     @input=${(e: any) => changePassword(e.target.value)}
+                    type="password"
+                    errortext={passwordError}
+                    error={passwordError}
                 />
+                ${passwordError ? html`<p class="error">${passwordError}</p>` : ""}
                 <div class="buttons">
                     <button
                         class="button button--full button-secondary"
@@ -67,28 +70,8 @@ export default function Hosting({
             </div>
         `
     }
-    
-    // Starting executor step if not working
-    if (step === 2) {
-        return html`
-            <div class="text-center">
-                <a class="button" target="_blank"  @click=${() => !loading ? startService() : null}>
-                    ${loading ? html`<div class="md-ring">
-                        <div></div>
-                        <div></div>
-                        <div></div>
-                        <div></div>
-                    </div>`: html`<div></div>`}
-                    Start remote executor
-                </a>
-                <p>
-                    This will spawn a new expecutor on our hosting service or restart one if its paused.
-                </p>
-            </div>
-        `
-    }
 
-    if (step === 3) {
+    if (step === 2) {
         return html`
             <div class="text-center">
                 <p>

@@ -20,6 +20,7 @@ export type Ad4mConnectOptions = {
   port?: number;
   token?: string;
   url?: string;
+  hosting?: boolean;
 };
 
 export type AuthStates = "authenticated" | "locked" | "unauthenticated";

@@ -7,6 +7,7 @@ export default function Start({
   changeState,
   onDownloaded,
   scanQrcode,
+  hosting
 }) {
   function clickLink(e: Event) {
     e.preventDefault();
@@ -18,20 +19,23 @@ export default function Start({
   return html`
     <div class="items">
       ${!hasClickedDownload
-        ? html`<div class="text-center">
-              ${isMobile
-                ? html`<button class="button" @click=${() => scanQrcode()}>
-                    Connect with QR
-                  </button> `
-                : html`<a
-                    class="button"
-                    target="_blank"
-                    @click=${clickLink}
-                    href="https://ad4m.dev/download"
-                  >
-                    Download AD4M
-                  </a>`}
-            </div>
+        ? html`
+          <div class="text-center">
+          ${isMobile
+            ? html`<button class="button" @click=${() => scanQrcode()}>
+                Connect with QR
+              </button> `
+            : html`<a
+                class="button"
+                target="_blank"
+                @click=${clickLink}
+                href="https://ad4m.dev/download"
+              >
+                Download AD4M
+              </a>`}
+              ${hosting ? html`<p>Or</p>` : ""}
+              ${hosting ? html`<button class="button" @click=${() => changeState("hosting")}>Hosting</button>` : ""}
+          </div>
             <div class="text-center">
               <button class="button button--link " @click=${() => connect()}>
                 Try again
@@ -42,13 +46,6 @@ export default function Start({
                 @click=${() => changeState("settings")}
               >
                 Change connection settings
-              </button>
-              or
-              <button
-                class="button button--link "
-                @click=${() => changeState("hosting")}
-              >
-                hosting
               </button>
 
             </div>`

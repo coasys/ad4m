@@ -472,6 +472,9 @@ export class Ad4mConnectElement extends LitElement {
   private _passowrd = "";
 
   @state()
+  private _passwordError = null;
+
+  @state()
   private _isHostingLoading = false;
 
   @state()
@@ -499,6 +502,9 @@ export class Ad4mConnectElement extends LitElement {
 
   @property({ type: String, reflect: true })
   capabilities = [];
+
+  @property({ type: Boolean, reflect: true })
+  hosting = false;
 
   // TODO: localstorage doesnt work here
   @property({ type: String })
@@ -601,38 +607,18 @@ export class Ad4mConnectElement extends LitElement {
           this._client.setPort(data.port);
           this._client.setUrl(`wss://${data.port}.hosting.ad4m.dev/graphql`);
           this.changeUIState("connected");
-        } else {
-          this._hostingStep = 2;
         }
-      } else if (response2.status === 404) {
-        this._hostingStep = 2;
+      }
+    }  else {
+      const data = await response.json();
+
+      if (data.message === 'Passwords did not match') {
+        this._passwordError = 'Passwords did not match';
       }
     }
     } catch (e) {
       console.log(e)
     }
-  }
-
-  private async startHostingService() {
-    let token = localStorage.getItem('hosting_token');
-
-    this._isHostingLoading = true;
-
-    const response = await fetch('https://hosting.ad4m.dev/api/service/create', {
-      method: 'POST',
-      headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + token
-      },
-    });
-
-    if (response.status === 200) {
-      const data = await response.json();
-      this._client.setUrl(data.url);
-      this.changeUIState("connected");
-    }
-
-    this._isHostingLoading = false;
   }
 
   private changeEmail(email: string) {
@@ -801,9 +787,8 @@ export class Ad4mConnectElement extends LitElement {
         changeState: this.changeUIState,
         step: this._hostingStep,
         login: this.loginToHosting,
-        startService: this.startHostingService,
-        loading: this._isHostingLoading,
         checkEmail: this.checkEmail,
+        passwordError: this._passwordError,
       });
     }
 
@@ -847,6 +832,7 @@ export class Ad4mConnectElement extends LitElement {
         hasClickedDownload: this._hasClickedDownload,
         onDownloaded: this.onDownloaded,
         changeState: this.changeUIState,
+        hosting: this.hosting
       });
     }
 
