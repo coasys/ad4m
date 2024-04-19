@@ -565,7 +565,7 @@ export class Ad4mConnectElement extends LitElement {
         if (response.status === 200) {
           this._hostingStep = 1;
         } else {
-          this._hostingStep = 3;
+          this._hostingStep = 2;
         }
       } catch (e) {
         console.log(e)
@@ -773,6 +773,10 @@ export class Ad4mConnectElement extends LitElement {
     this._isOpen = val;
   }
 
+  setHostingStep(step: number) {
+    this._hostingStep = step;
+  }
+
   renderViews() {
     if (this.connectionState === "connecting") {
       return Loading();
@@ -786,6 +790,7 @@ export class Ad4mConnectElement extends LitElement {
         changePassword: this.changePassword,
         changeState: this.changeUIState,
         step: this._hostingStep,
+        setHostingStep: this.setHostingStep,
         login: this.loginToHosting,
         checkEmail: this.checkEmail,
         passwordError: this._passwordError,

@@ -9,7 +9,8 @@ export default function Hosting({
     changePassword,
     login,
     checkEmail,
-    passwordError
+    passwordError,
+    setHostingStep
 }) {
     if (step === 0) {
         return html`
@@ -79,7 +80,10 @@ export default function Hosting({
                 </p>
                 <button
                     class="button button--full button-secondary"
-                    @click=${() => changeState("start")}
+                    @click=${() => {
+                        setHostingStep(0)
+                        changeState("start")
+                    }}
                 >
                     Back
                 </button>
