@@ -76,7 +76,7 @@ export default function Hosting({
         return html`
             <div class="text-center">
                 <p>
-                    Email is not registered. Please follow the <a target="_blank" href="https://hosting.ad4m.dev/signup">link</a> to register.
+                    Email is not registered. Please follow the <a target="_blank" href="https://hosting.ad4m.dev/">link</a> to register.
                 </p>
                 <button
                     class="button button--full button-secondary"
