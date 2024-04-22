@@ -34,7 +34,7 @@ export default function Start({
                 Download AD4M
               </a>`}
               ${hosting ? html`<p>Or</p>` : ""}
-              ${hosting ? html`<button class="button" @click=${() => changeState("hosting")}>Hosting</button>` : ""}
+              ${hosting ? html`<button class="button" @click=${() => changeState("hosting")}>Use hosted AD4M (alpha)</button>` : ""}
           </div>
             <div class="text-center">
               <button class="button button--link " @click=${() => connect()}>
