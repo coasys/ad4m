@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use crate::types::{Expression, ExpressionProof, Link, LinkExpression, PerspectiveDiff};
-use crate::graphql::graphql_types::{LinkStatus, PerspectiveExpression, PerspectiveHandle, SentMessage};
+use crate::graphql::graphql_types::{EntanglementProof, LinkStatus, PerspectiveExpression, PerspectiveHandle, SentMessage};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -133,7 +133,52 @@ impl Ad4mDb {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS entanglement_proof (
+                id INTEGER PRIMARY KEY,
+                proof TEXT NOT NULL
+             )",
+            [],
+        )?;
+
         Ok(Self { conn })
+    }
+
+    pub fn add_entanglement_proofs(&self, proofs: Vec<EntanglementProof>) -> Result<(), rusqlite::Error> {
+        for proof in proofs {
+            let proof = serde_json::to_string(&proof).unwrap();
+            self.conn.execute(
+                "INSERT INTO entanglement_proof (proof) VALUES (?)",
+                [proof],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_all_entanglement_proofs(&self) -> Result<Vec<EntanglementProof>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT proof FROM entanglement_proof")?;
+        let proof_iter = stmt.query_map([], |row| {
+            let proof_json: String = row.get(0)?;
+            let proof: EntanglementProof = serde_json::from_str(&proof_json).unwrap();
+            Ok(proof)
+        })?;
+
+        let mut proofs = Vec::new();
+        for proof in proof_iter {
+            proofs.push(proof?);
+        }
+        Ok(proofs)
+    }
+
+    pub fn remove_entanglement_proofs(&self, proofs: Vec<EntanglementProof>) -> Result<(), rusqlite::Error> {
+        for proof in proofs {
+            let proof_json = serde_json::to_string(&proof).unwrap();
+            self.conn.execute(
+                "DELETE FROM entanglement_proof WHERE proof = ?",
+                [proof_json],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn add_to_outbox(&self, message: &PerspectiveExpression, recipient: String) -> Result<(), rusqlite::Error> {

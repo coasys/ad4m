@@ -1,13 +1,26 @@
+use std::path;
+use std::sync::{Arc, Mutex};
 
-use deno_core::error::AnyError;
 use deno_core::anyhow::anyhow;
-use serde::Serialize;
+use deno_core::error::AnyError;
+use serde::{Deserialize, Serialize};
 
+use crate::graphql::graphql_types::{Agent, AgentStatus, Perspective};
+use crate::pubsub::{self, get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};
 use crate::types::{Expression, ExpressionProof};
-use crate::wallet::Wallet;
+use crate::wallet::{self, Wallet};
 
 pub mod capabilities;
 pub mod signatures;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentStore {
+    did: String,
+    did_document: did_key::Document,
+    signing_key_id: String,
+    keystore: String,
+    agent: Option<Agent>,
+}
 
 pub fn did_document() -> did_key::Document {
     let wallet_instance = Wallet::instance();
@@ -30,7 +43,9 @@ pub fn did() -> String {
 
 pub fn create_signed_expression<T: Serialize>(data: T) -> Result<Expression<T>, AnyError> {
     let timestamp = chrono::Utc::now();
-    let signature = hex::encode(sign(&signatures::hash_data_and_timestamp(&data, &timestamp))?);
+    let signature = hex::encode(sign(&signatures::hash_data_and_timestamp(
+        &data, &timestamp,
+    ))?);
 
     Ok(Expression {
         author: did(),
@@ -42,7 +57,6 @@ pub fn create_signed_expression<T: Serialize>(data: T) -> Result<Expression<T>, 
         },
     })
 }
-
 
 pub fn sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
     let wallet_instance = Wallet::instance();
@@ -86,6 +100,237 @@ impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentService {
+    pub did: Option<String>,
+    pub did_document: Option<did_key::Document>,
+    pub signing_key_id: Option<String>,
+    file: String,
+    file_profile: String,
+    pub agent: Option<Agent>,
+}
+
+lazy_static! {
+    static ref AGENT_SERVICE: Arc<Mutex<Option<AgentService>>> = Arc::new(Mutex::new(None));
+}
+
+impl AgentService {
+    pub fn init_global_instance(app_path: String) -> Result<(), deno_core::anyhow::Error> {
+        let mut agent_instance = AGENT_SERVICE.lock().unwrap();
+        *agent_instance = Some(AgentService::new(app_path));
+        Ok(())
+    }
+
+    pub fn new(app_path: String) -> AgentService {
+        let agent_path = format!(
+            "{}/ad4m/agent.json",
+            app_path
+        );
+        let agent_profile_path = format!(
+            "{}/ad4m/agent_profile.json",
+            app_path
+        );
+
+        AgentService {
+            did: None,
+            did_document: None,
+            file: agent_path,
+            file_profile: agent_profile_path,
+            agent: None,
+            signing_key_id: None,
+        }
+    }
+
+    pub fn global_instance() -> Arc<Mutex<Option<AgentService>>> {
+        AGENT_SERVICE.clone()
+    }
+
+    pub fn with_global_instance<F, R>(func: F) -> R
+    where
+        F: FnOnce(&AgentService) -> R,
+    {
+        let global_instance_arc = AgentService::global_instance();
+        let lock_result = global_instance_arc.lock();
+        let agent_service_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
+        let agent_service_ref = agent_service_lock.as_ref().expect("Ad4mDb not initialized");
+        func(agent_service_ref)
+    }
+
+    pub fn with_mutable_global_instance<F, R>(func: F) -> R
+    where
+        F: FnOnce(&mut AgentService) -> R,
+    {
+        let global_instance_arc = AgentService::global_instance();
+        let lock_result = global_instance_arc.lock();
+        let mut agent_service_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
+        let agent_service_mut = agent_service_lock.as_mut().expect("Ad4mDb not initialized");
+        func(agent_service_mut)
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        let is_initialized = path::Path::new(self.file.as_str()).exists();
+        is_initialized
+    }
+
+    pub fn is_unlocked(&self) -> bool {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+        wallet_ref.is_unlocked()
+    }
+
+    fn signing_checks(&self) -> Result<(), AnyError> {
+        if !self.is_initialized() {
+            return Err(anyhow!("Agent not initialized"));
+        }
+        if !self.is_unlocked() {
+            return Err(anyhow!("Agent not unlocked"));
+        }
+        if !self.signing_key_id.is_some() {
+            return Err(anyhow!("Agent signing key not found"));
+        }
+        Ok(())
+    }
+
+    pub fn create_signed_expression<T: Serialize>(
+        &self,
+        data: T,
+    ) -> Result<Expression<T>, AnyError> {
+        self.signing_checks()?;
+
+        create_signed_expression(data)
+    }
+
+    pub fn sign_string_hex(&self, data: String) -> Result<String, AnyError> {
+        self.signing_checks()?;
+
+        sign_string_hex(data)
+    }
+
+    pub fn store_agent_profile(&self) {
+        let agent = self.agent.as_ref().expect("Agent profile not found");
+        std::fs::write(
+            self.file_profile.as_str(),
+            serde_json::to_string(&agent).unwrap(),
+        )
+        .expect("Failed to write agent profile file");
+
+        // TODO: once language controller is moved add updating agent profile here
+    }
+
+    pub fn save_agent_profile(&mut self, agent: Agent) {
+        self.agent = Some(agent);
+        self.store_agent_profile();
+    }
+
+    pub fn create_new_keys(&mut self) -> Result<(), AnyError> {
+        let wallet_instance = Wallet::instance();
+        {
+            let mut wallet = wallet_instance.lock().expect("wallet lock");
+            let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+            wallet_ref.generate_keypair("main".to_string());
+        }
+
+        self.did_document = Some(did_document());
+        self.did = Some(did());
+        self.agent = Some(Agent {
+            did: did(),
+            perspective: Some(Perspective { links: vec![] }),
+            direct_message_language: None,
+        });
+        self.signing_key_id = Some(signing_key_id());
+        Ok(())
+    }
+
+    pub fn unlock(&self, password: String) -> Result<(), AnyError> {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+        wallet_ref.unlock(password);
+
+        // TODO store agent proifle
+
+        Ok(())
+    }
+
+    pub fn lock(&self, password: String) -> Result<(), AnyError> {
+        let wallet_instance = Wallet::instance();
+        {
+            let mut wallet = wallet_instance.lock().expect("wallet lock");
+            let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
+            wallet_ref.lock(password);
+        }
+
+        Ok(())
+    }
+
+    pub fn save(&self, password: String) {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_mut().expect("wallet instance");
+
+        let keystore = wallet_ref.export(password);
+
+        let store = AgentStore {
+            did: self.did.clone().unwrap().clone(),
+            did_document: self.did_document.clone().unwrap().clone(),
+            signing_key_id: self.signing_key_id.clone().unwrap(),
+            keystore,
+            agent: self.agent.clone(),
+        };
+
+        std::fs::write(self.file.as_str(), serde_json::to_string(&store).unwrap())
+            .expect("Failed to write agent file");
+    }
+
+    pub fn load(&mut self) {
+        if !self.is_initialized() {
+            return;
+        }
+
+        let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
+        let dump: AgentStore = serde_json::from_str(&file).unwrap();
+
+        self.did = Some(dump.did);
+        self.did_document = Some(dump.did_document);
+        self.signing_key_id = Some(dump.signing_key_id);
+
+        {
+            let wallet_instance = Wallet::instance();
+            let mut wallet = match wallet_instance.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let wallet_ref = wallet.as_mut().expect("wallet instance");
+            wallet_ref.load(dump.keystore);
+        }
+
+        if std::path::Path::new(self.file_profile.as_str()).exists() {
+            let file_profile = std::fs::read_to_string(self.file_profile.as_str())
+                .expect("Failed to read agent profile file");
+            self.agent =
+                Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
+        } else {
+            self.agent = Some(Agent {
+                did: did(),
+                perspective: Some(Perspective { links: vec![] }),
+                direct_message_language: None,
+            });
+        }
+    }
+
+    pub fn dump(&self) -> AgentStatus {
+        let document = serde_json::to_string(&self.did_document).unwrap();
+
+        AgentStatus {
+            did: self.did.clone(),
+            did_document: Some(document),
+            is_initialized: self.is_initialized(),
+            is_unlocked: self.is_unlocked(),
+            error: None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -95,9 +340,8 @@ mod tests {
 
     use super::*;
     use crate::agent::signatures::verify_string_signed_by_did;
-    use itertools::Itertools;
     use crate::test_utils::setup_wallet;
-
+    use itertools::Itertools;
 
     #[test]
     fn test_sign_and_verify_string_hex_roundtrip() {
@@ -107,7 +351,8 @@ mod tests {
         let did = did();
 
         assert!(
-            verify_string_signed_by_did(&did, &test_message, &signature).expect("Verification failed"),
+            verify_string_signed_by_did(&did, &test_message, &signature)
+                .expect("Verification failed"),
             "Signature verification for sign_string_hex failed"
         );
     }
@@ -115,7 +360,8 @@ mod tests {
     #[test]
     fn test_create_signed_expression() {
         setup_wallet();
-        let signed_expression = create_signed_expression(json!({"test": "data"})).expect("Failed to create signed expression");
+        let signed_expression = create_signed_expression(json!({"test": "data"}))
+            .expect("Failed to create signed expression");
         assert!(
             signatures::verify(&signed_expression).expect("Verification failed"),
             "Signature verification for create_signed_expression failed"
@@ -124,7 +370,10 @@ mod tests {
         let mut broken = signed_expression.clone();
         broken.proof.signature = "broken".to_string();
 
-        assert!(signatures::verify(&broken).is_err(), "Broken signature verification should fail");
+        assert!(
+            signatures::verify(&broken).is_err(),
+            "Broken signature verification should fail"
+        );
 
         let mut changed = signed_expression.clone();
         changed.data = json!({"changed": "data"});
@@ -135,16 +384,17 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_agent_signature_roundtrip() {
         setup_wallet();
         let test_message = "Agent signature test".to_string();
-        let agent_signature = AgentSignature::from_message(test_message.clone()).expect("Failed to create agent signature");
+        let agent_signature = AgentSignature::from_message(test_message.clone())
+            .expect("Failed to create agent signature");
         let did = did();
 
         assert!(
-            verify_string_signed_by_did(&did, &test_message, &agent_signature.signature).expect("Verification failed"),
+            verify_string_signed_by_did(&did, &test_message, &agent_signature.signature)
+                .expect("Verification failed"),
             "Signature verification for AgentSignature failed"
         );
     }
@@ -153,7 +403,8 @@ mod tests {
     fn _test_create_signed_expression_and_verify_with_changed_sorting() {
         setup_wallet();
         let json_value = json!({"key2": "value1", "key1": "value2"});
-        let signed_expression = create_signed_expression(json_value).expect("Failed to create signed expression");
+        let signed_expression =
+            create_signed_expression(json_value).expect("Failed to create signed expression");
 
         // Simulate changing the sorting of the JSON in the signed expression
         let mut data_map = BTreeMap::new();
@@ -175,8 +426,10 @@ mod tests {
     #[test]
     fn test_create_signed_expression_with_data_string() {
         setup_wallet();
-        let json_value = serde_json::Value::String(r#"{"key2": "value1", "key1": "value2"}"#.to_string());
-        let signed_expression = create_signed_expression(json_value).expect("Failed to create signed expression");
+        let json_value =
+            serde_json::Value::String(r#"{"key2": "value1", "key1": "value2"}"#.to_string());
+        let signed_expression =
+            create_signed_expression(json_value).expect("Failed to create signed expression");
         // Verify the expression with changed sorting
         assert!(
             signatures::verify(&signed_expression).expect("Verification failed"),
@@ -184,4 +437,3 @@ mod tests {
         );
     }
 }
-
