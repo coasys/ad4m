@@ -118,7 +118,9 @@ enum Domain {
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
         #[arg(long, action)]
-        admin_credential: Option<String>
+        admin_credential: Option<String>,
+        #[arg(long, action)]
+        localhost: Option<bool>,
     },
     RunLocalHcServices {}
 }
@@ -162,7 +164,8 @@ async fn main() -> Result<()> {
         hc_proxy_url,
         hc_bootstrap_url,
         connect_holochain,
-        admin_credential
+        admin_credential,
+        localhost
     } = args.domain
     {
         let _ = tokio::spawn(async move {
@@ -182,6 +185,7 @@ async fn main() -> Result<()> {
                 hc_bootstrap_url,
                 connect_holochain,
                 admin_credential,
+                localhost,
                 auto_permit_cap_requests: Some(true)
             }).await;
         }).await;

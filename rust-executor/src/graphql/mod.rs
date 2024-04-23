@@ -131,6 +131,12 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
     .or(homepage)
     .with(log);
 
-    warp::serve(routes).run(([127, 0, 0, 1], port)).await;
+    let address = if config.localhost.unwrap() {
+        [127, 0, 0, 1]
+    } else {
+        [0, 0, 0, 0]
+    };
+
+    warp::serve(routes).run((address, port)).await;
     Ok(())
 }

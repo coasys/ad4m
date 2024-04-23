@@ -21,6 +21,7 @@ import ScanQRCode from "./components/ScanQRCode";
 import Header from "./components/Header";
 import autoBind from "auto-bind";
 import { getForVersion, removeForVersion, setForVersion } from "./utils";
+import Hosting from "./components/Hosting";
 
 export { getAd4mClient } from "./utils";
 
@@ -365,6 +366,43 @@ const styles = css`
     }
   }
 
+  .md-ring {
+    display: block;
+    position: relative;
+    width: 30px;
+    height: 30px;
+    margin-right: 10px;
+  }
+  .md-ring div {
+    box-sizing: border-box;
+    display: block;
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    margin: 4px;
+    border: 2px solid var(--primary-color);
+    border-radius: 50%;
+    animation: md-ring 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+    border-color: var(--primary-color) transparent transparent transparent;
+  }
+  .md-ring div:nth-child(1) {
+    animation-delay: -0.45s;
+  }
+  .md-ring div:nth-child(2) {
+    animation-delay: -0.3s;
+  }
+  .md-ring div:nth-child(3) {
+    animation-delay: -0.15s;
+  }
+  @keyframes md-ring {
+    0% {
+      transform: rotate(0deg);
+    }
+    100% {
+      transform: rotate(360deg);
+    }
+  }
+
   .disconnected {
     position: fixed;
     top: 0;
@@ -425,6 +463,21 @@ export class Ad4mConnectElement extends LitElement {
   private _isOpen: boolean = false;
 
   @state()
+  private _hostingStep = 0;
+  
+  @state()
+  private _email = "";
+  
+  @state()
+  private _passowrd = "";
+
+  @state()
+  private _passwordError = null;
+
+  @state()
+  private _isHostingLoading = false;
+
+  @state()
   private uiState:
     | "settings"
     | "start"
@@ -432,6 +485,7 @@ export class Ad4mConnectElement extends LitElement {
     | "requestcap"
     | "verifycode"
     | "disconnected"
+    | "hosting"
     | "agentlocked" = "start";
 
   @property({ type: String, reflect: true })
@@ -448,6 +502,9 @@ export class Ad4mConnectElement extends LitElement {
 
   @property({ type: String, reflect: true })
   capabilities = [];
+
+  @property({ type: Boolean, reflect: true })
+  hosting = false;
 
   // TODO: localstorage doesnt work here
   @property({ type: String })
@@ -494,6 +551,38 @@ export class Ad4mConnectElement extends LitElement {
     this._client.on("connectionstatechange", this.handleConnectionChange);
 
     this.loadFont();
+  }
+
+  private async checkEmail() {
+    try {
+      const exist = await this._client.checkEmail(this._email);
+
+        if (exist) {
+          this._hostingStep = 1;
+        } else {
+          this._hostingStep = 2;
+        }
+      } catch (e) {
+        console.log(e)
+      }
+  }
+
+  private async loginToHosting() {
+    try {
+      await this._client.loginToHosting(this._email, this._passowrd);
+
+      this.changeUIState("connected");
+    } catch (e) {
+      this._passwordError = 'Passwords did not match';
+    }
+  }
+
+  private changeEmail(email: string) {
+    this._email = email;
+  } 
+
+  private changePassword(passowrd: string) {
+    this._passowrd = passowrd;
   }
 
   private async unlockAgent(passcode, holochain = true) {
@@ -640,9 +729,28 @@ export class Ad4mConnectElement extends LitElement {
     this._isOpen = val;
   }
 
+  setHostingStep(step: number) {
+    this._hostingStep = step;
+  }
+
   renderViews() {
     if (this.connectionState === "connecting") {
       return Loading();
+    }
+
+    if (this.uiState === "hosting") {
+      return Hosting({
+        email: this._email,
+        password: this._passowrd,
+        changeEmail: this.changeEmail,
+        changePassword: this.changePassword,
+        changeState: this.changeUIState,
+        step: this._hostingStep,
+        setHostingStep: this.setHostingStep,
+        login: this.loginToHosting,
+        checkEmail: this.checkEmail,
+        passwordError: this._passwordError,
+      });
     }
 
     if (this.uiState === "qr") {
@@ -685,6 +793,7 @@ export class Ad4mConnectElement extends LitElement {
         hasClickedDownload: this._hasClickedDownload,
         onDownloaded: this.onDownloaded,
         changeState: this.changeUIState,
+        hosting: this.hosting
       });
     }
 
