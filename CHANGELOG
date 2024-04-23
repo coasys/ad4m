@@ -1,9 +1,19 @@
 # Changelog
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).  
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
 
 ## unreleased
+
+### Added
+- Support ADAM executor hosting service alpha [PR#474](https://github.com/coasys/ad4m/pull/474)
+- Complete instructions in README [PR#473](https://github.com/coasys/ad4m/pull/473)
+
+### Changed
+- Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
+
+
+## [0.9.0] - 23/03/2024
 
 ### Added
  - Add ability to get and add Holochain agent infos through launcher [PR#463](https://github.com/coasys/ad4m/pull/463)
@@ -11,6 +21,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Hard-wired Hosted ad4m client `AgentInfo` in the executor. [PR#453](https://github.com/coasys/ad4m/pull/453)
  - Added ability to handle multiple agents in launcher. [PR#459](https://github.com/coasys/ad4m/pull/459)
  - Added a way to show & add new `AgentInfo` in launcher. [PR#463](https://github.com/coasys/ad4m/pull/463)
+ - `ad4m-executor` binary prints capability request challange to stdout to enable app hand-shake [PR#471](https://github.com/coasys/ad4m/pull/471)
 
 ### Changed
  - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):
@@ -43,6 +54,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - Fixed value returns as undefined if the property was boolean and set to false in `SubjectEntity.
   - Fixed links in docs.
 - Fixed flaky integration tests [PR#462](https://github.com/coasys/ad4m/pull/462)
+- Fixed `p-diff-sync`'s Deno incompatibilities [PR#471](https://github.com/coasys/ad4m/pull/471)
 
 ## [0.8.0] - 12/12/2023
 
@@ -58,7 +70,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Used pnpm as main package manager for project [#421](https://github.com/coasys/ad4m/pull/421)
  - Upgrade to Holochain 0.3.0-dev.27 [#427](https://github.com/coasys/ad4m/pull/428)
  - Agent & File storage boostrap languages now use centralized backend by default [#430](https://github.com/coasys/ad4m/pull/430)
- 
+
 ### Deprecated
 
 ### Removed
@@ -72,7 +84,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Added
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -117,7 +129,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Whole ADAM Layer package now runs from a single binary; either ADAM CLI or ADAM Launcher
  - ADAM Languages now expected to be Deno compatible modules; not old ESM node JS
  - JS executor now builds to be a Deno bundle to be consumed by rust-executor
- 
+
 ### Deprecated
 
 ### Removed
@@ -147,7 +159,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Changed
  - Moved code that deals with the IPFS repo lock from JS to Rust, improving (in most cases: unblocking) startup of the Launcher on Windows [PR#392](https://github.com/coasys/ad4m/pull/392)
- 
+
 ### Deprecated
 
 ### Removed
@@ -167,7 +179,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Added local links support to SDNA. [PR#370](https://github.com/perspect3vism/ad4m/pull/370)
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -183,7 +195,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Added
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -199,7 +211,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Changed
  - ipfs repo.lock now handled in the executor so ad4m-host startups will not have ipfs repo.lock conflicts [PR#333](https://github.com/perspect3vism/ad4m/pull/333)
  - Perspective diff sync now uses mutex locks to ensure its not updating its internal state in conflicting ways [PR#334](https://github.com/perspect3vism/ad4m/pull/334)
- 
+
 ### Deprecated
 
 ### Removed
@@ -223,7 +235,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Improved CI workflow where holochain binaries are always downloaded and used for all tests and builds [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
 
 - Launcher automatically authenticates with the proxy on login. [PR#303](https://github.com/perspect3vism/ad4m/pull/303)
- 
+
 ### Deprecated
 
 ### Removed

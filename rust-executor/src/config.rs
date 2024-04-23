@@ -22,6 +22,7 @@ pub struct Ad4mConfig {
     pub hc_bootstrap_url: Option<String>,
     pub connect_holochain: Option<bool>,
     pub admin_credential: Option<String>,
+    pub localhost: Option<bool>,
     pub auto_permit_cap_requests: Option<bool>,
 }
 
@@ -72,6 +73,9 @@ impl Ad4mConfig {
         if self.hc_use_proxy.is_none() {
             self.hc_use_proxy = Some(true)
         }
+        if self.localhost.is_none() {
+            self.localhost = Some(true);
+        }
     }
 
     pub fn get_json(&self) -> String {
@@ -97,6 +101,7 @@ impl Default for Ad4mConfig {
             hc_bootstrap_url: None,
             connect_holochain: None,
             admin_credential: None,
+            localhost: None,
             auto_permit_cap_requests: None,
         };
         config.prepare();

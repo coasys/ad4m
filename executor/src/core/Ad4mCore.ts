@@ -10,10 +10,8 @@ import LanguageController from './LanguageController'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
-import EntanglementProofController from './EntanglementProof'
 import fs from 'node:fs'
 import { AgentInfoResponse } from '@holochain/client'
-import RuntimeService from './RuntimeService'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
 import { getPubSub, sleep } from "./utils";
@@ -52,14 +50,11 @@ export default class Ad4mCore {
     //#IPFS?: IPFSType
 
     #agentService: AgentService
-    #runtimeService: RuntimeService
-
     #db: Ad4mDb
     #didResolver: DIDResolver
 
     #languageController?: LanguageController
 
-    #entanglementProofController?: EntanglementProofController
     #languagesReady: Promise<void>
     #resolveLanguagesReady: (value: void) => void
 
@@ -69,11 +64,7 @@ export default class Ad4mCore {
         this.#config = Config.init(config);
 
         this.#agentService = new AgentService(this.#config.rootConfigPath, this.#config.adminCredential)
-        this.#runtimeService = new RuntimeService(this.#config)
-        this.#agentService.ready.then(() => {
-            this.#runtimeService.did = this.#agentService!.did!
-        })
-        this.#agentService.load()
+        const agent = AGENT.load();
         this.#db = Db.init(this.#config.dataPath)
         this.#didResolver = DIDs.init(this.#config.dataPath)
         const that = this
@@ -122,22 +113,11 @@ export default class Ad4mCore {
         return this.#agentService
     }
 
-    get runtimeService(): RuntimeService {
-        return this.#runtimeService
-    }
-
     get languageController(): LanguageController {
         if (!this.#languageController) {
             throw Error("No languageController")
         }
         return this.#languageController!
-    }
-
-    get entanglementProofController(): EntanglementProofController {
-        if (!this.#entanglementProofController) {
-            this.#entanglementProofController = new EntanglementProofController(this.#config.rootConfigPath, this.#agentService);
-        }
-        return this.#entanglementProofController
     }
 
     async exit() {
@@ -172,15 +152,11 @@ export default class Ad4mCore {
             hcBootstrapUrl: params.hcBootstrapUrl,
         }
 
-        this.#holochain = new HolochainService(holochainConfig, this.#agentService, this.entanglementProofController)
+        this.#holochain = new HolochainService(holochainConfig)
         await this.#holochain.run({
             ...holochainConfig,
             passphrase: params.passphrase!
         });
-    }
-
-    async waitForAgent(): Promise<void> {
-        return this.#agentService.ready
     }
 
     async waitForLanguages(): Promise<void> {
@@ -198,13 +174,10 @@ export default class Ad4mCore {
     initControllers() {
         this.#languageController = new LanguageController({
             agent: this.#agentService,
-            runtime: this.#runtimeService,
             //IPFS: this.#IPFS,
             ad4mSignal: this.languageSignal,
             config: this.#config,
-        }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, db: this.#db } )
-
-        this.entanglementProofController
+        }, { holochainService: this.#holochain!, db: this.#db } )
     }
 
     async initLanguages() {
@@ -268,14 +241,14 @@ export default class Ad4mCore {
         console.log("wait for languages");
         await this.waitForLanguages()
         console.log("finished wait");
-        const agent = this.#agentService.agent!
+        const agent = AGENT.agent();
         if(agent.directMessageLanguage) return
         console.log("Agent doesn't have direct message language set yet. Creating from template...")
 
         console.log("Cloning direct message language from template...");
         const templateParams = {
             uid: uuidv4(),
-            recipient_did: this.#agentService.agent?.did,
+            recipient_did: agent?.did,
             recipient_hc_agent_pubkey: Buffer.from(await HOLOCHAIN_SERVICE.getAgentKey()).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
@@ -304,7 +277,8 @@ export default class Ad4mCore {
     }
 
     async myDirectMessageLanguage(): Promise<Language> {
-        const dmLang = this.#agentService.agent!.directMessageLanguage!
+        const agent = AGENT.agent();
+        const dmLang = agent!.directMessageLanguage!
         return await this.#languageController!.languageByRef(new LanguageRef(dmLang))
     }
 }

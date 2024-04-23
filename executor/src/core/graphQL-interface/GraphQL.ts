@@ -12,10 +12,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
     return {
         Query: {
             //@ts-ignore
-            agent: (context) => {
-                return core.agentService.agent
-            },
-            //@ts-ignore
             agentByDID: async (args, context) => {
                 const { did } = args;
                 if (did != core.agentService.did) {
@@ -36,14 +32,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 } else {
                     return core.agentService.agent
                 }
-            },
-            //@ts-ignore
-            agentStatus: (context) => {
-                return core.agentService.dump()
-            },
-            //@ts-ignore
-            agentIsLocked: () => {
-                return !core.agentService.isUnlocked
             },
             //@ts-ignore
             expression: async (args, context) => {
@@ -226,129 +214,23 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 if(args.filter && args.filter !== '') filter = args.filter
                 return core.languageController.filteredLanguageRefs(filter)
             },
-            //@ts-ignore
-            agentGetEntanglementProofs: () => {
-                return core.entanglementProofController.getEntanglementProofs();
-            },
-            //@ts-ignore
-            getTrustedAgents: (context) => {
-                return core.runtimeService.getTrustedAgents();
-            },
-
-            //@ts-ignore
-            runtimeKnownLinkLanguageTemplates: (context) => {
-                return core.runtimeService.knowLinkLanguageTemplates();
-            },
-
-            //@ts-ignore
-            runtimeFriends: (context) => {
-                return core.runtimeService.friends();
-            },
-
-            //@ts-ignore
-            runtimeHcAgentInfos: async (context) => {
-                return JSON.stringify(await core.holochainRequestAgentInfos());
-            },
-
-            //@ts-ignore
-            runtimeFriendStatus: async (args, context) => {
-                const { did } = args
-                if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
-                const dmLang = await core.friendsDirectMessageLanguage(did)
-                if(dmLang)
-                    return await dmLang.directMessageAdapter!.status()
-                else
-                    return undefined
-            },
-
-            //@ts-ignore
-            runtimeMessageInbox: async (args, context) => {
-                const { filter } = args
-                const dmLang = await core.myDirectMessageLanguage()
-                return await dmLang.directMessageAdapter!.inbox(filter)
-            },
-            //@ts-ignore
-            runtimeMessageOutbox: (args, context) => {
-                const { filter } = args
-                return core.runtimeService.getMessagesOutbox(filter)
-            },
-            //@ts-ignore
-            runtimeInfo: () => {
-                const isInitialized = core.agentService.isInitialized();
-                const isUnlocked = core.agentService.isUnlocked();
-                return {
-                    ad4mExecutorVersion: ad4mExecutorVersion,
-                    isUnlocked,
-                    isInitialized
-                }
-            }
         },
         Mutation: {
             //@ts-ignore
-            agentAddEntanglementProofs: (args, context) => {
-                const { proofs } = args;
-                core.entanglementProofController.addEntanglementProofs(proofs);
-                return core.entanglementProofController.getEntanglementProofs();
-            },
-            //@ts-ignore
-            agentDeleteEntanglementProofs: (args, context) => {
-                const { proofs } = args;
-                core.entanglementProofController.deleteEntanglementProofs(proofs);
-                return core.entanglementProofController.getEntanglementProofs();
-            },
-            //@ts-ignore
-            agentEntanglementProofPreFlight: (args, context) => {
-                const { deviceKey, deviceKeyType } = args;
-                return core.entanglementProofController.signDeviceKey(deviceKey, deviceKeyType);
-            },
-            //@ts-ignore
-            addTrustedAgents: (args, context) => {
-                const { agents } = args;
-                core.runtimeService.addTrustedAgents(agents);
-                return core.runtimeService.getTrustedAgents();
-            },
-            //@ts-ignore
-            deleteTrustedAgents: (args, context) => {
-                const { agents } = args;
-                core.runtimeService.deleteTrustedAgents(agents);
-                return core.runtimeService.getTrustedAgents();
-            },
-            //@ts-ignore
-            runtimeAddKnownLinkLanguageTemplates: (args, context) => {
-                const { addresses } = args;
-                core.runtimeService.addKnowLinkLanguageTemplates(addresses);
-                return core.runtimeService.knowLinkLanguageTemplates();
-            },
-            //@ts-ignore
-            runtimeRemoveKnownLinkLanguageTemplates: (args, context) => {
-                const { addresses } = args;
-                core.runtimeService.removeKnownLinkLanguageTemplates(addresses);
-                return core.runtimeService.knowLinkLanguageTemplates();
-            },
-            //@ts-ignore
             runtimeAddFriends: async (args, context) => {
                 const { dids } = args;
-                core.runtimeService.addFriends(dids);
                 //@ts-ignore
                 await Promise.all(dids.map(did => core.friendsDirectMessageLanguage(did)))
-                return core.runtimeService.friends();
-            },
-            //@ts-ignore
-            runtimeRemoveFriends: (args, context) => {
-                const { dids } = args;
-                core.runtimeService.removeFriends(dids);
-                return core.runtimeService.friends();
+
+                return [];
             },
             //@ts-ignore
             agentGenerate: async (args, context) => {
-                await core.agentService.createNewKeys()
-                await core.agentService.save(args.passphrase)
                 const {hcPortAdmin, connectHolochain, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, hcProxyUrl, hcBootstrapUrl} = config;
 
                 await core.initHolochain({ hcPortAdmin, hcPortApp, hcUseLocalProxy, hcUseMdns, hcUseProxy, hcUseBootstrap, passphrase: args.passphrase, hcProxyUrl, hcBootstrapUrl });
                 console.log("Holochain init complete");
 
-                await core.waitForAgent();
                 console.log("Wait for agent");
                 core.initControllers()
                 await core.initLanguages()
@@ -357,20 +239,6 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 if (!config.languageLanguageOnly) {
                     await core.initializeAgentsDirectMessageLanguage()
                 }
-
-                const agent = core.agentService.dump();
-
-                let pubSub = getPubSub();
-                await pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, agent)
-
-                console.log("\x1b[32m", "AD4M init complete", "\x1b[0m");
-
-                return agent;
-            },
-            //@ts-ignore
-            agentLock: async (args, context) => {
-                await core.agentService.lock(args.passphrase)
-                return core.agentService.dump()
             },
             //@ts-ignore
             agentUnlock: async (args, context) => {
@@ -389,8 +257,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                     } else {
                         console.log("Holo service already initialized")
                     }
-   
-                    await core.waitForAgent();
+
                     core.initControllers()
                     await core.initLanguages()
 
@@ -402,19 +269,11 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         console.log("Error ensuring public agent expression: ", e)
                     }
                 }
-
-                const dump = core.agentService.dump() as any
-
-                if(!core.agentService.isUnlocked()) {
-                    dump.error = "Wrong passphrase"
-                }
-
-                return dump
             },
             //@ts-ignore
             agentUpdateDirectMessageLanguage: async (args, context) => {
                 const { directMessageLanguage } = args;
-                let currentAgent = core.agentService.agent;
+                const currentAgent = AGENT.agent();
                 if (!currentAgent) {
                     throw Error("No current agent init'd")
                 }
@@ -425,7 +284,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             agentUpdatePublicPerspective: async (args, context) => {
                 const {perspective} = args;
-                let currentAgent = core.agentService.agent;
+                const currentAgent = AGENT.agent();
                 if (!currentAgent) {
                     throw Error("No current agent init'd")
                 }
@@ -503,49 +362,11 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 await core.languageController.putSettings(languageAddress, JSON.parse(settings))
                 return true
             },
-            //@ts-ignore
-            runtimeOpenLink: (args) => {
-                const { url } = args
-                console.log("openLinkExtern:", url)
-                //shell.openExternal(url)
-                return true
-            },
-            //@ts-ignore
-            runtimeQuit: (context) => {
-                process.exit(0)
-                return true
-            },
-            //@ts-ignore
-            runtimeHcAddAgentInfos: async (args, context) => {
-                const { agentInfos } = args
-                //@ts-ignore
-                const parsed = JSON.parse(agentInfos).map(info => {
-                    return {
-                        //@ts-ignore
-                        agent: Buffer.from(Object.values(info.agent)),
-                        //@ts-ignore
-                        signature: Buffer.from(Object.values(info.signature)),
-                        //@ts-ignore
-                        agent_info: Buffer.from(Object.values(info.agent_info))
-                    }
-                })
-
-                await core.holochainAddAgentInfos(parsed)
-                return true
-            },
-
-            //@ts-ignore
-            runtimeSetStatus: async (args, context) => {
-                const { status } = args
-                const dmLang = await core.myDirectMessageLanguage()
-                await dmLang.directMessageAdapter!.setStatus(status)
-                return true
-            },
 
             //@ts-ignore
             runtimeFriendSendMessage: async (args, context) => {
                 const { did, message } = args
-                if(!core.runtimeService.friends().includes(did)) throw `${did} is not a friend`
+
                 const dmLang = await core.friendsDirectMessageLanguage(did)
                 if(!dmLang) return false
 
@@ -565,9 +386,10 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                 }
 
                 if(wasSent && messageExpression) {
-                    core.runtimeService.addMessageOutbox(did, messageExpression)
+                    await RUNTIME_SERVICE.addMessageOutbox(did, messageExpression, wasSent)
                 }
-                return wasSent
+
+                return wasSent;
             }
 
         },

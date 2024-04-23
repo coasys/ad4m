@@ -1,8 +1,13 @@
+#![allow(non_snake_case)]
+
+use crate::runtime_service::{self, RuntimeService};
+use ad4m_client::literal::Literal;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
-use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
+use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
 
 use super::graphql_types::*;
-use crate::{agent::{self, capabilities::*}, holochain_service::{agent_infos_from_str, get_holochain_service}};
+use crate::{agent::{self, capabilities::*, AgentService}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key}, holochain_service::{agent_infos_from_str, get_holochain_service}, pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC}};
+
 pub struct Mutation;
 
 fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<PerspectiveInstance> {
@@ -35,16 +40,12 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "addTrustedAgents", {{ agents: {:?} }})
-            )"#,
-            agents
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.add_trusted_agent(agents);
+
+            Ok(runtime_service.get_trusted_agents())
+        })
     }
 
     async fn agent_add_entanglement_proofs(
@@ -53,16 +54,20 @@ impl Mutation {
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentAddEntanglementProofs", {{ proofs: {} }})
-            )"#,
-            serde_json::to_string(&proofs).unwrap(),
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let converted_proofs: Vec<EntanglementProof> = proofs.into_iter().map(|input| EntanglementProof {
+            did: input.did,
+            did_signing_key_id: input.did_signing_key_id,
+            device_key_type: input.device_key_type,
+            device_key: input.device_key,
+            device_key_signed_by_did: input.device_key_signed_by_did,
+            did_signed_by_device_key: Some(input.did_signed_by_device_key),
+        }).collect();
+
+        add_entanglement_proofs(converted_proofs);
+
+        let proofs = get_entanglement_proofs();
+
+        Ok(proofs)
     }
 
     async fn agent_delete_entanglement_proofs(
@@ -71,16 +76,20 @@ impl Mutation {
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentDeleteEntanglementProofs", {{ proofs: {} }})
-            )"#,
-            serde_json::to_string(&proofs).unwrap(),
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let converted_proofs: Vec<EntanglementProof> = proofs.into_iter().map(|input| EntanglementProof {
+            did: input.did,
+            did_signing_key_id: input.did_signing_key_id,
+            device_key_type: input.device_key_type,
+            device_key: input.device_key,
+            device_key_signed_by_did: input.device_key_signed_by_did,
+            did_signed_by_device_key: Some(input.did_signed_by_device_key),
+        }).collect();
+
+        delete_entanglement_proof(converted_proofs);
+
+        let proofs = get_entanglement_proofs();
+
+        Ok(proofs)
     }
 
     async fn agent_entanglement_proof_pre_flight(
@@ -90,16 +99,9 @@ impl Mutation {
         device_key_type: String,
     ) -> FieldResult<EntanglementProof> {
         //TODO: capability missing for this function
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentEntanglementProofPreFlight", {{ deviceKey: "{}", deviceKeyType: "{}" }})
-            )"#,
-            device_key, device_key_type
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<EntanglementProof> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let proof = sign_device_key(device_key, device_key_type);
+
+        Ok(proof)
     }
 
     async fn agent_generate(
@@ -108,6 +110,13 @@ impl Mutation {
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_CREATE_CAPABILITY)?;
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
+            agent_service.create_new_keys();
+            agent_service.save(passphrase.clone());
+
+            agent_service.dump().clone()
+        });
+
         let mut js = context.js_handle.clone();
         let script = format!(
             r#"JSON.stringify(
@@ -115,9 +124,19 @@ impl Mutation {
             )"#,
             passphrase
         );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        js.execute(script).await?;
+
+        get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+        log::info!("AD4M init complete");
+
+        Ok(agent)
     }
 
     async fn agent_lock(
@@ -125,17 +144,23 @@ impl Mutation {
         context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
-        check_capability(&context.capabilities, &AGENT_LOCK_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentLock", {{ passphrase: "{}" }})
-            )"#,
-            passphrase
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let agent = AgentService::with_global_instance(|agent_service| {
+            agent_service.lock(passphrase.clone());
+
+            let agent = agent_service.dump().clone();
+
+            agent
+        });
+
+        get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+        Ok(agent)
     }
 
     async fn agent_remove_app(
@@ -160,13 +185,13 @@ impl Mutation {
             println!("======================================");
             println!("Got capability request: \n{:?}", auth_info);
             let random_number_challenge = agent::capabilities::permit_capability(AuthInfoExtended {
-                request_id: request_id.clone(), 
+                request_id: request_id.clone(),
                 auth: auth_info
             })?;
             println!("--------------------------------------");
             println!("Random number challenge: {}", random_number_challenge);
             println!("======================================");
-        } 
+        }
 
         Ok(request_id)
     }
@@ -220,16 +245,45 @@ impl Mutation {
         holochain: bool,
     ) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }})
-            )"#,
-            passphrase, holochain
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        let agent_instance = AgentService::global_instance();
+        {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+
+            agent_ref.unlock(passphrase.clone());
+        }
+
+        if agent_instance.lock().expect("agent lock").as_ref().expect("agent instance").is_unlocked() {
+            let mut js = context.js_handle.clone();
+            let script = format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "agentUnlock", {{ passphrase: "{}", holochain: "{}" }})
+                )"#,
+                passphrase, holochain
+            );
+            js.execute(script).await?;
+        }
+
+        let mut agent = {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            agent_ref.dump().clone()
+        };
+
+        if !agent_instance.lock().expect("agent lock").as_ref().expect("agent instance").is_unlocked() {
+            agent.error = Some("Failed to unlock agent".to_string());
+        }
+
+        get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&agent).unwrap(),
+        )
+        .await;
+
+        Ok(agent)
     }
 
     async fn agent_update_direct_message_language(
@@ -278,17 +332,12 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let agents_json = serde_json::to_string(&agents)?;
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "deleteTrustedAgents", {{ agents: {} }})
-            )"#,
-            agents_json
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.remove_trusted_agent(agents);
+
+            Ok(runtime_service.get_trusted_agents())
+        })
     }
 
     async fn expression_create(
@@ -461,7 +510,7 @@ impl Mutation {
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .send_broadcast(perspective.into()) 
+            .send_broadcast(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -480,16 +529,16 @@ impl Mutation {
             links: payload.links
             .into_iter()
             .map(|l| Link::from(l))
-            .map(|l| create_signed_expression(l)) 
+            .map(|l| create_signed_expression(l))
             .filter_map(Result::ok)
             .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect::<Vec<DecoratedLinkExpression>>()
-        }; 
+        };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .send_broadcast(perspective.into()) 
+            .send_broadcast(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -509,7 +558,7 @@ impl Mutation {
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .send_signal(remote_agent_did, perspective.into()) 
+            .send_signal(remote_agent_did, perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -529,16 +578,16 @@ impl Mutation {
             links: payload.links
             .into_iter()
             .map(|l| Link::from(l))
-            .map(|l| create_signed_expression(l)) 
+            .map(|l| create_signed_expression(l))
             .filter_map(Result::ok)
             .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect::<Vec<DecoratedLinkExpression>>()
-        }; 
+        };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .send_signal(remote_agent_did, perspective.into()) 
+            .send_signal(remote_agent_did, perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -557,7 +606,7 @@ impl Mutation {
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .set_online_status(perspective.into()) 
+            .set_online_status(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -576,16 +625,16 @@ impl Mutation {
             links: status.links
             .into_iter()
             .map(|l| Link::from(l).normalize())
-            .map(|l| create_signed_expression(l)) 
+            .map(|l| create_signed_expression(l))
             .filter_map(Result::ok)
             .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared))) 
+            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
             .collect::<Vec<DecoratedLinkExpression>>()
-        }; 
+        };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .set_online_status(perspective.into()) 
+            .set_online_status(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -790,8 +839,15 @@ impl Mutation {
         dids: Vec<String>,
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)?;
+        let cloned_did = dids.clone();
+        let friends = RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.add_friend(dids);
+            runtime_service.get_friends()
+        });
+
+        // TODO: remove this when language controller is moved.
         let mut js = context.js_handle.clone();
-        let dids_json = serde_json::to_string(&dids)?;
+        let dids_json = serde_json::to_string(&cloned_did)?;
         let script = format!(
             r#"JSON.stringify(
             await core.callResolver(
@@ -803,7 +859,9 @@ impl Mutation {
         );
         let result = js.execute(script).await?;
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        result.get_graphql_result();
+
+        Ok(friends)
     }
 
     async fn runtime_add_known_link_language_templates(
@@ -815,20 +873,12 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let addresses_json = serde_json::to_string(&addresses)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeAddKnownLinkLanguageTemplates",
-                {{ addresses: {} }},
-            ))"#,
-            addresses_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.add_know_link_language(addresses.clone());
+
+            Ok(runtime_service.get_know_link_languages())
+        })
     }
 
     async fn runtime_friend_send_message(
@@ -838,6 +888,17 @@ impl Mutation {
         message: PerspectiveInput,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)?;
+
+        let friends = RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.get_friends()
+        });
+
+        if !friends.contains(&did.clone()) {
+            log::error!("Friend not found: {}", did);
+
+            return Ok(false)
+        }
+
         let mut js = context.js_handle.clone();
         let message_json = serde_json::to_string(&message)?;
         let script = format!(
@@ -851,7 +912,8 @@ impl Mutation {
         );
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let get_graphql_result = result.get_graphql_result()?;
+        Ok(get_graphql_result)
     }
 
     async fn runtime_hc_add_agent_infos(
@@ -880,34 +942,21 @@ impl Mutation {
     }
 
     async fn runtime_open_link(&self, context: &RequestContext, url: String) -> FieldResult<bool> {
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeOpenLink",
-                {{ url: "{}" }},
-            ))"#,
-            url,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        if webbrowser::open(&url).is_ok() {
+            log::info!("Browser opened successfully");
+            Ok(true)
+        } else {
+            log::info!("Failed to open browser");
+            Ok(false)
+        }
     }
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeQuit",
-            ))"#,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        std::process::exit(0);
+
+        Ok(true)
     }
 
     async fn runtime_remove_friends(
@@ -916,20 +965,12 @@ impl Mutation {
         dids: Vec<String>,
     ) -> FieldResult<Vec<String>> {
         check_capability(&context.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let dids_json = serde_json::to_string(&dids)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeRemoveFriends",
-                {{ dids: {} }},
-            ))"#,
-            dids_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.remove_friend(dids.clone());
+
+            Ok(runtime_service.get_friends())
+        })
     }
 
     async fn runtime_remove_known_link_language_templates(
@@ -941,20 +982,12 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
         )?;
-        let mut js = context.js_handle.clone();
-        let addresses_json = serde_json::to_string(&addresses)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "runtimeRemoveKnownLinkLanguageTemplates",
-                {{ addresses: {} }},
-            ))"#,
-            addresses_json,
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.remove_know_link_language(addresses.clone());
+
+            Ok(runtime_service.get_know_link_languages())
+        })
     }
 
     async fn runtime_set_status(

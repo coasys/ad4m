@@ -1,0 +1,14 @@
+{
+  "name": "web-control-flow",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "npx live-server"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@coasys/ad4m-connect": "*"
+  }
+}

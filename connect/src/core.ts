@@ -20,6 +20,7 @@ export type Ad4mConnectOptions = {
   port?: number;
   token?: string;
   url?: string;
+  hosting?: boolean;
 };
 
 export type AuthStates = "authenticated" | "locked" | "unauthenticated";
@@ -151,6 +152,71 @@ export default class Ad4mConnect {
       this.notifyConnectionChange("not_connected");
       this.notifyAuthChange("unauthenticated");
     }
+  }
+
+
+  async loginToHosting(email: string, password: string) {
+    try {
+      const response = await fetch('https://hosting.ad4m.dev/api/auth/login', {
+          method: 'POST',
+          headers: {
+              'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+              email,
+              password
+          })
+      });
+
+      if (response.status === 200) {
+        const data = await response.json();
+        // @ts-ignore
+        localStorage.setItem('hosting_token', data.token);
+
+        let token = localStorage.getItem('hosting_token');
+        
+        const response2 = await fetch('https://hosting.ad4m.dev/api/service/info', {
+          method: 'GET',
+          headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ' + token
+          },
+        });
+
+        if (response2.status === 200) {
+          const data = await response2.json();
+
+          if (data.serviceId) {
+            this.setPort(data.port);
+            this.setUrl(`wss://${data.port}.hosting.ad4m.dev/graphql`);
+          }
+        }
+      }  else {
+        const data = await response.json();
+
+        if (data.message === 'Passwords did not match') {
+          throw new Error('Passwords did not match');
+        }
+      }
+    } catch (e) {
+      console.log(e)
+      throw new Error(`Error logging in ${e}`);
+    }
+  }
+
+  async checkEmail(email: string) {
+    try {
+      const response = await fetch(`https://hosting.ad4m.dev/api/auth/check-email?email=${email}`, {
+          method: 'GET',
+          headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        return response.status === 200;
+      } catch (e) {
+        console.log(e)
+      }
   }
 
   // If port is explicit, don't search for port
