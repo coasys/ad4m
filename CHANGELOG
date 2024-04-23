@@ -5,6 +5,11 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ## unreleased
 
+### Added
+- Support ADAM executor hosting service alpha [PR#474](https://github.com/coasys/ad4m/pull/474)
+- Complete instructions in README [PR#473](https://github.com/coasys/ad4m/pull/473)
+
+### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 
 
