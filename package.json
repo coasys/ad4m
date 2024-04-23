@@ -93,5 +93,5 @@
       "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
-  "version": "0.9.0"
+  "version": "0.9.1-prerelease"
 }

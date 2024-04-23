@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.9.0"
+version = "0.9.1-prerelease"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
