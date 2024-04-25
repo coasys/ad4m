@@ -30,16 +30,13 @@ webhookAuth
 const NOTIFICATION_FIELDS = `
 id
 granted
-definition {
-    ${NOTIFICATION_DEFINITION_FIELDS}
-}
+${NOTIFICATION_DEFINITION_FIELDS}
 `
 
 const TRIGGERED_NOTIFICATION_FIELDS = `
 id
-definition {
-    ${NOTIFICATION_DEFINITION_FIELDS}
-}
+perspective_id
+notification { ${NOTIFICATION_FIELDS} }
 `
 
 export type MessageCallback = (message: PerspectiveExpression) => null

@@ -295,7 +295,7 @@ export default class RuntimeResolver {
         return true
     }
 
-    @Query()
+    @Mutation()
     runtimeRemoveNotification(@Arg("id", type => String) id: string): boolean {
         return true
     }
