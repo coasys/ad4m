@@ -924,6 +924,35 @@ describe('Ad4mClient', () => {
             expect(runtimeInfo.isInitialized).toBe(true);
             expect(runtimeInfo.isUnlocked).toBe(true);
         })
+
+        it('requestNotification smoke test', async () => {
+            await ad4mClient.runtime.requestNotification("test-notification");
+        })
+
+        it('grantNotification smoke test', async () => {
+            await ad4mClient.runtime.grantNotification("test-notification");
+        })
+
+        it('notifications smoke test', async () => {
+            const notifications = await ad4mClient.runtime.notifications();
+            expect(notifications.length).toBe(1);
+        })
+
+        it('updateNotification smoke test', async () => {
+            await ad4mClient.runtime.updateNotification("test-notification", {
+                description: "Test description",
+                appName: "Test app name",
+                appUrl: "https://example.com",
+                trigger: "triple(X, ad4m://has_type, flux://message)",
+                perspective_ids: ["u983ud-jdhh38d"],
+                webhookUrl: "https://example.com/webhook",
+                webhookAuth: "test-auth",
+            });
+        })
+
+        it('removeNotification smoke test', async () => {
+            await ad4mClient.runtime.removeNotification("test-notification");
+        })
     })
 
     describe('Ad4mClient subscriptions', () => {
