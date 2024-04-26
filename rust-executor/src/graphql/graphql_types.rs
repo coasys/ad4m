@@ -1,7 +1,7 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link, Notification, TriggeredNotification};
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -494,7 +494,7 @@ pub struct PerspectiveUnsignedInput {
 }
 
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(GraphQLInputObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 
 pub struct NotificationInput {
@@ -503,7 +503,7 @@ pub struct NotificationInput {
     pub appUrl: String,
     pub appIconPath: Option<String>,
     pub trigger: String,
-    pub perspective_ids: Vec<String>,
+    pub perspectiveIds: Vec<String>,
     pub webhookUrl: String,
     pub webhookAuth: String,
 }
@@ -775,6 +775,38 @@ impl GetValue for PerspectiveExpression {
 
 //Implement the trait for `PerspectiveExpression`
 impl GetFilter for PerspectiveExpression {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetValue for Notification {
+    type Value = Notification;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetFilter for Notification {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetValue for TriggeredNotification {
+    type Value = TriggeredNotification;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetFilter for TriggeredNotification {
     fn get_filter(&self) -> Option<String> {
         None
     }
