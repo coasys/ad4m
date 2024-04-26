@@ -3,8 +3,8 @@ use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use crate::types::{Expression, ExpressionProof, Link, LinkExpression, PerspectiveDiff};
-use crate::graphql::graphql_types::{EntanglementProof, LinkStatus, PerspectiveExpression, PerspectiveHandle, SentMessage};
+use crate::types::{Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff};
+use crate::graphql::graphql_types::{EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression, PerspectiveHandle, SentMessage};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -141,7 +141,94 @@ impl Ad4mDb {
             [],
         )?;
 
+
+        // Start Generation Here
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY,
+                granted BOOLEAN NOT NULL,
+                description TEXT NOT NULL,
+                appName TEXT NOT NULL,
+                appUrl TEXT NOT NULL,
+                appIconPath TEXT,
+                trigger TEXT NOT NULL,
+                perspective_ids TEXT NOT NULL,
+                webhookUrl TEXT NOT NULL,
+                webhookAuth TEXT NOT NULL
+             )",
+            [],
+        )?;
+
         Ok(Self { conn })
+    }
+    pub fn add_notification(&self, notification: NotificationInput) -> Result<String, rusqlite::Error> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                id,
+                false,
+                notification.description,
+                notification.appName,
+                notification.appUrl,
+                notification.appIconPath,
+                notification.trigger,
+                serde_json::to_string(&notification.perspective_ids).unwrap(),
+                notification.webhookUrl,
+                notification.webhookAuth,
+            ],
+        )?;
+        Ok(id)
+    }
+
+    pub fn get_notifications(&self) -> Result<Vec<Notification>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT * FROM notifications")?;
+        let notification_iter = stmt.query_map([], |row| {
+            Ok(Notification {
+                id: row.get(0)?,
+                granted: row.get(1)?,
+                description: row.get(2)?,
+                appName: row.get(3)?,
+                appUrl: row.get(4)?,
+                appIconPath: row.get(5)?,
+                trigger: row.get(6)?,
+                perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+                webhookUrl: row.get(8)?,
+                webhookAuth: row.get(9)?,
+            })
+        })?;
+
+        let mut notifications = Vec::new();
+        for notification in notification_iter {
+            notifications.push(notification?);
+        }
+        Ok(notifications)
+    }
+
+    pub fn remove_notification(&self, id: String) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM notifications WHERE id = ?",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_notification(&self, id: String, updated_notification: &NotificationInput) -> Result<bool, rusqlite::Error> {
+        let result = self.conn.execute(
+            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9 WHERE id = ?1",
+            params![
+                id,
+                updated_notification.description,
+                updated_notification.appName,
+                updated_notification.appUrl,
+                updated_notification.appIconPath,
+                updated_notification.trigger,
+                serde_json::to_string(&updated_notification.perspective_ids).unwrap(),
+                updated_notification.webhookUrl,
+                updated_notification.webhookAuth,
+            ],
+        )?;
+        Ok(result > 0)
     }
 
     pub fn add_entanglement_proofs(&self, proofs: Vec<EntanglementProof>) -> Result<(), rusqlite::Error> {
@@ -707,7 +794,7 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Ad4mDb;
+    use crate::{db::Ad4mDb, graphql::graphql_types::NotificationInput};
     use uuid::Uuid;
     use fake::{Fake, Faker};
     use chrono::Utc;
@@ -869,6 +956,67 @@ mod tests {
         let get2 = db.get_pending_diffs(&p_uuid).unwrap();
         assert_eq!(get2.additions.len(), 0);
     }
+
+
+#[test]
+fn can_handle_notifications() {
+    let db = Ad4mDb::new(":memory:").unwrap();
+
+    // Create a test notification
+    let notification = NotificationInput {
+        description: "Test Description".to_string(),
+        appName: "Test App Name".to_string(),
+        appUrl: "Test App URL".to_string(),
+        appIconPath: Some("Test App Icon Path".to_string()),
+        trigger: "Test Trigger".to_string(),
+        perspective_ids: vec!["Test Perspective ID".to_string()],
+        webhookUrl: "Test Webhook URL".to_string(),
+        webhookAuth: "Test Webhook Auth".to_string(),
+    };
+
+    // Add the test notification
+    let notification_id = db.add_notification(notification).unwrap();
+    // Get all notifications
+    let notifications = db.get_notifications().unwrap();
+    
+    // Ensure the test notification is in the list of notifications and has all properties set
+    let test_notification = notifications.iter().find(|n| n.id == notification_id).unwrap();
+    assert_eq!(test_notification.description, "Test Description");
+    assert_eq!(test_notification.appName, "Test App Name");
+    assert_eq!(test_notification.appUrl, "Test App URL");
+    assert_eq!(test_notification.appIconPath, Some("Test App Icon Path".to_string()));
+    assert_eq!(test_notification.trigger, "Test Trigger");
+    assert_eq!(test_notification.perspective_ids, vec!["Test Perspective ID".to_string()]);
+    assert_eq!(test_notification.webhookUrl, "Test Webhook URL");
+    assert_eq!(test_notification.webhookAuth, "Test Webhook Auth");
+
+    // Modify the test notification
+    let updated_notification = NotificationInput {
+        description: "Update Test Description".to_string(),
+        appName: "Test App Name".to_string(),
+        appUrl: "Test App URL".to_string(),
+        appIconPath: Some("Test App Icon Path".to_string()),
+        trigger: "Test Trigger".to_string(),
+        perspective_ids: vec!["Test Perspective ID".to_string()],
+        webhookUrl: "Test Webhook URL".to_string(),
+        webhookAuth: "Test Webhook Auth".to_string(),
+    };
+
+    // Update the test notification
+    let updated = db.update_notification(notification_id.clone(), &updated_notification).unwrap();
+    assert!(updated);
+
+    // Check if the notification is updated
+    let updated_notifications = db.get_notifications().unwrap();
+    let updated_test_notification = updated_notifications.iter().find(|n| n.id == notification_id).unwrap();
+    assert_eq!(updated_test_notification.description, "Update Test Description");
+
+    // Remove the test notification
+    db.remove_notification(notification_id.clone()).unwrap();
+    // Ensure the test notification is removed
+    let notifications_after_removal = db.get_notifications().unwrap();
+    assert!(notifications_after_removal.iter().all(|n| n.id != notification_id));
+}
 }
 
 

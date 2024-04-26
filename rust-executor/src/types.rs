@@ -339,3 +339,17 @@ pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Notification {
+    pub id: String,
+    pub granted: bool,
+    pub description: String,
+    pub appName: String,
+    pub appUrl: String,
+    pub appIconPath: Option<String>,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhookUrl: String,
+    pub webhookAuth: String,
+}

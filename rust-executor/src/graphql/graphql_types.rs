@@ -493,6 +493,22 @@ pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+
+pub struct NotificationInput {
+    pub description: String,
+    pub appName: String,
+    pub appUrl: String,
+    pub appIconPath: Option<String>,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhookUrl: String,
+    pub webhookAuth: String,
+}
+
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
