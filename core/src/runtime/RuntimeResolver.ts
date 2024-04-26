@@ -333,17 +333,21 @@ export default class RuntimeResolver {
     }
 
     @Subscription({topics: RUNTIME_NOTIFICATION_TRIGGERED_TOPIC, nullable: true})
-    runtimeNotificationTriggered(): Notification {
+    runtimeNotificationTriggered(): TriggeredNotification {
         return {
-            id: "test-id",
-            granted: false,
-            description: "Test description",
-            appName: "Test app name",
-            appUrl: "https://example.com",
-            trigger: "triple(X, ad4m://has_type, flux://message)",
-            perspective_ids: ["u983ud-jdhh38d"],
-            webhookUrl: "https://example.com/webhook",
-            webhookAuth: "test-auth",
+            perspective_id: "test-perspective-id",
+            triggerMatch: "test-trigger-match",
+            notification: {
+                id: "test-id",
+                granted: false,
+                description: "Test description",
+                appName: "Test app name",
+                appUrl: "https://example.com",
+                trigger: "triple(X, ad4m://has_type, flux://message)",
+                perspective_ids: ["u983ud-jdhh38d"],
+                webhookUrl: "https://example.com/webhook",
+                webhookAuth: "test-auth",
+            }
         }
     }
 }

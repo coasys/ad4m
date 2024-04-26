@@ -61,8 +61,8 @@ export class RuntimeClient {
         if(subscribe) {
             this.subscribeMessageReceived()
             this.subscribeExceptionOccurred()
-            //this.subscribeNotificationTriggered()
-            //this.subscribeNotificationRequested()
+            this.subscribeNotificationTriggered()
+            this.subscribeNotificationRequested()
         }
     }
 
