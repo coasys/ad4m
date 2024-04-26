@@ -284,7 +284,18 @@ export default class RuntimeResolver {
 
     @Query(returns => [Notification])
     runtimeNotifications(): Notification[] {
-        return []
+        return [{
+            id: "test-id",
+            granted: false,
+            description: "Test description",
+            appName: "Test app name",
+            appUrl: "https://example.com",
+            trigger: "triple(X, ad4m://has_type, flux://message)",
+            perspective_ids: ["u983ud-jdhh38d"],
+            webhookUrl: "https://example.com/webhook",
+            webhookAuth: "test-auth",
+        
+        }]
     }
 
     @Mutation()

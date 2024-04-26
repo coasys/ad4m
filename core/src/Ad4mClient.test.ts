@@ -926,7 +926,15 @@ describe('Ad4mClient', () => {
         })
 
         it('requestInstallNotification smoke test', async () => {
-            await ad4mClient.runtime.requestInstallNotification("test-notification");
+            await ad4mClient.runtime.requestInstallNotification({
+                description: "Test description",
+                appName: "Test app name",
+                appUrl: "https://example.com",
+                trigger: "triple(X, ad4m://has_type, flux://message)",
+                perspective_ids: ["u983ud-jdhh38d"],
+                webhookUrl: "https://example.com/webhook",
+                webhookAuth: "test-auth",
+            });
         })
 
         it('grantNotification smoke test', async () => {
