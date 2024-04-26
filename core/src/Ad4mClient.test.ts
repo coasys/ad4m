@@ -925,8 +925,8 @@ describe('Ad4mClient', () => {
             expect(runtimeInfo.isUnlocked).toBe(true);
         })
 
-        it('requestNotification smoke test', async () => {
-            await ad4mClient.runtime.requestNotification("test-notification");
+        it('requestInstallNotification smoke test', async () => {
+            await ad4mClient.runtime.requestInstallNotification("test-notification");
         })
 
         it('grantNotification smoke test', async () => {

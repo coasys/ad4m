@@ -35,7 +35,7 @@ ${NOTIFICATION_DEFINITION_FIELDS}
 
 const TRIGGERED_NOTIFICATION_FIELDS = `
 id
-perspective_id
+perspective_ids
 notification { ${NOTIFICATION_FIELDS} }
 `
 
