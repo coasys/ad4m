@@ -150,7 +150,7 @@ export default function runtimeTests(testContext: TestContext) {
             appUrl: "Test App URL",
             appIconPath: "Test App Icon Path",
             trigger: "Test Trigger",
-            perspective_ids: ["Test Perspective ID"],
+            perspectiveIds: ["Test Perspective ID"],
             webhookUrl: "Test Webhook URL",
             webhookAuth: "Test Webhook Auth"
         }
@@ -199,7 +199,7 @@ export default function runtimeTests(testContext: TestContext) {
             appUrl: "Test App URL",
             appIconPath: "Test App Icon Path",
             trigger: "Test Trigger",
-            perspective_ids: ["Test Perspective ID"],
+            perspectiveIds: ["Test Perspective ID"],
             webhookUrl: "Test Webhook URL",
             webhookAuth: "Test Webhook Auth"
         }

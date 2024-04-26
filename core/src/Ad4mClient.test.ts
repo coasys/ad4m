@@ -931,7 +931,7 @@ describe('Ad4mClient', () => {
                 appName: "Test app name",
                 appUrl: "https://example.com",
                 trigger: "triple(X, ad4m://has_type, flux://message)",
-                perspective_ids: ["u983ud-jdhh38d"],
+                perspectiveIds: ["u983ud-jdhh38d"],
                 webhookUrl: "https://example.com/webhook",
                 webhookAuth: "test-auth",
             });
@@ -952,7 +952,7 @@ describe('Ad4mClient', () => {
                 appName: "Test app name",
                 appUrl: "https://example.com",
                 trigger: "triple(X, ad4m://has_type, flux://message)",
-                perspective_ids: ["u983ud-jdhh38d"],
+                perspectiveIds: ["u983ud-jdhh38d"],
                 webhookUrl: "https://example.com/webhook",
                 webhookAuth: "test-auth",
             });

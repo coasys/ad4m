@@ -76,7 +76,7 @@ export class NotificationInput {
 
     // List Perspectives this Notification is active on.
     @Field(type => [String])
-    perspective_ids: string[];
+    perspectiveIds: string[];
 
     // URL to which the notification matches will be sent via POST
     @Field()
@@ -113,7 +113,7 @@ export class Notification {
 
     // List Perspectives this Notification is active on.
     @Field(type => [String])
-    perspective_ids: string[];
+    perspectiveIds: string[];
 
     // URL to which the notification matches will be sent via POST
     @Field()
@@ -130,7 +130,7 @@ export class TriggeredNotification {
     @Field()
     notification: Notification;
     @Field()
-    perspective_id: string;
+    perspectiveId: string;
 
     // This is the Prolog query match that triggered the notification.
     // It is a list of all variable bindings that match the notification's trigger.
@@ -291,7 +291,7 @@ export default class RuntimeResolver {
             appName: "Test app name",
             appUrl: "https://example.com",
             trigger: "triple(X, ad4m://has_type, flux://message)",
-            perspective_ids: ["u983ud-jdhh38d"],
+            perspectiveIds: ["u983ud-jdhh38d"],
             webhookUrl: "https://example.com/webhook",
             webhookAuth: "test-auth",
         
@@ -325,7 +325,7 @@ export default class RuntimeResolver {
             appName: "Test app name",
             appUrl: "https://example.com",
             trigger: "triple(X, ad4m://has_type, flux://message)",
-            perspective_ids: ["u983ud-jdhh38d"],
+            perspectiveIds: ["u983ud-jdhh38d"],
             webhookUrl: "https://example.com/webhook",
             webhookAuth: "test-auth",
         
@@ -335,7 +335,7 @@ export default class RuntimeResolver {
     @Subscription({topics: RUNTIME_NOTIFICATION_TRIGGERED_TOPIC, nullable: true})
     runtimeNotificationTriggered(): TriggeredNotification {
         return {
-            perspective_id: "test-perspective-id",
+            perspectiveId: "test-perspective-id",
             triggerMatch: "test-trigger-match",
             notification: {
                 id: "test-id",
@@ -344,7 +344,7 @@ export default class RuntimeResolver {
                 appName: "Test app name",
                 appUrl: "https://example.com",
                 trigger: "triple(X, ad4m://has_type, flux://message)",
-                perspective_ids: ["u983ud-jdhh38d"],
+                perspectiveIds: ["u983ud-jdhh38d"],
                 webhookUrl: "https://example.com/webhook",
                 webhookAuth: "test-auth",
             }

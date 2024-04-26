@@ -22,7 +22,7 @@ description
 appName
 appUrl
 trigger
-perspective_ids
+perspectiveIds
 webhookUrl
 webhookAuth
 `
@@ -35,7 +35,7 @@ ${NOTIFICATION_DEFINITION_FIELDS}
 
 const TRIGGERED_NOTIFICATION_FIELDS = `
 id
-perspective_ids
+perspectiveIds
 notification { ${NOTIFICATION_FIELDS} }
 `
 
