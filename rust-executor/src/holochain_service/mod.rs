@@ -132,7 +132,7 @@ impl HolochainService {
                             match message {
                                 HolochainServiceRequest::InstallApp(payload, response) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(10),
+                                        std::time::Duration::from_secs(60),
                                         service.install_app(payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; InstallApp call")) {
                                         Ok(result) => {
