@@ -4,7 +4,7 @@ use coasys_juniper::{
     GraphQLObject, GraphQLValue,
 };
 
-use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, PerspectiveInput}};
+use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput}};
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -340,7 +340,7 @@ pub struct PerspectiveDiff {
     pub removals: Vec<LinkExpression>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Notification {
     pub id: String,
     pub granted: bool,
@@ -352,4 +352,28 @@ pub struct Notification {
     pub perspective_ids: Vec<String>,
     pub webhookUrl: String,
     pub webhookAuth: String,
+}
+
+impl Notification {
+    pub fn from_input_and_id(id: String, input: NotificationInput) -> Self {
+        Notification {
+            id: id,
+            granted: false,
+            description: input.description,
+            appName: input.appName,
+            appUrl: input.appUrl,
+            appIconPath: input.appIconPath,
+            trigger: input.trigger,
+            perspective_ids: input.perspectiveIds,
+            webhookUrl: input.webhookUrl,
+            webhookAuth: input.webhookAuth,
+        }
+    }
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TriggeredNotification {
+    pub notification: Notification,
+    pub perspectiveId: String,
+    pub triggerMatch: String,
 }

@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
-use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, runtime_service::RuntimeService, types::DecoratedLinkExpression};
+use crate::{db::Ad4mDb, holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, runtime_service::RuntimeService, types::{DecoratedLinkExpression, Notification}};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use std::{env, path};
 use super::graphql_types::*;
@@ -514,5 +514,20 @@ impl Query {
         signatures::verify_string_signed_by_did(&did, &data, &signed_data)
             .map_err(|e| e.to_string())
             .map_err(|e| coasys_juniper::FieldError::new(e, coasys_juniper::Value::Null))
+    }
+
+
+    async fn runtime_notifications(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<Vec<Notification>> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        let notifications_result = Ad4mDb::with_global_instance(|db| {
+            db.get_notifications()
+        });
+        if let Err(e) = notifications_result {
+            return Err(FieldError::new(e.to_string(), Value::null()));
+        }
+        Ok(notifications_result.unwrap())
     }
 }

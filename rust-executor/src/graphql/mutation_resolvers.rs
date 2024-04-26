@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use crate::runtime_service::{self, RuntimeService};
+use crate::{db::Ad4mDb, runtime_service::{self, RuntimeService}, types::Notification};
 use ad4m_client::literal::Literal;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
 use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
@@ -1010,5 +1010,64 @@ impl Mutation {
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
         result.get_graphql_result()
+    }
+
+
+    async fn runtime_request_install_notification(
+        &self,
+        context: &RequestContext,
+        notification: NotificationInput,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        RuntimeService::request_install_notification(notification).await?;
+        Ok(true)
+    }
+
+    async fn runtime_update_notification(
+        &self,
+        context: &RequestContext,
+        id: String,
+        notification: NotificationInput,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        let notification = Notification::from_input_and_id(id.clone(), notification);
+
+        Ad4mDb::with_global_instance(|db| {
+            db.update_notification(id, &notification)
+        })?;
+        
+        Ok(true)
+    }
+
+    async fn runtime_remove_notification(
+        &self,
+        context: &RequestContext,
+        id: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| {
+            db.remove_notification(id)
+        })?;
+        Ok(true)
+    }
+
+    async fn runtime_grant_notification(
+        &self,
+        context: &RequestContext,
+        id: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        let mut notification = Ad4mDb::with_global_instance(|db| {
+            db.get_notification(id.clone())
+        }).map_err(|e| e.to_string())?.ok_or("Notification with given id not found")?;
+
+        notification.granted = true;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.update_notification(id, &notification)
+        }).map_err(|e| e.to_string())?;
+            
+        Ok(true)
     }
 }

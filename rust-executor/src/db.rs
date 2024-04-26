@@ -173,7 +173,7 @@ impl Ad4mDb {
                 notification.appUrl,
                 notification.appIconPath,
                 notification.trigger,
-                serde_json::to_string(&notification.perspective_ids).unwrap(),
+                serde_json::to_string(&notification.perspectiveIds).unwrap(),
                 notification.webhookUrl,
                 notification.webhookAuth,
             ],
@@ -205,6 +205,28 @@ impl Ad4mDb {
         Ok(notifications)
     }
 
+    pub fn get_notification(&self, id: String) -> Result<Option<Notification>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT * FROM notifications WHERE id = ?")?;
+        let mut rows = stmt.query(params![id])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(Notification {
+                id: row.get(0)?,
+                granted: row.get(1)?,
+                description: row.get(2)?,
+                appName: row.get(3)?,
+                appUrl: row.get(4)?,
+                appIconPath: row.get(5)?,
+                trigger: row.get(6)?,
+                perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+                webhookUrl: row.get(8)?,
+                webhookAuth: row.get(9)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn remove_notification(&self, id: String) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "DELETE FROM notifications WHERE id = ?",
@@ -213,9 +235,9 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn update_notification(&self, id: String, updated_notification: &NotificationInput) -> Result<bool, rusqlite::Error> {
+    pub fn update_notification(&self, id: String, updated_notification: &Notification) -> Result<bool, rusqlite::Error> {
         let result = self.conn.execute(
-            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9 WHERE id = ?1",
+            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
             params![
                 id,
                 updated_notification.description,
@@ -226,6 +248,7 @@ impl Ad4mDb {
                 serde_json::to_string(&updated_notification.perspective_ids).unwrap(),
                 updated_notification.webhookUrl,
                 updated_notification.webhookAuth,
+                updated_notification.granted,
             ],
         )?;
         Ok(result > 0)
@@ -978,7 +1001,7 @@ fn can_handle_notifications() {
     let notification_id = db.add_notification(notification).unwrap();
     // Get all notifications
     let notifications = db.get_notifications().unwrap();
-    
+
     // Ensure the test notification is in the list of notifications and has all properties set
     let test_notification = notifications.iter().find(|n| n.id == notification_id).unwrap();
     assert_eq!(test_notification.description, "Test Description");
