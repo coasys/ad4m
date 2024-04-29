@@ -2,10 +2,10 @@
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 use crate::{db::Ad4mDb, holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, runtime_service::RuntimeService, types::{DecoratedLinkExpression, Notification}};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
-use std::{env, path};
+use std::{env};
 use super::graphql_types::*;
-use base64::{encode};
-use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime_service, wallet::{self, Wallet}};
+
+use crate::{agent::{capabilities::*, signatures}};
 
 pub struct Query;
 
@@ -73,15 +73,15 @@ impl Query {
 
     async fn agent_get_entanglement_proofs(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
     ) -> FieldResult<Vec<EntanglementProof>> {
         let proofs = get_entanglement_proofs();
         Ok(proofs)
     }
 
-    async fn agent_is_locked(&self, context: &RequestContext) -> FieldResult<bool> {
+    async fn agent_is_locked(&self, _context: &RequestContext) -> FieldResult<bool> {
         AgentService::with_global_instance(|agent_service| {
-            let agent = agent_service.agent.clone().ok_or(FieldError::new(
+            let _agent = agent_service.agent.clone().ok_or(FieldError::new(
                 "Agent not found",
                 Value::null(),
             ))?;
@@ -439,7 +439,7 @@ impl Query {
         Ok(serde_json::to_string(&encoded_infos)?)
     }
 
-    async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
+    async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {
         AgentService::with_global_instance(|agent_service| {
             agent_service.agent.clone().ok_or(FieldError::new(
                 "Agent not found",
@@ -492,7 +492,7 @@ impl Query {
     async fn runtime_message_outbox(
         &self,
         context: &RequestContext,
-        filter: Option<String>,
+        _filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
 

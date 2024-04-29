@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
 
-use crate::{db::Ad4mDb, runtime_service::{self, RuntimeService}, types::Notification};
-use ad4m_client::literal::Literal;
+use crate::{db::Ad4mDb, runtime_service::{RuntimeService}, types::Notification};
+
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
-use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
+use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
 
 use super::graphql_types::*;
 use crate::{agent::{self, capabilities::*, AgentService}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key}, holochain_service::{agent_infos_from_str, get_holochain_service}, pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC}};
@@ -50,7 +50,7 @@ impl Mutation {
 
     async fn agent_add_entanglement_proofs(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
@@ -72,7 +72,7 @@ impl Mutation {
 
     async fn agent_delete_entanglement_proofs(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
@@ -94,7 +94,7 @@ impl Mutation {
 
     async fn agent_entanglement_proof_pre_flight(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
         device_key: String,
         device_key_type: String,
     ) -> FieldResult<EntanglementProof> {
@@ -141,7 +141,7 @@ impl Mutation {
 
     async fn agent_lock(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         let agent = AgentService::with_global_instance(|agent_service| {
@@ -941,7 +941,7 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn runtime_open_link(&self, context: &RequestContext, url: String) -> FieldResult<bool> {
+    async fn runtime_open_link(&self, _context: &RequestContext, url: String) -> FieldResult<bool> {
         if webbrowser::open(&url).is_ok() {
             log::info!("Browser opened successfully");
             Ok(true)
