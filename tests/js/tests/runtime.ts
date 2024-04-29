@@ -1,7 +1,7 @@
 import { TestContext } from './integration.test'
 import fs from "fs";
 import { expect } from "chai";
-import { NotificationInput } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
+import { Notification, NotificationInput } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
@@ -155,41 +155,36 @@ export default function runtimeTests(testContext: TestContext) {
             webhookAuth: "Test Webhook Auth"
         }
 
+        console.log("==================== 0")
         // Request to install a new notification
         const notificationId = await ad4mClient.runtime.requestInstallNotification(notification)
-        const mockFunction = () => {
+        const mockFunction = (requestedNotification: Notification) => {
             setTimeout(() => {
-                const requestedNotification = {
-                    id: notificationId,
-                    description: notification.description,
-                    appName: notification.appName,
-                    appUrl: notification.appUrl,
-                    appIconPath: notification.appIconPath,
-                    trigger: notification.trigger,
-                    perspective_ids: notification.perspective_ids,
-                    webhookUrl: notification.webhookUrl,
-                    webhookAuth: notification.webhookAuth
-                };
                 expect(requestedNotification.id).to.equal(notificationId);
                 expect(requestedNotification.description).to.equal(notification.description);
                 expect(requestedNotification.appName).to.equal(notification.appName);
                 expect(requestedNotification.appUrl).to.equal(notification.appUrl);
                 expect(requestedNotification.appIconPath).to.equal(notification.appIconPath);
                 expect(requestedNotification.trigger).to.equal(notification.trigger);
-                expect(requestedNotification.perspective_ids).to.eql(notification.perspective_ids);
+                expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
                 expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
                 expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
             }, 1000);
+            return null
         };
-        ad4mClient.runtime.addNotificationRequestedCallback(mockFunction);
+        await ad4mClient.runtime.addNotificationRequestedCallback(mockFunction);
+        console.log("==================== 1")
         // Check if the notification is in the list of notifications
         const notificationsBeforeGrant = await ad4mClient.runtime.notifications()
-        const notificationInList = notificationsBeforeGrant.find((n) => n.id === notificationId)
+        console.log("==================== 2")
+        expect(notificationsBeforeGrant.length).to.equal(1)
+        const notificationInList = notificationsBeforeGrant[0]
         expect(notificationInList).to.exist
         expect(notificationInList?.granted).to.be.false
 
         // Grant the notification
         const granted = await ad4mClient.runtime.grantNotification(notificationId)
+        console.log("==================== 3")
         expect(granted).to.be.true
 
         // Check if the notification is updated
@@ -206,7 +201,10 @@ export default function runtimeTests(testContext: TestContext) {
         const updated = await ad4mClient.runtime.updateNotification(notificationId, updatedNotification)
         expect(updated).to.be.true
 
+        console.log("==================== 4")
+
         const updatedNotificationCheck = await ad4mClient.runtime.notifications()
+        console.log("==================== 5")
         const updatedNotificationInList = updatedNotificationCheck.find((n) => n.id === notificationId)
         expect(updatedNotificationInList).to.exist
         expect(updatedNotificationInList?.granted).to.be.true
@@ -214,6 +212,7 @@ export default function runtimeTests(testContext: TestContext) {
 
         // Check if the notification is removed
         const removed = await ad4mClient.runtime.removeNotification(notificationId)
+        console.log("==================== 6")
         expect(removed).to.be.true
     })
     }
