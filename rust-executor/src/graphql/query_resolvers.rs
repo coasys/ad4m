@@ -86,7 +86,7 @@ impl Query {
                 Value::null(),
             ))?;
 
-            Ok(agent_service.is_unlocked())
+            Ok(!agent_service.is_unlocked())
         })
     }
 
