@@ -992,7 +992,7 @@ fn can_handle_notifications() {
         appUrl: "Test App URL".to_string(),
         appIconPath: Some("Test App Icon Path".to_string()),
         trigger: "Test Trigger".to_string(),
-        perspective_ids: vec!["Test Perspective ID".to_string()],
+        perspectiveIds: vec!["Test Perspective ID".to_string()],
         webhookUrl: "Test Webhook URL".to_string(),
         webhookAuth: "Test Webhook Auth".to_string(),
     };
@@ -1014,7 +1014,9 @@ fn can_handle_notifications() {
     assert_eq!(test_notification.webhookAuth, "Test Webhook Auth");
 
     // Modify the test notification
-    let updated_notification = NotificationInput {
+    let updated_notification = Notification {
+        id: notification_id.clone(),
+        granted: true,
         description: "Update Test Description".to_string(),
         appName: "Test App Name".to_string(),
         appUrl: "Test App URL".to_string(),
