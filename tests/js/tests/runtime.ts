@@ -155,7 +155,6 @@ export default function runtimeTests(testContext: TestContext) {
             webhookAuth: "Test Webhook Auth"
         }
 
-        console.log("==================== 0")
         // Request to install a new notification
         const notificationId = await ad4mClient.runtime.requestInstallNotification(notification)
         const mockFunction = (requestedNotification: Notification) => {
@@ -173,10 +172,9 @@ export default function runtimeTests(testContext: TestContext) {
             return null
         };
         await ad4mClient.runtime.addNotificationRequestedCallback(mockFunction);
-        console.log("==================== 1")
+        
         // Check if the notification is in the list of notifications
         const notificationsBeforeGrant = await ad4mClient.runtime.notifications()
-        console.log("==================== 2")
         expect(notificationsBeforeGrant.length).to.equal(1)
         const notificationInList = notificationsBeforeGrant[0]
         expect(notificationInList).to.exist
@@ -184,7 +182,6 @@ export default function runtimeTests(testContext: TestContext) {
 
         // Grant the notification
         const granted = await ad4mClient.runtime.grantNotification(notificationId)
-        console.log("==================== 3")
         expect(granted).to.be.true
 
         // Check if the notification is updated
@@ -201,18 +198,15 @@ export default function runtimeTests(testContext: TestContext) {
         const updated = await ad4mClient.runtime.updateNotification(notificationId, updatedNotification)
         expect(updated).to.be.true
 
-        console.log("==================== 4")
-
         const updatedNotificationCheck = await ad4mClient.runtime.notifications()
-        console.log("==================== 5")
         const updatedNotificationInList = updatedNotificationCheck.find((n) => n.id === notificationId)
         expect(updatedNotificationInList).to.exist
-        expect(updatedNotificationInList?.granted).to.be.true
+        // after changing a notification it needs to be granted again
+        expect(updatedNotificationInList?.granted).to.be.false
         expect(updatedNotificationInList?.description).to.equal(updatedNotification.description)
 
         // Check if the notification is removed
         const removed = await ad4mClient.runtime.removeNotification(notificationId)
-        console.log("==================== 6")
         expect(removed).to.be.true
     })
     }
