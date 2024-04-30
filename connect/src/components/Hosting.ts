@@ -19,7 +19,9 @@ export default function Hosting({
         <input
             class="input__field"
             value=${email}
+            autofocus
             @input=${(e: any) => changeEmail(e.target.value)}
+            @keydown=${(e: any) => e.key === "Enter" && checkEmail()}
         />
         <div class="buttons">
             <button
@@ -49,14 +51,16 @@ export default function Hosting({
                     value=${password}
                     @input=${(e: any) => changePassword(e.target.value)}
                     type="password"
-                    errortext={passwordError}
-                    error={passwordError}
+                    errortext=${passwordError}
+                    error=${passwordError}
+                    autofocus
+                    @keydown=${(e: any) => e.key === "Enter" && login()}
                 />
                 ${passwordError ? html`<p class="error">${passwordError}</p>` : ""}
                 <div class="buttons">
                     <button
                         class="button button--full button-secondary"
-                        @click=${() => changeState("start")}
+                        @click=${() => setHostingStep(0)}
                     >
                         Back
                     </button>
