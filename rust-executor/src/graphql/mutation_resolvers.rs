@@ -1017,10 +1017,9 @@ impl Mutation {
         &self,
         context: &RequestContext,
         notification: NotificationInput,
-    ) -> FieldResult<bool> {
+    ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        RuntimeService::request_install_notification(notification).await?;
-        Ok(true)
+        Ok(RuntimeService::request_install_notification(notification).await?)
     }
 
     async fn runtime_update_notification(

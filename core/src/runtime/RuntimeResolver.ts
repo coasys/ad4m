@@ -278,8 +278,8 @@ export default class RuntimeResolver {
     @Mutation()
     runtimeRequestInstallNotification(
         @Arg("notification", type => NotificationInput) notification: NotificationInput
-    ): boolean {
-        return true
+    ): string {
+        return "new-notification-id"        
     }
 
     @Query(returns => [Notification])

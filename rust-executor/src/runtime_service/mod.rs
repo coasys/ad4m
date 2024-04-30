@@ -149,13 +149,13 @@ impl RuntimeService {
     }
 
 
-    pub async fn request_install_notification(notification_input: NotificationInput) -> Result<(), String>{
+    pub async fn request_install_notification(notification_input: NotificationInput) -> Result<String, String>{
         let notification_id = Ad4mDb::with_global_instance(|db| {
             db.add_notification(notification_input)
         }).map_err(|e| e.to_string())?;
 
         let notification =Ad4mDb::with_global_instance(|db| {
-             db.get_notification(notification_id)
+             db.get_notification(notification_id.clone())
         }).map_err(|e| e.to_string())?.ok_or("Notification with given id not found")?;
 
         get_global_pubsub()
@@ -166,7 +166,7 @@ impl RuntimeService {
             )
             .await;
 
-        Ok(())
+        Ok(notification_id)
     }
 
     
