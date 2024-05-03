@@ -64,8 +64,8 @@ export class NotificationInput {
     appName: string;
     @Field()
     appUrl: string;
-    @Field({nullable: true})
-    appIconPath?: string;
+    @Field()
+    appIconPath: string;
 
     // This is Prolog query which will be executed on every perspective change.
     // All matched unbound variables will be part of the triggerMatch, i.e.
@@ -101,8 +101,8 @@ export class Notification {
     appName: string;
     @Field()
     appUrl: string;
-    @Field({nullable: true})
-    appIconPath?: string;
+    @Field()
+    appIconPath: string;
 
     // This is Prolog query which will be executed on every perspective change.
     // All matched unbound variables will be part of the triggerMatch, i.e.
@@ -290,6 +290,7 @@ export default class RuntimeResolver {
             description: "Test description",
             appName: "Test app name",
             appUrl: "https://example.com",
+            appIconPath: "https://fluxsocial.io/favicon",
             trigger: "triple(X, ad4m://has_type, flux://message)",
             perspectiveIds: ["u983ud-jdhh38d"],
             webhookUrl: "https://example.com/webhook",
@@ -324,6 +325,7 @@ export default class RuntimeResolver {
             description: "Test description",
             appName: "Test app name",
             appUrl: "https://example.com",
+            appIconPath: "https://fluxsocial.io/favicon",
             trigger: "triple(X, ad4m://has_type, flux://message)",
             perspectiveIds: ["u983ud-jdhh38d"],
             webhookUrl: "https://example.com/webhook",
@@ -343,6 +345,7 @@ export default class RuntimeResolver {
                 description: "Test description",
                 appName: "Test app name",
                 appUrl: "https://example.com",
+                appIconPath: "https://fluxsocial.io/favicon",
                 trigger: "triple(X, ad4m://has_type, flux://message)",
                 perspectiveIds: ["u983ud-jdhh38d"],
                 webhookUrl: "https://example.com/webhook",
