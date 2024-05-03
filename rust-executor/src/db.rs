@@ -169,13 +169,13 @@ impl Ad4mDb {
                 id,
                 false,
                 notification.description,
-                notification.appName,
-                notification.appUrl,
-                notification.appIconPath,
+                notification.app_name,
+                notification.app_url,
+                notification.app_icon_path,
                 notification.trigger,
-                serde_json::to_string(&notification.perspectiveIds).unwrap(),
-                notification.webhookUrl,
-                notification.webhookAuth,
+                serde_json::to_string(&notification.perspective_ids).unwrap(),
+                notification.webhook_url,
+                notification.webhook_auth,
             ],
         )?;
         Ok(id)
@@ -188,13 +188,13 @@ impl Ad4mDb {
                 id: row.get(0)?,
                 granted: row.get(1)?,
                 description: row.get(2)?,
-                appName: row.get(3)?,
-                appUrl: row.get(4)?,
-                appIconPath: row.get(5)?,
+                app_name: row.get(3)?,
+                app_url: row.get(4)?,
+                app_icon_path: row.get(5)?,
                 trigger: row.get(6)?,
                 perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                webhookUrl: row.get(8)?,
-                webhookAuth: row.get(9)?,
+                webhook_url: row.get(8)?,
+                webhook_auth: row.get(9)?,
             })
         })?;
 
@@ -214,13 +214,13 @@ impl Ad4mDb {
                 id: row.get(0)?,
                 granted: row.get(1)?,
                 description: row.get(2)?,
-                appName: row.get(3)?,
-                appUrl: row.get(4)?,
-                appIconPath: row.get(5)?,
+                app_name: row.get(3)?,
+                app_url: row.get(4)?,
+                app_icon_path: row.get(5)?,
                 trigger: row.get(6)?,
                 perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                webhookUrl: row.get(8)?,
-                webhookAuth: row.get(9)?,
+                webhook_url: row.get(8)?,
+                webhook_auth: row.get(9)?,
             }))
         } else {
             Ok(None)
@@ -241,13 +241,13 @@ impl Ad4mDb {
             params![
                 id,
                 updated_notification.description,
-                updated_notification.appName,
-                updated_notification.appUrl,
-                updated_notification.appIconPath,
+                updated_notification.app_name,
+                updated_notification.app_url,
+                updated_notification.app_icon_path,
                 updated_notification.trigger,
                 serde_json::to_string(&updated_notification.perspective_ids).unwrap(),
-                updated_notification.webhookUrl,
-                updated_notification.webhookAuth,
+                updated_notification.webhook_url,
+                updated_notification.webhook_auth,
                 updated_notification.granted,
             ],
         )?;
@@ -988,13 +988,13 @@ fn can_handle_notifications() {
     // Create a test notification
     let notification = NotificationInput {
         description: "Test Description".to_string(),
-        appName: "Test App Name".to_string(),
-        appUrl: "Test App URL".to_string(),
-        appIconPath: Some("Test App Icon Path".to_string()),
+        app_name: "Test App Name".to_string(),
+        app_url: "Test App URL".to_string(),
+        app_icon_path: "Test App Icon Path".to_string(),
         trigger: "Test Trigger".to_string(),
-        perspectiveIds: vec!["Test Perspective ID".to_string()],
-        webhookUrl: "Test Webhook URL".to_string(),
-        webhookAuth: "Test Webhook Auth".to_string(),
+        perspective_ids: vec!["Test Perspective ID".to_string()],
+        webhook_url: "Test Webhook URL".to_string(),
+        webhook_auth: "Test Webhook Auth".to_string(),
     };
 
     // Add the test notification
@@ -1005,26 +1005,26 @@ fn can_handle_notifications() {
     // Ensure the test notification is in the list of notifications and has all properties set
     let test_notification = notifications.iter().find(|n| n.id == notification_id).unwrap();
     assert_eq!(test_notification.description, "Test Description");
-    assert_eq!(test_notification.appName, "Test App Name");
-    assert_eq!(test_notification.appUrl, "Test App URL");
-    assert_eq!(test_notification.appIconPath, Some("Test App Icon Path".to_string()));
+    assert_eq!(test_notification.app_name, "Test App Name");
+    assert_eq!(test_notification.app_url, "Test App URL");
+    assert_eq!(test_notification.app_icon_path, "Test App Icon Path".to_string());
     assert_eq!(test_notification.trigger, "Test Trigger");
     assert_eq!(test_notification.perspective_ids, vec!["Test Perspective ID".to_string()]);
-    assert_eq!(test_notification.webhookUrl, "Test Webhook URL");
-    assert_eq!(test_notification.webhookAuth, "Test Webhook Auth");
+    assert_eq!(test_notification.webhook_url, "Test Webhook URL");
+    assert_eq!(test_notification.webhook_auth, "Test Webhook Auth");
 
     // Modify the test notification
     let updated_notification = Notification {
         id: notification_id.clone(),
         granted: true,
         description: "Update Test Description".to_string(),
-        appName: "Test App Name".to_string(),
-        appUrl: "Test App URL".to_string(),
-        appIconPath: Some("Test App Icon Path".to_string()),
+        app_name: "Test App Name".to_string(),
+        app_url: "Test App URL".to_string(),
+        app_icon_path: "Test App Icon Path".to_string(),
         trigger: "Test Trigger".to_string(),
         perspective_ids: vec!["Test Perspective ID".to_string()],
-        webhookUrl: "Test Webhook URL".to_string(),
-        webhookAuth: "Test Webhook Auth".to_string(),
+        webhook_url: "Test Webhook URL".to_string(),
+        webhook_auth: "Test Webhook Auth".to_string(),
     };
 
     // Update the test notification

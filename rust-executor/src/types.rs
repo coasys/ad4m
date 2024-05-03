@@ -341,17 +341,18 @@ pub struct PerspectiveDiff {
 }
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Notification {
     pub id: String,
     pub granted: bool,
     pub description: String,
-    pub appName: String,
-    pub appUrl: String,
-    pub appIconPath: Option<String>,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: String,
     pub trigger: String,
     pub perspective_ids: Vec<String>,
-    pub webhookUrl: String,
-    pub webhookAuth: String,
+    pub webhook_url: String,
+    pub webhook_auth: String,
 }
 
 impl Notification {
@@ -360,20 +361,21 @@ impl Notification {
             id: id,
             granted: false,
             description: input.description,
-            appName: input.appName,
-            appUrl: input.appUrl,
-            appIconPath: input.appIconPath,
+            app_name: input.app_name,
+            app_url: input.app_url,
+            app_icon_path: input.app_icon_path,
             trigger: input.trigger,
-            perspective_ids: input.perspectiveIds,
-            webhookUrl: input.webhookUrl,
-            webhookAuth: input.webhookAuth,
+            perspective_ids: input.perspective_ids,
+            webhook_url: input.webhook_url,
+            webhook_auth: input.webhook_auth,
         }
     }
 }
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct TriggeredNotification {
     pub notification: Notification,
-    pub perspectiveId: String,
-    pub triggerMatch: String,
+    pub perspective_id: String,
+    pub trigger_match: String,
 }

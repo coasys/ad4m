@@ -496,16 +496,15 @@ pub struct PerspectiveUnsignedInput {
 
 #[derive(GraphQLInputObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-
 pub struct NotificationInput {
     pub description: String,
-    pub appName: String,
-    pub appUrl: String,
-    pub appIconPath: Option<String>,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: String,
     pub trigger: String,
-    pub perspectiveIds: Vec<String>,
-    pub webhookUrl: String,
-    pub webhookAuth: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    pub webhook_auth: String,
 }
 
 
