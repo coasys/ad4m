@@ -21,6 +21,7 @@ const NOTIFICATION_DEFINITION_FIELDS = `
 description
 appName
 appUrl
+appIconPath
 trigger
 perspectiveIds
 webhookUrl
