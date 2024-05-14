@@ -34,9 +34,9 @@ ${NOTIFICATION_DEFINITION_FIELDS}
 `
 
 const TRIGGERED_NOTIFICATION_FIELDS = `
-id
-perspectiveIds
 notification { ${NOTIFICATION_FIELDS} }
+perspectiveId
+triggerMatch
 `
 
 export type MessageCallback = (message: PerspectiveExpression) => null
