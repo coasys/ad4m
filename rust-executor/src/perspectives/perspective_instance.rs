@@ -279,6 +279,20 @@ impl PerspectiveInstance {
         Err(anyhow!("Cannot commit diff. Not yet synced with neighbourhood..."))
     }
 
+    fn spawn_commit_and_handle_error(&self, diff: &PerspectiveDiff) {
+        let self_clone = self.clone();
+        let diff_clone = diff.clone();
+
+        tokio::spawn(async move {
+            if let Err(_) = self_clone.commit(&diff_clone).await {
+                let handle_clone = self_clone.persisted.lock().await.clone();
+                Ad4mDb::with_global_instance(|db| 
+                    db.add_pending_diff(&handle_clone.uuid, &diff_clone)
+                ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
+            }
+        });
+    }
+
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
         let handle = self.persisted.lock().await.clone();
         if !diff.additions.is_empty() {
@@ -373,7 +387,13 @@ impl PerspectiveInstance {
             .expect("Ad4mDb not initialized")
             .add_link(&handle.uuid, &link_expression, &status)?;
 
+
+        let diff = PerspectiveDiff {
+            additions: vec![link_expression.clone()],
+            removals: vec![],
+        };
         let decorated_link_expression = DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
+
         self.set_prolog_rebuild_flag().await;
         self.pubsub_publish_diff(DecoratedPerspectiveDiff {
             additions: vec![decorated_link_expression.clone()], 
@@ -381,32 +401,7 @@ impl PerspectiveInstance {
         }).await;
 
         if status == LinkStatus::Shared {
-            let diff = PerspectiveDiff {
-                additions: vec![link_expression.clone()],
-                removals: vec![],
-            };
-
-            let self_clone = self.clone();
-            let diff_clone = diff.clone();
-            let handle_clone = handle.clone();
-
-            tokio::spawn(async move {
-                match self_clone.commit(&diff_clone).await {
-                    Ok(_) => (),
-                    Err(_) => {
-                        let global_instance = Ad4mDb::global_instance();
-                        let db = global_instance.lock().expect("Couldn't get write lock on Ad4mDb");
-
-                        if let Some(db) = db.as_ref() {
-                            db.add_pending_diff(&handle_clone.uuid, &diff_clone).unwrap_or_else(|e| {
-                                eprintln!("Failed to add pending diff: {}", e);
-                            });
-                        } else {
-                            panic!("Ad4mDb not initialized");
-                        }
-                    }
-                }
-            });
+            self.spawn_commit_and_handle_error(&diff);
         }
 
         Ok(decorated_link_expression)
@@ -421,7 +416,6 @@ impl PerspectiveInstance {
             .collect::<Result<Vec<LinkExpression>, AnyError>>();
 
         let link_expressions = link_expressions?;
-
 
         let decorated_link_expressions = link_expressions.clone().into_iter()
             .map(|l| DecoratedLinkExpression::from((l, status.clone())))
@@ -438,15 +432,9 @@ impl PerspectiveInstance {
             additions: link_expressions.clone(),
             removals: vec![],
         };
-        let add_links_result = self.commit(&diff).await;
 
-        if add_links_result.is_err() {
-            Ad4mDb::global_instance()
-                .lock()
-                .expect("Couldn't get write lock on Ad4mDb")
-                .as_ref()
-                .expect("Ad4mDb not initialized")
-                .add_pending_diff(&uuid, &diff)?;
+        if status == LinkStatus::Shared {
+            self.spawn_commit_and_handle_error(&diff);
         }
 
         Ad4mDb::global_instance()
@@ -498,20 +486,11 @@ impl PerspectiveInstance {
             removals: removals.clone().into_iter().map(|l| DecoratedLinkExpression::from((l, status.clone()))).collect::<Vec<DecoratedLinkExpression>>(),
         };
 
-        self.pubsub_publish_diff(decorated_diff).await;
+        self.pubsub_publish_diff(decorated_diff.clone()).await;
 
-        let mutation_result = self.commit(&diff).await;
-
-        if mutation_result.is_err() {
-            Ad4mDb::global_instance()
-                .lock()
-                .expect("Couldn't get write lock on Ad4mDb")
-                .as_ref()
-                .expect("Ad4mDb not initialized")
-                .add_pending_diff(&handle.uuid, &diff)?;
+        if status == LinkStatus::Shared {
+            self.spawn_commit_and_handle_error(&diff);
         }
-
-        self.set_prolog_rebuild_flag().await;
 
         Ok(decorated_diff)
     }
@@ -548,7 +527,7 @@ impl PerspectiveInstance {
                 .update_link(&handle.uuid, &link, &new_link_expression)?;
 
         let decorated_new_link_expression = DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
-        let decorated_old_link = DecoratedLinkExpression::from((old_link.clone(), link_status));
+        let decorated_old_link = DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
 
         self.set_prolog_rebuild_flag().await;
         get_global_pubsub()
@@ -567,15 +546,8 @@ impl PerspectiveInstance {
             additions: vec![new_link_expression.clone()],
             removals: vec![old_link.clone()],
         };
-        let mutation_result = self.commit(&diff).await;
-
-        if mutation_result.is_err() {
-            Ad4mDb::global_instance()
-                .lock()
-                .expect("Couldn't get lock on Ad4mDb")
-                .as_ref()
-                .expect("Ad4mDb not initialized")
-                .add_pending_diff(&handle.uuid, &diff)?;
+        if link_status == LinkStatus::Shared {
+            self.spawn_commit_and_handle_error(&diff);
         }
 
         Ok(decorated_new_link_expression)
@@ -596,10 +568,9 @@ impl PerspectiveInstance {
                 additions: vec![],
                 removals: vec![link_expression.clone()],
             };
-            let mutation_result = self.commit(&diff).await;
 
-            if mutation_result.is_err() {
-                Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, &diff))?;
+            if status == LinkStatus::Shared {
+                self.spawn_commit_and_handle_error(&diff);
             }
 
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
