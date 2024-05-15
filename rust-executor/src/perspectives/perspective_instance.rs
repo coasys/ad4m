@@ -296,26 +296,19 @@ impl PerspectiveInstance {
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
         let handle = self.persisted.lock().await.clone();
         if !diff.additions.is_empty() {
-            Ad4mDb::global_instance()
-                .lock()
-                .expect("Couldn't get write lock on Ad4mDb")
-                .as_ref()
-                .expect("Ad4mDb not initialized")
-                .add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
-                .expect("Failed to add many links");
+            Ad4mDb::with_global_instance(|db| 
+                db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
+            ).expect("Failed to add many links");
         }
 
         if !diff.removals.is_empty() {
-            for link in &diff.removals {
-                Ad4mDb::global_instance()
-                    .lock()
-                    .expect("Couldn't get write lock on Ad4mDb")
-                    .as_ref()
-                    .expect("Ad4mDb not initialized")
-                    .remove_link(&handle.uuid, link)
-                    .expect("Failed to remove link");
-            }
+            Ad4mDb::with_global_instance(|db| 
+                for link in &diff.removals {
+                    db.remove_link(&handle.uuid, link).expect("Failed to remove link");
+                }
+            );
         }
+
         self.set_prolog_rebuild_flag().await;
         self.pubsub_publish_diff(DecoratedPerspectiveDiff {
             additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(), 
@@ -380,13 +373,9 @@ impl PerspectiveInstance {
 
     pub async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
-        Ad4mDb::global_instance()
-            .lock()
-            .expect("Couldn't get write lock on Ad4mDb")
-            .as_ref()
-            .expect("Ad4mDb not initialized")
-            .add_link(&handle.uuid, &link_expression, &status)?;
-
+        Ad4mDb::with_global_instance(|db|
+            db.add_link(&handle.uuid, &link_expression, &status)
+        )?;
 
         let diff = PerspectiveDiff {
             additions: vec![link_expression.clone()],
@@ -437,12 +426,9 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
 
-        Ad4mDb::global_instance()
-            .lock()
-            .expect("Couldn't get write lock on Ad4mDb")
-            .as_ref()
-            .expect("Ad4mDb not initialized")
-            .add_many_links(&uuid, link_expressions.clone(), &status)?;
+        Ad4mDb::with_global_instance(|db|
+            db.add_many_links(&uuid, link_expressions.clone(), &status)
+        )?;
 
         Ok(decorated_link_expressions)
     }
@@ -458,20 +444,14 @@ impl PerspectiveInstance {
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
 
-        Ad4mDb::global_instance()
-            .lock()
-            .expect("Couldn't get write lock on Ad4mDb")
-            .as_ref()
-            .expect("Ad4mDb not initialized")
-            .add_many_links(&handle.uuid, additions.clone(), &status)?;
+        Ad4mDb::with_global_instance(|db|
+            db.add_many_links(&handle.uuid, additions.clone(), &status)
+        )?;
 
         for link in &removals {
-            Ad4mDb::global_instance()
-                .lock()
-                .expect("Couldn't get write lock on Ad4mDb")
-                .as_ref()
-                .expect("Ad4mDb not initialized")
-                .remove_link(&handle.uuid, link)?;
+            Ad4mDb::with_global_instance(|db|
+                db.remove_link(&handle.uuid, link)
+            )?;
         }
 
         self.set_prolog_rebuild_flag().await;
@@ -497,12 +477,9 @@ impl PerspectiveInstance {
 
     pub async fn update_link(&mut self, old_link: LinkExpression, new_link: Link) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
-        let link_option = Ad4mDb::global_instance()
-            .lock()
-            .expect("Couldn't get lock on Ad4mDb")
-            .as_ref()
-            .expect("Ad4mDb not initialized")
-            .get_link(&handle.uuid, &old_link)?;
+        let link_option = Ad4mDb::with_global_instance(|db|
+            db.get_link(&handle.uuid, &old_link)
+        )?;
 
         let (link, link_status) = match link_option {
             Some(link) => link,
@@ -519,12 +496,9 @@ impl PerspectiveInstance {
 
         let new_link_expression = LinkExpression::from(create_signed_expression(new_link)?);
 
-        Ad4mDb::global_instance()
-                .lock()
-                .expect("Couldn't get write lock on Ad4mDb")
-                .as_ref()
-                .expect("Ad4mDb not initialized")
-                .update_link(&handle.uuid, &link, &new_link_expression)?;
+        Ad4mDb::with_global_instance(|db|
+            db.update_link(&handle.uuid, &link, &new_link_expression)
+        )?;
 
         let decorated_new_link_expression = DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
         let decorated_old_link = DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
