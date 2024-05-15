@@ -953,10 +953,7 @@ impl Mutation {
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-
         std::process::exit(0);
-
-        Ok(true)
     }
 
     async fn runtime_remove_friends(
