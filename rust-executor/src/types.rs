@@ -340,6 +340,29 @@ pub struct PerspectiveDiff {
     pub removals: Vec<LinkExpression>,
 }
 
+impl PerspectiveDiff {
+    pub fn from_additions(additions: Vec<LinkExpression>) -> PerspectiveDiff {
+        PerspectiveDiff {
+            additions,
+            removals: vec![]
+        }
+    }
+
+    pub fn from_removals(removals: Vec<LinkExpression>) -> PerspectiveDiff {
+        PerspectiveDiff {
+            additions: vec![],
+            removals,
+        }
+    }
+
+    pub fn from(additions: Vec<LinkExpression>, removals: Vec<LinkExpression>) -> PerspectiveDiff {
+        PerspectiveDiff {
+            additions,
+            removals,
+        }
+    }
+}
+
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Notification {

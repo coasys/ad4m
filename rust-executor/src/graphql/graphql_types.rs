@@ -309,6 +309,29 @@ pub struct DecoratedPerspectiveDiff {
     pub removals: Vec<DecoratedLinkExpression>,
 }
 
+impl DecoratedPerspectiveDiff {
+    pub fn from_additions(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions,
+            removals: vec![]
+        }
+    }
+
+    pub fn from_removals(removals: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions: vec![],
+            removals,
+        }
+    }
+
+    pub fn from(additions: Vec<DecoratedLinkExpression>, removals: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions,
+            removals,
+        }
+    }
+}
+
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

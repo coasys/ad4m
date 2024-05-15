@@ -309,11 +309,13 @@ impl PerspectiveInstance {
             );
         }
 
-        self.set_prolog_rebuild_flag().await;
-        self.pubsub_publish_diff(DecoratedPerspectiveDiff {
+        let decorated_diff = DecoratedPerspectiveDiff {
             additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(), 
             removals: diff.removals.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect()
-        }).await;
+        };
+
+        self.spawn_prolog_facts_update(decorated_diff.clone());
+        self.pubsub_publish_diff(decorated_diff).await;
     }
 
     pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
@@ -335,10 +337,6 @@ impl PerspectiveInstance {
         let link_expression = create_signed_expression(link)?;
         let link = self.add_link_expression(link_expression.into(), status).await;
         link
-    }
-
-    async fn set_prolog_rebuild_flag(&self) {
-        *self.prolog_needs_rebuild.lock().await = true;
     }
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
@@ -377,21 +375,17 @@ impl PerspectiveInstance {
             db.add_link(&handle.uuid, &link_expression, &status)
         )?;
 
-        let diff = PerspectiveDiff {
-            additions: vec![link_expression.clone()],
-            removals: vec![],
-        };
+        let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
         let decorated_link_expression = DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
+        let decorated_perspective_diff = DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        self.set_prolog_rebuild_flag().await;
-        self.pubsub_publish_diff(DecoratedPerspectiveDiff {
-            additions: vec![decorated_link_expression.clone()], 
-            removals: vec![]
-        }).await;
+        self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
+
+        self.pubsub_publish_diff(decorated_perspective_diff).await;
 
         Ok(decorated_link_expression)
     }
@@ -405,25 +399,18 @@ impl PerspectiveInstance {
             .collect::<Result<Vec<LinkExpression>, AnyError>>();
 
         let link_expressions = link_expressions?;
-
         let decorated_link_expressions = link_expressions.clone().into_iter()
             .map(|l| DecoratedLinkExpression::from((l, status.clone())))
             .collect::<Vec<DecoratedLinkExpression>>();
 
-        self.set_prolog_rebuild_flag().await;
+        let perspective_diff = PerspectiveDiff::from_additions(link_expressions.clone());
+        let decorated_perspective_diff = DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
-        self.pubsub_publish_diff(DecoratedPerspectiveDiff {
-            additions: decorated_link_expressions.clone(), 
-            removals: vec![]
-        }).await;
 
-        let diff = PerspectiveDiff {
-            additions: link_expressions.clone(),
-            removals: vec![],
-        };
-
+        self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
+        self.pubsub_publish_diff(decorated_perspective_diff).await;
         if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&diff);
+            self.spawn_commit_and_handle_error(&perspective_diff);
         }
 
         Ad4mDb::with_global_instance(|db|
@@ -454,18 +441,13 @@ impl PerspectiveInstance {
             )?;
         }
 
-        self.set_prolog_rebuild_flag().await;
-
-        let diff = PerspectiveDiff {
-            additions: additions.clone(),
-            removals: removals.clone()
-        };
-
+        let diff = PerspectiveDiff::from(additions.clone(), removals.clone());
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: additions.into_iter().map(|l| DecoratedLinkExpression::from((l, status.clone()))).collect::<Vec<DecoratedLinkExpression>>(),
             removals: removals.clone().into_iter().map(|l| DecoratedLinkExpression::from((l, status.clone()))).collect::<Vec<DecoratedLinkExpression>>(),
         };
 
+        self.spawn_prolog_facts_update(decorated_diff.clone());
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
@@ -500,10 +482,13 @@ impl PerspectiveInstance {
             db.update_link(&handle.uuid, &link, &new_link_expression)
         )?;
 
+        let diff = PerspectiveDiff::from(vec![new_link_expression.clone()], vec![old_link.clone()]);
         let decorated_new_link_expression = DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
         let decorated_old_link = DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
+        let decorated_diff = DecoratedPerspectiveDiff::from(vec![decorated_new_link_expression.clone()], vec![decorated_old_link.clone()]);
 
-        self.set_prolog_rebuild_flag().await;
+        self.spawn_prolog_facts_update(decorated_diff);
+
         get_global_pubsub()
             .await
             .publish(
@@ -516,10 +501,7 @@ impl PerspectiveInstance {
             )
             .await;
 
-        let diff = PerspectiveDiff {
-            additions: vec![new_link_expression.clone()],
-            removals: vec![old_link.clone()],
-        };
+        
         if link_status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
@@ -531,23 +513,18 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
         if let Some((link_from_db, status)) = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))? {
             Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, &link_expression))?;
+            let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
+            let decorated_link = DecoratedLinkExpression::from((link_from_db, status.clone()));
+            let decorated_diff = DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
-            self.set_prolog_rebuild_flag().await;
-            self.pubsub_publish_diff(DecoratedPerspectiveDiff {
-                additions: vec![], 
-                removals: vec![DecoratedLinkExpression::from((link_expression.clone(), status.clone()))]
-            }).await;
-
-            let diff = PerspectiveDiff {
-                additions: vec![],
-                removals: vec![link_expression.clone()],
-            };
+            self.spawn_prolog_facts_update(decorated_diff.clone());
+            self.pubsub_publish_diff(decorated_diff.clone()).await;
 
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
             }
 
-            Ok(DecoratedLinkExpression::from((link_from_db, status)))
+            Ok(decorated_link)
         } else {
             Err(anyhow!("Link not found"))
         }
@@ -726,28 +703,27 @@ impl PerspectiveInstance {
         Ok(added)
     }
 
-
-    /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
-    pub async fn prolog_query(&mut self, query: String) -> Result<String, AnyError> {
+    async fn ensure_prolog_engine(&self) -> Result<(), AnyError> {
         let mut maybe_prolog_engine = self.prolog_engine.lock().await;
         if maybe_prolog_engine.is_none() {
             let mut engine = PrologEngine::new();
             engine.spawn().await.map_err(|e| anyhow!("Failed to spawn Prolog engine: {}", e))?;
-            *maybe_prolog_engine = Some(engine);
-            self.set_prolog_rebuild_flag().await;
-        }
-
-        let prolog_enging_option_ref = maybe_prolog_engine.as_ref();
-        let prolog_engine = prolog_enging_option_ref.as_ref().expect("Must be some since we initialized the engine above");
-
-        let mut needs_rebuild = self.prolog_needs_rebuild.lock().await;
-
-        if *needs_rebuild {
             let all_links = self.get_links(&LinkQuery::default()).await?;
             let facts = init_engine_facts(all_links, self.persisted.lock().await.neighbourhood.as_ref().map(|n| n.author.clone())).await?;
-            prolog_engine.load_module_string("facts".to_string(), facts).await?;
-            *needs_rebuild = false;
+            engine.load_module_string("facts".to_string(), facts).await?;
+            *maybe_prolog_engine = Some(engine);
         }
+        Ok(())
+    }
+
+
+    /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
+    pub async fn prolog_query(&self, query: String) -> Result<String, AnyError> {
+        self.ensure_prolog_engine().await?;
+    
+        let prolog_engine_mutex = self.prolog_engine.lock().await;
+        let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
+        let prolog_engine = prolog_engine_option_ref.as_ref().expect("Must be some since we initialized the engine above");
 
         let query = if !query.ends_with(".") {
             query + "."
@@ -760,6 +736,35 @@ impl PerspectiveInstance {
         Ok(prolog_resolution_to_string(result))
     }
 
+    fn spawn_prolog_facts_update(&self, diff: DecoratedPerspectiveDiff) {
+        let self_clone = self.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = self_clone.ensure_prolog_engine().await {
+                log::error!("Error spawning Prolog engine: {:?}", e)
+            };
+            
+            match self_clone.update_prolog_engine_facts().await {
+                Ok(()) => self_clone.pubsub_publish_diff(diff).await,
+                Err(e) => log::error!(
+                    "Error while updating Prolog engine facts: {:?}", e
+                )
+            }
+            
+        });
+    }
+
+    async fn update_prolog_engine_facts(&self) -> Result<(), AnyError>{
+        let prolog_engine_mutex = self.prolog_engine.lock().await;
+        let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
+        let prolog_engine = prolog_engine_option_ref.as_ref().expect("Must be some since we initialized the engine above");
+        let all_links = self.get_links(&LinkQuery::default()).await?;
+        let facts = init_engine_facts(all_links, self.persisted.lock().await.neighbourhood.as_ref().map(|n| n.author.clone())).await?;
+        prolog_engine.load_module_string("facts".to_string(), facts).await?;
+
+        Ok(())
+    }
+ 
     async fn no_link_language_error(&self) -> AnyError {
         let handle = self.persisted.lock().await.clone();
         anyhow!("Perspective {} has no link language installed. State is: {:?}", handle.uuid, handle.state)
