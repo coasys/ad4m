@@ -280,6 +280,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 const copiedUpdatedLinkExpression = {...updatedLinkExpression}
 
                 await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
+                await sleep(1000)
                 expect(linkRemoved.calledOnce).to.be.true;
                 expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
             })
