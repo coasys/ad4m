@@ -304,9 +304,9 @@ impl PerspectiveInstance {
         }
         self.set_prolog_rebuild_flag().await;
         self.pubsub_publish_diff(DecoratedPerspectiveDiff {
-            additions: diff.additions.iter().map(|l| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(), 
-            removals: diff.removals.iter().map(|l| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect()
-        });
+            additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(), 
+            removals: diff.removals.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect()
+        }).await;
     }
 
     pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
@@ -376,9 +376,9 @@ impl PerspectiveInstance {
         let decorated_link_expression = DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
         self.set_prolog_rebuild_flag().await;
         self.pubsub_publish_diff(DecoratedPerspectiveDiff {
-            additions: vec![decorated_link_expression], 
+            additions: vec![decorated_link_expression.clone()], 
             removals: vec![]
-        });
+        }).await;
 
         if status == LinkStatus::Shared {
             let diff = PerspectiveDiff {
@@ -430,10 +430,9 @@ impl PerspectiveInstance {
         self.set_prolog_rebuild_flag().await;
 
         self.pubsub_publish_diff(DecoratedPerspectiveDiff {
-            additions: decorated_link_expressions, 
+            additions: decorated_link_expressions.clone(), 
             removals: vec![]
-        });
-
+        }).await;
 
         let diff = PerspectiveDiff {
             additions: link_expressions.clone(),
@@ -591,7 +590,7 @@ impl PerspectiveInstance {
             self.pubsub_publish_diff(DecoratedPerspectiveDiff {
                 additions: vec![], 
                 removals: vec![DecoratedLinkExpression::from((link_expression.clone(), status.clone()))]
-            });
+            }).await;
 
             let diff = PerspectiveDiff {
                 additions: vec![],
