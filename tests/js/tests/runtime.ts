@@ -142,82 +142,81 @@ export default function runtimeTests(testContext: TestContext) {
             expect(runtimeInfo.isInitialized).to.be.true;
         })
 
+        it("can handle notifications", async () => {
+            const ad4mClient = testContext.ad4mClient!
 
-    it("can handle notifications", async () => {
-        const ad4mClient = testContext.ad4mClient!
+            const notification: NotificationInput = {
+                description: "Test Description",
+                appName: "Test App Name",
+                appUrl: "Test App URL",
+                appIconPath: "Test App Icon Path",
+                trigger: "Test Trigger",
+                perspectiveIds: ["Test Perspective ID"],
+                webhookUrl: "Test Webhook URL",
+                webhookAuth: "Test Webhook Auth"
+            }
 
-        const notification: NotificationInput = {
-            description: "Test Description",
-            appName: "Test App Name",
-            appUrl: "Test App URL",
-            appIconPath: "Test App Icon Path",
-            trigger: "Test Trigger",
-            perspectiveIds: ["Test Perspective ID"],
-            webhookUrl: "Test Webhook URL",
-            webhookAuth: "Test Webhook Auth"
-        }
+            // Replace the manual mock function and Promise handling with sinon's stubs
+            const mockFunction = sinon.stub();
 
-        // Replace the manual mock function and Promise handling with sinon's stubs
-        const mockFunction = sinon.stub();
+            // Setup the stub to automatically resolve when called
+            mockFunction.callsFake((requestedNotification: Notification) => {
+                expect(requestedNotification.description).to.equal(notification.description);
+                expect(requestedNotification.appName).to.equal(notification.appName);
+                expect(requestedNotification.appUrl).to.equal(notification.appUrl);
+                expect(requestedNotification.appIconPath).to.equal(notification.appIconPath);
+                expect(requestedNotification.trigger).to.equal(notification.trigger);
+                expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
+                expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
+                expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
+                // Automatically resolve without needing to manually manage a Promise
+                return null;
+            });
 
-        // Setup the stub to automatically resolve when called
-        mockFunction.callsFake((requestedNotification: Notification) => {
-            expect(requestedNotification.description).to.equal(notification.description);
-            expect(requestedNotification.appName).to.equal(notification.appName);
-            expect(requestedNotification.appUrl).to.equal(notification.appUrl);
-            expect(requestedNotification.appIconPath).to.equal(notification.appIconPath);
-            expect(requestedNotification.trigger).to.equal(notification.trigger);
-            expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
-            expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
-            expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
-            // Automatically resolve without needing to manually manage a Promise
-            return null;
-        });
+            await ad4mClient.runtime.addNotificationRequestedCallback(mockFunction);
 
-        await ad4mClient.runtime.addNotificationRequestedCallback(mockFunction);
+            // Request to install a new notification
+            const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
 
-        // Request to install a new notification
-        const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
+            await sleep(2000)
 
-        await sleep(2000)
+            // Use sinon's assertions to wait for the stub to be called
+            await sinon.assert.calledOnce(mockFunction);
+            // Check if the notification is in the list of notifications
+            const notificationsBeforeGrant = await ad4mClient.runtime.notifications()
+            expect(notificationsBeforeGrant.length).to.equal(1)
+            const notificationInList = notificationsBeforeGrant[0]
+            expect(notificationInList).to.exist
+            expect(notificationInList?.granted).to.be.false
 
-        // Use sinon's assertions to wait for the stub to be called
-        await sinon.assert.calledOnce(mockFunction);
-        // Check if the notification is in the list of notifications
-        const notificationsBeforeGrant = await ad4mClient.runtime.notifications()
-        expect(notificationsBeforeGrant.length).to.equal(1)
-        const notificationInList = notificationsBeforeGrant[0]
-        expect(notificationInList).to.exist
-        expect(notificationInList?.granted).to.be.false
+            // Grant the notification
+            const granted = await ad4mClient.runtime.grantNotification(notificationId)
+            expect(granted).to.be.true
 
-        // Grant the notification
-        const granted = await ad4mClient.runtime.grantNotification(notificationId)
-        expect(granted).to.be.true
+            // Check if the notification is updated
+            const updatedNotification: NotificationInput = {
+                description: "Update Test Description",
+                appName: "Test App Name",
+                appUrl: "Test App URL",
+                appIconPath: "Test App Icon Path",
+                trigger: "Test Trigger",
+                perspectiveIds: ["Test Perspective ID"],
+                webhookUrl: "Test Webhook URL",
+                webhookAuth: "Test Webhook Auth"
+            }
+            const updated = await ad4mClient.runtime.updateNotification(notificationId, updatedNotification)
+            expect(updated).to.be.true
 
-        // Check if the notification is updated
-        const updatedNotification: NotificationInput = {
-            description: "Update Test Description",
-            appName: "Test App Name",
-            appUrl: "Test App URL",
-            appIconPath: "Test App Icon Path",
-            trigger: "Test Trigger",
-            perspectiveIds: ["Test Perspective ID"],
-            webhookUrl: "Test Webhook URL",
-            webhookAuth: "Test Webhook Auth"
-        }
-        const updated = await ad4mClient.runtime.updateNotification(notificationId, updatedNotification)
-        expect(updated).to.be.true
+            const updatedNotificationCheck = await ad4mClient.runtime.notifications()
+            const updatedNotificationInList = updatedNotificationCheck.find((n) => n.id === notificationId)
+            expect(updatedNotificationInList).to.exist
+            // after changing a notification it needs to be granted again
+            expect(updatedNotificationInList?.granted).to.be.false
+            expect(updatedNotificationInList?.description).to.equal(updatedNotification.description)
 
-        const updatedNotificationCheck = await ad4mClient.runtime.notifications()
-        const updatedNotificationInList = updatedNotificationCheck.find((n) => n.id === notificationId)
-        expect(updatedNotificationInList).to.exist
-        // after changing a notification it needs to be granted again
-        expect(updatedNotificationInList?.granted).to.be.false
-        expect(updatedNotificationInList?.description).to.equal(updatedNotification.description)
-
-        // Check if the notification is removed
-        const removed = await ad4mClient.runtime.removeNotification(notificationId)
-        expect(removed).to.be.true
-    })
+            // Check if the notification is removed
+            const removed = await ad4mClient.runtime.removeNotification(notificationId)
+            expect(removed).to.be.true
+        })
     }
 }
