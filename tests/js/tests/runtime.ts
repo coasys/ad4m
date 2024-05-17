@@ -1,9 +1,10 @@
 import { TestContext } from './integration.test'
 import fs from "fs";
 import { expect } from "chai";
-import { Notification, NotificationInput } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
+import { Notification, NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
 import sinon from 'sinon';
 import { sleep } from '../utils/utils';
+import { Link } from '@coasys/ad4m';
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
@@ -156,7 +157,6 @@ export default function runtimeTests(testContext: TestContext) {
                 webhookAuth: "Test Webhook Auth"
             }
 
-            // Replace the manual mock function and Promise handling with sinon's stubs
             const mockFunction = sinon.stub();
 
             // Setup the stub to automatically resolve when called
@@ -217,6 +217,58 @@ export default function runtimeTests(testContext: TestContext) {
             // Check if the notification is removed
             const removed = await ad4mClient.runtime.removeNotification(notificationId)
             expect(removed).to.be.true
+        })
+
+        it("can trigger notifications", async () => {
+            const ad4mClient = testContext.ad4mClient!
+
+            let triggerPredicate = "ad4m://notification"
+
+            let notificationPerspective = await ad4mClient.perspective.add("notification test perspective")
+            let otherPerspective = await ad4mClient.perspective.add("other perspective")
+
+            const notification: NotificationInput = {
+                description: "ad4m://notification predicate used",
+                appName: "ADAM tests",
+                appUrl: "Test App URL",
+                appIconPath: "Test App Icon Path",
+                trigger: `triple(Source, "${triggerPredicate}", Target)`,
+                perspectiveIds: [notificationPerspective.uuid],
+                webhookUrl: "Test Webhook URL",
+                webhookAuth: "Test Webhook Auth"
+            }
+
+            // Request to install a new notification
+            const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
+            sleep(1000)
+            // Grant the notification
+            const granted = await ad4mClient.runtime.grantNotification(notificationId)
+            expect(granted).to.be.true
+
+            const mockFunction = sinon.stub();
+            await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
+
+            await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
+            sleep(1000)
+            expect(mockFunction.called).to.be.false
+
+            await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
+            sleep(1000)
+            expect(mockFunction.called).to.be.false
+
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
+            sleep(1000)
+            expect(mockFunction.called).to.be.true
+            let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
+            console.log(triggeredNotification)
+            expect(triggeredNotification.notification.description).to.equal(notification.description)
+            expect(triggeredNotification.triggerMatch).to.equal({Source: "test://source", Target: "test://target1"})
+
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
+            sleep(1000)
+            expect(mockFunction.getCalls.length).to.equal(2)
+            triggeredNotification = mockFunction.getCall(1).args[0] as TriggeredNotification
+            expect(triggeredNotification.triggerMatch).to.equal({Source: "test://source", Target: "test://target2"})
         })
     }
 }
