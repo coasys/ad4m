@@ -159,8 +159,11 @@ export default function runtimeTests(testContext: TestContext) {
 
             const mockFunction = sinon.stub();
 
+            let ignoreRequest = false
+
             // Setup the stub to automatically resolve when called
             mockFunction.callsFake((requestedNotification: Notification) => {
+                if(ignoreRequest) return
                 expect(requestedNotification.description).to.equal(notification.description);
                 expect(requestedNotification.appName).to.equal(notification.appName);
                 expect(requestedNotification.appUrl).to.equal(notification.appUrl);
@@ -182,6 +185,8 @@ export default function runtimeTests(testContext: TestContext) {
 
             // Use sinon's assertions to wait for the stub to be called
             await sinon.assert.calledOnce(mockFunction);
+            ignoreRequest = true;
+            
             // Check if the notification is in the list of notifications
             const notificationsBeforeGrant = await ad4mClient.runtime.notifications()
             expect(notificationsBeforeGrant.length).to.equal(1)
@@ -248,27 +253,42 @@ export default function runtimeTests(testContext: TestContext) {
             const mockFunction = sinon.stub();
             await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
 
+            // Ensuring no false positives
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
-            sleep(1000)
+            await sleep(1000)
             expect(mockFunction.called).to.be.false
 
+            // Ensuring only selected perspectives will trigger
             await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
-            sleep(1000)
+            await sleep(1000)
             expect(mockFunction.called).to.be.false
 
+            // Happy path
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
-            sleep(1000)
+            await sleep(1000)
             expect(mockFunction.called).to.be.true
             let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
-            console.log(triggeredNotification)
             expect(triggeredNotification.notification.description).to.equal(notification.description)
-            expect(triggeredNotification.triggerMatch).to.equal({Source: "test://source", Target: "test://target1"})
+            let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            let match = triggerMatch[0]
+            //@ts-ignore
+            expect(match.Source).to.equal("test://source")
+            //@ts-ignore
+            expect(match.Target).to.equal("test://target1")
 
+            // Ensuring we don't get old data on a new trigger
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
-            sleep(1000)
-            expect(mockFunction.getCalls.length).to.equal(2)
+            await sleep(1000)
+            expect(mockFunction.callCount).to.equal(2)
             triggeredNotification = mockFunction.getCall(1).args[0] as TriggeredNotification
-            expect(triggeredNotification.triggerMatch).to.equal({Source: "test://source", Target: "test://target2"})
+            triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            match = triggerMatch[0]
+            //@ts-ignore
+            expect(match.Source).to.equal("test://source")
+            //@ts-ignore
+            expect(match.Target).to.equal("test://target2")
         })
     }
 }

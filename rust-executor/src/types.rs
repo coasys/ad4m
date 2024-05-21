@@ -363,7 +363,7 @@ impl PerspectiveDiff {
     }
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct Notification {
     pub id: String,

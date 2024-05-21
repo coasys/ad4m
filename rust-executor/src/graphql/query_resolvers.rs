@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
-use crate::{db::Ad4mDb, holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, runtime_service::RuntimeService, types::{DecoratedLinkExpression, Notification}};
+use crate::{db::Ad4mDb, holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string}, runtime_service::RuntimeService, types::{DecoratedLinkExpression, Notification}};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use std::{env};
 use super::graphql_types::*;
@@ -341,10 +341,10 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        Ok(get_perspective(&uuid)
+        Ok(prolog_resolution_to_string(get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
             .prolog_query(query)
-            .await?)
+            .await?))
     }
 
     async fn perspective_snapshot(

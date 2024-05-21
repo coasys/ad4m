@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution};
 use tokio::{join, time};
 use tokio::sync::Mutex;
 use ad4m_client::literal::Literal;
@@ -11,7 +13,7 @@ use crate::agent::create_signed_expression;
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::prolog_service::engine::PrologEngine;
-use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC};
+use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
 use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
 use super::sdna::init_engine_facts;
@@ -49,6 +51,7 @@ pub struct PerspectiveInstance {
     prolog_needs_rebuild: Arc<Mutex<bool>>,
     is_teardown: Arc<Mutex<bool>>,
     sdna_change_mutex: Arc<Mutex<()>>,
+    prolog_update_mutex: Arc<Mutex<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
 }
 
@@ -67,6 +70,7 @@ impl PerspectiveInstance {
             prolog_needs_rebuild: Arc::new(Mutex::new(true)),
             is_teardown: Arc::new(Mutex::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
+            prolog_update_mutex: Arc::new(Mutex::new(())),
             link_language: Arc::new(Mutex::new(None)),
         }
     }
@@ -295,6 +299,7 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
         let handle = self.persisted.lock().await.clone();
+        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         if !diff.additions.is_empty() {
             Ad4mDb::with_global_instance(|db| 
                 db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
@@ -314,7 +319,7 @@ impl PerspectiveInstance {
             removals: diff.removals.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect()
         };
 
-        self.spawn_prolog_facts_update(decorated_diff.clone());
+        self.spawn_prolog_facts_update(notification_snapshot_before, decorated_diff.clone());
         self.pubsub_publish_diff(decorated_diff).await;
     }
 
@@ -370,6 +375,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
+        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         Ad4mDb::with_global_instance(|db|
             db.add_link(&handle.uuid, &link_expression, &status)
@@ -379,7 +385,7 @@ impl PerspectiveInstance {
         let decorated_link_expression = DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
         let decorated_perspective_diff = DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
+        self.spawn_prolog_facts_update(notification_snapshot_before, decorated_perspective_diff.clone());
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
@@ -392,6 +398,7 @@ impl PerspectiveInstance {
 
 
     pub async fn add_links(&mut self, links: Vec<Link>, status: LinkStatus) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let uuid = handle.uuid.clone();
         let link_expressions = links.into_iter()
@@ -406,21 +413,21 @@ impl PerspectiveInstance {
         let perspective_diff = PerspectiveDiff::from_additions(link_expressions.clone());
         let decorated_perspective_diff = DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
+        Ad4mDb::with_global_instance(|db|
+            db.add_many_links(&uuid, link_expressions.clone(), &status)
+        )?;
 
-        self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
+        self.spawn_prolog_facts_update(notification_snapshot_before, decorated_perspective_diff.clone());
         self.pubsub_publish_diff(decorated_perspective_diff).await;
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&perspective_diff);
         }
 
-        Ad4mDb::with_global_instance(|db|
-            db.add_many_links(&uuid, link_expressions.clone(), &status)
-        )?;
-
         Ok(decorated_link_expressions)
     }
 
     pub async fn link_mutations(&mut self, mutations: LinkMutations, status: LinkStatus) -> Result<DecoratedPerspectiveDiff, AnyError> {
+        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let additions = mutations.additions.into_iter()
             .map(Link::from)
@@ -447,7 +454,7 @@ impl PerspectiveInstance {
             removals: removals.clone().into_iter().map(|l| DecoratedLinkExpression::from((l, status.clone()))).collect::<Vec<DecoratedLinkExpression>>(),
         };
 
-        self.spawn_prolog_facts_update(decorated_diff.clone());
+        self.spawn_prolog_facts_update(notification_snapshot_before, decorated_diff.clone());
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
@@ -458,6 +465,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn update_link(&mut self, old_link: LinkExpression, new_link: Link) -> Result<DecoratedLinkExpression, AnyError> {
+        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let link_option = Ad4mDb::with_global_instance(|db|
             db.get_link(&handle.uuid, &old_link)
@@ -487,7 +495,7 @@ impl PerspectiveInstance {
         let decorated_old_link = DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
         let decorated_diff = DecoratedPerspectiveDiff::from(vec![decorated_new_link_expression.clone()], vec![decorated_old_link.clone()]);
 
-        self.spawn_prolog_facts_update(decorated_diff);
+        self.spawn_prolog_facts_update(notification_snapshot_before, decorated_diff);
 
         get_global_pubsub()
             .await
@@ -512,12 +520,13 @@ impl PerspectiveInstance {
     pub async fn remove_link(&mut self, link_expression: LinkExpression) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
         if let Some((link_from_db, status)) = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))? {
+            let notification_snapshot_before = self.notification_trigger_snapshot().await;
             Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, &link_expression))?;
             let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
             let decorated_link = DecoratedLinkExpression::from((link_from_db, status.clone()));
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
-            self.spawn_prolog_facts_update(decorated_diff.clone());
+            self.spawn_prolog_facts_update(notification_snapshot_before, decorated_diff.clone());
             self.pubsub_publish_diff(decorated_diff.clone()).await;
 
             if status == LinkStatus::Shared {
@@ -718,7 +727,7 @@ impl PerspectiveInstance {
 
 
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
-    pub async fn prolog_query(&self, query: String) -> Result<String, AnyError> {
+    pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
         self.ensure_prolog_engine().await?;
     
         let prolog_engine_mutex = self.prolog_engine.lock().await;
@@ -731,27 +740,115 @@ impl PerspectiveInstance {
             query
         };
 
-        let result = prolog_engine
-            .run_query(query).await?.map_err(|e| anyhow!(e))?;
-        Ok(prolog_resolution_to_string(result))
+        prolog_engine
+            .run_query(query)
+            .await?
+            .map_err(|e| anyhow!(e))
     }
 
-    fn spawn_prolog_facts_update(&self, diff: DecoratedPerspectiveDiff) {
+    fn spawn_prolog_facts_update(&self, before: BTreeMap<Notification, Vec<QueryMatch>>, diff: DecoratedPerspectiveDiff) {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
+            let uuid = self_clone.persisted.lock().await.uuid.clone();
+            
             if let Err(e) = self_clone.ensure_prolog_engine().await {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
-            
-            match self_clone.update_prolog_engine_facts().await {
-                Ok(()) => self_clone.pubsub_publish_diff(diff).await,
-                Err(e) => log::error!(
+
+            println!("Prolog update with diff: {:?}", diff);
+            println!("Before notification matches: {:?}", before);
+
+            if let Err(e) = self_clone.update_prolog_engine_facts().await {
+                log::error!(
                     "Error while updating Prolog engine facts: {:?}", e
-                )
+                );
+            } else {
+                self_clone.pubsub_publish_diff(diff).await;
+
+                let after =  self_clone.notification_trigger_snapshot().await;
+
+                println!("After notification matches: {:?}", before);
+
+                if !before.is_empty() || !after.is_empty() {
+                    println!("\nBefore matches: {:?}\n", before);
+                    println!("\nAfter matches: {:?}\n", after);
+                }
+
+                if before != after {
+                    println!("DIFFERENT!");
+                }
+
+                let new_matches = Self::subtract_before_notification_matches(before, after);
+
+                println!("new_matches: {:?}", new_matches);
+                
+                Self::publish_notification_matches(uuid, new_matches).await;
             }
-            
         });
+    }
+
+    fn all_notifications_for_perspective_id(uuid: String) -> Result<Vec<Notification>, AnyError> {
+        Ok(Ad4mDb::with_global_instance(|db| {
+            db.get_notifications()
+        })?
+            .into_iter()
+            .filter(|n| n.perspective_ids.contains(&uuid))
+            .collect())
+    }
+
+    async fn calc_notification_trigger_matches(&self) -> Result<BTreeMap<Notification, Vec<QueryMatch>>, AnyError> {
+        let uuid = self.persisted.lock().await.uuid.clone();
+        let notifications = Self::all_notifications_for_perspective_id(uuid)?;
+        let mut result_map = BTreeMap::new();
+        for n in notifications {
+            if let QueryResolution::Matches(matches) = self.prolog_query(n.trigger.clone()).await? {
+                println!("calc_notification_trigger_matches: matches {:?}", matches);
+                result_map.insert(n.clone(), matches);
+            }
+        }
+
+        Ok(result_map)
+    }
+
+    async fn notification_trigger_snapshot(&self) -> BTreeMap<Notification, Vec<QueryMatch>> {
+        self.calc_notification_trigger_matches().await.unwrap_or_else(|e| {
+            log::error!("Error trying to render notification matches: {:?}", e);
+            BTreeMap::new()
+        })
+    }
+
+    fn subtract_before_notification_matches(
+        before: BTreeMap<Notification, Vec<QueryMatch>>,
+        after: BTreeMap<Notification, Vec<QueryMatch>>,
+    ) -> BTreeMap<Notification, Vec<QueryMatch>> {
+        after
+            .into_iter()
+            .map(|(notification, mut matches)| {
+                if let Some(old_matches) = before.get(&notification) {
+                    matches = matches.into_iter().filter(|m| !old_matches.contains(m)).collect();
+                }
+                (notification, matches)
+            })
+            .collect()
+    }
+
+    async fn publish_notification_matches(uuid: String, match_map: BTreeMap<Notification, Vec<QueryMatch>>) {
+        for (notification, matches) in match_map {
+            let payload = TriggeredNotification {
+                notification: notification.clone(),
+                perspective_id: uuid.clone(),
+                trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches))
+            };
+
+            get_global_pubsub()
+                .await
+                .publish(
+                    &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+                    &serde_json::to_string(&payload).unwrap(),
+                )
+                .await;
+        }
     }
 
     async fn update_prolog_engine_facts(&self) -> Result<(), AnyError>{
@@ -1062,6 +1159,7 @@ mod tests {
 
 
     }
+
 
     // Additional tests for updateLink, removeLink, syncWithSharingAdapter, etc. would go here
     // following the same pattern as above.
