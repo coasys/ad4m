@@ -6,6 +6,7 @@ use std::{env};
 use super::graphql_types::*;
 
 use crate::{agent::{capabilities::*, signatures}};
+use std::time::Instant;
 
 pub struct Query;
 
@@ -319,15 +320,19 @@ impl Query {
         query: LinkQuery,
         uuid: String,
     ) -> FieldResult<Vec<DecoratedLinkExpression>> {
+        let start = Instant::now();
         check_capability(
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        Ok(get_perspective(&uuid)
+        let result = get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
             .get_links(&query)
-            .await?)
+            .await?;
+
+        log::info!("Profiling: query perspective_query_links took {:?}", start.elapsed());
+        Ok(result)
     }
 
     async fn perspective_query_prolog(
@@ -336,15 +341,19 @@ impl Query {
         query: String,
         uuid: String,
     ) -> FieldResult<String> {
+        let start = Instant::now();
         check_capability(
             &context.capabilities,
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        Ok(prolog_resolution_to_string(get_perspective(&uuid)
+        let result = prolog_resolution_to_string(get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
             .prolog_query(query)
-            .await?))
+            .await?);
+
+            log::info!("Profiling: query perspective_query_prolog took {:?}", start.elapsed());
+            Ok(result)
     }
 
     async fn perspective_snapshot(

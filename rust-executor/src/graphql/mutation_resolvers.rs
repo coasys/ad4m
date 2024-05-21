@@ -7,6 +7,7 @@ use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
 
 use super::graphql_types::*;
 use crate::{agent::{self, capabilities::*, AgentService}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key}, holochain_service::{agent_infos_from_str, get_holochain_service}, pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC}};
+use std::time::Instant;
 
 pub struct Mutation;
 
@@ -690,18 +691,22 @@ impl Mutation {
         uuid: String,
         status: Option<String>,
     ) -> FieldResult<Vec<DecoratedLinkExpression>> {
+        let start = Instant::now();
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective.add_links(
+        let result = perspective.add_links(
             links
                 .into_iter()
                 .map(|l| l.into())
                 .collect(),
             link_status_from_input(status)?
-        ).await?)
+        ).await?;
+
+        log::info!("Profiling: mutation perspective_add_links took {:?}", start.elapsed());
+        Ok(result)
     }
 
     async fn perspective_link_mutations(

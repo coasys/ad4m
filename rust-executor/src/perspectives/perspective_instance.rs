@@ -19,7 +19,7 @@ use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, Lin
 use super::sdna::init_engine_facts;
 use super::update_perspective;
 use super::utils::prolog_resolution_to_string;
-
+use std::time::Instant;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum SdnaType {
@@ -375,6 +375,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn add_link_expression(&mut self, link_expression: LinkExpression, status: LinkStatus) -> Result<DecoratedLinkExpression, AnyError> {
+        let start = Instant::now();
         let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         Ad4mDb::with_global_instance(|db|
@@ -393,11 +394,13 @@ impl PerspectiveInstance {
 
         self.pubsub_publish_diff(decorated_perspective_diff).await;
 
+        log::info!("Profiling: add_link_expression took {:?}", start.elapsed());
         Ok(decorated_link_expression)
     }
 
 
     pub async fn add_links(&mut self, links: Vec<Link>, status: LinkStatus) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        let start = Instant::now();
         let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let uuid = handle.uuid.clone();
@@ -423,10 +426,12 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&perspective_diff);
         }
 
+        log::info!("Profiling: add_links took {:?}", start.elapsed());
         Ok(decorated_link_expressions)
     }
 
     pub async fn link_mutations(&mut self, mutations: LinkMutations, status: LinkStatus) -> Result<DecoratedPerspectiveDiff, AnyError> {
+        let start = Instant::now();
         let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let additions = mutations.additions.into_iter()
@@ -461,10 +466,12 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
 
+        log::info!("Profiling: link_mutations took {:?}", start.elapsed());
         Ok(decorated_diff)
     }
 
     pub async fn update_link(&mut self, old_link: LinkExpression, new_link: Link) -> Result<DecoratedLinkExpression, AnyError> {
+        let start = Instant::now();
         let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let link_option = Ad4mDb::with_global_instance(|db|
@@ -514,10 +521,12 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
 
+        log::info!("Profiling: update_link took {:?}", start.elapsed());
         Ok(decorated_new_link_expression)
     }
 
     pub async fn remove_link(&mut self, link_expression: LinkExpression) -> Result<DecoratedLinkExpression, AnyError> {
+        let start = Instant::now();
         let handle = self.persisted.lock().await.clone();
         if let Some((link_from_db, status)) = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))? {
             let notification_snapshot_before = self.notification_trigger_snapshot().await;
@@ -533,6 +542,7 @@ impl PerspectiveInstance {
                 self.spawn_commit_and_handle_error(&diff);
             }
 
+            log::info!("Profiling: remove_link took {:?}", start.elapsed());
             Ok(decorated_link)
         } else {
             Err(anyhow!("Link not found"))
@@ -618,6 +628,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        let start = Instant::now();
         let mut reverse = false;
         let mut query = q.clone();
 
@@ -651,12 +662,16 @@ impl PerspectiveInstance {
             links = links[..limit as usize].to_vec();
         }
 
-        Ok(links
+        let result = links
             .into_iter()
             .map(|(link, status)| {
                 DecoratedLinkExpression::from((link.clone(), status)).into()
             })
-            .collect())
+            .collect();
+
+        log::info!("Profiling: get_links took {:?}", start.elapsed());
+
+        Ok(result)
     }
 
 
@@ -728,6 +743,7 @@ impl PerspectiveInstance {
 
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
+        let start = Instant::now();
         self.ensure_prolog_engine().await?;
     
         let prolog_engine_mutex = self.prolog_engine.lock().await;
@@ -740,16 +756,20 @@ impl PerspectiveInstance {
             query
         };
 
-        prolog_engine
+        let result = prolog_engine
             .run_query(query)
             .await?
-            .map_err(|e| anyhow!(e))
+            .map_err(|e| anyhow!(e));
+
+        log::info!("Profiling: get_links took {:?}", start.elapsed());
+        result
     }
 
     fn spawn_prolog_facts_update(&self, before: BTreeMap<Notification, Vec<QueryMatch>>, diff: DecoratedPerspectiveDiff) {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
+            let start = Instant::now();
             let uuid = self_clone.persisted.lock().await.uuid.clone();
             
             if let Err(e) = self_clone.ensure_prolog_engine().await {
@@ -765,6 +785,7 @@ impl PerspectiveInstance {
                 let after =  self_clone.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(before, after);                
                 Self::publish_notification_matches(uuid, new_matches).await;
+                log::info!("Profiling: spawned prolog update task took {:?}", start.elapsed());
             }
         });
     }
@@ -832,12 +853,14 @@ impl PerspectiveInstance {
     }
 
     async fn update_prolog_engine_facts(&self) -> Result<(), AnyError>{
+        let start = Instant::now();
         let prolog_engine_mutex = self.prolog_engine.lock().await;
         let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
         let prolog_engine = prolog_engine_option_ref.as_ref().expect("Must be some since we initialized the engine above");
         let all_links = self.get_links(&LinkQuery::default()).await?;
         let facts = init_engine_facts(all_links, self.persisted.lock().await.neighbourhood.as_ref().map(|n| n.author.clone())).await?;
         prolog_engine.load_module_string("facts".to_string(), facts).await?;
+        log::info!("Profiling: update_prolog_engine_facts took {:?}", start.elapsed());
 
         Ok(())
     }
