@@ -756,33 +756,14 @@ impl PerspectiveInstance {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
 
-            println!("Prolog update with diff: {:?}", diff);
-            println!("Before notification matches: {:?}", before);
-
             if let Err(e) = self_clone.update_prolog_engine_facts().await {
                 log::error!(
                     "Error while updating Prolog engine facts: {:?}", e
                 );
             } else {
                 self_clone.pubsub_publish_diff(diff).await;
-
                 let after =  self_clone.notification_trigger_snapshot().await;
-
-                println!("After notification matches: {:?}", before);
-
-                if !before.is_empty() || !after.is_empty() {
-                    println!("\nBefore matches: {:?}\n", before);
-                    println!("\nAfter matches: {:?}\n", after);
-                }
-
-                if before != after {
-                    println!("DIFFERENT!");
-                }
-
-                let new_matches = Self::subtract_before_notification_matches(before, after);
-
-                println!("new_matches: {:?}", new_matches);
-                
+                let new_matches = Self::subtract_before_notification_matches(before, after);                
                 Self::publish_notification_matches(uuid, new_matches).await;
             }
         });
@@ -803,7 +784,6 @@ impl PerspectiveInstance {
         let mut result_map = BTreeMap::new();
         for n in notifications {
             if let QueryResolution::Matches(matches) = self.prolog_query(n.trigger.clone()).await? {
-                println!("calc_notification_trigger_matches: matches {:?}", matches);
                 result_map.insert(n.clone(), matches);
             }
         }
