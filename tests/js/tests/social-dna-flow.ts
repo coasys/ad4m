@@ -1,6 +1,7 @@
 import { Link, LinkQuery, Literal } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { expect } from "chai";
+import { sleep } from "../utils/utils";
 
 export default function socialDNATests(testContext: TestContext) {
     return  () => {
@@ -66,6 +67,7 @@ export default function socialDNATests(testContext: TestContext) {
 
 
                 await perspective.runFlowAction('TODO', 'test-lang://1234', "Start")
+                await sleep(100)
                 todoState = await perspective.flowState('TODO', 'test-lang://1234')
                 expect(todoState).to.be.equal(0.5)
 
@@ -84,6 +86,7 @@ export default function socialDNATests(testContext: TestContext) {
 
 
                 await perspective.runFlowAction('TODO', 'test-lang://1234', "Finish")
+                await sleep(100)
                 todoState = await perspective.flowState('TODO', 'test-lang://1234')
                 expect(todoState).to.be.equal(1)
 
