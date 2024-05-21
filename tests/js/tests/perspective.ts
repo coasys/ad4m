@@ -10,6 +10,8 @@ export default function perspectiveTests(testContext: TestContext) {
             it('can create, get & delete perspective', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
+                let perspectiveCount = (await ad4mClient.perspective.all()).length
+
                 const create = await ad4mClient.perspective.add("test");
                 expect(create.name).to.equal("test");
 
@@ -23,7 +25,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(getUpdated!.name).to.equal("updated-test");
 
                 const perspectives = await ad4mClient.perspective.all();
-                expect(perspectives.length).to.equal(1);
+                expect(perspectives.length).to.equal(perspectiveCount + 1);
 
                 const perspectiveSnaphot = await ad4mClient.perspective.snapshotByUUID(update.uuid );
                 expect(perspectiveSnaphot!.links.length).to.equal(0);
