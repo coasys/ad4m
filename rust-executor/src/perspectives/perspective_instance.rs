@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use serde_json::Value;
 use tokio::{join, time};
 use tokio::sync::Mutex;
 use ad4m_client::literal::Literal;
@@ -61,7 +62,7 @@ pub struct Command {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Parameter {
     name: String,
-    value: String,
+    value: serde_json::Value,
 }
 
 
@@ -964,6 +965,13 @@ impl PerspectiveInstance {
 
 
     pub async fn execute_commands(&mut self, commands: Vec<Command>, expression: String, parameters: Vec<Parameter>) -> Result<(), AnyError> {
+        let jsvalue_to_string = |value: &Value| -> String {
+            match value {
+                serde_json::Value::String(s) => s.clone(),
+                _ => value.to_string(),
+            }
+        };
+
         let replace_this = |input: Option<String>| -> Option<String> {
             if Some(String::from("this")) == input {
                 Some(expression.clone())
@@ -975,7 +983,7 @@ impl PerspectiveInstance {
         let replace_parameters = |input: Option<String>| -> Option<String> {
             if let Some(mut output) = input {
                 for parameter in &parameters {
-                    output = output.replace(&parameter.name, &parameter.value);
+                    output = output.replace(&parameter.name, &jsvalue_to_string(&parameter.value));
                 }
                 Some(output)
             } else {
@@ -991,6 +999,8 @@ impl PerspectiveInstance {
                 .ok_or_else(|| anyhow!("Source cannot be None"))?;
             let local = command.local.unwrap_or(false);
             let status = if local { LinkStatus::Local } else { LinkStatus::Shared };
+
+            let values = parameters.iter().map(|p| p.value.to_string()).collect::<Vec<String>>().join(", ");
     
             match command.action {
                 Action::AddLink => {
@@ -1039,7 +1049,7 @@ impl PerspectiveInstance {
                         parameters.iter().map(|p| Link{
                             source: source.clone(), 
                             predicate: predicate.clone(), 
-                            target: p.value.clone()
+                            target: jsvalue_to_string(&p.value)
                         }).collect(), 
                         status
                     ).await?;
