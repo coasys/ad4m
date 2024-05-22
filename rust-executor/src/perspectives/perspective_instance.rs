@@ -37,6 +37,34 @@ impl SdnaType {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub enum Action {
+    #[serde(rename = "addLink")]
+    AddLink,
+    #[serde(rename = "removeLink")]
+    RemoveLink,
+    #[serde(rename = "setSingleTarget")]
+    SetSingleTarget,
+    #[serde(rename = "collectionSetter")]
+    CollectionSetter,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct Command {
+    source: Option<String>,
+    predicate: Option<String>,
+    target: Option<String>,
+    local: Option<bool>,
+    action: Action,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct Parameter {
+    name: String,
+    value: String,
+}
+
+
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
@@ -934,6 +962,93 @@ impl PerspectiveInstance {
         }
     }
 
+
+    pub async fn execute_commands(&mut self, commands: Vec<Command>, expression: String, parameters: Vec<Parameter>) -> Result<(), AnyError> {
+        let replace_this = |input: Option<String>| -> Option<String> {
+            if Some(String::from("this")) == input {
+                Some(expression.clone())
+            } else {
+                input
+            }
+        };
+    
+        let replace_parameters = |input: Option<String>| -> Option<String> {
+            if let Some(mut output) = input {
+                for parameter in &parameters {
+                    output = output.replace(&parameter.name, &parameter.value);
+                }
+                Some(output)
+            } else {
+                input
+            }
+        };
+    
+        for command in commands {
+            let source = replace_this(replace_parameters(command.source))
+                .ok_or_else(|| anyhow!("Source cannot be None"))?;
+            let predicate = replace_this(replace_parameters(command.predicate));
+            let target = (replace_parameters(command.target)) 
+                .ok_or_else(|| anyhow!("Source cannot be None"))?;
+            let local = command.local.unwrap_or(false);
+            let status = if local { LinkStatus::Local } else { LinkStatus::Shared };
+    
+            match command.action {
+                Action::AddLink => {
+                    self.add_link(Link{ source, predicate, target }, status).await?;
+                }
+                Action::RemoveLink => {
+                    let link_expressions = self.get_links(&LinkQuery{
+                        source:Some(source), 
+                        predicate, 
+                        target: Some(target), 
+                        from_date: None, 
+                        until_date: None, 
+                        limit: None
+                    }).await?;
+                    for link_expression in link_expressions {
+                        self.remove_link(link_expression.into()).await?;
+                    }
+                }
+                Action::SetSingleTarget => {
+                    let link_expressions = self.get_links(&LinkQuery{
+                        source:Some(source.clone()), 
+                        predicate: predicate.clone(), 
+                        target: None,
+                        from_date: None, 
+                        until_date: None, 
+                        limit: None
+                    }).await?;
+                    for link_expression in link_expressions {
+                        self.remove_link(link_expression.into()).await?;
+                    }
+                    self.add_link(Link{ source, predicate, target }, status).await?;
+                }
+                Action::CollectionSetter => {
+                    let link_expressions = self.get_links(&LinkQuery{
+                        source:Some(source.clone()), 
+                        predicate: predicate.clone(), 
+                        target: None,
+                        from_date: None, 
+                        until_date: None, 
+                        limit: None
+                    }).await?;
+                    for link_expression in link_expressions {
+                        self.remove_link(link_expression.into()).await?;
+                    }
+                    self.add_links(
+                        parameters.iter().map(|p| Link{
+                            source: source.clone(), 
+                            predicate: predicate.clone(), 
+                            target: p.value.clone()
+                        }).collect(), 
+                        status
+                    ).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 
 }
 

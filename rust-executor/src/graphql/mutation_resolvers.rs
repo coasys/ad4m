@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use crate::runtime_service::{self, RuntimeService};
+use crate::{perspectives::perspective_instance::{Command, Parameter}, runtime_service::{self, RuntimeService}};
 use ad4m_client::literal::Literal;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
 use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
@@ -830,6 +830,39 @@ impl Mutation {
                 graphql_value!({ "invalid_sdna_type": sdna_type })
             ))?;
         perspective.add_sdna(name, sdna_code, sdna_type).await?;
+        Ok(true)
+    }
+
+    async fn perspective_execute_commands(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        commands: String,
+        expression: String,
+        parameters: Option<String>,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+        
+        let commands: Vec<Command> = serde_json::from_str(&commands)
+            .map_err(|e| FieldError::new(
+                e,
+                graphql_value!({ "invalid_commands": commands })
+            ))?;
+        let parameters: Vec<Parameter> = if let Some(p) = parameters {
+            serde_json::from_str(&p)
+                .map_err(|e| FieldError::new(
+                    e,
+                    graphql_value!({ "invalid_parameters": p })
+                ))?
+        } else {
+            Vec::new()
+        };
+
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        perspective.execute_commands(commands, expression, parameters).await?;
         Ok(true)
     }
 

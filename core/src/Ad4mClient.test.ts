@@ -792,6 +792,16 @@ describe('Ad4mClient', () => {
             const r = await ad4mClient.perspective.addSdna('00001', "Test", 'subject_class("Test", test)', 'subject_class');
             expect(r).toBeTruthy()
         })
+
+        it('executeCommands() smoke test', async () => {
+            const result = await ad4mClient.perspective.executeCommands(
+                '00001', 
+                'command1; command2', 
+                'expression1', 
+                'param1, param2'
+            );
+            expect(result).toBeTruthy();
+        })
     })
 
     describe('.runtime', () => {

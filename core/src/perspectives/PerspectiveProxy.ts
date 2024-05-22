@@ -66,55 +66,7 @@ export class PerspectiveProxy {
     }
 
     async executeAction(actions, expression, parameters: Parameter[]) {
-        const replaceThis = (input: string|undefined) => {
-            if(input) {
-                if (input === 'this') {
-                    return expression
-                } else {
-                    return input
-                }
-            } else {
-                return undefined
-            }
-        }
-
-        const replaceParameters = (input: string|undefined) => {
-            if(parameters) {
-                let output = input
-                for(const parameter of parameters) {
-                    output = output.replace(parameter.name, parameter.value)
-                }
-                return output
-            } else
-                return input
-        }
-
-        for(let command of actions) {
-            let source = replaceThis(replaceParameters(command.source))
-            let predicate = replaceThis(replaceParameters(command.predicate))
-            let target = replaceThis(replaceParameters(command.target))
-            let local = command?.local ?? false
-
-            switch(command.action) {
-                case 'addLink':
-                    await this.add(new Link({source, predicate, target}), local ? 'local' : 'shared')
-                    break;
-                case 'removeLink':
-                    const linkExpressions = await this.get(new LinkQuery({source, predicate, target}))
-                    for (const linkExpression of linkExpressions) {
-                        await this.remove(linkExpression)
-                    }
-                    break;
-                case 'setSingleTarget':
-                    await this.setSingleTarget(new Link({source, predicate, target}), local ? 'local' : 'shared')
-                    break;
-                case 'collectionSetter':
-                    const links = await this.get(new LinkQuery({ source, predicate }))
-                    await this.removeLinks(links);
-                    await this.addLinks(parameters.map(p => new Link({source, predicate, target: p.value})), local ? 'local' : 'shared')
-                    break;
-            }
-        }
+        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters))
     }
 
     /** Returns all the links of this perspective that matches the LinkQuery */
