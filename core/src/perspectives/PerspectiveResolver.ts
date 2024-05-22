@@ -192,7 +192,7 @@ export default class PerspectiveResolver {
         @Arg('uuid') uuid: string, 
         @Arg('commands') commands: string, 
         @Arg('expression') expression: string, 
-        @Arg('parameters') parameters: string
+        @Arg('parameters', type => String, {nullable: true}) parameters: string
     ): Boolean {
         return true
     }
