@@ -118,7 +118,6 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
   }
 
   async getData(id: string): Promise<SubjectClass | string | null> {
-    await this.ensureSubject();
     const entry = await this.get(id);
     if (entry) {
       // @ts-ignore
