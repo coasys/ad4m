@@ -5,7 +5,7 @@ use coasys_juniper::FieldResult;
 use std::pin::Pin;
 
 use crate::{pubsub::{
-    get_global_pubsub, subscribe_and_process, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC, RUNTIME_INSTALL_NOTIFICATION_REQUESTED_TOPIC, RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC
+    get_global_pubsub, subscribe_and_process, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC, RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC
 }, types::{DecoratedLinkExpression, Notification, TriggeredNotification}};
 
 use super::graphql_types::*;
@@ -226,21 +226,6 @@ impl Subscription {
                 let pubsub = get_global_pubsub().await;
                 let topic = &RUNTIME_MESSAGED_RECEIVED_TOPIC;
                 subscribe_and_process::<PerspectiveExpression>(pubsub, topic.to_string(), None)
-                    .await
-            }
-        }
-    }
-
-    async fn runtime_notification_requested(
-        &self,
-        context: &RequestContext,
-    ) -> Pin<Box<dyn Stream<Item = FieldResult<Notification>> + Send>> {
-        match check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
-            Ok(_) => {
-                let pubsub = get_global_pubsub().await;
-                let topic = &RUNTIME_INSTALL_NOTIFICATION_REQUESTED_TOPIC;
-                subscribe_and_process::<Notification>(pubsub, topic.to_string(), None)
                     .await
             }
         }
