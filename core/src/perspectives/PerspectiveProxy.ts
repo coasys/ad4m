@@ -316,14 +316,17 @@ export class PerspectiveProxy {
      * @param exprAddr The address of the expression to be turned into a subject instance
      */
     async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
-        let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
-        if(!result.length) {
-            throw "No constructor found for given subject class: " + className
+        let className: string;
+
+        if(typeof subjectClass === "string") {
+            className = subjectClass
+
+            await this.#client.createSubject(this.#handle.uuid, JSON.stringify({className}), exprAddr);
+        } else {
+            let query = this.buildQueryFromTemplate(subjectClass as object)
+            await this.#client.createSubject(this.#handle.uuid, JSON.stringify({query}), exprAddr);
         }
 
-        let actions = result.map(x => eval(x.Actions))
-        await this.executeAction(actions[0], exprAddr, undefined)
         return this.getSubjectProxy(exprAddr, subjectClass)
     }
 
@@ -420,18 +423,7 @@ export class PerspectiveProxy {
     }
 
 
-    /** Returns all subject classes that match the given template object.
-     * This function looks at the properties of the template object and
-     * its setters and collections to create a Prolog query that finds
-     * all subject classes that would be converted to a proxy object
-     * with exactly the same properties and collections.
-     *
-     * Since there could be multiple subject classes that match the given
-     * criteria, this function returns a list of class names.
-     *
-     * @param obj The template object
-     */
-    async subjectClassesByTemplate(obj: object): Promise<string[]> {
+    private buildQueryFromTemplate(obj: object): string {
         // Collect all string properties of the object in a list
         let properties = []
 
@@ -502,6 +494,23 @@ export class PerspectiveProxy {
 
 
         query += "."
+
+        return query;
+    }
+
+    /** Returns all subject classes that match the given template object.
+     * This function looks at the properties of the template object and
+     * its setters and collections to create a Prolog query that finds
+     * all subject classes that would be converted to a proxy object
+     * with exactly the same properties and collections.
+     *
+     * Since there could be multiple subject classes that match the given
+     * criteria, this function returns a list of class names.
+     *
+     * @param obj The template object
+     */
+    async subjectClassesByTemplate(obj: object): Promise<string[]> {
+        const query = this.buildQueryFromTemplate(obj);
         let result = await this.infer(query)
         if(!result) {
             return []

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
+use coasys_juniper::FieldError;
+use kitsune_p2p_types::dht::test_utils::Op;
 use serde_json::Value;
 use tokio::{join, time};
 use tokio::sync::Mutex;
@@ -57,6 +59,30 @@ pub struct Command {
     target: Option<String>,
     local: Option<bool>,
     action: Action,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClass {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Class")]
+    class: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClassActions {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Actions")]
+    actions: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClassOption {
+    #[serde(rename = "className")]
+    class_name: Option<String>,
+    #[serde(rename = "query")]
+    query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -173,7 +199,7 @@ impl PerspectiveInstance {
                     if link_language.current_revision().await.map_err(|e| anyhow!("current_revision error: {}",e))?.is_some() {
                         // Ok, we are synced and have a revision. Let's commit our pending diffs.
                         let pending_diffs = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid)).map_err(|e| anyhow!("get_pending_diffs error: {}",e))?;
-                        
+
                         if pending_diffs.additions.is_empty() && pending_diffs.removals.is_empty() {
                             return Ok(());
                         }
@@ -979,7 +1005,7 @@ impl PerspectiveInstance {
                 input
             }
         };
-    
+
         let replace_parameters = |input: Option<String>| -> Option<String> {
             if let Some(mut output) = input {
                 for parameter in &parameters {
@@ -990,29 +1016,29 @@ impl PerspectiveInstance {
                 input
             }
         };
-    
+
         for command in commands {
             let source = replace_this(replace_parameters(command.source))
                 .ok_or_else(|| anyhow!("Source cannot be None"))?;
             let predicate = replace_this(replace_parameters(command.predicate));
-            let target = (replace_parameters(command.target)) 
+            let target = (replace_parameters(command.target))
                 .ok_or_else(|| anyhow!("Source cannot be None"))?;
             let local = command.local.unwrap_or(false);
             let status = if local { LinkStatus::Local } else { LinkStatus::Shared };
 
             let values = parameters.iter().map(|p| p.value.to_string()).collect::<Vec<String>>().join(", ");
-    
+
             match command.action {
                 Action::AddLink => {
                     self.add_link(Link{ source, predicate, target }, status).await?;
                 }
                 Action::RemoveLink => {
                     let link_expressions = self.get_links(&LinkQuery{
-                        source:Some(source), 
-                        predicate, 
-                        target: Some(target), 
-                        from_date: None, 
-                        until_date: None, 
+                        source:Some(source),
+                        predicate,
+                        target: Some(target),
+                        from_date: None,
+                        until_date: None,
                         limit: None
                     }).await?;
                     for link_expression in link_expressions {
@@ -1021,11 +1047,11 @@ impl PerspectiveInstance {
                 }
                 Action::SetSingleTarget => {
                     let link_expressions = self.get_links(&LinkQuery{
-                        source:Some(source.clone()), 
-                        predicate: predicate.clone(), 
+                        source:Some(source.clone()),
+                        predicate: predicate.clone(),
                         target: None,
-                        from_date: None, 
-                        until_date: None, 
+                        from_date: None,
+                        until_date: None,
                         limit: None
                     }).await?;
                     for link_expression in link_expressions {
@@ -1035,11 +1061,11 @@ impl PerspectiveInstance {
                 }
                 Action::CollectionSetter => {
                     let link_expressions = self.get_links(&LinkQuery{
-                        source:Some(source.clone()), 
-                        predicate: predicate.clone(), 
+                        source:Some(source.clone()),
+                        predicate: predicate.clone(),
                         target: None,
-                        from_date: None, 
-                        until_date: None, 
+                        from_date: None,
+                        until_date: None,
                         limit: None
                     }).await?;
                     for link_expression in link_expressions {
@@ -1047,10 +1073,10 @@ impl PerspectiveInstance {
                     }
                     self.add_links(
                         parameters.iter().map(|p| Link{
-                            source: source.clone(), 
-                            predicate: predicate.clone(), 
+                            source: source.clone(),
+                            predicate: predicate.clone(),
                             target: jsvalue_to_string(&p.value)
-                        }).collect(), 
+                        }).collect(),
                         status
                     ).await?;
                 }
@@ -1060,8 +1086,88 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+
+    pub async fn create_subject(&mut self, subject_class: SubjectClassOption, expression_address: String) -> Result<(), AnyError> {
+        log::info!("Creating subject with class: {:?} | {:?}", subject_class, expression_address);
+        let class_name =if subject_class.class_name.is_some() {
+            subject_class.class_name.unwrap()
+        } else {
+            let query = subject_class.query.unwrap();
+            let result = self.prolog_query(format!("{}", query)).await;
+
+            let result = match result {
+                Ok(result) => {
+                    let result = serde_json::from_str(&result)?;
+
+                    match result {
+                        Value::Array(array) => {
+                            let mut class: Vec<String> = vec![];
+                            for item in array {
+                                let command: SubjectClass = serde_json::from_value(item)?;
+                                class.push(command.class.unwrap());
+                            }
+                            Ok(class)
+                        }
+                        _ => Ok(vec![])
+                    }
+                },
+                Err(e) => {
+                    log::error!("Error creating subject: {:?}", e);
+                    Err("Error creating subject".to_string())
+                }
+            };
+
+            let result = result.unwrap().clone();
+
+            let class_name = &result[0];
+
+            class_name.clone()
+        };
+
+        let result = self.prolog_query(format!("subject_class(\"{}\", C), constructor(C, Actions).", class_name)).await;
+
+        let result =  result.unwrap();
+
+        log::info!("Result: {:?}", result.clone());
+
+        let actions: Vec<SubjectClassActions> = serde_json::from_str(&result).unwrap();
+
+        log::info!("Commands: {:?}", actions);
+
+        if actions.len() == 0 {
+            // Err("No constructor found for class: {}")
+            log::error!("No constructor found for class: {}", class_name);
+        }
+
+        let action = &actions[0].clone().actions.clone().unwrap();
+
+        log::info!("Action: {:?}", action);
+
+        let commands: Vec<Command> = serde_json::from_str(&action).unwrap();
+
+        log::info!("Commands 1: {:?}", commands);
+
+        self.execute_commands(commands, expression_address, vec![]).await?;
+
+        Ok(())
+    }
 }
 
+pub fn prolog_result(result: String) -> Value {
+    let v: Value = serde_json::from_str(&result).unwrap();
+    match v {
+        Value::String(string) => {
+            if string == "true" {
+                Value::Bool(true)
+            } else if string == "false" {
+                Value::Bool(false)
+            } else {
+                Value::String(string)
+            }
+        }
+        _ => v,
+    }
+}
 
 
 

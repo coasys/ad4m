@@ -181,7 +181,7 @@ export default class PerspectiveResolver {
         pubSub.publish(LINK_REMOVED_TOPIC)
         return true
     }
-    
+
     @Mutation(returns => Boolean)
     perspectiveAddSdna(@Arg('uuid') uuid: string, @Arg('name') name: string, @Arg('sdnaCode') sdnaCode: string, @Arg('sdnaType') sdnaType: string, @PubSub() pubSub: any): Boolean {
         return true
@@ -189,10 +189,19 @@ export default class PerspectiveResolver {
 
     @Mutation(returns => Boolean)
     perspectiveExecuteCommands(
-        @Arg('uuid') uuid: string, 
-        @Arg('commands') commands: string, 
-        @Arg('expression') expression: string, 
+        @Arg('uuid') uuid: string,
+        @Arg('commands') commands: string,
+        @Arg('expression') expression: string,
         @Arg('parameters', type => String, {nullable: true}) parameters: string
+    ): Boolean {
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    perspectiveCreateSubject(
+        @Arg('uuid') uuid: string,
+        @Arg('subjectClass') SubjectClass: string,
+        @Arg('expressionAddress') expressionAddress: string
     ): Boolean {
         return true
     }

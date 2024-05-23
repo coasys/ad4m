@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use crate::{perspectives::perspective_instance::{Command, Parameter}, runtime_service::{self, RuntimeService}};
+use crate::{perspectives::perspective_instance::{Command, Parameter, SubjectClass, SubjectClassOption}, runtime_service::{self, RuntimeService}};
 use ad4m_client::literal::Literal;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
 use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
@@ -845,7 +845,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        
+
         let commands: Vec<Command> = serde_json::from_str(&commands)
             .map_err(|e| FieldError::new(
                 e,
@@ -863,6 +863,30 @@ impl Mutation {
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         perspective.execute_commands(commands, expression, parameters).await?;
+        Ok(true)
+    }
+
+    async fn perspective_create_subject(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subject_class: String,
+        expression_address: String,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+
+        let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)
+            .map_err(|e| FieldError::new(
+                e,
+                graphql_value!({ "invalid_subject_class": subject_class })
+            ))?;
+
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+
+        perspective.create_subject(subject_class, expression_address).await?;
         Ok(true)
     }
 
