@@ -3,4 +3,5 @@ export enum ExceptionType {
     ExpressionIsNotVerified = "EXPRESSION_IS_NOT_VERIFIED",
     AgentIsUntrusted = "AGENT_IS_UNTRUSTED",
     CapabilityRequested = "CAPABILITY_REQUESTED",
+    InstallNotificationRequest = 'INSTALL_NOTIFICATION_REQUEST',
 }

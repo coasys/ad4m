@@ -4,7 +4,7 @@ import { expect } from "chai";
 import { Notification, NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
 import sinon from 'sinon';
 import { sleep } from '../utils/utils';
-import { Link } from '@coasys/ad4m';
+import { ExceptionType, Link } from '@coasys/ad4m';
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
@@ -162,21 +162,26 @@ export default function runtimeTests(testContext: TestContext) {
             let ignoreRequest = false
 
             // Setup the stub to automatically resolve when called
-            mockFunction.callsFake((requestedNotification: Notification) => {
+            mockFunction.callsFake((exception) => {
                 if(ignoreRequest) return
-                expect(requestedNotification.description).to.equal(notification.description);
-                expect(requestedNotification.appName).to.equal(notification.appName);
-                expect(requestedNotification.appUrl).to.equal(notification.appUrl);
-                expect(requestedNotification.appIconPath).to.equal(notification.appIconPath);
-                expect(requestedNotification.trigger).to.equal(notification.trigger);
-                expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
-                expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
-                expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
-                // Automatically resolve without needing to manually manage a Promise
-                return null;
+
+                if (exception.type === ExceptionType.InstallNotificationRequest) {
+                    const requestedNotification = JSON.parse(exception.addon);
+
+                    expect(requestedNotification.description).to.equal(notification.description);
+                    expect(requestedNotification.appName).to.equal(notification.appName);
+                    expect(requestedNotification.appUrl).to.equal(notification.appUrl);
+                    expect(requestedNotification.appIconPath).to.equal(notification.appIconPath);
+                    expect(requestedNotification.trigger).to.equal(notification.trigger);
+                    expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
+                    expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
+                    expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
+                    // Automatically resolve without needing to manually manage a Promise
+                    return null;
+                }
             });
 
-            await ad4mClient.runtime.addNotificationRequestedCallback(mockFunction);
+            await ad4mClient.runtime.addExceptionCallback(mockFunction);
 
             // Request to install a new notification
             const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
@@ -186,7 +191,7 @@ export default function runtimeTests(testContext: TestContext) {
             // Use sinon's assertions to wait for the stub to be called
             await sinon.assert.calledOnce(mockFunction);
             ignoreRequest = true;
-            
+
             // Check if the notification is in the list of notifications
             const notificationsBeforeGrant = await ad4mClient.runtime.notifications()
             expect(notificationsBeforeGrant.length).to.equal(1)

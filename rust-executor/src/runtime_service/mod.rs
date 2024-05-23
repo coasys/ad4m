@@ -23,8 +23,8 @@ pub struct BootstrapSeed {
 
 use serde::{Deserialize, Serialize};
 
-use crate::graphql::graphql_types::NotificationInput;
-use crate::pubsub::{get_global_pubsub, RUNTIME_INSTALL_NOTIFICATION_REQUESTED_TOPIC};
+use crate::graphql::graphql_types::{ExceptionInfo, ExceptionType, NotificationInput};
+use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::{agent::did, db::Ad4mDb, graphql::graphql_types::SentMessage};
 
 lazy_static! {
@@ -158,17 +158,27 @@ impl RuntimeService {
              db.get_notification(notification_id.clone())
         }).map_err(|e| e.to_string())?.ok_or("Notification with given id not found")?;
 
+        let exception_info = ExceptionInfo {
+            title: "Request to install notifications for the app".to_string(),
+            message: format!(
+                "{} is waiting for notifications to be authenticated, open the ADAM Launcher for more information.",
+                notification.app_name
+            ),
+            r#type: ExceptionType::InstallNotificationRequest,
+            addon: Some(serde_json::to_string(&notification).unwrap()),
+        };
+
         get_global_pubsub()
             .await
             .publish(
-                &RUNTIME_INSTALL_NOTIFICATION_REQUESTED_TOPIC,
-                &serde_json::to_string(&notification).unwrap(),
+                &EXCEPTION_OCCURRED_TOPIC,
+                &serde_json::to_string(&exception_info).unwrap(),
             )
             .await;
 
         Ok(notification_id)
     }
 
-    
+
 
 }
