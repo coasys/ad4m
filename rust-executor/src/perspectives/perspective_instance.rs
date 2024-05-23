@@ -1168,12 +1168,31 @@ impl PerspectiveInstance {
 
         for c in collections {
             let collection_values_result = self.prolog_query(format!(r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#, class_name, base_expression, c)).await?;
-            let collection_values: Vec<String> = prolog_get_all_string_bindings(&collection_values_result, "Value");
-            if let Some(first_result) = collection_values.first() {
-                object.insert(c.clone(), first_result.clone());
-            } else {
-                log::error!("Couldn't get a collection value for class: `{}`, collection: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, c, base_expression, collection_values_result);
-            }
+            let flattened_list_of_values = match collection_values_result {
+                QueryResolution::Matches(matches) => matches.iter()
+                    .filter_map(|m| m.bindings.get("Value"))
+                    .filter_map(|v| match v {
+                        scryer_prolog::machine::parsed_results::Value::List(list) => Some(list),
+                        _ => None
+                    })
+                    .map(|v| v.into_iter())
+                    .flatten()
+                    .cloned()
+                    .collect::<Vec::<scryer_prolog::machine::parsed_results::Value>>(),
+                _ => vec![],
+            };
+
+            let string_values: Vec<String> = flattened_list_of_values
+                .into_iter()
+                .filter_map(|v| match v {
+                    scryer_prolog::machine::parsed_results::Value::String(s) => Some(s),
+                    _ => None
+                })
+                .collect();
+
+            let json_array = serde_json::to_string(&string_values).expect("to serialize a string vector");
+            object.insert(c.clone(), json_array);
+            
         }
 
         Ok(object)
