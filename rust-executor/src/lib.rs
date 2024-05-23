@@ -24,7 +24,7 @@ mod neighbourhoods;
 #[cfg(test)]
 mod test_utils;
 
-use std::{env, path::Path, thread::JoinHandle};
+use std::{env, thread::JoinHandle};
 
 use tokio;
 use log::{info, warn, error};
@@ -34,7 +34,7 @@ use js_core::JsCore;
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 
-use crate::{agent::AgentService, dapp_server::serve_dapp, db::Ad4mDb, graphql::graphql_types::EntanglementProof, languages::LanguageController, prolog_service::init_prolog_service, runtime_service::RuntimeService};
+use crate::{agent::AgentService, dapp_server::serve_dapp, db::Ad4mDb, languages::LanguageController, prolog_service::init_prolog_service, runtime_service::RuntimeService};
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {

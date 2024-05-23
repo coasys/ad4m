@@ -1,6 +1,10 @@
 import { TestContext } from './integration.test'
 import fs from "fs";
 import { expect } from "chai";
+import { Notification, NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
+import sinon from 'sinon';
+import { sleep } from '../utils/utils';
+import { Link } from '@coasys/ad4m';
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
@@ -137,6 +141,154 @@ export default function runtimeTests(testContext: TestContext) {
             expect(runtimeInfo.ad4mExecutorVersion).to.be.equal(process.env.npm_package_version);
             expect(runtimeInfo.isUnlocked).to.be.true;
             expect(runtimeInfo.isInitialized).to.be.true;
+        })
+
+        it("can handle notifications", async () => {
+            const ad4mClient = testContext.ad4mClient!
+
+            const notification: NotificationInput = {
+                description: "Test Description",
+                appName: "Test App Name",
+                appUrl: "Test App URL",
+                appIconPath: "Test App Icon Path",
+                trigger: "Test Trigger",
+                perspectiveIds: ["Test Perspective ID"],
+                webhookUrl: "Test Webhook URL",
+                webhookAuth: "Test Webhook Auth"
+            }
+
+            const mockFunction = sinon.stub();
+
+            let ignoreRequest = false
+
+            // Setup the stub to automatically resolve when called
+            mockFunction.callsFake((requestedNotification: Notification) => {
+                if(ignoreRequest) return
+                expect(requestedNotification.description).to.equal(notification.description);
+                expect(requestedNotification.appName).to.equal(notification.appName);
+                expect(requestedNotification.appUrl).to.equal(notification.appUrl);
+                expect(requestedNotification.appIconPath).to.equal(notification.appIconPath);
+                expect(requestedNotification.trigger).to.equal(notification.trigger);
+                expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
+                expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
+                expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
+                // Automatically resolve without needing to manually manage a Promise
+                return null;
+            });
+
+            await ad4mClient.runtime.addNotificationRequestedCallback(mockFunction);
+
+            // Request to install a new notification
+            const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
+
+            await sleep(2000)
+
+            // Use sinon's assertions to wait for the stub to be called
+            await sinon.assert.calledOnce(mockFunction);
+            ignoreRequest = true;
+            
+            // Check if the notification is in the list of notifications
+            const notificationsBeforeGrant = await ad4mClient.runtime.notifications()
+            expect(notificationsBeforeGrant.length).to.equal(1)
+            const notificationInList = notificationsBeforeGrant[0]
+            expect(notificationInList).to.exist
+            expect(notificationInList?.granted).to.be.false
+
+            // Grant the notification
+            const granted = await ad4mClient.runtime.grantNotification(notificationId)
+            expect(granted).to.be.true
+
+            // Check if the notification is updated
+            const updatedNotification: NotificationInput = {
+                description: "Update Test Description",
+                appName: "Test App Name",
+                appUrl: "Test App URL",
+                appIconPath: "Test App Icon Path",
+                trigger: "Test Trigger",
+                perspectiveIds: ["Test Perspective ID"],
+                webhookUrl: "Test Webhook URL",
+                webhookAuth: "Test Webhook Auth"
+            }
+            const updated = await ad4mClient.runtime.updateNotification(notificationId, updatedNotification)
+            expect(updated).to.be.true
+
+            const updatedNotificationCheck = await ad4mClient.runtime.notifications()
+            const updatedNotificationInList = updatedNotificationCheck.find((n) => n.id === notificationId)
+            expect(updatedNotificationInList).to.exist
+            // after changing a notification it needs to be granted again
+            expect(updatedNotificationInList?.granted).to.be.false
+            expect(updatedNotificationInList?.description).to.equal(updatedNotification.description)
+
+            // Check if the notification is removed
+            const removed = await ad4mClient.runtime.removeNotification(notificationId)
+            expect(removed).to.be.true
+        })
+
+        it("can trigger notifications", async () => {
+            const ad4mClient = testContext.ad4mClient!
+
+            let triggerPredicate = "ad4m://notification"
+
+            let notificationPerspective = await ad4mClient.perspective.add("notification test perspective")
+            let otherPerspective = await ad4mClient.perspective.add("other perspective")
+
+            const notification: NotificationInput = {
+                description: "ad4m://notification predicate used",
+                appName: "ADAM tests",
+                appUrl: "Test App URL",
+                appIconPath: "Test App Icon Path",
+                trigger: `triple(Source, "${triggerPredicate}", Target)`,
+                perspectiveIds: [notificationPerspective.uuid],
+                webhookUrl: "Test Webhook URL",
+                webhookAuth: "Test Webhook Auth"
+            }
+
+            // Request to install a new notification
+            const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
+            sleep(1000)
+            // Grant the notification
+            const granted = await ad4mClient.runtime.grantNotification(notificationId)
+            expect(granted).to.be.true
+
+            const mockFunction = sinon.stub();
+            await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
+
+            // Ensuring no false positives
+            await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
+            await sleep(1000)
+            expect(mockFunction.called).to.be.false
+
+            // Ensuring only selected perspectives will trigger
+            await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
+            await sleep(1000)
+            expect(mockFunction.called).to.be.false
+
+            // Happy path
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
+            await sleep(1000)
+            expect(mockFunction.called).to.be.true
+            let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
+            expect(triggeredNotification.notification.description).to.equal(notification.description)
+            let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            let match = triggerMatch[0]
+            //@ts-ignore
+            expect(match.Source).to.equal("test://source")
+            //@ts-ignore
+            expect(match.Target).to.equal("test://target1")
+
+            // Ensuring we don't get old data on a new trigger
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
+            await sleep(1000)
+            expect(mockFunction.callCount).to.equal(2)
+            triggeredNotification = mockFunction.getCall(1).args[0] as TriggeredNotification
+            triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            match = triggerMatch[0]
+            //@ts-ignore
+            expect(match.Source).to.equal("test://source")
+            //@ts-ignore
+            expect(match.Target).to.equal("test://target2")
         })
     }
 }

@@ -4,7 +4,7 @@ use coasys_juniper::{
     GraphQLObject, GraphQLValue,
 };
 
-use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, PerspectiveInput}};
+use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput}};
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -338,4 +338,67 @@ impl ToString for ExpressionRef {
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
+}
+
+impl PerspectiveDiff {
+    pub fn from_additions(additions: Vec<LinkExpression>) -> PerspectiveDiff {
+        PerspectiveDiff {
+            additions,
+            removals: vec![]
+        }
+    }
+
+    pub fn from_removals(removals: Vec<LinkExpression>) -> PerspectiveDiff {
+        PerspectiveDiff {
+            additions: vec![],
+            removals,
+        }
+    }
+
+    pub fn from(additions: Vec<LinkExpression>, removals: Vec<LinkExpression>) -> PerspectiveDiff {
+        PerspectiveDiff {
+            additions,
+            removals,
+        }
+    }
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct Notification {
+    pub id: String,
+    pub granted: bool,
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: String,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    pub webhook_auth: String,
+}
+
+impl Notification {
+    pub fn from_input_and_id(id: String, input: NotificationInput) -> Self {
+        Notification {
+            id: id,
+            granted: false,
+            description: input.description,
+            app_name: input.app_name,
+            app_url: input.app_url,
+            app_icon_path: input.app_icon_path,
+            trigger: input.trigger,
+            perspective_ids: input.perspective_ids,
+            webhook_url: input.webhook_url,
+            webhook_auth: input.webhook_auth,
+        }
+    }
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggeredNotification {
+    pub notification: Notification,
+    pub perspective_id: String,
+    pub trigger_match: String,
 }
