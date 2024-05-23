@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 
+use std::collections::HashMap;
+
 use crate::{perspectives::perspective_instance::{Command, Parameter, SubjectClass, SubjectClassOption}, runtime_service::{self, RuntimeService}};
 use ad4m_client::literal::Literal;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
@@ -888,6 +890,32 @@ impl Mutation {
 
         perspective.create_subject(subject_class, expression_address).await?;
         Ok(true)
+    }
+
+
+    async fn perspective_get_subject_data(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subject_class: String,
+        expression_address: String,
+    ) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+
+        let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)
+        .map_err(|e| FieldError::new(
+            e,
+            graphql_value!({ "invalid_subject_class": subject_class })
+        ))?;
+
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+
+        let result = perspective.get_subject_data(subject_class, expression_address).await?;
+
+        Ok(serde_json::to_string(&result)?)
     }
 
     async fn runtime_add_friends(

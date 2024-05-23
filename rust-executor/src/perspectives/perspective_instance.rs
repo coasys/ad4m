@@ -1,3 +1,5 @@
+use std::collections::{self, HashMap};
+use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 use coasys_juniper::FieldError;
@@ -70,11 +72,35 @@ pub struct SubjectClass {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClassProperty {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Property")]
+    property: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClassCollection {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Collection")]
+    collection: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct SubjectClassActions {
     #[serde(rename = "C")]
     c: Option<String>,
     #[serde(rename = "Actions")]
     actions: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct PorpertyValue {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Value")]
+    value: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1141,7 +1167,9 @@ impl PerspectiveInstance {
 
         let action = &actions[0].clone().actions.clone().unwrap();
 
-        log::info!("Action: {:?}", action);
+        // let action = &action[1..&action.len()-1];
+
+        log::info!("Action: {}", action);
 
         let commands: Vec<Command> = serde_json::from_str(&action).unwrap();
 
@@ -1150,6 +1178,109 @@ impl PerspectiveInstance {
         self.execute_commands(commands, expression_address, vec![]).await?;
 
         Ok(())
+    }
+
+    pub async fn get_subject_data(&mut self, subject_class: SubjectClassOption, id: String) -> Result<HashMap<String, String>, AnyError>{
+        let object: HashMap<String, Option<String>> = HashMap::new();
+
+        let class_name =if subject_class.class_name.is_some() {
+            subject_class.class_name.unwrap()
+        } else {
+            let query = subject_class.query.unwrap();
+            let result = self.prolog_query(format!("{}", query)).await;
+
+            let result = match result {
+                Ok(result) => {
+                    let result = serde_json::from_str(&result)?;
+
+                    match result {
+                        Value::Array(array) => {
+                            let mut class: Vec<String> = vec![];
+                            for item in array {
+                                let command: SubjectClass = serde_json::from_value(item)?;
+                                class.push(command.class.unwrap());
+                            }
+                            Ok(class)
+                        }
+                        _ => Ok(vec![])
+                    }
+                },
+                Err(e) => {
+                    log::error!("Error creating subject: {:?}", e);
+                    Err("Error getting subject class data".to_string())
+                }
+            };
+
+            let result = result.unwrap().clone();
+
+            let class_name = &result[0];
+
+            class_name.clone()
+        };
+
+        let result = self.prolog_query(format!("subject_class(\"{}\", C), instance(C, \"{}\").", class_name, id)).await;
+
+        if !prolog_result(result.unwrap()).as_bool().unwrap() {
+            log::error!("No instance found for class: {} with id: {}", class_name, id);
+            Err("No instance found".to_string());
+        }
+
+        let result = self.prolog_query(format!("subject_class("${}", C), property(C, Property).", class_name)).await;
+        let properties: Vec<SubjectClassProperty> = serde_json::from_str(&result.unwrap()).unwrap();
+        let properties: Vec<String> = properties.iter().map(|p| p.property.clone().unwrap()).collect();
+
+        for p in &properties {
+            let resolve_expression_uri = self.prolog_query(format!(r#"subject_class("{}", C), property_resolve(C, "{}")"#, class_name, p)).await?;
+            let get_property = async {
+                let results = self.prolog_query(format!(r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, class_name, id, p)).await?;
+                let results: Vec<PorpertyValue> = serde_json::from_str(&results).unwrap();
+
+                if let Some(first_result) = results.first() {
+                    let expression_uri = &first_result.value;
+                    if resolve_expression_uri.is_some() {
+                        match self.get_expression(expression_uri).await {
+                            Ok(expression) => match serde_json::from_str::<Value>(&expression.data) {
+                                Ok(data) => data,
+                                Err(_) => expression.data,
+                            },
+                            Err(_) => expression_uri.clone(),
+                        }
+                    } else {
+                        expression_uri.clone()
+                    }
+                } else if !results.is_empty() {
+                    results
+                } else {
+                    None
+                }
+            };
+
+            object.insert(p.clone(), get_property().await?);
+        }
+
+        let results2 = self.prolog_query(format!(r#"subject_class("{}", C), collection(C, Collection)"#, class_name)).await?;
+        let collections: Vec<SubjectClassCollection> = serde_json::from_str(&results2).unwrap();
+        let collections: Vec<String> = collections.iter().map(|c| c.collection.clone().unwrap()).collect();
+
+        for c in collections {
+            let get_property = async {
+                let results = self.prolog_query(format!(r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#, class_name, id, c)).await?;
+                let results: Vec<PorpertyValue> = serde_json::from_str(&results).unwrap();
+                if let Some(first_result) = results.first() {
+                    let value = &first_result.value;
+                    // eval equivalent in Rust would be complex and potentially unsafe.
+                    // You might want to parse the value into a specific data structure instead.
+                    // Here's a placeholder that just clones the value:
+                    value.clone()
+                } else {
+                    Vec::new()
+                }
+            };
+
+            object.insert(c.clone(), get_property().await?);
+        }
+
+        Ok(object)
     }
 }
 
