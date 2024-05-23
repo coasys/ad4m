@@ -143,6 +143,7 @@ pub enum ExceptionType {
     AgentIsUntrusted = 2,
     #[default]
     CapabilityRequested = 3,
+    InstallNotificationRequest = 4
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
