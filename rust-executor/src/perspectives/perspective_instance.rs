@@ -1036,8 +1036,6 @@ impl PerspectiveInstance {
             let local = command.local.unwrap_or(false);
             let status = if local { LinkStatus::Local } else { LinkStatus::Shared };
 
-            let values = parameters.iter().map(|p| p.value.to_string()).collect::<Vec<String>>().join(", ");
-
             match command.action {
                 Action::AddLink => {
                     self.add_link(Link{ source, predicate, target }, status).await?;
@@ -1113,7 +1111,6 @@ impl PerspectiveInstance {
            }
         };
 
-        log::info!("Creating subject with class: {:?} | {:?}", subject_class, expression_address);
         let class_name =if subject_class.class_name.is_some() {
             subject_class.class_name.unwrap()
         } else {
@@ -1131,20 +1128,12 @@ impl PerspectiveInstance {
         };
 
         let result = self.prolog_query(format!("subject_class(\"{}\", C), constructor(C, Actions).", class_name)).await?;
-
-        log::info!("Result: {:?}", result.clone());
-
         let actions = get_first_string_binding(result, "Actions")
             .ok_or(anyhow!("No constructor found for class: {}", class_name))?;
 
-        log::info!("Commands: {:?}", actions);
 
         let commands: Vec<Command> = json5::from_str(&actions).unwrap();
-
-        log::info!("Commands 1: {:?}", commands);
-
         self.execute_commands(commands, expression_address, vec![]).await?;
-
         Ok(())
     }
 
