@@ -1,6 +1,6 @@
 use scryer_prolog::machine::parsed_results::{Value, QueryMatch, QueryResolution};
 
-pub fn prolog_value_to_json_tring(value: Value) -> String {
+pub fn prolog_value_to_json_string(value: Value) -> String {
     match value {
         Value::Integer(i) => format!("{}", i),
         Value::Float(f) => format!("{}", f),
@@ -25,7 +25,7 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
                 if i > 0 {
                     string_result.push_str(", ");
                 }
-                string_result.push_str(&prolog_value_to_json_tring(v.clone()));
+                string_result.push_str(&prolog_value_to_json_string(v.clone()));
             }
             string_result.push_str("]");
             string_result
@@ -36,7 +36,7 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
                 if i > 0 {
                     string_result.push_str(", ");
                 }
-                string_result.push_str(&prolog_value_to_json_tring(v.clone()));
+                string_result.push_str(&prolog_value_to_json_string(v.clone()));
             }
             string_result.push_str("]");
             string_result
@@ -51,7 +51,7 @@ fn prolog_match_to_json_string(query_match: &QueryMatch) -> String {
         if i > 0 {
             string_result.push_str(", ");
         }
-        string_result.push_str(&format!("\"{}\": {}", k, prolog_value_to_json_tring(v.clone())));
+        string_result.push_str(&format!("\"{}\": {}", k, prolog_value_to_json_string(v.clone())));
     }
     string_result.push_str("}");
     string_result
@@ -83,6 +83,21 @@ pub fn prolog_get_all_string_bindings(result: &QueryResolution, variable_name: &
                scryer_prolog::machine::parsed_results::Value::String(s) => Some(s),
                _ => None,
            })
+           .cloned()
+           .collect()
+   } else {
+       Vec::new()
+   }
+}
+
+pub fn prolog_get_first_binding(result: &QueryResolution, variable_name: &str) -> Option<scryer_prolog::machine::parsed_results::Value> {
+    prolog_get_all_bindings(result, variable_name).into_iter().next()
+}
+
+pub fn prolog_get_all_bindings(result: &QueryResolution, variable_name: &str) -> Vec<scryer_prolog::machine::parsed_results::Value> {
+    if let QueryResolution::Matches(matches) = result {
+        matches.iter()
+           .filter_map(|m| m.bindings.get(variable_name))
            .cloned()
            .collect()
    } else {

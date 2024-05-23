@@ -13,6 +13,7 @@ use serde::{Serialize, Deserialize};
 use crate::agent::create_signed_expression;
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
+use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
@@ -1123,7 +1124,7 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    pub async fn get_subject_data(&mut self, subject_class: SubjectClassOption, base_expression: String) -> Result<HashMap<String, String>, AnyError>{
+    pub async fn get_subject_data(&mut self, subject_class: SubjectClassOption, base_expression: String) -> Result<String, AnyError>{
         let mut object: HashMap<String, String> = HashMap::new();
 
         let class_name = self.subject_class_option_to_class_name(subject_class).await?;
@@ -1138,9 +1139,8 @@ impl PerspectiveInstance {
         let properties: Vec<String> = prolog_get_all_string_bindings(&properties_result, "Property");
 
         for p in &properties {
-            
             let property_values_result = self.prolog_query(format!(r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, class_name, base_expression, p)).await?;
-            if let Some(property_value) = prolog_get_first_string_binding(&property_values_result, "Value") {
+            if let Some(property_value) = prolog_get_first_binding(&property_values_result, "Value") {
                 let resolve_expression_uri = QueryResolution::True == self.prolog_query(format!(r#"subject_class("{}", C), property_resolve(C, "{}")"#, class_name, p)).await?;
                 let value = if resolve_expression_uri {
                     property_value
@@ -1157,7 +1157,7 @@ impl PerspectiveInstance {
                 } else {
                     property_value.clone()
                 };
-                object.insert(p.clone(), value);
+                object.insert(p.clone(), prolog_value_to_json_string(value));
             } else {
                 log::error!("Couldn't get a property value for class: `{}`, property: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, p, base_expression, property_values_result);
             };
@@ -1168,34 +1168,21 @@ impl PerspectiveInstance {
 
         for c in collections {
             let collection_values_result = self.prolog_query(format!(r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#, class_name, base_expression, c)).await?;
-            let flattened_list_of_values = match collection_values_result {
-                QueryResolution::Matches(matches) => matches.iter()
-                    .filter_map(|m| m.bindings.get("Value"))
-                    .filter_map(|v| match v {
-                        scryer_prolog::machine::parsed_results::Value::List(list) => Some(list),
-                        _ => None
-                    })
-                    .map(|v| v.into_iter())
-                    .flatten()
-                    .cloned()
-                    .collect::<Vec::<scryer_prolog::machine::parsed_results::Value>>(),
-                _ => vec![],
-            };
-
-            let string_values: Vec<String> = flattened_list_of_values
-                .into_iter()
-                .filter_map(|v| match v {
-                    scryer_prolog::machine::parsed_results::Value::String(s) => Some(s),
-                    _ => None
-                })
-                .collect();
-
-            let json_array = serde_json::to_string(&string_values).expect("to serialize a string vector");
-            object.insert(c.clone(), json_array);
-            
+            if let Some(collection_value) = prolog_get_first_binding(&collection_values_result, "Value") {
+                object.insert(c.clone(), prolog_value_to_json_string(collection_value));
+            } else {
+                log::error!("Couldn't get a collection value for class: `{}`, collection: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, c, base_expression, collection_values_result);
+            }
         }
 
-        Ok(object)
+        let stringified = object.into_iter()
+            .map(|(k, v)| {
+                format!(r#""{}": {}"#, k, v)
+            })
+            .collect::<Vec::<String>>()
+            .join(", ");
+
+        Ok(format!("{{ {} }}", stringified))
     }
 }
 

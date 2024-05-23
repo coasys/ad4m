@@ -912,8 +912,7 @@ impl Mutation {
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
 
         let result = perspective.get_subject_data(subject_class, expression_address).await?;
-
-        Ok(serde_json::to_string(&result)?)
+        Ok(result)
     }
 
     async fn runtime_add_friends(
