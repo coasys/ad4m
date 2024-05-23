@@ -1,11 +1,7 @@
 use std::collections::{self, HashMap, BTreeMap};
-use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
-use coasys_juniper::FieldError;
-use kitsune_p2p_types::dht::test_utils::Op;
 use serde_json::Value;
-use std::time::Duration;
 use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution};
 use tokio::{join, time};
 use tokio::sync::Mutex;
@@ -24,6 +20,7 @@ use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, Lin
 use super::sdna::init_engine_facts;
 use super::update_perspective;
 use super::utils::prolog_resolution_to_string;
+use json5;
 
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1101,64 +1098,48 @@ impl PerspectiveInstance {
 
 
     pub async fn create_subject(&mut self, subject_class: SubjectClassOption, expression_address: String) -> Result<(), AnyError> {
+        let get_first_string_binding = |result: QueryResolution, variable_name: &str| {
+            if let QueryResolution::Matches(matches) = result {
+                matches.iter()
+                   .filter_map(|m| m.bindings.get(variable_name))
+                   .filter_map(|value| match value {
+                       scryer_prolog::machine::parsed_results::Value::String(s) => Some(s),
+                       _ => None,
+                   })
+                   .cloned()
+                   .next()
+           } else {
+               None
+           }
+        };
+
         log::info!("Creating subject with class: {:?} | {:?}", subject_class, expression_address);
         let class_name =if subject_class.class_name.is_some() {
             subject_class.class_name.unwrap()
         } else {
             let query = subject_class.query.unwrap();
-            let result = self.prolog_query(format!("{}", query)).await;
-
-            let result = match result {
-                Ok(result) => {
-                    let result = serde_json::from_str(&result)?;
-
-                    match result {
-                        Value::Array(array) => {
-                            let mut class: Vec<String> = vec![];
-                            for item in array {
-                                let command: SubjectClass = serde_json::from_value(item)?;
-                                class.push(command.class.unwrap());
-                            }
-                            Ok(class)
-                        }
-                        _ => Ok(vec![])
-                    }
-                },
-                Err(e) => {
+            let result = self.prolog_query(format!("{}", query)).await
+                .map_err(|e| {
                     log::error!("Error creating subject: {:?}", e);
-                    Err("Error creating subject".to_string())
-                }
-            };
+                    e
+                })?;
 
-            let result = result.unwrap().clone();
-
-            let class_name = &result[0];
-
-            class_name.clone()
+            
+            get_first_string_binding(result, "Class")
+                .map(|value| value.clone())
+                .ok_or(anyhow!("No matching subject class found!"))?
         };
 
-        let result = self.prolog_query(format!("subject_class(\"{}\", C), constructor(C, Actions).", class_name)).await;
-
-        let result =  result.unwrap();
+        let result = self.prolog_query(format!("subject_class(\"{}\", C), constructor(C, Actions).", class_name)).await?;
 
         log::info!("Result: {:?}", result.clone());
 
-        let actions: Vec<SubjectClassActions> = serde_json::from_str(&result).unwrap();
+        let actions = get_first_string_binding(result, "Actions")
+            .ok_or(anyhow!("No constructor found for class: {}", class_name))?;
 
         log::info!("Commands: {:?}", actions);
 
-        if actions.len() == 0 {
-            // Err("No constructor found for class: {}")
-            log::error!("No constructor found for class: {}", class_name);
-        }
-
-        let action = &actions[0].clone().actions.clone().unwrap();
-
-        // let action = &action[1..&action.len()-1];
-
-        log::info!("Action: {}", action);
-
-        let commands: Vec<Command> = serde_json::from_str(&action).unwrap();
+        let commands: Vec<Command> = json5::from_str(&actions).unwrap();
 
         log::info!("Commands 1: {:?}", commands);
 
@@ -1168,6 +1149,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn get_subject_data(&mut self, subject_class: SubjectClassOption, id: String) -> Result<HashMap<String, String>, AnyError>{
+        /*
         let object: HashMap<String, Option<String>> = HashMap::new();
 
         let class_name =if subject_class.class_name.is_some() {
@@ -1268,6 +1250,8 @@ impl PerspectiveInstance {
         }
 
         Ok(object)
+         */
+        Err(anyhow!("not implemented"))
     }
 }
 
