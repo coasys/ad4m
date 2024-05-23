@@ -310,6 +310,15 @@ export class PerspectiveClient {
         })).perspectiveCreateSubject
     }
 
+    async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
+        return unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveGetSubjectData($uuid: String!, $subjectClass: String!, $expressionAddress: String!) {
+                perspectiveGetSubjectData(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress)
+            }`,
+            variables: { uuid, subjectClass, expressionAddress }
+        })).perspectiveGetSubjectData
+    }
+
     // ExpressionClient functions, needed for Subjects:
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {
         return await this.#expressionClient.get(expressionURI)

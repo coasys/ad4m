@@ -803,6 +803,11 @@ describe('Ad4mClient', () => {
             expect(result).toBeTruthy();
         })
 
+        it('getSubjectData() smoke test', async () => {
+            const result = await ad4mClient.perspective.getSubjectData('00001', 'Test', 'test');
+            expect(result).toBe("");
+        });
+
         it('createSubject() smoke test', async () => {
             const result = await ad4mClient.perspective.createSubject(
                 '00001',

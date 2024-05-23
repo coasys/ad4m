@@ -206,6 +206,15 @@ export default class PerspectiveResolver {
         return true
     }
 
+    @Mutation(returns => String)
+    perspectiveGetSubjectData(
+        @Arg('uuid') uuid: string,
+        @Arg('subjectClass') SubjectClass: string,
+        @Arg('expressionAddress') expressionAddress: string
+    ): String {
+        return ""
+    }
+
     @Subscription({topics: PERSPECTIVE_ADDED_TOPIC, nullable: true})
     perspectiveAdded(): PerspectiveHandle {
         const perspective = new PerspectiveHandle('00001', 'New Perspective');

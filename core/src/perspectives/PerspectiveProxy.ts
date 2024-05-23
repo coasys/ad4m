@@ -330,6 +330,14 @@ export class PerspectiveProxy {
         return this.getSubjectProxy(exprAddr, subjectClass)
     }
 
+    async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
+        if (typeof subjectClass === "string") {
+            return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
+        }
+        let query = this.buildQueryFromTemplate(subjectClass as object)
+        return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({query}), exprAddr))
+    }
+
     /** Removes a subject instance by running its (SDNA defined) destructor,
      * which means removing links around the given expression address
      *
