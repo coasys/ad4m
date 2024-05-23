@@ -70,3 +70,22 @@ pub fn prolog_resolution_to_string(resultion: QueryResolution) -> String {
         }
     }
 }
+
+pub fn prolog_get_first_string_binding(result: &QueryResolution, variable_name: &str) -> Option<String> {
+    prolog_get_all_string_bindings(result, variable_name).into_iter().next()
+}
+
+pub fn prolog_get_all_string_bindings(result: &QueryResolution, variable_name: &str) -> Vec<String> {
+    if let QueryResolution::Matches(matches) = result {
+        matches.iter()
+           .filter_map(|m| m.bindings.get(variable_name))
+           .filter_map(|value| match value {
+               scryer_prolog::machine::parsed_results::Value::String(s) => Some(s),
+               _ => None,
+           })
+           .cloned()
+           .collect()
+   } else {
+       Vec::new()
+   }
+}

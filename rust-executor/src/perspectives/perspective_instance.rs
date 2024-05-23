@@ -19,7 +19,7 @@ use crate::{db::Ad4mDb, types::*};
 use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
 use super::sdna::init_engine_facts;
 use super::update_perspective;
-use super::utils::prolog_resolution_to_string;
+use super::utils::{prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string};
 use json5;
 
 
@@ -1094,41 +1094,27 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-
-    pub async fn create_subject(&mut self, subject_class: SubjectClassOption, expression_address: String) -> Result<(), AnyError> {
-        let get_first_string_binding = |result: QueryResolution, variable_name: &str| {
-            if let QueryResolution::Matches(matches) = result {
-                matches.iter()
-                   .filter_map(|m| m.bindings.get(variable_name))
-                   .filter_map(|value| match value {
-                       scryer_prolog::machine::parsed_results::Value::String(s) => Some(s),
-                       _ => None,
-                   })
-                   .cloned()
-                   .next()
-           } else {
-               None
-           }
-        };
-
-        let class_name =if subject_class.class_name.is_some() {
+    async fn subject_class_option_to_class_name(&mut self, subject_class: SubjectClassOption) -> Result<String, AnyError> {
+        Ok(if subject_class.class_name.is_some() {
             subject_class.class_name.unwrap()
         } else {
-            let query = subject_class.query.unwrap();
+            let query = subject_class.query.ok_or(anyhow!("SubjectClassOption needs to either have `name` or `query` set"))?;
             let result = self.prolog_query(format!("{}", query)).await
                 .map_err(|e| {
                     log::error!("Error creating subject: {:?}", e);
                     e
                 })?;
-
-            
-            get_first_string_binding(result, "Class")
+            prolog_get_first_string_binding(&result, "Class")
                 .map(|value| value.clone())
                 .ok_or(anyhow!("No matching subject class found!"))?
-        };
+        })
+    }
 
+
+    pub async fn create_subject(&mut self, subject_class: SubjectClassOption, expression_address: String) -> Result<(), AnyError> {
+        let class_name = self.subject_class_option_to_class_name(subject_class).await?;
         let result = self.prolog_query(format!("subject_class(\"{}\", C), constructor(C, Actions).", class_name)).await?;
-        let actions = get_first_string_binding(result, "Actions")
+        let actions = prolog_get_first_string_binding(&result, "Actions")
             .ok_or(anyhow!("No constructor found for class: {}", class_name))?;
 
 
@@ -1137,110 +1123,60 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    pub async fn get_subject_data(&mut self, subject_class: SubjectClassOption, id: String) -> Result<HashMap<String, String>, AnyError>{
-        /*
-        let object: HashMap<String, Option<String>> = HashMap::new();
+    pub async fn get_subject_data(&mut self, subject_class: SubjectClassOption, base_expression: String) -> Result<HashMap<String, String>, AnyError>{
+        let mut object: HashMap<String, String> = HashMap::new();
 
-        let class_name =if subject_class.class_name.is_some() {
-            subject_class.class_name.unwrap()
-        } else {
-            let query = subject_class.query.unwrap();
-            let result = self.prolog_query(format!("{}", query)).await;
+        let class_name = self.subject_class_option_to_class_name(subject_class).await?;
+        let result = self.prolog_query(format!("subject_class(\"{}\", C), instance(C, \"{}\").", class_name, base_expression)).await?;
 
-            let result = match result {
-                Ok(result) => {
-                    let result = serde_json::from_str(&result)?;
-
-                    match result {
-                        Value::Array(array) => {
-                            let mut class: Vec<String> = vec![];
-                            for item in array {
-                                let command: SubjectClass = serde_json::from_value(item)?;
-                                class.push(command.class.unwrap());
-                            }
-                            Ok(class)
-                        }
-                        _ => Ok(vec![])
-                    }
-                },
-                Err(e) => {
-                    log::error!("Error creating subject: {:?}", e);
-                    Err("Error getting subject class data".to_string())
-                }
-            };
-
-            let result = result.unwrap().clone();
-
-            let class_name = &result[0];
-
-            class_name.clone()
-        };
-
-        let result = self.prolog_query(format!("subject_class(\"{}\", C), instance(C, \"{}\").", class_name, id)).await;
-
-        if !prolog_result(result.unwrap()).as_bool().unwrap() {
-            log::error!("No instance found for class: {} with id: {}", class_name, id);
-            Err("No instance found".to_string());
+        if let QueryResolution::False = result {
+            log::error!("No instance found for class: {} with id: {}", class_name, base_expression);
+            return Err(anyhow!("No instance found for class: {} with id: {}", class_name, base_expression));
         }
 
-        let result = self.prolog_query(format!("subject_class("${}", C), property(C, Property).", class_name)).await;
-        let properties: Vec<SubjectClassProperty> = serde_json::from_str(&result.unwrap()).unwrap();
-        let properties: Vec<String> = properties.iter().map(|p| p.property.clone().unwrap()).collect();
+        let properties_result = self.prolog_query(format!(r#"subject_class("{}", C), property(C, Property)."#, class_name)).await?;
+        let properties: Vec<String> = prolog_get_all_string_bindings(&properties_result, "Property");
 
         for p in &properties {
-            let resolve_expression_uri = self.prolog_query(format!(r#"subject_class("{}", C), property_resolve(C, "{}")"#, class_name, p)).await?;
-            let get_property = async {
-                let results = self.prolog_query(format!(r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, class_name, id, p)).await?;
-                let results: Vec<PorpertyValue> = serde_json::from_str(&results).unwrap();
-
-                if let Some(first_result) = results.first() {
-                    let expression_uri = &first_result.value;
-                    if resolve_expression_uri.is_some() {
-                        match self.get_expression(expression_uri).await {
-                            Ok(expression) => match serde_json::from_str::<Value>(&expression.data) {
-                                Ok(data) => data,
-                                Err(_) => expression.data,
-                            },
-                            Err(_) => expression_uri.clone(),
-                        }
-                    } else {
-                        expression_uri.clone()
+            
+            let property_values_result = self.prolog_query(format!(r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, class_name, base_expression, p)).await?;
+            if let Some(property_value) = prolog_get_first_string_binding(&property_values_result, "Value") {
+                let resolve_expression_uri = QueryResolution::True == self.prolog_query(format!(r#"subject_class("{}", C), property_resolve(C, "{}")"#, class_name, p)).await?;
+                let value = if resolve_expression_uri {
+                    property_value
+                    /*
+                    let expression_uri = &first_result;
+                    match self.get_expression(expression_uri).await {
+                        Ok(expression) => match serde_json::from_str::<Value>(&expression.data) {
+                            Ok(data) => data,
+                            Err(_) => expression.data,
+                        },
+                        Err(_) => expression_uri.clone(),
                     }
-                } else if !results.is_empty() {
-                    results
+                        */
                 } else {
-                    None
-                }
+                    property_value.clone()
+                };
+                object.insert(p.clone(), value);
+            } else {
+                log::error!("Couldn't get a property value for class: `{}`, property: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, p, base_expression, property_values_result);
             };
-
-            object.insert(p.clone(), get_property().await?);
         }
 
-        let results2 = self.prolog_query(format!(r#"subject_class("{}", C), collection(C, Collection)"#, class_name)).await?;
-        let collections: Vec<SubjectClassCollection> = serde_json::from_str(&results2).unwrap();
-        let collections: Vec<String> = collections.iter().map(|c| c.collection.clone().unwrap()).collect();
+        let collections_results = self.prolog_query(format!(r#"subject_class("{}", C), collection(C, Collection)"#, class_name)).await?;
+        let collections: Vec<String> = prolog_get_all_string_bindings(&collections_results, "Collection");
 
         for c in collections {
-            let get_property = async {
-                let results = self.prolog_query(format!(r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#, class_name, id, c)).await?;
-                let results: Vec<PorpertyValue> = serde_json::from_str(&results).unwrap();
-                if let Some(first_result) = results.first() {
-                    let value = &first_result.value;
-                    // eval equivalent in Rust would be complex and potentially unsafe.
-                    // You might want to parse the value into a specific data structure instead.
-                    // Here's a placeholder that just clones the value:
-                    value.clone()
-                } else {
-                    Vec::new()
-                }
-            };
-
-            object.insert(c.clone(), get_property().await?);
+            let collection_values_result = self.prolog_query(format!(r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#, class_name, base_expression, c)).await?;
+            let collection_values: Vec<String> = prolog_get_all_string_bindings(&collection_values_result, "Value");
+            if let Some(first_result) = collection_values.first() {
+                object.insert(c.clone(), first_result.clone());
+            } else {
+                log::error!("Couldn't get a collection value for class: `{}`, collection: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, c, base_expression, collection_values_result);
+            }
         }
 
         Ok(object)
-         */
-        Err(anyhow!("not implemented"))
     }
 }
 
