@@ -6,9 +6,9 @@ use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
 use crate::graphql::graphql_types::{Agent, AgentStatus, Perspective};
-use crate::pubsub::{self, get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};
+
 use crate::types::{Expression, ExpressionProof};
-use crate::wallet::{self, Wallet};
+use crate::wallet::{Wallet};
 
 pub mod capabilities;
 pub mod signatures;

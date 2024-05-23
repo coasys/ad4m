@@ -1,7 +1,7 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link, Notification, TriggeredNotification};
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -143,6 +143,7 @@ pub enum ExceptionType {
     AgentIsUntrusted = 2,
     #[default]
     CapabilityRequested = 3,
+    InstallNotificationRequest = 4
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -307,6 +308,29 @@ pub struct LinkMutations {
 pub struct DecoratedPerspectiveDiff {
     pub additions: Vec<DecoratedLinkExpression>,
     pub removals: Vec<DecoratedLinkExpression>,
+}
+
+impl DecoratedPerspectiveDiff {
+    pub fn from_additions(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions,
+            removals: vec![]
+        }
+    }
+
+    pub fn from_removals(removals: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions: vec![],
+            removals,
+        }
+    }
+
+    pub fn from(additions: Vec<DecoratedLinkExpression>, removals: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions,
+            removals,
+        }
+    }
 }
 
 
@@ -492,6 +516,21 @@ pub struct PerspectiveInput {
 pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
+
+
+#[derive(GraphQLInputObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationInput {
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: String,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    pub webhook_auth: String,
+}
+
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -759,6 +798,38 @@ impl GetValue for PerspectiveExpression {
 
 //Implement the trait for `PerspectiveExpression`
 impl GetFilter for PerspectiveExpression {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetValue for Notification {
+    type Value = Notification;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetFilter for Notification {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetValue for TriggeredNotification {
+    type Value = TriggeredNotification;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetFilter for TriggeredNotification {
     fn get_filter(&self) -> Option<String> {
         None
     }

@@ -1,7 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import unwrapApolloResult from "../unwrapApolloResult"
-import { RuntimeInfo, ExceptionInfo, SentMessage } from "./RuntimeResolver"
+import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification } from "./RuntimeResolver"
 
 const PERSPECTIVE_EXPRESSION_FIELDS = `
 author
@@ -17,22 +17,53 @@ data {
 proof { valid, invalid, signature, key }
 `
 
+const NOTIFICATION_DEFINITION_FIELDS = `
+description
+appName
+appUrl
+appIconPath
+trigger
+perspectiveIds
+webhookUrl
+webhookAuth
+`
+
+const NOTIFICATION_FIELDS = `
+id
+granted
+${NOTIFICATION_DEFINITION_FIELDS}
+`
+
+const TRIGGERED_NOTIFICATION_FIELDS = `
+notification { ${NOTIFICATION_FIELDS} }
+perspectiveId
+triggerMatch
+`
+
 export type MessageCallback = (message: PerspectiveExpression) => null
 export type ExceptionCallback = (info: ExceptionInfo) => null
+export type NotificationTriggeredCallback = (notification: TriggeredNotification) => null
+export type NotificationRequestedCallback = (notification: Notification) => null
 
 export class RuntimeClient {
     #apolloClient: ApolloClient<any>
     #messageReceivedCallbacks: MessageCallback[]
     #exceptionOccurredCallbacks: ExceptionCallback[]
+    #notificationTriggeredCallbacks: NotificationTriggeredCallback[]
+    #notificationRequestedCallbacks: NotificationRequestedCallback[]
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
         this.#messageReceivedCallbacks = []
         this.#exceptionOccurredCallbacks = []
+        this.#notificationTriggeredCallbacks = []
+        this.#notificationRequestedCallbacks = []
 
         if(subscribe) {
             this.subscribeMessageReceived()
             this.subscribeExceptionOccurred()
+            this.subscribeNotificationTriggered()
+            this.subscribeNotificationRequested()
         }
     }
 
@@ -236,6 +267,94 @@ export class RuntimeClient {
             variables: { filter }
         }))
         return runtimeMessageOutbox
+    }
+
+    async requestInstallNotification(notification: NotificationInput) {
+        const { runtimeRequestInstallNotification } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeRequestInstallNotification($notification: NotificationInput!) {
+                runtimeRequestInstallNotification(notification: $notification)
+            }`,
+            variables: { notification }
+        }))
+        return runtimeRequestInstallNotification
+    }
+
+    async grantNotification(id: string): Promise<boolean> {
+        const { runtimeGrantNotification } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeGrantNotification($id: String!) {
+                runtimeGrantNotification(id: $id)
+            }`,
+            variables: { id }
+        }))
+        return runtimeGrantNotification
+    }
+
+    async notifications(): Promise<Notification[]> {
+        const { runtimeNotifications } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeNotifications {
+                runtimeNotifications { ${NOTIFICATION_FIELDS} }
+            }`,
+        }))
+        return runtimeNotifications
+    }
+
+    async updateNotification(id: string, notification: NotificationInput): Promise<boolean> {
+        const { runtimeUpdateNotification } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeUpdateNotification($id: String!, $notification: NotificationInput!) {
+                runtimeUpdateNotification(id: $id, notification: $notification)
+            }`,
+            variables: { id, notification }
+        }))
+        return runtimeUpdateNotification
+    }
+
+    async removeNotification(id: string): Promise<boolean> {
+        const { runtimeRemoveNotification } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeRemoveNotification($id: String!) {
+                runtimeRemoveNotification(id: $id)
+            }`,
+            variables: { id }
+        }))
+        return runtimeRemoveNotification
+    }
+
+
+    addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
+        this.#notificationTriggeredCallbacks.push(cb)
+    }
+
+    addNotificationRequestedCallback(cb: NotificationRequestedCallback) {
+        this.#notificationRequestedCallbacks.push(cb)
+    }
+
+    subscribeNotificationTriggered() {
+        this.#apolloClient.subscribe({
+            query: gql` subscription {
+                runtimeNotificationTriggered { ${TRIGGERED_NOTIFICATION_FIELDS} }
+            }   
+        `}).subscribe({
+            next: result => {
+                this.#notificationTriggeredCallbacks.forEach(cb => {
+                    cb(result.data.runtimeNotificationTriggered)
+                })
+            },
+            error: (e) => console.error(e)
+        })
+    }
+
+    subscribeNotificationRequested() {
+        this.#apolloClient.subscribe({
+            query: gql` subscription {
+                runtimeNotificationRequested { ${NOTIFICATION_FIELDS} }
+            }   
+        `}).subscribe({
+            next: result => {
+                this.#notificationRequestedCallbacks.forEach(cb => {
+                    cb(result.data.runtimeNotificationRequested)
+                })
+            },
+            error: (e) => console.error(e)
+        })
     }
 
     addMessageCallback(cb: MessageCallback) {

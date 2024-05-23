@@ -1,11 +1,11 @@
 #![allow(non_snake_case)]
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
-use crate::{holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective}, runtime_service::RuntimeService, types::DecoratedLinkExpression};
+use crate::{db::Ad4mDb, holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string}, runtime_service::RuntimeService, types::{DecoratedLinkExpression, Notification}};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
-use std::{env, path};
+use std::{env};
 use super::graphql_types::*;
-use base64::{encode};
-use crate::{agent::{capabilities::*, signatures}, holochain_service, runtime_service, wallet::{self, Wallet}};
+
+use crate::{agent::{capabilities::*, signatures}};
 
 pub struct Query;
 
@@ -73,15 +73,15 @@ impl Query {
 
     async fn agent_get_entanglement_proofs(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
     ) -> FieldResult<Vec<EntanglementProof>> {
         let proofs = get_entanglement_proofs();
         Ok(proofs)
     }
 
-    async fn agent_is_locked(&self, context: &RequestContext) -> FieldResult<bool> {
+    async fn agent_is_locked(&self, _context: &RequestContext) -> FieldResult<bool> {
         AgentService::with_global_instance(|agent_service| {
-            let agent = agent_service.agent.clone().ok_or(FieldError::new(
+            let _agent = agent_service.agent.clone().ok_or(FieldError::new(
                 "Agent not found",
                 Value::null(),
             ))?;
@@ -341,10 +341,10 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        Ok(get_perspective(&uuid)
+        Ok(prolog_resolution_to_string(get_perspective(&uuid)
             .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
             .prolog_query(query)
-            .await?)
+            .await?))
     }
 
     async fn perspective_snapshot(
@@ -439,7 +439,7 @@ impl Query {
         Ok(serde_json::to_string(&encoded_infos)?)
     }
 
-    async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
+    async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {
         AgentService::with_global_instance(|agent_service| {
             agent_service.agent.clone().ok_or(FieldError::new(
                 "Agent not found",
@@ -492,7 +492,7 @@ impl Query {
     async fn runtime_message_outbox(
         &self,
         context: &RequestContext,
-        filter: Option<String>,
+        _filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
 
@@ -514,5 +514,20 @@ impl Query {
         signatures::verify_string_signed_by_did(&did, &data, &signed_data)
             .map_err(|e| e.to_string())
             .map_err(|e| coasys_juniper::FieldError::new(e, coasys_juniper::Value::Null))
+    }
+
+
+    async fn runtime_notifications(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<Vec<Notification>> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        let notifications_result = Ad4mDb::with_global_instance(|db| {
+            db.get_notifications()
+        });
+        if let Err(e) = notifications_result {
+            return Err(FieldError::new(e.to_string(), Value::null()));
+        }
+        Ok(notifications_result.unwrap())
     }
 }
