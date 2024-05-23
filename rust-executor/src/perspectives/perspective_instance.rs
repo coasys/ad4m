@@ -1141,23 +1141,35 @@ impl PerspectiveInstance {
         for p in &properties {
             let property_values_result = self.prolog_query(format!(r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, class_name, base_expression, p)).await?;
             if let Some(property_value) = prolog_get_first_binding(&property_values_result, "Value") {
-                let resolve_expression_uri = QueryResolution::True == self.prolog_query(format!(r#"subject_class("{}", C), property_resolve(C, "{}")"#, class_name, p)).await?;
+                let result = self.prolog_query(format!(r#"subject_class("{}", C), property_resolve(C, "{}")"#, class_name, p)).await?;
+                println!("resolve query result for {}: {:?}", p, result);
+                let resolve_expression_uri = QueryResolution::False != result;
+                println!("resolve_expression_uri for {}: {:?}", p, resolve_expression_uri);
                 let value = if resolve_expression_uri {
-                    property_value
-                    /*
-                    let expression_uri = &first_result;
-                    match self.get_expression(expression_uri).await {
-                        Ok(expression) => match serde_json::from_str::<Value>(&expression.data) {
-                            Ok(data) => data,
-                            Err(_) => expression.data,
+                    match &property_value {
+                        scryer_prolog::machine::parsed_results::Value::String(s) => {
+                            println!("getting expr url: {}", s);
+                            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
+
+                            if let Some(ref mut js) = *lock {
+                                js.execute(format!(
+                                        r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}))"#,
+                                        s
+                                    ))
+                                    .await?
+                            } else {
+                                prolog_value_to_json_string(property_value.clone())
+                            }
                         },
-                        Err(_) => expression_uri.clone(),
+                        x => {
+                            println!("Couldn't get expression subjectentity: {:?}", x);
+                            prolog_value_to_json_string(property_value.clone())
+                        }
                     }
-                        */
                 } else {
-                    property_value.clone()
+                    prolog_value_to_json_string(property_value.clone())
                 };
-                object.insert(p.clone(), prolog_value_to_json_string(value));
+                object.insert(p.clone(), value);
             } else {
                 log::error!("Couldn't get a property value for class: `{}`, property: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, p, base_expression, property_values_result);
             };
