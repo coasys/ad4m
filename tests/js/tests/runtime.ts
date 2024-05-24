@@ -304,15 +304,17 @@ export default function runtimeTests(testContext: TestContext) {
         it("should trigger a notification and call the webhook", async () => {
             const ad4mClient = testContext.ad4mClient!
             const webhookUrl = 'http://localhost:8080/webhook';
+            const webhookAuth = 'Test Webhook Auth'
              // Setup Express server
              const app = express();
              app.use(bodyParser.json());
  
              let webhookCalled = false;
+             let webhookGotAuth = ""
  
              app.post('/webhook', (req, res) => {
                  webhookCalled = true;
-                 console.log("Webhook test server post:", req)
+                 webhookGotAuth = req.headers['authorization']?.substring("Bearer ".length)||"";
                  res.status(200).send({ success: true });
              });
  
@@ -339,7 +341,7 @@ export default function runtimeTests(testContext: TestContext) {
                 trigger: `triple(Source, "${triggerPredicate}", Target)`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: webhookUrl,
-                webhookAuth: "Test Webhook Auth"
+                webhookAuth: webhookAuth
             }
 
             // Request to install a new notification
@@ -363,13 +365,16 @@ export default function runtimeTests(testContext: TestContext) {
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
             await sleep(1000)
             expect(webhookCalled).to.be.true
+            expect(webhookGotAuth).to.equal(webhookAuth)
 
             // Reset webhookCalled for the next test
             webhookCalled = false;
+            webhookGotAuth = ""
 
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
             await sleep(1000)
             expect(webhookCalled).to.be.true
+            expect(webhookGotAuth).to.equal(webhookAuth)
 
             // Close the server after the test
             //@ts-ignore
