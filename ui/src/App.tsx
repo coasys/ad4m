@@ -4,6 +4,7 @@ import { useContext, useEffect, useState } from "react";
 import TrustAgent from "./components/TrustAgent";
 import Navigation from "./components/Navigation";
 import Auth from "./components/Auth";
+import Notification from "./components/Notification";
 import { Ad4minContext } from "./context/Ad4minContext";
 import { AgentProvider } from "./context/AgentContext";
 import { Route, Routes } from "react-router-dom";
@@ -19,7 +20,7 @@ import TrayMessage from "./components/TrayMessage";
 const App = () => {
   const [opened, setOpened] = useState(false);
   const {
-    state: { candidate, did, auth },
+    state: { candidate, did, auth, notification },
     methods: { handleTrustAgent },
   } = useContext(Ad4minContext);
 
@@ -85,6 +86,7 @@ const App = () => {
         <TrustAgent candidate={candidate} handleTrustAgent={handleTrustAgent} />
       )}
       {auth && <Auth />}
+      {notification && <Notification />}
     </div>
   );
 };

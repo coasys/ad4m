@@ -1,5 +1,5 @@
 import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
-import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { ExceptionInfo, Notification as NotificationType } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { createContext, useCallback, useEffect, useState } from "react";
 import {
   buildAd4mClient,
@@ -22,6 +22,7 @@ type State = {
   connected: boolean;
   connectedLaoding: boolean;
   expertMode: boolean;
+  notification: NotificationType | null;
 };
 
 type ContextProps = {
@@ -32,6 +33,7 @@ type ContextProps = {
     handleTrustAgent: (str: string) => void;
     handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void;
     toggleExpertMode: () => void;
+    handleNotification: (notification: Notification) => void;
   };
 };
 
@@ -48,6 +50,7 @@ const initialState: ContextProps = {
     connected: false,
     connectedLaoding: true,
     expertMode: getForVersion("expertMode") === "true",
+    notification: null,
   },
   methods: {
     configureEndpoint: () => null,
@@ -55,6 +58,7 @@ const initialState: ContextProps = {
     handleTrustAgent: () => null,
     handleLogin: () => null,
     toggleExpertMode: () => null,
+    handleNotification: () => null,
   },
 };
 
@@ -128,6 +132,14 @@ export function Ad4minProvider({ children }: any) {
               auth: exception.addon!,
             }));
           }
+
+          if (exception.type === ExceptionType.InstallNotificationRequest) {
+            setState((prev) => ({
+              ...prev,
+              notification: JSON.parse(exception.addon!),
+            }));
+          }
+
           Notification.requestPermission().then((response) => {
             if (response === "granted") {
               new Notification(exception.title, { body: exception.message });
@@ -224,6 +236,13 @@ export function Ad4minProvider({ children }: any) {
     }));
   };
 
+  const handleNotification = (notification: Notification) => {
+    setState((prev) => ({
+      ...prev,
+      notification,
+    }));
+  }
+
   const configureEndpoint = async (url: string) => {
     if (url) {
       setState((prev) => ({
@@ -270,6 +289,7 @@ export function Ad4minProvider({ children }: any) {
           resetEndpoint,
           handleLogin,
           toggleExpertMode,
+          handleNotification
         },
       }}
     >
