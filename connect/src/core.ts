@@ -313,7 +313,7 @@ export default class Ad4mConnect {
             setTimeout(async () => {
               const client = await this.connect();
               if (client) {
-                await this.checkAuth();
+                this.ad4mClient = client;
               } else {
                 this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
                 this.notifyAuthChange("unauthenticated");
