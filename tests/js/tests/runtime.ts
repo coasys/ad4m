@@ -394,7 +394,7 @@ export default function runtimeTests(testContext: TestContext) {
             //@ts-ignore
             expect(match.Source).to.equal("test://source")
             //@ts-ignore
-            expect(match.Target).to.equal("test://target1")
+            expect(match.Target).to.equal("test://target2")
 
             // Close the server after the test
             //@ts-ignore
