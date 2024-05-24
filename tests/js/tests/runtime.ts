@@ -5,6 +5,7 @@ import { Notification, NotificationInput, TriggeredNotification } from '@coasys/
 import sinon from 'sinon';
 import { sleep } from '../utils/utils';
 import { ExceptionType, Link } from '@coasys/ad4m';
+import nock from 'nock';
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
@@ -294,6 +295,50 @@ export default function runtimeTests(testContext: TestContext) {
             expect(match.Source).to.equal("test://source")
             //@ts-ignore
             expect(match.Target).to.equal("test://target2")
+        })
+
+
+
+        it("should trigger a notification and call the webhook", async () => {
+            const webhookUrl = 'http://localhost:3000/webhook';
+            const scope = nock(webhookUrl)
+                .post('/')
+                .reply(200, { success: true });
+
+            // Request to install a new notification
+            const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
+            sleep(1000)
+            // Grant the notification
+            const granted = await ad4mClient.runtime.grantNotification(notificationId)
+            expect(granted).to.be.true
+
+            // Set up the webhook
+            await ad4mClient.runtime.addNotificationTriggeredWebhook(webhookUrl);
+
+            // Ensuring no false positives
+            await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
+            await sleep(1000)
+            expect(scope.isDone()).to.be.false
+
+            // Ensuring only selected perspectives will trigger
+            await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
+            await sleep(1000)
+            expect(scope.isDone()).to.be.false
+
+            // Happy path
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
+            await sleep(1000)
+            expect(scope.isDone()).to.be.true
+
+            // Ensuring we don't get old data on a new trigger
+            scope.done(); // Reset nock
+            const newScope = nock(webhookUrl)
+                .post('/')
+                .reply(200, { success: true });
+
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
+            await sleep(1000)
+            expect(newScope.isDone()).to.be.true
         })
     }
 }
