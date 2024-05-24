@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{self, HashMap, BTreeMap};
 use std::sync::Arc;
 use std::time::Duration;
+use serde_json::Value;
 use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution};
 use tokio::{join, time};
 use tokio::sync::Mutex;
@@ -12,13 +13,15 @@ use serde::{Serialize, Deserialize};
 use crate::agent::create_signed_expression;
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
+use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
-use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
+use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
 use super::sdna::init_engine_facts;
 use super::update_perspective;
-use super::utils::prolog_resolution_to_string;
+use super::utils::{prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string};
+use json5;
 
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -38,6 +41,82 @@ impl SdnaType {
         }
     }
 }
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub enum Action {
+    #[serde(rename = "addLink")]
+    AddLink,
+    #[serde(rename = "removeLink")]
+    RemoveLink,
+    #[serde(rename = "setSingleTarget")]
+    SetSingleTarget,
+    #[serde(rename = "collectionSetter")]
+    CollectionSetter,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct Command {
+    source: Option<String>,
+    predicate: Option<String>,
+    target: Option<String>,
+    local: Option<bool>,
+    action: Action,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClass {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Class")]
+    class: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClassProperty {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Property")]
+    property: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClassCollection {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Collection")]
+    collection: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClassActions {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Actions")]
+    actions: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct PorpertyValue {
+    #[serde(rename = "C")]
+    c: Option<String>,
+    #[serde(rename = "Value")]
+    value: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SubjectClassOption {
+    #[serde(rename = "className")]
+    class_name: Option<String>,
+    #[serde(rename = "query")]
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct Parameter {
+    name: String,
+    value: serde_json::Value,
+}
+
 
 #[derive(Clone)]
 pub struct PerspectiveInstance {
@@ -148,7 +227,7 @@ impl PerspectiveInstance {
                     if link_language.current_revision().await.map_err(|e| anyhow!("current_revision error: {}",e))?.is_some() {
                         // Ok, we are synced and have a revision. Let's commit our pending diffs.
                         let pending_diffs = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid)).map_err(|e| anyhow!("get_pending_diffs error: {}",e))?;
-                        
+
                         if pending_diffs.additions.is_empty() && pending_diffs.removals.is_empty() {
                             return Ok(());
                         }
@@ -290,7 +369,7 @@ impl PerspectiveInstance {
         tokio::spawn(async move {
             if let Err(_) = self_clone.commit(&diff_clone).await {
                 let handle_clone = self_clone.persisted.lock().await.clone();
-                Ad4mDb::with_global_instance(|db| 
+                Ad4mDb::with_global_instance(|db|
                     db.add_pending_diff(&handle_clone.uuid, &diff_clone)
                 ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
             }
@@ -301,13 +380,13 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
         let notification_snapshot_before = self.notification_trigger_snapshot().await;
         if !diff.additions.is_empty() {
-            Ad4mDb::with_global_instance(|db| 
+            Ad4mDb::with_global_instance(|db|
                 db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
             ).expect("Failed to add many links");
         }
 
         if !diff.removals.is_empty() {
-            Ad4mDb::with_global_instance(|db| 
+            Ad4mDb::with_global_instance(|db|
                 for link in &diff.removals {
                     db.remove_link(&handle.uuid, link).expect("Failed to remove link");
                 }
@@ -315,7 +394,7 @@ impl PerspectiveInstance {
         }
 
         let decorated_diff = DecoratedPerspectiveDiff {
-            additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(), 
+            additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(),
             removals: diff.removals.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect()
         };
 
@@ -509,7 +588,7 @@ impl PerspectiveInstance {
             )
             .await;
 
-        
+
         if link_status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
@@ -729,7 +808,7 @@ impl PerspectiveInstance {
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
         self.ensure_prolog_engine().await?;
-    
+
         let prolog_engine_mutex = self.prolog_engine.lock().await;
         let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
         let prolog_engine = prolog_engine_option_ref.as_ref().expect("Must be some since we initialized the engine above");
@@ -751,7 +830,7 @@ impl PerspectiveInstance {
 
         tokio::spawn(async move {
             let uuid = self_clone.persisted.lock().await.uuid.clone();
-            
+
             if let Err(e) = self_clone.ensure_prolog_engine().await {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
@@ -763,7 +842,7 @@ impl PerspectiveInstance {
             } else {
                 self_clone.pubsub_publish_diff(diff).await;
                 let after =  self_clone.notification_trigger_snapshot().await;
-                let new_matches = Self::subtract_before_notification_matches(before, after);                
+                let new_matches = Self::subtract_before_notification_matches(before, after);
                 Self::publish_notification_matches(uuid, new_matches).await;
             }
         });
@@ -841,7 +920,7 @@ impl PerspectiveInstance {
 
         Ok(())
     }
- 
+
     async fn no_link_language_error(&self) -> AnyError {
         let handle = self.persisted.lock().await.clone();
         anyhow!("Perspective {} has no link language installed. State is: {:?}", handle.uuid, handle.state)
@@ -922,8 +1001,227 @@ impl PerspectiveInstance {
     }
 
 
+    pub async fn execute_commands(&mut self, commands: Vec<Command>, expression: String, parameters: Vec<Parameter>) -> Result<(), AnyError> {
+        let jsvalue_to_string = |value: &Value| -> String {
+            match value {
+                serde_json::Value::String(s) => s.clone(),
+                _ => value.to_string(),
+            }
+        };
+
+        let replace_this = |input: Option<String>| -> Option<String> {
+            if Some(String::from("this")) == input {
+                Some(expression.clone())
+            } else {
+                input
+            }
+        };
+
+        let replace_parameters = |input: Option<String>| -> Option<String> {
+            if let Some(mut output) = input {
+                for parameter in &parameters {
+                    output = output.replace(&parameter.name, &jsvalue_to_string(&parameter.value));
+                }
+                Some(output)
+            } else {
+                input
+            }
+        };
+
+        for command in commands {
+            let source = replace_this(replace_parameters(command.source))
+                .ok_or_else(|| anyhow!("Source cannot be None"))?;
+            let predicate = replace_this(replace_parameters(command.predicate));
+            let target = (replace_parameters(command.target))
+                .ok_or_else(|| anyhow!("Source cannot be None"))?;
+            let local = command.local.unwrap_or(false);
+            let status = if local { LinkStatus::Local } else { LinkStatus::Shared };
+
+            match command.action {
+                Action::AddLink => {
+                    self.add_link(Link{ source, predicate, target }, status).await?;
+                }
+                Action::RemoveLink => {
+                    let link_expressions = self.get_links(&LinkQuery{
+                        source:Some(source),
+                        predicate,
+                        target: Some(target),
+                        from_date: None,
+                        until_date: None,
+                        limit: None
+                    }).await?;
+                    for link_expression in link_expressions {
+                        self.remove_link(link_expression.into()).await?;
+                    }
+                }
+                Action::SetSingleTarget => {
+                    let link_expressions = self.get_links(&LinkQuery{
+                        source:Some(source.clone()),
+                        predicate: predicate.clone(),
+                        target: None,
+                        from_date: None,
+                        until_date: None,
+                        limit: None
+                    }).await?;
+                    for link_expression in link_expressions {
+                        self.remove_link(link_expression.into()).await?;
+                    }
+                    self.add_link(Link{ source, predicate, target }, status).await?;
+                }
+                Action::CollectionSetter => {
+                    let link_expressions = self.get_links(&LinkQuery{
+                        source:Some(source.clone()),
+                        predicate: predicate.clone(),
+                        target: None,
+                        from_date: None,
+                        until_date: None,
+                        limit: None
+                    }).await?;
+                    for link_expression in link_expressions {
+                        self.remove_link(link_expression.into()).await?;
+                    }
+                    self.add_links(
+                        parameters.iter().map(|p| Link{
+                            source: source.clone(),
+                            predicate: predicate.clone(),
+                            target: jsvalue_to_string(&p.value)
+                        }).collect(),
+                        status
+                    ).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn subject_class_option_to_class_name(&mut self, subject_class: SubjectClassOption) -> Result<String, AnyError> {
+        Ok(if subject_class.class_name.is_some() {
+            subject_class.class_name.unwrap()
+        } else {
+            let query = subject_class.query.ok_or(anyhow!("SubjectClassOption needs to either have `name` or `query` set"))?;
+            let result = self.prolog_query(format!("{}", query)).await
+                .map_err(|e| {
+                    log::error!("Error creating subject: {:?}", e);
+                    e
+                })?;
+            prolog_get_first_string_binding(&result, "Class")
+                .map(|value| value.clone())
+                .ok_or(anyhow!("No matching subject class found!"))?
+        })
+    }
+
+
+    pub async fn create_subject(&mut self, subject_class: SubjectClassOption, expression_address: String) -> Result<(), AnyError> {
+        let class_name = self.subject_class_option_to_class_name(subject_class).await?;
+        let result = self.prolog_query(format!("subject_class(\"{}\", C), constructor(C, Actions).", class_name)).await?;
+        let actions = prolog_get_first_string_binding(&result, "Actions")
+            .ok_or(anyhow!("No constructor found for class: {}", class_name))?;
+
+
+        let commands: Vec<Command> = json5::from_str(&actions).unwrap();
+        self.execute_commands(commands, expression_address, vec![]).await?;
+        Ok(())
+    }
+
+    pub async fn get_subject_data(&mut self, subject_class: SubjectClassOption, base_expression: String) -> Result<String, AnyError>{
+        let mut object: HashMap<String, String> = HashMap::new();
+
+        let class_name = self.subject_class_option_to_class_name(subject_class).await?;
+        let result = self.prolog_query(format!("subject_class(\"{}\", C), instance(C, \"{}\").", class_name, base_expression)).await?;
+
+        if let QueryResolution::False = result {
+            log::error!("No instance found for class: {} with id: {}", class_name, base_expression);
+            return Err(anyhow!("No instance found for class: {} with id: {}", class_name, base_expression));
+        }
+
+        let properties_result = self.prolog_query(format!(r#"subject_class("{}", C), property(C, Property)."#, class_name)).await?;
+        let properties: Vec<String> = prolog_get_all_string_bindings(&properties_result, "Property");
+
+        for p in &properties {
+            let property_values_result = self.prolog_query(format!(r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, class_name, base_expression, p)).await?;
+            if let Some(property_value) = prolog_get_first_binding(&property_values_result, "Value") {
+                let result = self.prolog_query(format!(r#"subject_class("{}", C), property_resolve(C, "{}")"#, class_name, p)).await?;
+                println!("resolve query result for {}: {:?}", p, result);
+                let resolve_expression_uri = QueryResolution::False != result;
+                println!("resolve_expression_uri for {}: {:?}", p, resolve_expression_uri);
+                let value = if resolve_expression_uri {
+                    match &property_value {
+                        scryer_prolog::machine::parsed_results::Value::String(s) => {
+                            println!("getting expr url: {}", s);
+                            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
+
+                            if let Some(ref mut js) = *lock {
+                                let result = js.execute(format!(
+                                        r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}))"#,
+                                        s
+                                    ))
+                                    .await?;
+
+                                let result: JsResultType<Option<ExpressionRendered>> = serde_json::from_str(&result)?;
+
+                                match result {
+                                    JsResultType::Ok(Some(expr)) => expr.data,
+                                    JsResultType::Ok(None) | JsResultType::Error(_) => prolog_value_to_json_string(property_value.clone()),
+                                }
+                            } else {
+                                prolog_value_to_json_string(property_value.clone())
+                            }
+                        },
+                        x => {
+                            println!("Couldn't get expression subjectentity: {:?}", x);
+                            prolog_value_to_json_string(property_value.clone())
+                        }
+                    }
+                } else {
+                    prolog_value_to_json_string(property_value.clone())
+                };
+                object.insert(p.clone(), value);
+            } else {
+                log::error!("Couldn't get a property value for class: `{}`, property: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, p, base_expression, property_values_result);
+                object.insert(p.clone(), "null".to_string());
+            };
+        }
+
+        let collections_results = self.prolog_query(format!(r#"subject_class("{}", C), collection(C, Collection)"#, class_name)).await?;
+        let collections: Vec<String> = prolog_get_all_string_bindings(&collections_results, "Collection");
+
+        for c in collections {
+            let collection_values_result = self.prolog_query(format!(r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#, class_name, base_expression, c)).await?;
+            if let Some(collection_value) = prolog_get_first_binding(&collection_values_result, "Value") {
+                object.insert(c.clone(), prolog_value_to_json_string(collection_value));
+            } else {
+                log::error!("Couldn't get a collection value for class: `{}`, collection: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, c, base_expression, collection_values_result);
+                object.insert(c.clone(), "[]".to_string());
+            }
+        }
+
+        let stringified = object.into_iter()
+            .map(|(k, v)| {
+                format!(r#""{}": {}"#, k, v)
+            })
+            .collect::<Vec::<String>>()
+            .join(", ");
+
+        Ok(format!("{{ {} }}", stringified))
+    }
 }
 
+pub fn prolog_result(result: String) -> Value {
+    let v: Value = serde_json::from_str(&result).unwrap();
+    match v {
+        Value::String(string) => {
+            if string == "true" {
+                Value::Bool(true)
+            } else if string == "false" {
+                Value::Bool(false)
+            } else {
+                Value::String(string)
+            }
+        }
+        _ => v,
+    }
+}
 
 
 

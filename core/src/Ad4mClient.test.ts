@@ -34,9 +34,9 @@ jest.setTimeout(15000)
 async function createGqlServer(port: number) {
     const schema = await buildSchema({
         resolvers: [
-            AgentResolver, 
+            AgentResolver,
             ExpressionResolver,
-            LanguageResolver, 
+            LanguageResolver,
             NeighbourhoodResolver,
             PerspectiveResolver,
             RuntimeResolver
@@ -87,7 +87,7 @@ async function createGqlServer(port: number) {
 describe('Ad4mClient', () => {
     let ad4mClient
     let apolloClient
-    
+
     beforeAll(async () => {
         let port = await createGqlServer(4000);
 
@@ -98,7 +98,7 @@ describe('Ad4mClient', () => {
             webSocketImpl: Websocket
         }));
 
-        
+
 
         apolloClient = new ApolloClient({
             link: wsLink,
@@ -254,9 +254,9 @@ describe('Ad4mClient', () => {
                 appDesc: "demo-desc",
                 appDomain: "demo.test.org",
                 appUrl: "https://demo-link",
-                appIconPath: "/some/image/path", 
+                appIconPath: "/some/image/path",
                 capabilities: [
-                    { 
+                    {
                         with: {
                             "domain":"agent",
                             "pointers":["*"]
@@ -267,7 +267,7 @@ describe('Ad4mClient', () => {
             expect(requestId).toBe("test-request-id")
         })
 
-        
+
         it('agentGetApps() smoke tests', async () => {
             const apps = await ad4mClient.agent.getApps()
             expect(apps.length).toBe(0)
@@ -705,7 +705,7 @@ describe('Ad4mClient', () => {
 
         it('addListener() smoke test', async () => {
             let perspective = await ad4mClient.perspective.byUUID('00004')
-            
+
             const testLink = new LinkExpression()
             testLink.author = "did:ad4m:test"
             testLink.timestamp = Date.now().toString()
@@ -726,7 +726,7 @@ describe('Ad4mClient', () => {
             const link = new LinkExpressionInput()
             link.source = 'root'
             link.target = 'perspective://Qm34589a3ccc0'
-            await perspective.add(link)  
+            await perspective.add(link)
 
             expect(linkAdded).toBeCalledTimes(1)
             expect(linkRemoved).toBeCalledTimes(0)
@@ -734,7 +734,7 @@ describe('Ad4mClient', () => {
             perspective = await ad4mClient.perspective.byUUID('00004')
 
             await perspective.addListener('link-removed', linkRemoved)
-            await perspective.remove(testLink)  
+            await perspective.remove(testLink)
 
             expect(linkAdded).toBeCalledTimes(1)
             expect(linkRemoved).toBeCalledTimes(1)
@@ -742,20 +742,20 @@ describe('Ad4mClient', () => {
 
         it('removeListener() smoke test', async () => {
             let perspective = await ad4mClient.perspective.byUUID('00004')
-            
+
             const linkAdded = jest.fn()
 
             await perspective.addListener('link-added', linkAdded)
-            await perspective.add({source: 'root', target: 'neighbourhood://Qm12345'})  
+            await perspective.add({source: 'root', target: 'neighbourhood://Qm12345'})
 
             expect(linkAdded).toBeCalledTimes(1)
 
             linkAdded.mockClear();
-            
+
             perspective = await ad4mClient.perspective.byUUID('00004')
 
             await perspective.removeListener('link-added', linkAdded)
-            await perspective.add({source: 'root', target: 'neighbourhood://Qm123456'})  
+            await perspective.add({source: 'root', target: 'neighbourhood://Qm123456'})
 
             expect(linkAdded).toBeCalledTimes(1)
         })
@@ -774,7 +774,7 @@ describe('Ad4mClient', () => {
 
         it('updateLink() smoke test', async () => {
             const link = await ad4mClient.perspective.updateLink(
-                '00001', 
+                '00001',
                 {author: '', timestamp: '', proof: {signature: '', key: ''}, data:{source: 'root', target: 'none'}},
                 {source: 'root', target: 'lang://Qm123', predicate: 'p'})
             expect(link.author).toBe('did:ad4m:test')
@@ -792,6 +792,30 @@ describe('Ad4mClient', () => {
             const r = await ad4mClient.perspective.addSdna('00001', "Test", 'subject_class("Test", test)', 'subject_class');
             expect(r).toBeTruthy()
         })
+
+        it('executeCommands() smoke test', async () => {
+            const result = await ad4mClient.perspective.executeCommands(
+                '00001',
+                'command1; command2',
+                'expression1',
+                'param1, param2'
+            );
+            expect(result).toBeTruthy();
+        })
+
+        it('getSubjectData() smoke test', async () => {
+            const result = await ad4mClient.perspective.getSubjectData('00001', 'Test', 'test');
+            expect(result).toBe("");
+        });
+
+        it('createSubject() smoke test', async () => {
+            const result = await ad4mClient.perspective.createSubject(
+                '00001',
+                'command1; command2',
+                'expression1',
+            );
+            expect(result).toBeTruthy();
+        })
     })
 
     describe('.runtime', () => {
@@ -804,7 +828,7 @@ describe('Ad4mClient', () => {
             const r = await ad4mClient.runtime.openLink('https://ad4m.dev')
             expect(r).toBeTruthy()
         })
-        
+
         it('addTrustedAgents() smoke test', async () => {
             const r = await ad4mClient.runtime.addTrustedAgents(["agentPubKey"]);
             expect(r).toStrictEqual([ 'agentPubKey' ])
@@ -866,7 +890,7 @@ describe('Ad4mClient', () => {
             const verify = await ad4mClient.runtime.verifyStringSignedByDid("did", "didSigningKeyId", "data", "signedData")
             expect(verify).toBe(true)
         })
-        
+
         it('setStatus smoke test', async () => {
             const link = new LinkExpression()
             link.author = 'did:method:12345'
@@ -984,13 +1008,13 @@ describe('Ad4mClient', () => {
                 await ad4mClientWithoutSubscription.agent.updateDirectMessageLanguage("lang://test");
                 expect(agentUpdatedCallback).toBeCalledTimes(1)
             })
-            
+
             it('agent subscribeAgentStatusChanged smoke test', async () => {
                 const agentStatusChangedCallback = jest.fn()
                 ad4mClientWithoutSubscription.agent.addAgentStatusChangedListener(agentStatusChangedCallback)
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(agentStatusChangedCallback).toBeCalledTimes(0)
-    
+
                 ad4mClientWithoutSubscription.agent.subscribeAgentStatusChanged()
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithoutSubscription.agent.unlock("test", false);
@@ -1002,13 +1026,13 @@ describe('Ad4mClient', () => {
                 ad4mClientWithoutSubscription.agent.addAppChangedListener(appsChangedCallback)
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(appsChangedCallback).toBeCalledTimes(0)
-    
+
                 ad4mClientWithoutSubscription.agent.subscribeAppsChanged()
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithoutSubscription.agent.removeApp("test");
                 expect(appsChangedCallback).toBeCalledTimes(1)
             })
-    
+
             it('perspective subscribePerspectiveAdded smoke test', async () => {
                 const perspectiveAddedCallback = jest.fn()
                 ad4mClientWithoutSubscription.perspective.addPerspectiveAddedListener(perspectiveAddedCallback)
@@ -1021,7 +1045,7 @@ describe('Ad4mClient', () => {
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(perspectiveAddedCallback).toBeCalledTimes(1)
             })
-    
+
             it('perspective subscribePerspectiveUpdated smoke test', async () => {
                 const perspectiveUpdatedCallback = jest.fn()
                 ad4mClientWithoutSubscription.perspective.addPerspectiveUpdatedListener(perspectiveUpdatedCallback)
@@ -1034,7 +1058,7 @@ describe('Ad4mClient', () => {
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(perspectiveUpdatedCallback).toBeCalledTimes(1)
             })
-    
+
             it('perspective subscribePerspectiveRemoved smoke test', async () => {
                 const perspectiveRemovedCallback = jest.fn()
                 ad4mClientWithoutSubscription.perspective.addPerspectiveRemovedListener(perspectiveRemovedCallback)
@@ -1051,7 +1075,7 @@ describe('Ad4mClient', () => {
 
         describe('ad4mClient with subscription', () => {
             let ad4mClientWithSubscription
-            
+
             beforeEach(() => {
                 ad4mClientWithSubscription = new Ad4mClient(apolloClient, true)
             })
@@ -1061,18 +1085,18 @@ describe('Ad4mClient', () => {
                 ad4mClientWithSubscription.agent.addUpdatedListener(agentUpdatedCallback)
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(agentUpdatedCallback).toBeCalledTimes(0)
-                
+
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithSubscription.agent.updateDirectMessageLanguage("lang://test");
                 expect(agentUpdatedCallback).toBeCalledTimes(1)
             })
-            
+
             it('agent subscribeAgentStatusChanged smoke test', async () => {
                 const agentStatusChangedCallback = jest.fn()
                 ad4mClientWithSubscription.agent.addAgentStatusChangedListener(agentStatusChangedCallback)
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(agentStatusChangedCallback).toBeCalledTimes(0)
-    
+
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithSubscription.agent.unlock("test", false);
                 expect(agentStatusChangedCallback).toBeCalledTimes(1)
@@ -1083,12 +1107,12 @@ describe('Ad4mClient', () => {
                 ad4mClientWithSubscription.agent.addAppChangedListener(appsChangedCallback)
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(appsChangedCallback).toBeCalledTimes(0)
-    
+
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithSubscription.agent.removeApp("test");
                 expect(appsChangedCallback).toBeCalledTimes(1)
             })
-    
+
             it('perspective subscribePerspectiveAdded smoke test', async () => {
                 const perspectiveAddedCallback = jest.fn()
                 ad4mClientWithSubscription.perspective.addPerspectiveAddedListener(perspectiveAddedCallback)
@@ -1100,7 +1124,7 @@ describe('Ad4mClient', () => {
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(perspectiveAddedCallback).toBeCalledTimes(1)
             })
-    
+
             it('perspective subscribePerspectiveUpdated smoke test', async () => {
                 const perspectiveUpdatedCallback = jest.fn()
                 ad4mClientWithSubscription.perspective.addPerspectiveUpdatedListener(perspectiveUpdatedCallback)
@@ -1112,13 +1136,13 @@ describe('Ad4mClient', () => {
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(perspectiveUpdatedCallback).toBeCalledTimes(1)
             })
-    
+
             it('perspective subscribePerspectiveRemoved smoke test', async () => {
                 const perspectiveRemovedCallback = jest.fn()
                 ad4mClientWithSubscription.perspective.addPerspectiveRemovedListener(perspectiveRemovedCallback)
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(perspectiveRemovedCallback).toBeCalledTimes(0)
-                
+
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 await ad4mClientWithSubscription.perspective.remove('00006');
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
