@@ -148,7 +148,7 @@ impl PerspectiveInstance {
                     if link_language.current_revision().await.map_err(|e| anyhow!("current_revision error: {}",e))?.is_some() {
                         // Ok, we are synced and have a revision. Let's commit our pending diffs.
                         let pending_diffs = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid)).map_err(|e| anyhow!("get_pending_diffs error: {}",e))?;
-                        
+
                         if pending_diffs.additions.is_empty() && pending_diffs.removals.is_empty() {
                             return Ok(());
                         }
@@ -290,7 +290,7 @@ impl PerspectiveInstance {
         tokio::spawn(async move {
             if let Err(_) = self_clone.commit(&diff_clone).await {
                 let handle_clone = self_clone.persisted.lock().await.clone();
-                Ad4mDb::with_global_instance(|db| 
+                Ad4mDb::with_global_instance(|db|
                     db.add_pending_diff(&handle_clone.uuid, &diff_clone)
                 ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
             }
@@ -301,13 +301,13 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
         let notification_snapshot_before = self.notification_trigger_snapshot().await;
         if !diff.additions.is_empty() {
-            Ad4mDb::with_global_instance(|db| 
+            Ad4mDb::with_global_instance(|db|
                 db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
             ).expect("Failed to add many links");
         }
 
         if !diff.removals.is_empty() {
-            Ad4mDb::with_global_instance(|db| 
+            Ad4mDb::with_global_instance(|db|
                 for link in &diff.removals {
                     db.remove_link(&handle.uuid, link).expect("Failed to remove link");
                 }
@@ -315,7 +315,7 @@ impl PerspectiveInstance {
         }
 
         let decorated_diff = DecoratedPerspectiveDiff {
-            additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(), 
+            additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(),
             removals: diff.removals.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect()
         };
 
@@ -509,7 +509,7 @@ impl PerspectiveInstance {
             )
             .await;
 
-        
+
         if link_status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
@@ -729,7 +729,7 @@ impl PerspectiveInstance {
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
         self.ensure_prolog_engine().await?;
-    
+
         let prolog_engine_mutex = self.prolog_engine.lock().await;
         let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
         let prolog_engine = prolog_engine_option_ref.as_ref().expect("Must be some since we initialized the engine above");
@@ -751,7 +751,7 @@ impl PerspectiveInstance {
 
         tokio::spawn(async move {
             let uuid = self_clone.persisted.lock().await.uuid.clone();
-            
+
             if let Err(e) = self_clone.ensure_prolog_engine().await {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
@@ -763,7 +763,7 @@ impl PerspectiveInstance {
             } else {
                 self_clone.pubsub_publish_diff(diff).await;
                 let after =  self_clone.notification_trigger_snapshot().await;
-                let new_matches = Self::subtract_before_notification_matches(before, after);                
+                let new_matches = Self::subtract_before_notification_matches(before, after);
                 Self::publish_notification_matches(uuid, new_matches).await;
             }
         });
@@ -821,6 +821,14 @@ impl PerspectiveInstance {
                 trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches))
             };
 
+            let client = reqwest::Client::new();
+            let res = client.post(&notification.webhook_url)
+                .bearer_auth(&notification.webhook_auth)
+                .send()
+                .await;
+
+            log::info!("Webhook response: {:?}", res);
+
             get_global_pubsub()
                 .await
                 .publish(
@@ -841,7 +849,7 @@ impl PerspectiveInstance {
 
         Ok(())
     }
- 
+
     async fn no_link_language_error(&self) -> AnyError {
         let handle = self.persisted.lock().await.clone();
         anyhow!("Perspective {} has no link language installed. State is: {:?}", handle.uuid, handle.state)

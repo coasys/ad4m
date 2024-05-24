@@ -84,6 +84,7 @@ scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client", version="0.9.1-prerelease" }
+reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 
 rusqlite = { version = "0.29.0", features = ["bundled"] }
 fake = { version = "2.9.2", features = ["derive"] }
