@@ -310,9 +310,16 @@ export default class Ad4mConnect {
         },
         closed: () => {
           if (!this.requestedRestart) {
-            this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
-            this.notifyAuthChange("unauthenticated");
-            this.requestedRestart = false;
+            setTimeout(async () => {
+              const client = await this.connect();
+              if (client) {
+                this.ad4mClient = client;
+              } else {
+                this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
+                this.notifyAuthChange("unauthenticated");
+                this.requestedRestart = false;
+              }
+            }, 5000);
           }
         },
       },
