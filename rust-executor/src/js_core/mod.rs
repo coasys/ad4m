@@ -34,7 +34,7 @@ use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 use crate::holochain_service::maybe_get_holochain_service;
 use crate::Ad4mConfig;
 
-static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
+pub(crate) static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
     Lazy::new(|| Arc::new(TokioMutex::new(None)));
 
 pub struct JsCoreHandle {
