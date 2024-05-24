@@ -174,7 +174,7 @@ export default class Ad4mConnect {
         localStorage.setItem('hosting_token', data.token);
 
         let token = localStorage.getItem('hosting_token');
-        
+
         const response2 = await fetch('https://hosting.ad4m.dev/api/service/info', {
           method: 'GET',
           headers: {
@@ -310,9 +310,16 @@ export default class Ad4mConnect {
         },
         closed: () => {
           if (!this.requestedRestart) {
-            this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
-            this.notifyAuthChange("unauthenticated");
-            this.requestedRestart = false;
+            setTimeout(async () => {
+              const client = await this.connect();
+              if (client) {
+                await this.checkAuth();
+              } else {
+                this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
+                this.notifyAuthChange("unauthenticated");
+                this.requestedRestart = false;
+              }
+            }, 5000);
           }
         },
       },
