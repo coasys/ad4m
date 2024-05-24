@@ -17,7 +17,7 @@ use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_
 use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
-use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
+use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
 use super::sdna::init_engine_facts;
 use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string};
@@ -369,7 +369,7 @@ impl PerspectiveInstance {
         tokio::spawn(async move {
             if let Err(_) = self_clone.commit(&diff_clone).await {
                 let handle_clone = self_clone.persisted.lock().await.clone();
-                Ad4mDb::with_global_instance(|db| 
+                Ad4mDb::with_global_instance(|db|
                     db.add_pending_diff(&handle_clone.uuid, &diff_clone)
                 ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
             }
@@ -380,13 +380,13 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
         let notification_snapshot_before = self.notification_trigger_snapshot().await;
         if !diff.additions.is_empty() {
-            Ad4mDb::with_global_instance(|db| 
+            Ad4mDb::with_global_instance(|db|
                 db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
             ).expect("Failed to add many links");
         }
 
         if !diff.removals.is_empty() {
-            Ad4mDb::with_global_instance(|db| 
+            Ad4mDb::with_global_instance(|db|
                 for link in &diff.removals {
                     db.remove_link(&handle.uuid, link).expect("Failed to remove link");
                 }
@@ -394,7 +394,7 @@ impl PerspectiveInstance {
         }
 
         let decorated_diff = DecoratedPerspectiveDiff {
-            additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(), 
+            additions: diff.additions.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect(),
             removals: diff.removals.iter().map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared))).collect()
         };
 
@@ -588,7 +588,7 @@ impl PerspectiveInstance {
             )
             .await;
 
-        
+
         if link_status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
@@ -808,7 +808,7 @@ impl PerspectiveInstance {
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
         self.ensure_prolog_engine().await?;
-    
+
         let prolog_engine_mutex = self.prolog_engine.lock().await;
         let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
         let prolog_engine = prolog_engine_option_ref.as_ref().expect("Must be some since we initialized the engine above");
@@ -830,7 +830,7 @@ impl PerspectiveInstance {
 
         tokio::spawn(async move {
             let uuid = self_clone.persisted.lock().await.uuid.clone();
-            
+
             if let Err(e) = self_clone.ensure_prolog_engine().await {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
@@ -842,7 +842,7 @@ impl PerspectiveInstance {
             } else {
                 self_clone.pubsub_publish_diff(diff).await;
                 let after =  self_clone.notification_trigger_snapshot().await;
-                let new_matches = Self::subtract_before_notification_matches(before, after);                
+                let new_matches = Self::subtract_before_notification_matches(before, after);
                 Self::publish_notification_matches(uuid, new_matches).await;
             }
         });
@@ -920,7 +920,7 @@ impl PerspectiveInstance {
 
         Ok(())
     }
- 
+
     async fn no_link_language_error(&self) -> AnyError {
         let handle = self.persisted.lock().await.clone();
         anyhow!("Perspective {} has no link language installed. State is: {:?}", handle.uuid, handle.state)
@@ -1152,11 +1152,18 @@ impl PerspectiveInstance {
                             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
 
                             if let Some(ref mut js) = *lock {
-                                js.execute(format!(
+                                let result = js.execute(format!(
                                         r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}))"#,
                                         s
                                     ))
-                                    .await?
+                                    .await?;
+
+                                let result: JsResultType<Option<ExpressionRendered>> = serde_json::from_str(&result)?;
+
+                                match result {
+                                    JsResultType::Ok(Some(expr)) => expr.data,
+                                    JsResultType::Ok(None) | JsResultType::Error(_) => prolog_value_to_json_string(property_value.clone()),
+                                }
                             } else {
                                 prolog_value_to_json_string(property_value.clone())
                             }
@@ -1172,6 +1179,7 @@ impl PerspectiveInstance {
                 object.insert(p.clone(), value);
             } else {
                 log::error!("Couldn't get a property value for class: `{}`, property: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, p, base_expression, property_values_result);
+                object.insert(p.clone(), "null".to_string());
             };
         }
 
@@ -1184,6 +1192,7 @@ impl PerspectiveInstance {
                 object.insert(c.clone(), prolog_value_to_json_string(collection_value));
             } else {
                 log::error!("Couldn't get a collection value for class: `{}`, collection: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, c, base_expression, collection_values_result);
+                object.insert(c.clone(), "[]".to_string());
             }
         }
 
