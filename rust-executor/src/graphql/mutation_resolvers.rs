@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
-
-use crate::runtime_service::{self, RuntimeService};
+use std::collections::HashMap;
+use crate::{db::Ad4mDb, types::Notification, perspectives::perspective_instance::{Command, Parameter, SubjectClass, SubjectClassOption}, runtime_service::{self, RuntimeService}};
 use ad4m_client::literal::Literal;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
-use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError, Value};
+use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
 
 use super::graphql_types::*;
 use crate::{agent::{self, capabilities::*, AgentService}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key}, holochain_service::{agent_infos_from_str, get_holochain_service}, pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC}};
@@ -50,7 +50,7 @@ impl Mutation {
 
     async fn agent_add_entanglement_proofs(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
@@ -72,7 +72,7 @@ impl Mutation {
 
     async fn agent_delete_entanglement_proofs(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
@@ -94,7 +94,7 @@ impl Mutation {
 
     async fn agent_entanglement_proof_pre_flight(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
         device_key: String,
         device_key_type: String,
     ) -> FieldResult<EntanglementProof> {
@@ -141,7 +141,7 @@ impl Mutation {
 
     async fn agent_lock(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
         let agent = AgentService::with_global_instance(|agent_service| {
@@ -833,6 +833,88 @@ impl Mutation {
         Ok(true)
     }
 
+    async fn perspective_execute_commands(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        commands: String,
+        expression: String,
+        parameters: Option<String>,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+
+        let commands: Vec<Command> = serde_json::from_str(&commands)
+            .map_err(|e| FieldError::new(
+                e,
+                graphql_value!({ "invalid_commands": commands })
+            ))?;
+        let parameters: Vec<Parameter> = if let Some(p) = parameters {
+            serde_json::from_str(&p)
+                .map_err(|e| FieldError::new(
+                    e,
+                    graphql_value!({ "invalid_parameters": p })
+                ))?
+        } else {
+            Vec::new()
+        };
+
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        perspective.execute_commands(commands, expression, parameters).await?;
+        Ok(true)
+    }
+
+    async fn perspective_create_subject(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subject_class: String,
+        expression_address: String,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+
+        let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)
+            .map_err(|e| FieldError::new(
+                e,
+                graphql_value!({ "invalid_subject_class": subject_class })
+            ))?;
+
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+
+        perspective.create_subject(subject_class, expression_address).await?;
+        Ok(true)
+    }
+
+
+    async fn perspective_get_subject_data(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subject_class: String,
+        expression_address: String,
+    ) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+
+        let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)
+        .map_err(|e| FieldError::new(
+            e,
+            graphql_value!({ "invalid_subject_class": subject_class })
+        ))?;
+
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+
+        let result = perspective.get_subject_data(subject_class, expression_address).await?;
+        Ok(result)
+    }
+
     async fn runtime_add_friends(
         &self,
         context: &RequestContext,
@@ -941,7 +1023,7 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn runtime_open_link(&self, context: &RequestContext, url: String) -> FieldResult<bool> {
+    async fn runtime_open_link(&self, _context: &RequestContext, url: String) -> FieldResult<bool> {
         if webbrowser::open(&url).is_ok() {
             log::info!("Browser opened successfully");
             Ok(true)
@@ -953,10 +1035,7 @@ impl Mutation {
 
     async fn runtime_quit(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
-
         std::process::exit(0);
-
-        Ok(true)
     }
 
     async fn runtime_remove_friends(
@@ -1010,5 +1089,63 @@ impl Mutation {
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
         result.get_graphql_result()
+    }
+
+
+    async fn runtime_request_install_notification(
+        &self,
+        context: &RequestContext,
+        notification: NotificationInput,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ok(RuntimeService::request_install_notification(notification).await?)
+    }
+
+    async fn runtime_update_notification(
+        &self,
+        context: &RequestContext,
+        id: String,
+        notification: NotificationInput,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        let notification = Notification::from_input_and_id(id.clone(), notification);
+
+        Ad4mDb::with_global_instance(|db| {
+            db.update_notification(id, &notification)
+        })?;
+        
+        Ok(true)
+    }
+
+    async fn runtime_remove_notification(
+        &self,
+        context: &RequestContext,
+        id: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| {
+            db.remove_notification(id)
+        })?;
+        Ok(true)
+    }
+
+    async fn runtime_grant_notification(
+        &self,
+        context: &RequestContext,
+        id: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        let mut notification = Ad4mDb::with_global_instance(|db| {
+            db.get_notification(id.clone())
+        }).map_err(|e| e.to_string())?.ok_or("Notification with given id not found")?;
+
+        notification.granted = true;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.update_notification(id, &notification)
+        }).map_err(|e| e.to_string())?;
+            
+        Ok(true)
     }
 }

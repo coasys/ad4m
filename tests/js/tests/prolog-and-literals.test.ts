@@ -593,6 +593,14 @@ describe("Prolog + Literals", () => {
                         local: true
                     })
                     local: string = ""
+
+                    @SubjectProperty({
+                        through: "recipe://resolve",
+                        writable: true,
+                        resolveLanguage: "literal"
+                    })
+                    resolve: string = ""
+
                 }
 
                 before(async () => {
@@ -652,6 +660,7 @@ describe("Prolog + Literals", () => {
                     const recipe2 = new Recipe(perspective!, root);
 
                     await recipe2.get();
+                    console.log("comments:", recipe2.comments)
 
                     expect(recipe2.comments.length).to.equal(2)
                 })
@@ -726,6 +735,22 @@ describe("Prolog + Literals", () => {
                     await recipe2.get();
 
                     expect(recipe2.ingredients.length).to.equal(1)
+                })
+
+                it("can implement the resolveLanguage property type", async () => {
+                    let root = Literal.from("Active record implementation test resolveLanguage").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.resolve = "Test name literal";
+
+                    await recipe.save();
+                    await recipe.get();
+
+                    //@ts-ignore
+                    let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
+                    expect(links.length).to.equal(1)
+                    let literal = Literal.fromUrl(links[0].data.target).get()
+                    expect(literal.data).to.equal(recipe.resolve)
                 })
             })
         })

@@ -53,7 +53,7 @@ impl PubSub {
 
     pub async fn publish(&self, topic: &Topic, message: &Message) {
         let mut subscribers = self.subscribers.lock().await;
-        
+
         if let Some(subscribers_vec) = subscribers.get_mut(topic) {
             let mut i = 0;
             while i < subscribers_vec.len() {
@@ -102,7 +102,7 @@ pub(crate) async fn subscribe_and_process<
                 error!("Failed to deserialize pubsub message: {:?}", e);
                 error!("Type: {}", type_name);
                 error!("Message: {:?}", msg);
-                
+
                 let field_error = FieldError::new(
                     e,
                     graphql_value!({ "type": "INTERNAL_ERROR_COULD_NOT_SERIALIZE" }),
@@ -131,6 +131,7 @@ lazy_static::lazy_static! {
     pub static ref PERSPECTIVE_UPDATED_TOPIC: String = "perspective-updated-topic".to_owned();
     pub static ref PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC: String = "perspective-sync-state-change-topic".to_owned();
     pub static ref RUNTIME_MESSAGED_RECEIVED_TOPIC: String = "runtime-messaged-received-topic".to_owned();
+    pub static ref RUNTIME_NOTIFICATION_TRIGGERED_TOPIC: String = "runtime-notification-triggered-topic".to_owned();
 }
 
 pub async fn get_global_pubsub() -> Arc<PubSub> {

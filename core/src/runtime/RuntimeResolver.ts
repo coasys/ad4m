@@ -1,9 +1,9 @@
-import { Arg, Mutation, Resolver, Query, Subscription, ObjectType, Field, Int } from "type-graphql";
+import { Arg, Mutation, Resolver, Query, Subscription, ObjectType, Field, Int, InputType } from "type-graphql";
 import { Perspective, PerspectiveExpression, PerspectiveInput } from "../perspectives/Perspective";
 import { ExpressionProof } from "../expression/Expression";
 import { LinkExpression } from "../links/Links";
 import { ExceptionType } from "../Exception";
-import { RUNTIME_MESSAGED_RECEIVED_TOPIC, EXCEPTION_OCCURRED_TOPIC } from '../PubSub';
+import { RUNTIME_MESSAGED_RECEIVED_TOPIC, EXCEPTION_OCCURRED_TOPIC, RUNTIME_NOTIFICATION_REQUESTED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC } from '../PubSub';
 
 const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -52,6 +52,90 @@ export class ExceptionInfo {
     type: ExceptionType;
     @Field({ nullable: true })
     addon?: string;
+}
+
+// This class defines a Notification and is what an app provides
+// when registering and installing a notification.
+@InputType()
+export class NotificationInput {
+    @Field()
+    description: string;
+    @Field()
+    appName: string;
+    @Field()
+    appUrl: string;
+    @Field()
+    appIconPath: string;
+
+    // This is Prolog query which will be executed on every perspective change.
+    // All matched unbound variables will be part of the triggerMatch, i.e.
+    // the content that will be sent to the launcher via subscription 
+    // and to the webhook.
+    @Field()
+    trigger: string;
+
+    // List Perspectives this Notification is active on.
+    @Field(type => [String])
+    perspectiveIds: string[];
+
+    // URL to which the notification matches will be sent via POST
+    @Field()
+    webhookUrl: string;
+
+    // Authentication bearer token to be sent via POST to the webhookUrl.
+    @Field()
+    webhookAuth: string;
+}
+
+// This is a notification as it is stored in the runtime.
+// Above definition plus ID and granted flag.
+@ObjectType()
+export class Notification {
+    @Field()
+    id: string;    
+    @Field()
+    granted: boolean;
+    @Field()
+    description: string;
+    @Field()
+    appName: string;
+    @Field()
+    appUrl: string;
+    @Field()
+    appIconPath: string;
+
+    // This is Prolog query which will be executed on every perspective change.
+    // All matched unbound variables will be part of the triggerMatch, i.e.
+    // the content that will be sent to the launcher via subscription 
+    // and to the webhook.
+    @Field()
+    trigger: string;
+
+    // List Perspectives this Notification is active on.
+    @Field(type => [String])
+    perspectiveIds: string[];
+
+    // URL to which the notification matches will be sent via POST
+    @Field()
+    webhookUrl: string;
+
+    // Authentication bearer token to be sent via POST to the webhookUrl.
+    @Field()
+    webhookAuth: string;
+}
+
+// This is what is sent to the launcher and the webhook.
+@ObjectType()
+export class TriggeredNotification {
+    @Field()
+    notification: Notification;
+    @Field()
+    perspectiveId: string;
+
+    // This is the Prolog query match that triggered the notification.
+    // It is a list of all variable bindings that match the notification's trigger.
+    @Field()
+    triggerMatch: string;
 }
 
 /**
@@ -190,4 +274,84 @@ export default class RuntimeResolver {
             type: ExceptionType.LanguageIsNotLoaded,
         }
     }
+
+    @Mutation()
+    runtimeRequestInstallNotification(
+        @Arg("notification", type => NotificationInput) notification: NotificationInput
+    ): string {
+        return "new-notification-id"        
+    }
+
+    @Query(returns => [Notification])
+    runtimeNotifications(): Notification[] {
+        return [{
+            id: "test-id",
+            granted: false,
+            description: "Test description",
+            appName: "Test app name",
+            appUrl: "https://example.com",
+            appIconPath: "https://fluxsocial.io/favicon",
+            trigger: "triple(X, ad4m://has_type, flux://message)",
+            perspectiveIds: ["u983ud-jdhh38d"],
+            webhookUrl: "https://example.com/webhook",
+            webhookAuth: "test-auth",
+        
+        }]
+    }
+
+    @Mutation()
+    runtimeUpdateNotification(
+        @Arg("id", type => String) id: string, 
+        @Arg("notification", type => NotificationInput) notification: NotificationInput
+    ): boolean {
+        return true
+    }
+
+    @Mutation()
+    runtimeRemoveNotification(@Arg("id", type => String) id: string): boolean {
+        return true
+    }
+
+    @Mutation()
+    runtimeGrantNotification(@Arg("id", type => String) id: string): boolean {
+        return true
+    }
+
+    @Subscription({topics: RUNTIME_NOTIFICATION_REQUESTED_TOPIC, nullable: true})
+    runtimeNotificationRequested(): Notification {
+        return {
+            id: "test-id",
+            granted: false,
+            description: "Test description",
+            appName: "Test app name",
+            appUrl: "https://example.com",
+            appIconPath: "https://fluxsocial.io/favicon",
+            trigger: "triple(X, ad4m://has_type, flux://message)",
+            perspectiveIds: ["u983ud-jdhh38d"],
+            webhookUrl: "https://example.com/webhook",
+            webhookAuth: "test-auth",
+        
+        }
+    }
+
+    @Subscription({topics: RUNTIME_NOTIFICATION_TRIGGERED_TOPIC, nullable: true})
+    runtimeNotificationTriggered(): TriggeredNotification {
+        return {
+            perspectiveId: "test-perspective-id",
+            triggerMatch: "test-trigger-match",
+            notification: {
+                id: "test-id",
+                granted: false,
+                description: "Test description",
+                appName: "Test app name",
+                appUrl: "https://example.com",
+                appIconPath: "https://fluxsocial.io/favicon",
+                trigger: "triple(X, ad4m://has_type, flux://message)",
+                perspectiveIds: ["u983ud-jdhh38d"],
+                webhookUrl: "https://example.com/webhook",
+                webhookAuth: "test-auth",
+            }
+        }
+    }
 }
+

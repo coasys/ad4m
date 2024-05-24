@@ -1,4 +1,4 @@
-use std::{ collections::HashMap, env, fs::{self, File}, io, path::Path, sync::Mutex};
+use std::{fs::File, sync::Mutex};
 use std::io::{Read};
 pub(crate) mod runtime_service_extension;
 use std::sync::Arc;
@@ -23,6 +23,8 @@ pub struct BootstrapSeed {
 
 use serde::{Deserialize, Serialize};
 
+use crate::graphql::graphql_types::{ExceptionInfo, ExceptionType, NotificationInput};
+use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::{agent::did, db::Ad4mDb, graphql::graphql_types::SentMessage};
 
 lazy_static! {
@@ -145,4 +147,38 @@ impl RuntimeService {
             db.add_to_outbox(&message.message, message.recipient)
         }).map_err(|e| e.to_string());
     }
+
+
+    pub async fn request_install_notification(notification_input: NotificationInput) -> Result<String, String>{
+        let notification_id = Ad4mDb::with_global_instance(|db| {
+            db.add_notification(notification_input)
+        }).map_err(|e| e.to_string())?;
+
+        let notification =Ad4mDb::with_global_instance(|db| {
+             db.get_notification(notification_id.clone())
+        }).map_err(|e| e.to_string())?.ok_or("Notification with given id not found")?;
+
+        let exception_info = ExceptionInfo {
+            title: "Request to install notifications for the app".to_string(),
+            message: format!(
+                "{} is waiting for notifications to be authenticated, open the ADAM Launcher for more information.",
+                notification.app_name
+            ),
+            r#type: ExceptionType::InstallNotificationRequest,
+            addon: Some(serde_json::to_string(&notification).unwrap()),
+        };
+
+        get_global_pubsub()
+            .await
+            .publish(
+                &EXCEPTION_OCCURRED_TOPIC,
+                &serde_json::to_string(&exception_info).unwrap(),
+            )
+            .await;
+
+        Ok(notification_id)
+    }
+
+
+
 }

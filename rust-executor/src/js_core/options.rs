@@ -1,4 +1,4 @@
-use deno_runtime::runtime;
+
 use deno_runtime::worker::WorkerOptions;
 use std::{collections::HashMap, rc::Rc};
 use url::Url;

@@ -1,6 +1,6 @@
-use std::{collections::HashSet, env, fs::File, io::{BufReader, Write}, path::{self, Path}, sync::Mutex};
 
-use crate::{agent::{sign, sign_string_hex, AgentService}, db::Ad4mDb, graphql::graphql_types::EntanglementProof};
+
+use crate::{agent::{sign_string_hex, AgentService}, db::Ad4mDb, graphql::graphql_types::EntanglementProof};
 
 pub(crate) mod entanglement_service_extension;
 
