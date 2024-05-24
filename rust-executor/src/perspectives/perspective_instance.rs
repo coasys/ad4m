@@ -902,14 +902,17 @@ impl PerspectiveInstance {
 
             let message = serde_json::to_string(&payload).unwrap();
 
-            log::info!("Notification webhook - posting to {:?}", notification.webhook_url);
-            let client = reqwest::Client::new();
-            let res = client.post(&notification.webhook_url)
-                .bearer_auth(&notification.webhook_auth)
-                .body(message.clone()) 
-                .send()
-                .await;
-            log::info!("Notification webhook response: {:?}", res);
+            if let Ok(_) = url::Url::parse(&notification.webhook_url) {
+                log::info!("Notification webhook - posting to {:?}", notification.webhook_url);
+                let client = reqwest::Client::new();
+                let res = client.post(&notification.webhook_url)
+                    .bearer_auth(&notification.webhook_auth)
+                    .header("Content-Type", "application/json")
+                    .body(message.clone()) 
+                    .send()
+                    .await;
+                log::info!("Notification webhook response: {:?}", res);
+            }
 
             get_global_pubsub()
                 .await
