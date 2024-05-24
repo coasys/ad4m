@@ -311,10 +311,12 @@ export default function runtimeTests(testContext: TestContext) {
  
              let webhookCalled = false;
              let webhookGotAuth = ""
+             let webhookGotBody = null
  
              app.post('/webhook', (req, res) => {
                  webhookCalled = true;
                  webhookGotAuth = req.headers['authorization']?.substring("Bearer ".length)||"";
+                 webhookGotBody = req.body;
                  res.status(200).send({ success: true });
              });
  
@@ -366,15 +368,33 @@ export default function runtimeTests(testContext: TestContext) {
             await sleep(1000)
             expect(webhookCalled).to.be.true
             expect(webhookGotAuth).to.equal(webhookAuth)
+            expect(webhookGotBody).to.be.not.be.null
+            let triggeredNotification = webhookGotBody as unknown as TriggeredNotification
+            let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            let match = triggerMatch[0]
+            //@ts-ignore
+            expect(match.Source).to.equal("test://source")
+            //@ts-ignore
+            expect(match.Target).to.equal("test://target1")
 
             // Reset webhookCalled for the next test
             webhookCalled = false;
             webhookGotAuth = ""
+            webhookGotBody = null
 
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
             await sleep(1000)
             expect(webhookCalled).to.be.true
             expect(webhookGotAuth).to.equal(webhookAuth)
+            triggeredNotification = webhookGotBody as unknown as TriggeredNotification
+            triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            match = triggerMatch[0]
+            //@ts-ignore
+            expect(match.Source).to.equal("test://source")
+            //@ts-ignore
+            expect(match.Target).to.equal("test://target2")
 
             // Close the server after the test
             //@ts-ignore
