@@ -130,28 +130,21 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
       new LinkQuery({ source: entry.baseExpression })
     );
 
-    const getters = Object.entries(Object.getOwnPropertyDescriptors(entry))
-      .filter(([key, descriptor]) => typeof descriptor.get === "function")
-      .map(([key]) => key);
+    let data: any = await this.perspective.getSubjectData(this.subject, entry.baseExpression)
 
-    const promises = getters.map((getter) => entry[getter]);
-    return Promise.all(promises).then((values) => {
-      return getters.reduce((acc, getter, index) => {
-        let value = values[index];
-        if (this.tempSubject.prototype?.__properties[getter]?.transform) {
-          value =
-            this.tempSubject.prototype.__properties[getter].transform(value);
-        }
+    for (const key in data) {
+      if (this.tempSubject.prototype?.__properties[key]?.transform) {
+        data[key] =
+          this.tempSubject.prototype.__properties[key].transform(data[key]);
+      }
+    }
 
-        return {
-          ...acc,
-          id: entry.baseExpression,
-          timestamp: links[0].timestamp,
-          author: links[0].author,
-          [getter]: value,
-        };
-      }, {});
-    });
+    return {
+      id: entry.baseExpression,
+      timestamp: links[0].timestamp,
+      author: links[0].author,
+      ...data,
+    }
   }
 
   async getAll(source?: string, query?: QueryOptions): Promise<SubjectClass[]> {
