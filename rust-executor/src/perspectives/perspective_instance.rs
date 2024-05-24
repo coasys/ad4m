@@ -900,19 +900,22 @@ impl PerspectiveInstance {
                 trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches))
             };
 
+            let message = serde_json::to_string(&payload).unwrap();
+
+            log::info!("Notification webhook - posting to {:?}", notification.webhook_url);
             let client = reqwest::Client::new();
             let res = client.post(&notification.webhook_url)
                 .bearer_auth(&notification.webhook_auth)
+                .body(message.clone()) 
                 .send()
                 .await;
-
-            log::info!("Webhook response: {:?}", res);
+            log::info!("Notification webhook response: {:?}", res);
 
             get_global_pubsub()
                 .await
                 .publish(
                     &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
-                    &serde_json::to_string(&payload).unwrap(),
+                    &message,
                 )
                 .await;
         }
