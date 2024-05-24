@@ -73,8 +73,6 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
   }
 
   async update(id: string, data: QueryPartialEntity<SubjectClass>) {
-    await this.ensureSubject();
-
     const instance = await this.get(id);
 
     if (!instance) {
@@ -102,8 +100,8 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
   }
 
   async get(id: string): Promise<SubjectClass | null> {
-    await this.ensureSubject();
     if (id) {
+      await this.ensureSubject();
       const subjectProxy = await this.perspective.getSubjectProxy(
         id,
         this.subject
@@ -231,8 +229,6 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
     source?: string,
     query?: QueryOptions
   ): Promise<SubjectClass[]> {
-    await this.ensureSubject();
-
     const subjects = await this.getAll(source, query);
 
     const entries = await Promise.all(
