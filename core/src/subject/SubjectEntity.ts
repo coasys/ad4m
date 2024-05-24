@@ -43,63 +43,11 @@ export class SubjectEntity {
 
   private async getData(id?: string) {
     const tempId = id ?? this.#baseExpression;
-    let isInstance = await this.#perspective.isSubjectInstance(tempId, this.#subjectClass)
-    if (!isInstance) {
-      throw `Not a valid subject instance of ${this.#subjectClass} for ${tempId}`
-    }
-
-    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property(C, Property)`)
-    let properties = results.map(result => result.Property)
-
-    for (let p of properties) {
-      const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve(C, "${p}")`)
-      const getProperty = async () => {
-        let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, "${tempId}", "${p}", Value)`)
-        if (results && results.length > 0) {
-          let expressionURI = results[0].Value
-          if (resolveExpressionURI) {
-            try {
-              const expression = await this.#perspective.getExpression(expressionURI)
-              try {
-                return JSON.parse(expression.data)
-              } catch (e) {
-                return expression.data
-              }
-            } catch (err) {
-              return expressionURI
-            }
-          } else {
-            return expressionURI
-          }
-        } else if (results) {
-          return results
-        } else {
-          return undefined
-        }
-      };
-
-      this[p] = await getProperty()
-    }
-
-    let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection(C, Collection)`)
-    if (!results2) results2 = []
-    let collections = results2.map(result => result.Collection)
-
-    for (let c of collections) {
-      const getProperty = async () => {
-        let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_getter(C, "${tempId}", "${c}", Value)`)
-        if (results && results.length > 0 && results[0].Value) {
-          return eval(results[0].Value)
-        } else {
-          return []
-        }
-      }
-
-      this[c] = await getProperty()
-    }
-
+    console.log("SubjectEntity: getData")
+    let data = await this.#perspective.getSubjectData(this.#subjectClass, tempId)
+    console.log("SubjectEntity got data:", data)
+    Object.assign(this, data);
     this.#baseExpression = tempId;
-
     return this
   }
 

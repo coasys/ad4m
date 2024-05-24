@@ -73,8 +73,6 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
   }
 
   async update(id: string, data: QueryPartialEntity<SubjectClass>) {
-    await this.ensureSubject();
-
     const instance = await this.get(id);
 
     if (!instance) {
@@ -102,8 +100,8 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
   }
 
   async get(id: string): Promise<SubjectClass | null> {
-    await this.ensureSubject();
     if (id) {
+      await this.ensureSubject();
       const subjectProxy = await this.perspective.getSubjectProxy(
         id,
         this.subject
@@ -118,7 +116,6 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
   }
 
   async getData(id: string): Promise<SubjectClass | string | null> {
-    await this.ensureSubject();
     const entry = await this.get(id);
     if (entry) {
       // @ts-ignore
@@ -133,28 +130,21 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
       new LinkQuery({ source: entry.baseExpression })
     );
 
-    const getters = Object.entries(Object.getOwnPropertyDescriptors(entry))
-      .filter(([key, descriptor]) => typeof descriptor.get === "function")
-      .map(([key]) => key);
+    let data: any = await this.perspective.getSubjectData(this.subject, entry.baseExpression)
 
-    const promises = getters.map((getter) => entry[getter]);
-    return Promise.all(promises).then((values) => {
-      return getters.reduce((acc, getter, index) => {
-        let value = values[index];
-        if (this.tempSubject.prototype?.__properties[getter]?.transform) {
-          value =
-            this.tempSubject.prototype.__properties[getter].transform(value);
-        }
+    for (const key in data) {
+      if (this.tempSubject.prototype?.__properties[key]?.transform) {
+        data[key] =
+          this.tempSubject.prototype.__properties[key].transform(data[key]);
+      }
+    }
 
-        return {
-          ...acc,
-          id: entry.baseExpression,
-          timestamp: links[0].timestamp,
-          author: links[0].author,
-          [getter]: value,
-        };
-      }, {});
-    });
+    return {
+      id: entry.baseExpression,
+      timestamp: links[0].timestamp,
+      author: links[0].author,
+      ...data,
+    }
   }
 
   async getAll(source?: string, query?: QueryOptions): Promise<SubjectClass[]> {
@@ -232,8 +222,6 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
     source?: string,
     query?: QueryOptions
   ): Promise<SubjectClass[]> {
-    await this.ensureSubject();
-
     const subjects = await this.getAll(source, query);
 
     const entries = await Promise.all(
