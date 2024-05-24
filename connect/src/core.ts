@@ -319,7 +319,7 @@ export default class Ad4mConnect {
                 this.notifyAuthChange("unauthenticated");
                 this.requestedRestart = false;
               }
-            }, 5000);
+            }, 1000);
           }
         },
       },
