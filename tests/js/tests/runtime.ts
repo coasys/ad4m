@@ -5,7 +5,9 @@ import { Notification, NotificationInput, TriggeredNotification } from '@coasys/
 import sinon from 'sinon';
 import { sleep } from '../utils/utils';
 import { ExceptionType, Link } from '@coasys/ad4m';
-import nock from 'nock';
+import express from 'express';
+import bodyParser from 'body-parser';
+import { Server } from 'http';
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
@@ -302,9 +304,28 @@ export default function runtimeTests(testContext: TestContext) {
         it("should trigger a notification and call the webhook", async () => {
             const ad4mClient = testContext.ad4mClient!
             const webhookUrl = 'http://localhost:8080/webhook';
-            const scope = nock(webhookUrl)
-                .post('/')
-                .reply(200, { success: true });
+             // Setup Express server
+             const app = express();
+             app.use(bodyParser.json());
+ 
+             let webhookCalled = false;
+ 
+             app.post('/webhook', (req, res) => {
+                 webhookCalled = true;
+                 console.log("Webhook test server post:", req)
+                 res.status(200).send({ success: true });
+             });
+ 
+             let server: Server|void
+             let serverRunning = new Promise<void>((done) => {
+                server = app.listen(8080, () => {
+                    console.log('Test server running on port 8080');
+                    done()
+                });
+             })
+
+             await serverRunning
+             
 
             let triggerPredicate = "ad4m://notification_webhook"
             let notificationPerspective = await ad4mClient.perspective.add("notification test perspective")
@@ -331,27 +352,28 @@ export default function runtimeTests(testContext: TestContext) {
             // Ensuring no false positives
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
             await sleep(1000)
-            expect(scope.isDone()).to.be.false
+            expect(webhookCalled).to.be.false
 
             // Ensuring only selected perspectives will trigger
             await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
             await sleep(1000)
-            expect(scope.isDone()).to.be.false
+            expect(webhookCalled).to.be.false
 
             // Happy path
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
             await sleep(1000)
-            expect(scope.isDone()).to.be.true
+            expect(webhookCalled).to.be.true
 
-            // Ensuring we don't get old data on a new trigger
-            scope.done(); // Reset nock
-            const newScope = nock(webhookUrl)
-                .post('/')
-                .reply(200, { success: true });
+            // Reset webhookCalled for the next test
+            webhookCalled = false;
 
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
             await sleep(1000)
-            expect(newScope.isDone()).to.be.true
+            expect(webhookCalled).to.be.true
+
+            // Close the server after the test
+            //@ts-ignore
+            server!.close()
         })
     }
 }
