@@ -300,10 +300,26 @@ export default function runtimeTests(testContext: TestContext) {
 
 
         it("should trigger a notification and call the webhook", async () => {
-            const webhookUrl = 'http://localhost:3000/webhook';
+            const ad4mClient = testContext.ad4mClient!
+            const webhookUrl = 'http://localhost:8080/webhook';
             const scope = nock(webhookUrl)
                 .post('/')
                 .reply(200, { success: true });
+
+            let triggerPredicate = "ad4m://notification_webhook"
+            let notificationPerspective = await ad4mClient.perspective.add("notification test perspective")
+            let otherPerspective = await ad4mClient.perspective.add("other perspective")
+
+            const notification: NotificationInput = {
+                description: "ad4m://notification predicate used",
+                appName: "ADAM tests",
+                appUrl: "Test App URL",
+                appIconPath: "Test App Icon Path",
+                trigger: `triple(Source, "${triggerPredicate}", Target)`,
+                perspectiveIds: [notificationPerspective.uuid],
+                webhookUrl: webhookUrl,
+                webhookAuth: "Test Webhook Auth"
+            }
 
             // Request to install a new notification
             const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
@@ -311,9 +327,6 @@ export default function runtimeTests(testContext: TestContext) {
             // Grant the notification
             const granted = await ad4mClient.runtime.grantNotification(notificationId)
             expect(granted).to.be.true
-
-            // Set up the webhook
-            await ad4mClient.runtime.addNotificationTriggeredWebhook(webhookUrl);
 
             // Ensuring no false positives
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
