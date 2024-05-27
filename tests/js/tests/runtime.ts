@@ -5,9 +5,9 @@ import { Notification, NotificationInput, TriggeredNotification } from '@coasys/
 import sinon from 'sinon';
 import { sleep } from '../utils/utils';
 import { ExceptionType, Link } from '@coasys/ad4m';
-//import express from 'express';
-//import bodyParser from 'body-parser';
-//import { Server } from 'http';
+import express from 'express';
+import bodyParser from 'body-parser';
+import { Server } from 'http';
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
