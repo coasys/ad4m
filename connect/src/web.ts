@@ -571,8 +571,6 @@ export class Ad4mConnectElement extends LitElement {
     try {
       await this._client.loginToHosting(this._email, this._passowrd);
 
-      this.connect();
-
       this.changeUIState("connected");
     } catch (e) {
       this._passwordError = 'Passwords did not match';
