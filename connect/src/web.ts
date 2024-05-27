@@ -571,6 +571,8 @@ export class Ad4mConnectElement extends LitElement {
     try {
       await this._client.loginToHosting(this._email, this._passowrd);
 
+      this.connect();
+
       this.changeUIState("connected");
     } catch (e) {
       this._passwordError = 'Passwords did not match';
@@ -639,6 +641,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private handleConnectionChange(event: ConnectionStates) {
+   console.log(event); 
     if (event === "connected") {
       this.changeUIState("requestcap");
     }
@@ -829,6 +832,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   render() {
+    console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
     if (this._isOpen === false) return null;
     if (this.authState === "authenticated") return null;
     return html`
