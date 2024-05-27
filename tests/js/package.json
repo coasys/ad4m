@@ -61,5 +61,5 @@
   "dependencies": {
     "uuid": "*"
   },
-  "version": "0.9.1-prerelease"
+  "version": "0.10.0-prerelease"
 }
