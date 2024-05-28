@@ -30,8 +30,8 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-deno_core = "0.230.0"
-deno_runtime = "0.132.0"
+deno_core = "0.283.0"
+deno_runtime = "0.161.0"
 tokio = { version = "1.25.0", features = ["full"] }
 url = "2.3.1"
 futures = "0.3.28"
@@ -74,11 +74,11 @@ jsonwebtoken = "8.3.0"
 
 webbrowser = "0.8.12"
 
-holochain = { version = "0.3.0-beta-dev.39", features = ["test_utils", "default"] }
-holochain_cli_bundle = { version = "0.3.0-beta-dev.36" }
-holochain_types = { version = "0.3.0-beta-dev.35" }
-holochain_cli_run_local_services = { version = "0.3.0-beta-dev.23" }
-kitsune_p2p_types = { version = "0.3.0-beta-dev.22" }
+holochain = { version = "0.3.1-rc.0", features = ["test_utils", "default"] }
+holochain_cli_bundle = { version = "0.3.1-rc.0" }
+holochain_types = { version = "0.3.1-rc.0" }
+holochain_cli_run_local_services = { version = "0.3.1-rc.0" }
+kitsune_p2p_types = { version = "0.3.1-rc.0" }
 
 scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
