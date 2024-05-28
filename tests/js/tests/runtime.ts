@@ -300,7 +300,6 @@ export default function runtimeTests(testContext: TestContext) {
         })
 
 
-/*
         it("should trigger a notification and call the webhook", async () => {
             const ad4mClient = testContext.ad4mClient!
             const webhookUrl = 'http://localhost:8080/webhook';
@@ -400,6 +399,5 @@ export default function runtimeTests(testContext: TestContext) {
             //@ts-ignore
             server!.close()
         })
-        */
     }
 }
