@@ -22,7 +22,7 @@ type State = {
   connected: boolean;
   connectedLaoding: boolean;
   expertMode: boolean;
-  notification: NotificationType | null;
+  notifications: NotificationType[];
 };
 
 type ContextProps = {
@@ -33,7 +33,7 @@ type ContextProps = {
     handleTrustAgent: (str: string) => void;
     handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void;
     toggleExpertMode: () => void;
-    handleNotification: (notification: Notification) => void;
+    handleNotification: (notification: NotificationType) => void;
   };
 };
 
@@ -50,7 +50,7 @@ const initialState: ContextProps = {
     connected: false,
     connectedLaoding: true,
     expertMode: getForVersion("expertMode") === "true",
-    notification: null,
+    notifications: [],
   },
   methods: {
     configureEndpoint: () => null,
@@ -136,7 +136,7 @@ export function Ad4minProvider({ children }: any) {
           if (exception.type === ExceptionType.InstallNotificationRequest) {
             setState((prev) => ({
               ...prev,
-              notification: JSON.parse(exception.addon!),
+              notifications: [prev.notifications, JSON.parse(exception.addon!)],
             }));
           }
 
@@ -236,11 +236,17 @@ export function Ad4minProvider({ children }: any) {
     }));
   };
 
-  const handleNotification = (notification: Notification) => {
-    setState((prev) => ({
-      ...prev,
-      notification,
-    }));
+  const handleNotification = (notification: NotificationType) => {
+    setState((prev) => {
+      const filteredNotifications = prev.notifications.filter(
+        (n) => n.id !== notification.id
+      );
+      
+      return {
+        ...prev,
+        notifications: filteredNotifications,
+      }
+    });
   }
 
   const configureEndpoint = async (url: string) => {

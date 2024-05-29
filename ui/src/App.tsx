@@ -20,7 +20,7 @@ import TrayMessage from "./components/TrayMessage";
 const App = () => {
   const [opened, setOpened] = useState(false);
   const {
-    state: { candidate, did, auth, notification },
+    state: { candidate, did, auth, notifications },
     methods: { handleTrustAgent },
   } = useContext(Ad4minContext);
 
@@ -86,7 +86,7 @@ const App = () => {
         <TrustAgent candidate={candidate} handleTrustAgent={handleTrustAgent} />
       )}
       {auth && <Auth />}
-      {notification && <Notification />}
+      {notifications.map((notification) => (<Notification key={notification.id} notification={notification} />))}
     </div>
   );
 };

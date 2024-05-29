@@ -1,9 +1,10 @@
 import { useContext, useEffect, useState } from "react";
-import { Ad4minContext } from "../context/Ad4minContext";
+import { Ad4minContext } from "../context/Ad4minContext"
+import { Notification as NotificationType } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";;
 
-const Notification = () => {
+const Notification = ({notification}: {notification: NotificationType}) => {
   const {
-    state: { client, notification },
+    state: { client  },
     methods: { handleNotification },
   } = useContext(Ad4minContext);
 
@@ -21,7 +22,7 @@ const Notification = () => {
     console.log(`permit result: ${result}`);
 
     // @ts-ignore
-    handleNotification(null);
+    handleNotification(notification);
 
     closeRequestModal();
   };
