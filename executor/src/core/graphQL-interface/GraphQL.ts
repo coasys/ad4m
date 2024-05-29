@@ -305,6 +305,8 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
             //@ts-ignore
             expressionCreate: async (args, context) => {
                 const { languageAddress, content } = args
+                console.log("expressionCreate 1", languageAddress)
+                console.log("expressionCreate 2", content)
 
                 //@ts-ignore
                 function prepareExpressionData(value) {

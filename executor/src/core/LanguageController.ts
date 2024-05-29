@@ -981,6 +981,7 @@ export default class LanguageController {
             return parseExprUrl(Literal.from(expr).toUrl())
         }
         const language = await this.languageByRef(lang)
+        console.log("expressionCreate 3", language)
         if (!language.expressionAdapter) {
             throw new Error("Language does not have an expressionAdapter")
         }
@@ -995,10 +996,15 @@ export default class LanguageController {
         }
 
         try {
+            console.log("expressionCreate 4", isPublic(putAdapter))
             if (isPublic(putAdapter)) {
+                console.log("expressionCreate 4-1")
                 address = await putAdapter.createPublic(content);
+                console.log("expressionCreate 4-2", address)
             } else {
+                console.log("expressionCreate 4-3")
                 address = await putAdapter.addressOf(content);
+                console.log("expressionCreate 4-4", address)
             }
         } catch (e) {
             throw new Error(`Incompatible putAdapter in Languge ${JSON.stringify(lang)}\nError was: ${JSON.stringify(e)}`)

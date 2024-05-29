@@ -125,6 +125,7 @@ export default class AgentService {
 
   async unlock(password: string) {
     AGENT.unlock(password);
+    AGENT.load();
     try {
       await this.storeAgentProfile();
     } catch (e) {
