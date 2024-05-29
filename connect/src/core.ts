@@ -311,8 +311,7 @@ export default class Ad4mConnect {
         },
         closed: async () => {
           if (!this.requestedRestart) {
-            if (!this.url) {
-              console.log("meow 3");
+            if (!this.token) {
               this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
               this.notifyAuthChange("unauthenticated");
               this.requestedRestart = false;
