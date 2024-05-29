@@ -103,6 +103,7 @@ dependencies = [
  "os_info",
  "rand 0.8.5",
  "regex",
+ "reqwest",
  "rocket",
  "rusqlite",
  "rust-embed",

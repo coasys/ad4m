@@ -5,6 +5,12 @@ import { Notification, NotificationInput, TriggeredNotification } from '@coasys/
 import sinon from 'sinon';
 import { sleep } from '../utils/utils';
 import { ExceptionType, Link } from '@coasys/ad4m';
+// Imports needed for webhook tests:
+// (deactivated for now because these imports break the test suite on CI)
+// (( local execution works - I leave this here for manualy local testing ))
+//import express from 'express';
+//import bodyParser from 'body-parser';
+//import { Server } from 'http';
 
 const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
@@ -295,5 +301,112 @@ export default function runtimeTests(testContext: TestContext) {
             //@ts-ignore
             expect(match.Target).to.equal("test://target2")
         })
+
+
+         
+        // See comments on the imports at the top
+        // breaks CI for some reason but works locally
+        // leaving this here for manual local testing
+        /*
+        it("should trigger a notification and call the webhook", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            const webhookUrl = 'http://localhost:8080/webhook';
+            const webhookAuth = 'Test Webhook Auth'
+             // Setup Express server
+             const app = express();
+             app.use(bodyParser.json());
+ 
+             let webhookCalled = false;
+             let webhookGotAuth = ""
+             let webhookGotBody = null
+ 
+             app.post('/webhook', (req, res) => {
+                 webhookCalled = true;
+                 webhookGotAuth = req.headers['authorization']?.substring("Bearer ".length)||"";
+                 webhookGotBody = req.body;
+                 res.status(200).send({ success: true });
+             });
+ 
+             let server: Server|void
+             let serverRunning = new Promise<void>((done) => {
+                server = app.listen(8080, () => {
+                    console.log('Test server running on port 8080');
+                    done()
+                });
+             })
+
+             await serverRunning
+             
+
+            let triggerPredicate = "ad4m://notification_webhook"
+            let notificationPerspective = await ad4mClient.perspective.add("notification test perspective")
+            let otherPerspective = await ad4mClient.perspective.add("other perspective")
+
+            const notification: NotificationInput = {
+                description: "ad4m://notification predicate used",
+                appName: "ADAM tests",
+                appUrl: "Test App URL",
+                appIconPath: "Test App Icon Path",
+                trigger: `triple(Source, "${triggerPredicate}", Target)`,
+                perspectiveIds: [notificationPerspective.uuid],
+                webhookUrl: webhookUrl,
+                webhookAuth: webhookAuth
+            }
+
+            // Request to install a new notification
+            const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
+            sleep(1000)
+            // Grant the notification
+            const granted = await ad4mClient.runtime.grantNotification(notificationId)
+            expect(granted).to.be.true
+
+            // Ensuring no false positives
+            await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
+            await sleep(1000)
+            expect(webhookCalled).to.be.false
+
+            // Ensuring only selected perspectives will trigger
+            await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
+            await sleep(1000)
+            expect(webhookCalled).to.be.false
+
+            // Happy path
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
+            await sleep(1000)
+            expect(webhookCalled).to.be.true
+            expect(webhookGotAuth).to.equal(webhookAuth)
+            expect(webhookGotBody).to.be.not.be.null
+            let triggeredNotification = webhookGotBody as unknown as TriggeredNotification
+            let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            let match = triggerMatch[0]
+            //@ts-ignore
+            expect(match.Source).to.equal("test://source")
+            //@ts-ignore
+            expect(match.Target).to.equal("test://target1")
+
+            // Reset webhookCalled for the next test
+            webhookCalled = false;
+            webhookGotAuth = ""
+            webhookGotBody = null
+
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
+            await sleep(1000)
+            expect(webhookCalled).to.be.true
+            expect(webhookGotAuth).to.equal(webhookAuth)
+            triggeredNotification = webhookGotBody as unknown as TriggeredNotification
+            triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            match = triggerMatch[0]
+            //@ts-ignore
+            expect(match.Source).to.equal("test://source")
+            //@ts-ignore
+            expect(match.Target).to.equal("test://target2")
+
+            // Close the server after the test
+            //@ts-ignore
+            server!.close()
+        })
+        */
     }
 }

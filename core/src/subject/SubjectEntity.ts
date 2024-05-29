@@ -43,9 +43,7 @@ export class SubjectEntity {
 
   private async getData(id?: string) {
     const tempId = id ?? this.#baseExpression;
-    console.log("SubjectEntity: getData")
     let data = await this.#perspective.getSubjectData(this.#subjectClass, tempId)
-    console.log("SubjectEntity got data:", data)
     Object.assign(this, data);
     this.#baseExpression = tempId;
     return this

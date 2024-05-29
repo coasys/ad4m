@@ -317,23 +317,6 @@ export default class RuntimeResolver {
         return true
     }
 
-    @Subscription({topics: RUNTIME_NOTIFICATION_REQUESTED_TOPIC, nullable: true})
-    runtimeNotificationRequested(): Notification {
-        return {
-            id: "test-id",
-            granted: false,
-            description: "Test description",
-            appName: "Test app name",
-            appUrl: "https://example.com",
-            appIconPath: "https://fluxsocial.io/favicon",
-            trigger: "triple(X, ad4m://has_type, flux://message)",
-            perspectiveIds: ["u983ud-jdhh38d"],
-            webhookUrl: "https://example.com/webhook",
-            webhookAuth: "test-auth",
-        
-        }
-    }
-
     @Subscription({topics: RUNTIME_NOTIFICATION_TRIGGERED_TOPIC, nullable: true})
     runtimeNotificationTriggered(): TriggeredNotification {
         return {
