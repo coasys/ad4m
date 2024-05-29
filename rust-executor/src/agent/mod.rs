@@ -291,6 +291,7 @@ impl AgentService {
         }
 
         let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
+        println!("file: {:?}", file);
         let dump: Result<AgentStore, _> = serde_json::from_str(&file);
 
         match dump {
