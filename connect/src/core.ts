@@ -189,6 +189,7 @@ export default class Ad4mConnect {
           if (data.serviceId) {
             this.setPort(data.port);
             this.setUrl(`wss://${data.port}.hosting.ad4m.dev/graphql`);
+            this.connect();
           }
         }
       }  else {
@@ -308,9 +309,13 @@ export default class Ad4mConnect {
         connected: () => {
           this.notifyConnectionChange("connected");
         },
-        closed: () => {
+        closed: async () => {
           if (!this.requestedRestart) {
-            setTimeout(async () => {
+            if (!this.token) {
+              this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
+              this.notifyAuthChange("unauthenticated");
+              this.requestedRestart = false;
+            } else {
               const client = await this.connect();
               if (client) {
                 this.ad4mClient = client;
@@ -319,7 +324,7 @@ export default class Ad4mConnect {
                 this.notifyAuthChange("unauthenticated");
                 this.requestedRestart = false;
               }
-            }, 1000);
+            }
           }
         },
       },

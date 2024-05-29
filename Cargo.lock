@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m"
-version = "0.9.1-prerelease.0"
+version = "0.10.0-prerelease.0"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.9.1-prerelease"
+version = "0.10.0-prerelease"
 dependencies = [
  "anyhow",
  "async-tungstenite",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-executor"
-version = "0.9.1-prerelease"
+version = "0.10.0-prerelease"
 dependencies = [
  "ad4m-client",
  "argon2",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.9.1-prerelease.0"
+version = "0.10.0-prerelease.0"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",

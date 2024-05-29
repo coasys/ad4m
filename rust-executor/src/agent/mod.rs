@@ -16,7 +16,9 @@ pub mod signatures;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgentStore {
     did: String,
-    did_document: did_key::Document,
+    #[serde(rename = "didDocument")]
+    did_document: String,
+    #[serde(rename = "signingKeyId")]
     signing_key_id: String,
     keystore: String,
     agent: Option<Agent>,
@@ -103,7 +105,7 @@ impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentService {
     pub did: Option<String>,
-    pub did_document: Option<did_key::Document>,
+    pub did_document: Option<String>,
     pub signing_key_id: Option<String>,
     file: String,
     file_profile: String,
@@ -127,7 +129,7 @@ impl AgentService {
             app_path
         );
         let agent_profile_path = format!(
-            "{}/ad4m/agent_profile.json",
+            "{}/ad4m/agentProfile.json",
             app_path
         );
 
@@ -231,7 +233,7 @@ impl AgentService {
             wallet_ref.generate_keypair("main".to_string());
         }
 
-        self.did_document = Some(did_document());
+        self.did_document = Some(serde_json::to_string(&did_document()).unwrap());
         self.did = Some(did());
         self.agent = Some(Agent {
             did: did(),
@@ -273,7 +275,7 @@ impl AgentService {
 
         let store = AgentStore {
             did: self.did.clone().unwrap().clone(),
-            did_document: self.did_document.clone().unwrap().clone(),
+            did_document: self.did_document.clone().unwrap(),
             signing_key_id: self.signing_key_id.clone().unwrap(),
             keystore,
             agent: self.agent.clone(),
@@ -320,11 +322,9 @@ impl AgentService {
     }
 
     pub fn dump(&self) -> AgentStatus {
-        let document = serde_json::to_string(&self.did_document).unwrap();
-
         AgentStatus {
             did: self.did.clone(),
-            did_document: Some(document),
+            did_document: self.did_document.clone(),
             is_initialized: self.is_initialized(),
             is_unlocked: self.is_unlocked(),
             error: None,
