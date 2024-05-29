@@ -291,33 +291,41 @@ impl AgentService {
         }
 
         let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
-        let dump: AgentStore = serde_json::from_str(&file).unwrap();
+        let dump: Result<AgentStore, _> = serde_json::from_str(&file);
 
-        self.did = Some(dump.did);
-        self.did_document = Some(dump.did_document);
-        self.signing_key_id = Some(dump.signing_key_id);
+        match dump {
+            Ok(data) => {
+                self.did = Some(data.did);
+                self.did_document = Some(data.did_document);
+                self.signing_key_id = Some(data.signing_key_id);
 
-        {
-            let wallet_instance = Wallet::instance();
-            let mut wallet = match wallet_instance.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let wallet_ref = wallet.as_mut().expect("wallet instance");
-            wallet_ref.load(dump.keystore);
-        }
-
-        if std::path::Path::new(self.file_profile.as_str()).exists() {
-            let file_profile = std::fs::read_to_string(self.file_profile.as_str())
-                .expect("Failed to read agent profile file");
-            self.agent =
-                Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
-        } else {
-            self.agent = Some(Agent {
-                did: did(),
-                perspective: Some(Perspective { links: vec![] }),
-                direct_message_language: None,
-            });
+                {
+                    let wallet_instance = Wallet::instance();
+                    let mut wallet = match wallet_instance.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let wallet_ref = wallet.as_mut().expect("wallet instance");
+                    wallet_ref.load(data.keystore);
+                }
+        
+                if std::path::Path::new(self.file_profile.as_str()).exists() {
+                    let file_profile = std::fs::read_to_string(self.file_profile.as_str())
+                        .expect("Failed to read agent profile file");
+                    self.agent =
+                        Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
+                } else {
+                    self.agent = Some(Agent {
+                        did: did(),
+                        perspective: Some(Perspective { links: vec![] }),
+                        direct_message_language: None,
+                    });
+                }
+            },
+            Err(err) => {
+                println!("Failed to parse JSON: {}", err);
+                return;
+            }
         }
     }
 
