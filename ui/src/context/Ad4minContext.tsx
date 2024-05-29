@@ -136,7 +136,7 @@ export function Ad4minProvider({ children }: any) {
           if (exception.type === ExceptionType.InstallNotificationRequest) {
             setState((prev) => ({
               ...prev,
-              notifications: [prev.notifications, JSON.parse(exception.addon!)],
+              notifications: [...prev.notifications, JSON.parse(exception.addon!)],
             }));
           }
 
@@ -241,7 +241,7 @@ export function Ad4minProvider({ children }: any) {
       const filteredNotifications = prev.notifications.filter(
         (n) => n.id !== notification.id
       );
-      
+
       return {
         ...prev,
         notifications: filteredNotifications,
