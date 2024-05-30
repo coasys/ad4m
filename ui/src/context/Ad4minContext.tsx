@@ -159,6 +159,7 @@ export function Ad4minProvider({ children }: any) {
           const match = notification.triggerMatch;
           const parsed = JSON.parse(match);
           sendNotification({
+            icon: notification.notification.appIconPath,
             title: parsed?.Title || notification.notification.appName,
             body: parsed?.Description || "Received a new notification",
           });
