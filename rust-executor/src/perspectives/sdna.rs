@@ -247,6 +247,8 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
 
     lines.extend(literal_html_string_predicates.split('\n').map(|s| s.to_string()));
 
+    lines.push(format!("agent_did(\"{}\").", agent::did()));    
+
     let mut author_agents = vec![agent::did()];
     if let Some(neughbourhood_author) = neighbourhood_author {
         author_agents.push(neughbourhood_author);
