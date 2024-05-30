@@ -147,6 +147,7 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     lines.push(":- use_module(library(charsio)).".to_string());
     lines.push(":- use_module(library(format)).".to_string());
     lines.push(":- use_module(library(assoc)).".to_string());
+    lines.push(":- use_module(library(dif)).".to_string());
 
     let lib = r#"
 :- discontiguous(paginate/4).
