@@ -146,6 +146,7 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     lines.push(":- use_module(library(dcgs)).".to_string());
     lines.push(":- use_module(library(charsio)).".to_string());
     lines.push(":- use_module(library(format)).".to_string());
+    lines.push(":- use_module(library(assoc)).".to_string());
 
     let lib = r#"
 :- discontiguous(paginate/4).
@@ -172,7 +173,7 @@ N > 0,
 NextN is N - 1,
 takeN(Rest, NextN, PageRest).
     "#;
-    
+
     lines.extend(lib.split('\n').map(|s| s.to_string()));
 
     let literal_html_string_predicates = r#"
@@ -246,6 +247,52 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     "#;
 
     lines.extend(literal_html_string_predicates.split('\n').map(|s| s.to_string()));
+
+    let json_parser = r#"
+    % Main predicate to parse JSON and extract a property
+    json_property(JsonString, Property, Value) :-
+        phrase(json_dict(Dict), JsonString),
+        get_assoc(Property, Dict, Value).
+    
+    % DCG rules to parse JSON
+    json_dict(Dict) -->
+        ws, "{", ws, key_value_pairs(Pairs), ws, "}", ws,
+        { list_to_assoc(Pairs, Dict) }.
+    
+    key_value_pairs([Key-Value|Pairs]) -->
+        ws, json_string(Key), ws, ":", ws, json_value(Value), ws, ("," -> key_value_pairs(Pairs) ; {Pairs=[]}).
+    
+    json_value(Value) --> json_dict(Value).
+    json_value(Value) --> json_array(Value).
+    json_value(Value) --> json_string(Value).
+    json_value(Value) --> json_number(Value).
+    
+    json_array([Value|Values]) -->
+        "[", ws, json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}), ws, "]".
+    json_value_list([Value|Values]) --> json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}).
+    
+    json_string(String) -->
+        "\"", string_chars(String), "\"".
+    
+    json_number(Number) -->
+        number_chars(Chars),
+        { number_chars(Number, Chars) }.
+    
+    string_chars([]) --> [].
+    string_chars([C|Cs]) --> [C], { dif(C, '"') }, string_chars(Cs).
+    
+    number_chars([D|Ds]) --> digit(D), number_chars(Ds).
+    number_chars([]) --> [].
+    
+    digit(D) --> [D], { member(D, "0123456789.") }.
+    
+    ws --> ws_char, ws.
+    ws --> [].
+    
+    ws_char --> [C], { C = ' ' ; C = '\t' ; C = '\n' ; C = '\r' }.
+    "#;
+
+    lines.extend(json_parser.split('\n').map(|s| s.to_string()));
 
     lines.push(format!("agent_did(\"{}\").", agent::did()));    
 
