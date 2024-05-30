@@ -1,4 +1,5 @@
 import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
+import { sendNotification } from "@tauri-apps/api/notification";
 import { ExceptionInfo, Notification as NotificationType } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { createContext, useCallback, useEffect, useState } from "react";
 import {
@@ -151,6 +152,17 @@ export function Ad4minProvider({ children }: any) {
 
           return null;
         });
+
+        // @ts-ignore
+        client.runtime.addNotificationTriggeredCallback((notification) => {
+          console.log("Notification triggered: ", notification);
+          const match = notification.triggerMatch;
+          const parsed = JSON.parse(match);
+          sendNotification({
+            title: parsed?.Title || notification.notification.appName,
+            body: parsed?.Description || "Received a new notification",
+          });
+        })
       }
     },
     []
