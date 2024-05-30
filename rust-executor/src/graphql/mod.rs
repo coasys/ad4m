@@ -23,6 +23,10 @@ use coasys_juniper_graphql_transport_ws::ConnectionConfig;
 use coasys_juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
 use std::path::Path;
+use tokio_rustls::rustls::{ServerConfig, NoClientAuth, Certificate, PrivateKey};
+use tokio_rustls::TlsAcceptor;
+use std::fs::File;
+use std::io::BufReader;
 
 impl coasys_juniper::Context for RequestContext {}
 
@@ -137,6 +141,43 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
         [0, 0, 0, 0]
     };
 
-    warp::serve(routes).run((address, port)).await;
+    // Load TLS keys
+    let certs = load_certs("~/cert.pem")?;
+    let key = load_private_key("~/key.pem")?;
+
+    let tls_config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| AnyError::msg(format!("Failed to create TLS config: {}", e)))?;
+
+    let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
+    warp::serve(routes)
+        .tls()
+        .cert_path("~/cert.pem")
+        .key_path("~/key.pem")
+        .run((address, port))
+        .await;
     Ok(())
+}
+
+
+fn load_certs(path: &str) -> Result<Vec<Certificate>, AnyError> {
+    let certfile = File::open(path).map_err(|e| AnyError::msg(format!("Failed to open cert file: {}", e)))?;
+    let mut reader = BufReader::new(certfile);
+    rustls_pemfile::certs(&mut reader)
+        .map(|certs| certs.into_iter().map(Certificate).collect())
+        .map_err(|_| AnyError::msg("Failed to load certificates"))
+}
+
+fn load_private_key(path: &str) -> Result<PrivateKey, AnyError> {
+    let keyfile = File::open(path).map_err(|e| AnyError::msg(format!("Failed to open key file: {}", e)))?;
+    let mut reader = BufReader::new(keyfile);
+    let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
+        .map_err(|_| AnyError::msg("Failed to load private key"))?;
+    if keys.len() != 1 {
+        return Err(AnyError::msg("Expected a single private key"));
+    }
+    Ok(PrivateKey(keys[0].clone()))
 }
