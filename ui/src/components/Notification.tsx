@@ -89,19 +89,23 @@ const Notification = ({ notification }: { notification: NotificationType }) => {
                     </j-text>
                   </j-flex>
                 </div>
-                <div>
-                  <j-flex>
-                    <j-text>
-                      Webhook URL: {notification?.webhookUrl}
-                    </j-text>
-                  </j-flex>
-                  <j-text color="danger" variant="caption">
+                {
+                  notification?.webhookUrl && (
+                    <div>
+                      <j-flex>
+                        <j-text>
+                          Webhook URL: {notification?.webhookUrl}
+                        </j-text>
+                      </j-flex>
+                      <j-text color="danger" variant="caption">
 
-                  </j-text>
-                  <p style="height: 60px; color: red; font-size: 14px; margin: 0; ">
-                    Caution: This notification will be sent to the above URL and the data can be leaked outside of the app. Please make sure you trust the app.
-                  </p>
-                </div>
+                      </j-text>
+                      <p style="height: 60px; color: red; font-size: 14px; margin: 0; ">
+                        Caution: This notification will be sent to the above URL and the data can be leaked outside of the app. Please make sure you trust the app.
+                      </p>
+                    </div>
+                  )
+                }
               </j-flex>
 
               <j-flex gap="300">
