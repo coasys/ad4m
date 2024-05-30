@@ -223,6 +223,7 @@ url_decode([H|T]) --> url_decode_char(H), url_decode(T).
 
 url_decode_char(' ') --> "%20".
 url_decode_char('!') --> "%21".
+url_decode_char('"') --> "%22".
 url_decode_char('#') --> "%23".
 url_decode_char('$') --> "%24".
 url_decode_char('%') --> "%25".
@@ -243,6 +244,17 @@ url_decode_char('[') --> "%5B".
 url_decode_char(']') --> "%5D".
 url_decode_char('{') --> "%7B".
 url_decode_char('}') --> "%7D".
+url_decode_char('<') --> "%3C".
+url_decode_char('>') --> "%3E".
+url_decode_char('\\') --> "%5C".
+url_decode_char('^') --> "%5E".
+url_decode_char('_') --> "%5F".
+url_decode_char('|') --> "%7C".
+url_decode_char('~') --> "%7E".
+url_encode_char('`') --> "%60".
+url_encode_char('-') --> "%2D".
+url_encode_char('.') --> "%2E".
+
 url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     "#;
 
