@@ -145,17 +145,6 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
     let cert_file_path = "/Users/nicolasluck/cert.pem";
     let key_file_path = "/Users/nicolasluck/key.pem";
 
-    // Load TLS keys
-    let certs = load_certs(&cert_file_path)?;
-    let key = load_private_key(&key_file_path)?;
-
-    let tls_config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| AnyError::msg(format!("Failed to create TLS config: {}", e)))?;
-
-    let _tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
-
     warp::serve(routes)
         .tls()
         .cert_path(cert_file_path)
