@@ -251,9 +251,9 @@ url_decode_char('^') --> "%5E".
 url_decode_char('_') --> "%5F".
 url_decode_char('|') --> "%7C".
 url_decode_char('~') --> "%7E".
-url_encode_char('`') --> "%60".
-url_encode_char('-') --> "%2D".
-url_encode_char('.') --> "%2E".
+url_decode_char('`') --> "%60".
+url_decode_char('-') --> "%2D".
+url_decode_char('.') --> "%2E".
 
 url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     "#;
