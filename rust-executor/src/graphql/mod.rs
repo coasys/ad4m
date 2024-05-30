@@ -6,6 +6,7 @@ mod subscription_resolvers;
 use graphql_types::RequestContext;
 use mutation_resolvers::*;
 use query_resolvers::*;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use subscription_resolvers::*;
 
 use crate::js_core::JsCoreHandle;
@@ -23,7 +24,7 @@ use coasys_juniper_graphql_transport_ws::ConnectionConfig;
 use coasys_juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
 use std::path::Path;
-use tokio_rustls::rustls::{ServerConfig, NoClientAuth, Certificate, PrivateKey};
+use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 use std::fs::File;
 use std::io::BufReader;
@@ -141,43 +142,49 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
         [0, 0, 0, 0]
     };
 
+    let cert_file_path = "/Users/nicolasluck/cert.pem";
+    let key_file_path = "/Users/nicolasluck/key.pem";
+
     // Load TLS keys
-    let certs = load_certs("~/cert.pem")?;
-    let key = load_private_key("~/key.pem")?;
+    let certs = load_certs(&cert_file_path)?;
+    let key = load_private_key(&key_file_path)?;
 
     let tls_config = ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| AnyError::msg(format!("Failed to create TLS config: {}", e)))?;
 
-    let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+    let _tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
     warp::serve(routes)
         .tls()
-        .cert_path("~/cert.pem")
-        .key_path("~/key.pem")
+        .cert_path(cert_file_path)
+        .key_path(key_file_path)
         .run((address, port))
         .await;
     Ok(())
 }
 
 
-fn load_certs(path: &str) -> Result<Vec<Certificate>, AnyError> {
+fn load_certs(path: &str) -> Result<Vec<CertificateDer>, AnyError> {
     let certfile = File::open(path).map_err(|e| AnyError::msg(format!("Failed to open cert file: {}", e)))?;
     let mut reader = BufReader::new(certfile);
-    rustls_pemfile::certs(&mut reader)
-        .map(|certs| certs.into_iter().map(Certificate).collect())
-        .map_err(|_| AnyError::msg("Failed to load certificates"))
+    
+    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AnyError::msg(format!("Failed to parse certs: {}", e)))?;
+
+    Ok(certs)
 }
 
-fn load_private_key(path: &str) -> Result<PrivateKey, AnyError> {
+fn load_private_key(path: &str) -> Result<PrivateKeyDer, AnyError> {
     let keyfile = File::open(path).map_err(|e| AnyError::msg(format!("Failed to open key file: {}", e)))?;
     let mut reader = BufReader::new(keyfile);
     let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
-        .map_err(|_| AnyError::msg("Failed to load private key"))?;
+        .filter_map(|x| x.ok())
+        .collect::<Vec<_>>();
     if keys.len() != 1 {
         return Err(AnyError::msg("Expected a single private key"));
     }
-    Ok(PrivateKey(keys[0].clone()))
+    Ok(PrivateKeyDer::Pkcs8(keys[0].clone_key()))
 }
