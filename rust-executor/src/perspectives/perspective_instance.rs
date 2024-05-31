@@ -793,7 +793,15 @@ impl PerspectiveInstance {
 
     async fn ensure_prolog_engine(&self) -> Result<(), AnyError> {
         let mut maybe_prolog_engine = self.prolog_engine.lock().await;
-        if maybe_prolog_engine.is_none() {
+        let mut rebuild_flag = self.prolog_needs_rebuild.lock().await;
+
+        if maybe_prolog_engine.is_none() || *rebuild_flag == true {
+            if *rebuild_flag == true && maybe_prolog_engine.is_some() {
+                let old_engine = maybe_prolog_engine.as_ref().unwrap();
+                let _ = old_engine.drop();
+                *rebuild_flag = false;
+            }
+
             let mut engine = PrologEngine::new();
             engine.spawn().await.map_err(|e| anyhow!("Failed to spawn Prolog engine: {}", e))?;
             let all_links = self.get_links(&LinkQuery::default()).await?;
@@ -801,6 +809,7 @@ impl PerspectiveInstance {
             engine.load_module_string("facts".to_string(), facts).await?;
             *maybe_prolog_engine = Some(engine);
         }
+
         Ok(())
     }
 
@@ -819,10 +828,18 @@ impl PerspectiveInstance {
             query
         };
 
-        prolog_engine
+        let result = prolog_engine
             .run_query(query)
-            .await?
-            .map_err(|e| anyhow!(e))
+            .await?;
+
+        match result {
+            Err(e) => {
+                let mut flag = self.prolog_needs_rebuild.lock().await;
+                *flag = true;
+                Err(anyhow!(e))
+            }
+            Ok(resolution) => Ok(resolution)
+        }
     }
 
     fn spawn_prolog_facts_update(&self, before: BTreeMap<Notification, Vec<QueryMatch>>, diff: DecoratedPerspectiveDiff) {
