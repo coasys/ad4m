@@ -13,5 +13,5 @@ derive_more = "0"
 serde = "1"
 chrono = { version = "0.4.31", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 
-hdi = { version = "0.4.0-beta-dev.29"}
-hdk = { version = "0.3.0-beta-dev.33"}
+hdi = { version = "0.4.0-beta-dev.29", git = "https://github.com/coasys/holochain.git", rev = "173bc41e3df1cb3f7723d92e3feb5cea94ae00ac"}
+hdk = { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "173bc41e3df1cb3f7723d92e3feb5cea94ae00ac"}
