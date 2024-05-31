@@ -28,7 +28,7 @@ use ad4m_client::*;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dev::DevFunctions;
-use rust_executor::Ad4mConfig;
+use rust_executor::{config::TlsConfig, Ad4mConfig};
 
 /// AD4M command line interface.
 /// https://ad4m.dev
@@ -121,6 +121,10 @@ enum Domain {
         admin_credential: Option<String>,
         #[arg(long, action)]
         localhost: Option<bool>,
+        #[arg(short, long, action)]
+        tls_cert_file: Option<String>,
+        #[arg(short, long, action)]
+        tls_key_file: Option<String>,
     },
     RunLocalHcServices {}
 }
@@ -165,9 +169,22 @@ async fn main() -> Result<()> {
         hc_bootstrap_url,
         connect_holochain,
         admin_credential,
-        localhost
+        localhost,
+        tls_cert_file,
+        tls_key_file
     } = args.domain
     {
+        let tls = if tls_cert_file.is_some() && tls_cert_file.is_some() {
+            Some(TlsConfig {
+                cert_file_path: tls_cert_file.unwrap(),
+                key_file_path: tls_key_file.unwrap()
+            })
+        } else {
+            if tls_cert_file.is_some() || tls_key_file.is_some() {
+                println!("To active TLS encryption, please provide arguments: tls_cert_file and tls_key_file!");
+            }
+            None
+        };
         let _ = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
                 app_data_path,
@@ -186,7 +203,8 @@ async fn main() -> Result<()> {
                 connect_holochain,
                 admin_credential,
                 localhost,
-                auto_permit_cap_requests: Some(true)
+                auto_permit_cap_requests: Some(true),
+                tls
             }).await;
         }).await;
         
