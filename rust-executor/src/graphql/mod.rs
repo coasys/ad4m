@@ -142,38 +142,19 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
         [0, 0, 0, 0]
     };
 
-    let cert_file_path = "/Users/nicolasluck/cert.pem";
-    let key_file_path = "/Users/nicolasluck/key.pem";
-
-    warp::serve(routes)
-        .tls()
-        .cert_path(cert_file_path)
-        .key_path(key_file_path)
-        .run((address, port))
-        .await;
-    Ok(())
-}
-
-
-fn load_certs(path: &str) -> Result<Vec<CertificateDer>, AnyError> {
-    let certfile = File::open(path).map_err(|e| AnyError::msg(format!("Failed to open cert file: {}", e)))?;
-    let mut reader = BufReader::new(certfile);
-    
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| AnyError::msg(format!("Failed to parse certs: {}", e)))?;
-
-    Ok(certs)
-}
-
-fn load_private_key(path: &str) -> Result<PrivateKeyDer, AnyError> {
-    let keyfile = File::open(path).map_err(|e| AnyError::msg(format!("Failed to open key file: {}", e)))?;
-    let mut reader = BufReader::new(keyfile);
-    let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
-        .filter_map(|x| x.ok())
-        .collect::<Vec<_>>();
-    if keys.len() != 1 {
-        return Err(AnyError::msg("Expected a single private key"));
+    if let Some(tls_config) = config.tls {
+        warp::serve(routes)
+            .tls()
+            .cert_path(tls_config.cert_file_path)
+            .key_path(tls_config.key_file_path)
+            .run((address, port))
+            .await;
+    } else {
+        warp::serve(routes)
+            .run((address, port))
+            .await;
     }
-    Ok(PrivateKeyDer::Pkcs8(keys[0].clone_key()))
+
+    
+    Ok(())
 }
