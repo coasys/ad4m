@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::Value;
 use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution};
 use tokio::{join, time};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
@@ -130,7 +130,7 @@ pub struct PerspectiveInstance {
     prolog_needs_rebuild: Arc<Mutex<bool>>,
     is_teardown: Arc<Mutex<bool>>,
     sdna_change_mutex: Arc<Mutex<()>>,
-    prolog_update_mutex: Arc<Mutex<()>>,
+    prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
 }
 
@@ -149,7 +149,7 @@ impl PerspectiveInstance {
             prolog_needs_rebuild: Arc::new(Mutex::new(true)),
             is_teardown: Arc::new(Mutex::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
-            prolog_update_mutex: Arc::new(Mutex::new(())),
+            prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(Mutex::new(None)),
         }
     }
@@ -792,10 +792,15 @@ impl PerspectiveInstance {
     }
 
     async fn ensure_prolog_engine(&self) -> Result<(), AnyError> {
-        let mut maybe_prolog_engine = self.prolog_engine.lock().await;
+        let has_prolog_engine = {
+            self.prolog_engine.lock().await.is_some()
+        };
+        
         let mut rebuild_flag = self.prolog_needs_rebuild.lock().await;
 
-        if maybe_prolog_engine.is_none() || *rebuild_flag == true {
+        if !has_prolog_engine || *rebuild_flag == true {
+            let _update_lock = self.prolog_update_mutex.write().await;
+            let mut maybe_prolog_engine = self.prolog_engine.lock().await;
             if *rebuild_flag == true && maybe_prolog_engine.is_some() {
                 let old_engine = maybe_prolog_engine.as_ref().unwrap();
                 let _ = old_engine.drop();
@@ -818,6 +823,7 @@ impl PerspectiveInstance {
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
         self.ensure_prolog_engine().await?;
 
+        let _read_lock = self.prolog_update_mutex.read().await;
         let prolog_engine_mutex = self.prolog_engine.lock().await;
         let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
         let prolog_engine = prolog_engine_option_ref.as_ref().expect("Must be some since we initialized the engine above");
