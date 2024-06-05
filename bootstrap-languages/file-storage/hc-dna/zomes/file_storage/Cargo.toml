@@ -11,7 +11,7 @@ name = "file_storage"
 
 [dependencies]
 derive_more = "0"
-serde = "1"
+serde = "1.0.198"
 lazy_static = "*"
 chrono = { version = "0.4.31", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 thiserror = "1.0.20"
