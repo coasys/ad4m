@@ -1,6 +1,6 @@
 use deno_core::error::AnyError;
-use deno_core::{v8, PollEventLoopOptions};
-use deno_runtime::worker::MainWorker;
+use deno_core::{v8, PollEventLoopOptions, JsRuntime};
+use deno_runtime::worker::MainWorker; // Import the JsRuntime struct.
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -39,11 +39,11 @@ impl Future for EventLoopFuture {
 
 pub struct SmartGlobalVariableFuture {
     worker: Arc<TokioMutex<MainWorker>>,
-    value: v8::Global<v8::Value>,
+    value: String,
 }
 
 impl SmartGlobalVariableFuture {
-    pub fn new(worker: Arc<TokioMutex<MainWorker>>, value: v8::Global<v8::Value>) -> Self {
+    pub fn new(worker: Arc<TokioMutex<MainWorker>>, value: String) -> Self {
         SmartGlobalVariableFuture { worker, value }
     }
 }
@@ -54,25 +54,19 @@ impl Future for SmartGlobalVariableFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         //println!("Trying to get the worker lock: {}", self.name);
         let mut worker = self.worker.try_lock().expect("Failed to lock worker");
-        let poll_value = worker.js_runtime.poll_value(&self.value, cx);
+        let scope = &mut worker.js_runtime.handle_scope();
+        let context = v8::Context::new(scope);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        
+        let code = v8::String::new(scope, &self.value).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
 
-        match poll_value {
-            Poll::Pending => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            },
-            Poll::Ready(value) => {
-                match value {
-                    Ok(value) => {
-                        let scope = &mut v8::HandleScope::new(worker.js_runtime.v8_isolate());
-                        let context = v8::Context::new(scope);
-                        let scope = &mut v8::ContextScope::new(scope, context);
-                        let value = value.open(scope).to_rust_string_lossy(scope);
-                        Poll::Ready(Ok(value))
-                    },
-                    Err(err) => Poll::Ready(Err(err))
-                }
+        match script.run(scope) {
+            Some(result) => {
+                let result_str = result.to_string(scope).unwrap().to_rust_string_lossy(scope);
+                Poll::Ready(Ok(result_str))
             }
+            None => Poll::Ready(Err(AnyError::msg("Failed to execute script"))),
         }
     }
 }

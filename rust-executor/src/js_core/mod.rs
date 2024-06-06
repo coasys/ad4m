@@ -1,7 +1,7 @@
 use ::futures::Future;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use deno_core::resolve_url_or_path;
+use deno_core::{resolve_url_or_path, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
@@ -187,8 +187,7 @@ impl JsCore {
             "#, script
         );
         //info!("Sending script: {}", wrapped_script);
-        let execute_async = worker.execute_script("js_core", wrapped_script.into())?;
-        Ok(SmartGlobalVariableFuture::new(self.worker.clone(), execute_async))
+        Ok(SmartGlobalVariableFuture::new(self.worker.clone(), wrapped_script.into()))
     }
 
     fn generate_execution_slot(
