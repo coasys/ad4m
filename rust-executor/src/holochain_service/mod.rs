@@ -106,8 +106,6 @@ impl HolochainService {
                     let spawned_sig = tokio::spawn(async move {
                         let sig_broadcasters = conductor_clone.signal_broadcaster();
 
-                        conductor_clone.with_subscriber(subscriber)
-
                         let mut streams = tokio_stream::StreamMap::new();
                         for (i, rx) in sig_broadcasters
                             .subscribe_separately()
