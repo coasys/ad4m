@@ -11,6 +11,8 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
+use holochain::tracing::instrument::WithSubscriber;
+use holochain_types::websocket::AllowedOrigins;
 use kitsune_p2p_types::config::{KitsuneP2pTuningParams, KitsuneP2pConfig, NetworkType, TransportConfig};
 use kitsune_p2p_types::dependencies::url2::Url2;
 use holochain::prelude::{
@@ -103,6 +105,8 @@ impl HolochainService {
                     // Spawn a new task to forward items from the stream to the receiver
                     let spawned_sig = tokio::spawn(async move {
                         let sig_broadcasters = conductor_clone.signal_broadcaster();
+
+                        conductor_clone.with_subscriber(subscriber)
 
                         let mut streams = tokio_stream::StreamMap::new();
                         for (i, rx) in sig_broadcasters
@@ -398,7 +402,7 @@ impl HolochainService {
 
         let interface = conductor
             .clone()
-            .add_app_interface(Either::Left(local_config.app_port))
+            .add_app_interface(Either::Left(local_config.app_port), AllowedOrigins::Any, None)
             .await;
 
         info!("Added app interface: {:?}", interface);

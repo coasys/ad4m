@@ -1,5 +1,5 @@
 use deno_core::error::AnyError;
-use deno_core::v8;
+use deno_core::{v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use std::future::Future;
 use std::pin::Pin;
@@ -25,7 +25,10 @@ impl Future for EventLoopFuture {
         sleep(std::time::Duration::from_millis(1));
         let worker = self.worker.try_lock();
         if let Ok(mut worker) = worker {
-            let res = worker.poll_event_loop(cx, false);
+            let res = worker.js_runtime.poll_event_loop(cx, PollEventLoopOptions {
+                pump_v8_message_loop: true,
+                wait_for_inspector: false,
+            });
             cx.waker().wake_by_ref();
             res
         } else {
