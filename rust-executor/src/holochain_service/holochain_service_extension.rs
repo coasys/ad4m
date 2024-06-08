@@ -186,6 +186,6 @@ async fn unpack_dna(#[string] path: String) -> Result<String, AnyError> {
 deno_core::extension!(
     holochain_service,
     ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, sign_string, shutdown, get_agent_key, pack_dna, unpack_dna],
-    esm_entry_point = "ext:pubsub_service/holochain_service_extension.js",
+    esm_entry_point = "ext:holochain_service/holochain_service_extension.js",
     esm = [dir "src/holochain_service", "holochain_service_extension.js"]
 );
