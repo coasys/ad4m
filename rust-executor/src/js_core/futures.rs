@@ -55,18 +55,20 @@ impl Future for SmartGlobalVariableFuture {
         //println!("Trying to get the worker lock: {}", self.name);
         let mut worker = self.worker.try_lock().expect("Failed to lock worker");
         let scope = &mut worker.js_runtime.handle_scope();
-        let context = v8::Context::new(scope);
-        let scope = &mut v8::ContextScope::new(scope, context);
-        
         let code = v8::String::new(scope, &self.value).unwrap();
-        let script = v8::Script::compile(scope, code, None).unwrap();
-
-        match script.run(scope) {
-            Some(result) => {
-                let result_str = result.to_string(scope).unwrap().to_rust_string_lossy(scope);
-                Poll::Ready(Ok(result_str))
-            }
-            None => Poll::Ready(Err(AnyError::msg("Failed to execute script"))),
+        let script = v8::Script::compile(scope, code, None);
+        match script {
+            Some(script) => {
+                let result = script.run(scope);
+                match result {
+                    Some(result) => {
+                        let result_str = result.to_string(scope).unwrap().to_rust_string_lossy(scope);
+                        Poll::Ready(Ok(result_str))
+                    }
+                    None => Poll::Ready(Err(AnyError::msg("Failed to execute script"))),
+                }
+            },
+            None => Poll::Ready(Err(AnyError::msg("Failed to compile script"))),
         }
     }
 }
