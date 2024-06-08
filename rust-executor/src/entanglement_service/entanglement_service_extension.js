@@ -5,19 +5,19 @@ import {
 
 ((globalThis) => {
   globalThis.ENTANGLEMENT_SERVICE = {
-    signDeviceKey: async (deviceKey, deviceKeyType) => {
+    signDeviceKey: (deviceKey, deviceKeyType) => {
       return sign_device_key(deviceKey, deviceKeyType);
     },
-    generateHolochainProof: async (holochainPubkey, signedDid) => {
+    generateHolochainProof: (holochainPubkey, signedDid) => {
       return generate_entanglement_proof(holochainPubkey, signedDid);
     },
-    addEntaglementProofs: async (proofs) => {
+    addEntaglementProofs: (proofs) => {
       return add_entanglement_proofs(proofs);
     },
-    deleteEntanglementProofs: async (proofs) => {
+    deleteEntanglementProofs: (proofs) => {
       return delete_entanglement_proofs(proofs);
     },
-    getEntanglementProofs: async () => {
+    getEntanglementProofs: () => {
       return get_entanglement_proofs(proofs);
     }
   }
