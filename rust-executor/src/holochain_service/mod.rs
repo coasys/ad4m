@@ -5,7 +5,7 @@ use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use holochain::conductor::api::{AppInfo, CellInfo, ZomeCall};
+use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
@@ -104,18 +104,15 @@ impl HolochainService {
 
                     // Spawn a new task to forward items from the stream to the receiver
                     let spawned_sig = tokio::spawn(async move {
-                        let sig_broadcasters = conductor_clone.signal_broadcaster();
+                        let streams: tokio_stream::StreamMap<String, tokio_stream::wrappers::BroadcastStream<Signal>> = tokio_stream::StreamMap::new();
+                        conductor_clone.list_apps(Some(AppStatusFilter::Running)).await.unwrap().into_iter().for_each(|app| {                            
+                            let sig_broadcasters = conductor_clone.subscribe_to_app_signals(app.installed_app_id.clone());
 
-                        let mut streams = tokio_stream::StreamMap::new();
-                        for (i, rx) in sig_broadcasters
-                            .subscribe_separately()
-                            .into_iter()
-                            .enumerate()
-                        {
-                            streams.insert(i, tokio_stream::wrappers::BroadcastStream::new(rx));
-                        }
-                        let mut stream =
-                            streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
+                            let mut streams = tokio_stream::StreamMap::new();
+                            streams.insert(app.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
+                        });
+
+                        let mut stream = streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
 
                         response_sender
                             .send(HolochainServiceResponse::InitComplete(Ok(())))
