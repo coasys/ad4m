@@ -1,3 +1,5 @@
+use std::panic::AssertUnwindSafe;
+
 use deno_core::anyhow::Error;
 use scryer_prolog::machine::{parsed_results::QueryResult, Machine};
 use tokio::sync::{mpsc, oneshot};
@@ -56,8 +58,28 @@ impl PrologEngine {
                     while let Some(message) = receiver.recv().await {
                         match message {
                             PrologServiceRequest::RunQuery(query, response) => {
-                                let result = machine.run_query(query);
-                                let _ = response.send(PrologServiceResponse::QueryResult(result));
+                                match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                    machine.run_query(query)
+                                })) {
+                                    Ok(result) => {
+                                        let _ = response.send(PrologServiceResponse::QueryResult(result));
+                                    }
+                                    Err(e) => {
+                                        let error_string = if let Some(string) = e.downcast_ref::<String>() {
+                                            format!("Scryer panicked with: {:?}", string)
+                                        } else if let Some(&str) = e.downcast_ref::<&str>() {
+                                            format!("Scryer panicked with: {:?}", str)
+                                        } else {
+                                            format!("Scryer panicked with: {:?}", e)
+                                        };
+                                        log::error!("{}", error_string);
+                                        let _ = response.send(
+                                            PrologServiceResponse::QueryResult(
+                                                Err(format!("Scryer panicked with: {:?}", error_string))
+                                            )
+                                        );
+                                    }
+                                }
                             }
                             PrologServiceRequest::LoadModuleString(
                                 module_name,
