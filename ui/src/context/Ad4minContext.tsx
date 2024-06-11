@@ -158,10 +158,13 @@ export function Ad4minProvider({ children }: any) {
           console.log("Notification triggered: ", notification);
           const match = notification.triggerMatch;
           const parsed = JSON.parse(match);
+          const firstMatch = parsed[0];
+          const title = firstMatch?.Title
           sendNotification({
             icon: notification.notification.appIconPath,
-            title: parsed?.Title || notification.notification.appName,
-            body: parsed?.Description || "Received a new notification",
+            title: notification.notification.appName + (title ? ": " + title : ""),
+            body: firstMatch?.Description || "Received a new notification",
+            //body: match
           });
         })
       }
