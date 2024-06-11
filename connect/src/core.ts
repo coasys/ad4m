@@ -188,7 +188,7 @@ export default class Ad4mConnect {
 
           if (data.serviceId) {
             this.setPort(data.port);
-            this.setUrl(`wss://${data.port}.hosting.ad4m.dev/graphql`);
+            this.setUrl(data.url);
             this.connect();
           }
         }
