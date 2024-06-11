@@ -93,6 +93,9 @@ regex = "1.5.4"
 json5 = "0.4"
 
 include_dir = "0.6.0"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 
 [dev-dependencies]
 maplit = "1.0.2"

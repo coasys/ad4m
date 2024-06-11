@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    pub cert_file_path: String,
+    pub key_file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ad4mConfig {
     pub app_data_path: Option<String>,
@@ -24,6 +30,7 @@ pub struct Ad4mConfig {
     pub admin_credential: Option<String>,
     pub localhost: Option<bool>,
     pub auto_permit_cap_requests: Option<bool>,
+    pub tls: Option<TlsConfig>,
 }
 
 impl Ad4mConfig {
@@ -103,6 +110,7 @@ impl Default for Ad4mConfig {
             admin_credential: None,
             localhost: None,
             auto_permit_cap_requests: None,
+            tls: None,
         };
         config.prepare();
         config
