@@ -26,7 +26,7 @@ pub fn add_entanglement_proofs(#[serde] proofs: Vec<EntanglementProof>) -> Resul
 
 #[op2]
 #[serde]
-pub fn delete_entanglement_proof(#[serde] proofs: Vec<EntanglementProof>) -> Result<(), AnyError> {
+pub fn delete_entanglement_proofs(#[serde] proofs: Vec<EntanglementProof>) -> Result<(), AnyError> {
   Ok(delete_entanglement_proof_service(proofs))
 }
 
@@ -38,7 +38,7 @@ pub fn get_entanglement_proofs() -> Result<Vec<EntanglementProof>, AnyError> {
 
 deno_core::extension!(
   entanglement_service,
-  ops = [sign_device_key, generate_entanglement_proof, add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs],
+  ops = [sign_device_key, generate_entanglement_proof, add_entanglement_proofs, delete_entanglement_proofs, get_entanglement_proofs],
   esm_entry_point = "ext:entanglement_service/entanglement_service_extension.js",
   esm = [dir "src/entanglement_service", "entanglement_service_extension.js"]
 );
