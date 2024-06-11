@@ -285,17 +285,33 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     json_value_list([Value|Values]) --> json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}).
     
     json_string(String) -->
-        "\"", string_chars(String), "\"".
+    "\"", json_string_chars(String), "\"".
+
+    json_string_chars([]) --> [].
+    json_string_chars([C|Cs]) --> json_string_char(C), json_string_chars(Cs).
+
+    json_string_char(C) --> [C], { dif(C, '"'), dif(C, '\\') }.
+    json_string_char('"') --> ['\\', '"'].
+    json_string_char('\\') --> ['\\', '\\'].
+    json_string_char('/') --> ['\\', '/'].
+    json_string_char('\b') --> ['\\', 'b'].
+    json_string_char('\f') --> ['\\', 'f'].
+    json_string_char('\n') --> ['\\', 'n'].
+    json_string_char('\r') --> ['\\', 'r'].
+    json_string_char('\t') --> ['\\', 't'].
     
     json_number(Number) -->
-        number_chars(Chars),
-        { number_chars(Number, Chars) }.
+        number_sequence(Chars),
+        { atom_chars(Atom, Chars),
+          atom_number(Atom, Number) }.
     
     string_chars([]) --> [].
     string_chars([C|Cs]) --> [C], { dif(C, '"') }, string_chars(Cs).
     
-    number_chars([D|Ds]) --> digit(D), number_chars(Ds).
-    number_chars([]) --> [].
+    % Simplified number_sequence to handle both integer and fractional parts
+    number_sequence([D|Ds]) --> digit(D), number_sequence_rest(Ds).
+    number_sequence_rest([D|Ds]) --> digit(D), number_sequence_rest(Ds).
+    number_sequence_rest([]) --> [].
     
     digit(D) --> [D], { member(D, "0123456789.") }.
     
