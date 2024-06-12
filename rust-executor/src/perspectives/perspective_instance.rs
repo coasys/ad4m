@@ -795,7 +795,7 @@ impl PerspectiveInstance {
         let has_prolog_engine = {
             self.prolog_engine.lock().await.is_some()
         };
-        
+
         let mut rebuild_flag = self.prolog_needs_rebuild.lock().await;
 
         if !has_prolog_engine || *rebuild_flag == true {
@@ -917,33 +917,35 @@ impl PerspectiveInstance {
 
     async fn publish_notification_matches(uuid: String, match_map: BTreeMap<Notification, Vec<QueryMatch>>) {
         for (notification, matches) in match_map {
-            let payload = TriggeredNotification {
-                notification: notification.clone(),
-                perspective_id: uuid.clone(),
-                trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches))
-            };
+            if (matches.len() > 0) {
+                let payload = TriggeredNotification {
+                    notification: notification.clone(),
+                    perspective_id: uuid.clone(),
+                    trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches))
+                };
 
-            let message = serde_json::to_string(&payload).unwrap();
+                let message = serde_json::to_string(&payload).unwrap();
 
-            if let Ok(_) = url::Url::parse(&notification.webhook_url) {
-                log::info!("Notification webhook - posting to {:?}", notification.webhook_url);
-                let client = reqwest::Client::new();
-                let res = client.post(&notification.webhook_url)
-                    .bearer_auth(&notification.webhook_auth)
-                    .header("Content-Type", "application/json")
-                    .body(message.clone()) 
-                    .send()
+                if let Ok(_) = url::Url::parse(&notification.webhook_url) {
+                    log::info!("Notification webhook - posting to {:?}", notification.webhook_url);
+                    let client = reqwest::Client::new();
+                    let res = client.post(&notification.webhook_url)
+                        .bearer_auth(&notification.webhook_auth)
+                        .header("Content-Type", "application/json")
+                        .body(message.clone())
+                        .send()
+                        .await;
+                    log::info!("Notification webhook response: {:?}", res);
+                }
+
+                get_global_pubsub()
+                    .await
+                    .publish(
+                        &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+                        &message,
+                    )
                     .await;
-                log::info!("Notification webhook response: {:?}", res);
             }
-
-            get_global_pubsub()
-                .await
-                .publish(
-                    &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
-                    &message,
-                )
-                .await;
         }
     }
 
