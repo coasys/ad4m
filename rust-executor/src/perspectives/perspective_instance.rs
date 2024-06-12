@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::Value;
 use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution};
 use tokio::{join, time};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
@@ -130,7 +130,7 @@ pub struct PerspectiveInstance {
     prolog_needs_rebuild: Arc<Mutex<bool>>,
     is_teardown: Arc<Mutex<bool>>,
     sdna_change_mutex: Arc<Mutex<()>>,
-    prolog_update_mutex: Arc<Mutex<()>>,
+    prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
 }
 
@@ -149,7 +149,7 @@ impl PerspectiveInstance {
             prolog_needs_rebuild: Arc::new(Mutex::new(true)),
             is_teardown: Arc::new(Mutex::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
-            prolog_update_mutex: Arc::new(Mutex::new(())),
+            prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(Mutex::new(None)),
         }
     }
@@ -792,8 +792,21 @@ impl PerspectiveInstance {
     }
 
     async fn ensure_prolog_engine(&self) -> Result<(), AnyError> {
-        let mut maybe_prolog_engine = self.prolog_engine.lock().await;
-        if maybe_prolog_engine.is_none() {
+        let has_prolog_engine = {
+            self.prolog_engine.lock().await.is_some()
+        };
+
+        let mut rebuild_flag = self.prolog_needs_rebuild.lock().await;
+
+        if !has_prolog_engine || *rebuild_flag == true {
+            let _update_lock = self.prolog_update_mutex.write().await;
+            let mut maybe_prolog_engine = self.prolog_engine.lock().await;
+            if *rebuild_flag == true && maybe_prolog_engine.is_some() {
+                let old_engine = maybe_prolog_engine.as_ref().unwrap();
+                let _ = old_engine.drop();
+                *rebuild_flag = false;
+            }
+
             let mut engine = PrologEngine::new();
             engine.spawn().await.map_err(|e| anyhow!("Failed to spawn Prolog engine: {}", e))?;
             let all_links = self.get_links(&LinkQuery::default()).await?;
@@ -801,6 +814,7 @@ impl PerspectiveInstance {
             engine.load_module_string("facts".to_string(), facts).await?;
             *maybe_prolog_engine = Some(engine);
         }
+
         Ok(())
     }
 
@@ -809,6 +823,7 @@ impl PerspectiveInstance {
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
         self.ensure_prolog_engine().await?;
 
+        let _read_lock = self.prolog_update_mutex.read().await;
         let prolog_engine_mutex = self.prolog_engine.lock().await;
         let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
         let prolog_engine = prolog_engine_option_ref.as_ref().expect("Must be some since we initialized the engine above");
@@ -819,10 +834,18 @@ impl PerspectiveInstance {
             query
         };
 
-        prolog_engine
+        let result = prolog_engine
             .run_query(query)
-            .await?
-            .map_err(|e| anyhow!(e))
+            .await?;
+
+        match result {
+            Err(e) => {
+                let mut flag = self.prolog_needs_rebuild.lock().await;
+                *flag = true;
+                Err(anyhow!(e))
+            }
+            Ok(resolution) => Ok(resolution)
+        }
     }
 
     fn spawn_prolog_facts_update(&self, before: BTreeMap<Notification, Vec<QueryMatch>>, diff: DecoratedPerspectiveDiff) {
@@ -894,33 +917,35 @@ impl PerspectiveInstance {
 
     async fn publish_notification_matches(uuid: String, match_map: BTreeMap<Notification, Vec<QueryMatch>>) {
         for (notification, matches) in match_map {
-            let payload = TriggeredNotification {
-                notification: notification.clone(),
-                perspective_id: uuid.clone(),
-                trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches))
-            };
+            if (matches.len() > 0) {
+                let payload = TriggeredNotification {
+                    notification: notification.clone(),
+                    perspective_id: uuid.clone(),
+                    trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches))
+                };
 
-            let message = serde_json::to_string(&payload).unwrap();
+                let message = serde_json::to_string(&payload).unwrap();
 
-            if let Ok(_) = url::Url::parse(&notification.webhook_url) {
-                log::info!("Notification webhook - posting to {:?}", notification.webhook_url);
-                let client = reqwest::Client::new();
-                let res = client.post(&notification.webhook_url)
-                    .bearer_auth(&notification.webhook_auth)
-                    .header("Content-Type", "application/json")
-                    .body(message.clone()) 
-                    .send()
+                if let Ok(_) = url::Url::parse(&notification.webhook_url) {
+                    log::info!("Notification webhook - posting to {:?}", notification.webhook_url);
+                    let client = reqwest::Client::new();
+                    let res = client.post(&notification.webhook_url)
+                        .bearer_auth(&notification.webhook_auth)
+                        .header("Content-Type", "application/json")
+                        .body(message.clone())
+                        .send()
+                        .await;
+                    log::info!("Notification webhook response: {:?}", res);
+                }
+
+                get_global_pubsub()
+                    .await
+                    .publish(
+                        &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+                        &message,
+                    )
                     .await;
-                log::info!("Notification webhook response: {:?}", res);
             }
-
-            get_global_pubsub()
-                .await
-                .publish(
-                    &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
-                    &message,
-                )
-                .await;
         }
     }
 

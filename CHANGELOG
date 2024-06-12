@@ -5,7 +5,20 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ## unreleased
 
+### Fixed
+- Prolog engine gets respawned when a query caused an error to clean the machine state [PR#483](https://github.com/coasys/ad4m/pull/483)
+- Catch panics in Scryer and handle as error instead of killing the engine thread which caused `channel closed` error in future queries [PR#483](https://github.com/coasys/ad4m/pull/483)
+
 ### Added
+- Prolog predicates needed in new Flux mention notification trigger:
+ - agent_did/1
+ - remove_html_tags/2
+ - string_includes/2
+ - literal_from_url/3
+ - json_property/3
+[PR#483](https://github.com/coasys/ad4m/pull/483) 
+- Triggered notifications are handled through operating system notifications [PR#483](https://github.com/coasys/ad4m/pull/483)
+
 - App notifications implemented. ADAM apps can register Prolog queries with the executor which will be checked on every perspective change. If the change adds a new match, it will trigger the publishing of a notifications via subscriptions in client interface [PR#475](https://github.com/coasys/ad4m/pull/475), as well as calling a web hook if given [PR#482](https://github.com/coasys/ad4m/pull/482)
 - Support ADAM executor hosting service alpha [PR#474](https://github.com/coasys/ad4m/pull/474)
 - Complete instructions in README [PR#473](https://github.com/coasys/ad4m/pull/473)
