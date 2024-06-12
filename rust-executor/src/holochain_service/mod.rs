@@ -28,6 +28,7 @@ use tokio::select;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::yield_now;
 use tokio::time::timeout;
+use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 pub(crate) mod holochain_service_extension;
@@ -81,6 +82,7 @@ impl HolochainService {
     pub async fn init(local_config: LocalConductorConfig) -> Result<(), AnyError> {
         let (sender, mut receiver) = mpsc::unbounded_channel::<HolochainServiceRequest>();
         let (stream_sender, stream_receiver) = mpsc::unbounded_channel::<Signal>();
+        let (new_app_ids_sender, mut new_app_ids_receiver) = mpsc::unbounded_channel::<AppInfo>();
 
         let inteface = HolochainServiceInterface {
             sender,
@@ -104,23 +106,31 @@ impl HolochainService {
 
                     // Spawn a new task to forward items from the stream to the receiver
                     let spawned_sig = tokio::spawn(async move {
-                        let streams: tokio_stream::StreamMap<String, tokio_stream::wrappers::BroadcastStream<Signal>> = tokio_stream::StreamMap::new();
+                        let mut streams: tokio_stream::StreamMap<String, tokio_stream::wrappers::BroadcastStream<Signal>> = tokio_stream::StreamMap::new();
                         conductor_clone.list_apps(Some(AppStatusFilter::Running)).await.unwrap().into_iter().for_each(|app| {                            
                             let sig_broadcasters = conductor_clone.subscribe_to_app_signals(app.installed_app_id.clone());
 
-                            let mut streams = tokio_stream::StreamMap::new();
+                            //let mut streams = tokio_stream::StreamMap::new();
                             streams.insert(app.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
                         });
 
-                        let mut stream = streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
-
+                        let multiplex_streams = Box::new(|streams: tokio_stream::StreamMap<String, BroadcastStream::<Signal>>| streams.map(|(_, signal)| signal.expect("Couldn't receive a signal")));
+                        let mut stream = multiplex_streams(streams);
                         response_sender
                             .send(HolochainServiceResponse::InitComplete(Ok(())))
                             .unwrap();
 
                         loop {
-                            while let Some(item) = stream.next().await {
-                                let _ = stream_sender.send(item);
+                            tokio::select! {
+                                Some(item) = stream.next() => {
+                                    let _ = stream_sender.send(item);
+                                },
+                                Some(new_app_id) = new_app_ids_receiver.recv() => {
+                                    let sig_broadcasters = conductor_clone.subscribe_to_app_signals(new_app_id.installed_app_id.clone());
+                                    streams.insert(new_app_id.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
+                                    stream = multiplex_streams(streams);
+                                }
+                                else => break,
                             }
                             yield_now().await;
                         }
@@ -135,6 +145,9 @@ impl HolochainService {
                                         service.install_app(payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; InstallApp call")) {
                                         Ok(result) => {
+                                            if let Ok(app_info) = &result {
+                                                let _ = new_app_ids_sender.send(app_info.clone());
+                                            }
                                             let _ = response.send(HolochainServiceResponse::InstallApp(result));
                                         },
                                         Err(err) => {
