@@ -57,13 +57,11 @@ export class RuntimeClient {
         this.#messageReceivedCallbacks = []
         this.#exceptionOccurredCallbacks = []
         this.#notificationTriggeredCallbacks = []
-        this.#notificationRequestedCallbacks = []
 
         if(subscribe) {
             this.subscribeMessageReceived()
             this.subscribeExceptionOccurred()
             this.subscribeNotificationTriggered()
-            this.subscribeNotificationRequested()
         }
     }
 
@@ -323,10 +321,6 @@ export class RuntimeClient {
         this.#notificationTriggeredCallbacks.push(cb)
     }
 
-    addNotificationRequestedCallback(cb: NotificationRequestedCallback) {
-        this.#notificationRequestedCallbacks.push(cb)
-    }
-
     subscribeNotificationTriggered() {
         this.#apolloClient.subscribe({
             query: gql` subscription {
@@ -336,21 +330,6 @@ export class RuntimeClient {
             next: result => {
                 this.#notificationTriggeredCallbacks.forEach(cb => {
                     cb(result.data.runtimeNotificationTriggered)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-    }
-
-    subscribeNotificationRequested() {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                runtimeNotificationRequested { ${NOTIFICATION_FIELDS} }
-            }   
-        `}).subscribe({
-            next: result => {
-                this.#notificationRequestedCallbacks.forEach(cb => {
-                    cb(result.data.runtimeNotificationRequested)
                 })
             },
             error: (e) => console.error(e)

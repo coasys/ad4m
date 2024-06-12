@@ -8,13 +8,20 @@ pub fn prolog_value_to_json_string(value: Value) -> String {
         Value::Atom(a) => format!("{}", a.as_str()),
         Value::String(s) => 
             if let Err(_e) = serde_json::from_str::<serde_json::Value>(s.as_str()) {
-                //treat as string literal
-                //escape double quotes
-                format!("\"{}\"", s
-                    .replace("\"", "\\\"")
-                    .replace("\n", "\\n")
-                    .replace("\t", "\\t")
-                    .replace("\r", "\\r"))
+                //try unescaping an escape json string
+                let wrapped_s = format!("\"{}\"",s);
+                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(wrapped_s.as_str()) {
+                    json_value.to_string()
+                } else {
+                    //treat as string literal
+                    //escape double quotes
+                    format!("\"{}\"", s
+                        .replace("\"", "\\\"")
+                        .replace("\n", "\\n")
+                        .replace("\t", "\\t")
+                        .replace("\r", "\\r"))
+                }
+                
             } else {
                 //return valid json string
                 s

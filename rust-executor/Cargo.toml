@@ -89,6 +89,7 @@ scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client", version="0.10.0-prerelease" }
+reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 
 rusqlite = { version = "0.29.0", features = ["bundled"] }
 fake = { version = "2.9.2", features = ["derive"] }
@@ -97,6 +98,9 @@ regex = "1.5.4"
 json5 = "0.4"
 
 include_dir = "0.6.0"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 
 [dev-dependencies]
 maplit = "1.0.2"

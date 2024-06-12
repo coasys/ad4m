@@ -174,7 +174,7 @@ export default class Ad4mConnect {
         localStorage.setItem('hosting_token', data.token);
 
         let token = localStorage.getItem('hosting_token');
-        
+
         const response2 = await fetch('https://hosting.ad4m.dev/api/service/info', {
           method: 'GET',
           headers: {
@@ -188,7 +188,7 @@ export default class Ad4mConnect {
 
           if (data.serviceId) {
             this.setPort(data.port);
-            this.setUrl(`wss://${data.port}.hosting.ad4m.dev/graphql`);
+            this.setUrl(data.url);
             this.connect();
           }
         }
