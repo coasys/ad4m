@@ -5,6 +5,7 @@ use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use futures::stream_select;
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::paths::DataRootPath;
@@ -104,31 +105,34 @@ impl HolochainService {
                     let mut service = HolochainService::new(local_config).await.unwrap();
                     let conductor_clone = service.conductor.clone();
 
+                    
+
                     // Spawn a new task to forward items from the stream to the receiver
                     let spawned_sig = tokio::spawn(async move {
+
                         let mut streams: tokio_stream::StreamMap<String, tokio_stream::wrappers::BroadcastStream<Signal>> = tokio_stream::StreamMap::new();
                         conductor_clone.list_apps(Some(AppStatusFilter::Running)).await.unwrap().into_iter().for_each(|app| {                            
                             let sig_broadcasters = conductor_clone.subscribe_to_app_signals(app.installed_app_id.clone());
-
-                            //let mut streams = tokio_stream::StreamMap::new();
                             streams.insert(app.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
-                        });
+                        });    
 
-                        let multiplex_streams = Box::new(|streams: tokio_stream::StreamMap<String, BroadcastStream::<Signal>>| streams.map(|(_, signal)| signal.expect("Couldn't receive a signal")));
-                        let mut stream = multiplex_streams(streams);
+
                         response_sender
                             .send(HolochainServiceResponse::InitComplete(Ok(())))
                             .unwrap();
 
                         loop {
                             tokio::select! {
-                                Some(item) = stream.next() => {
-                                    let _ = stream_sender.send(item);
-                                },
+                                Some((_, maybe_signal)) = streams.next() => {
+                                    if let Ok(signal) = maybe_signal {
+                                        let _ = stream_sender.send(signal);
+                                    } else {
+                                        log::error!("Got error from Holochain through app signal stream: {:?}", maybe_signal.err().expect("to be error since we're in else case"))
+                                    }
+                                }
                                 Some(new_app_id) = new_app_ids_receiver.recv() => {
                                     let sig_broadcasters = conductor_clone.subscribe_to_app_signals(new_app_id.installed_app_id.clone());
                                     streams.insert(new_app_id.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
-                                    stream = multiplex_streams(streams);
                                 }
                                 else => break,
                             }
