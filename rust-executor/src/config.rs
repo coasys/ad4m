@@ -31,6 +31,7 @@ pub struct Ad4mConfig {
     pub localhost: Option<bool>,
     pub auto_permit_cap_requests: Option<bool>,
     pub tls: Option<TlsConfig>,
+    pub log_holochain_metrics: Option<bool>,
 }
 
 impl Ad4mConfig {
@@ -83,6 +84,9 @@ impl Ad4mConfig {
         if self.localhost.is_none() {
             self.localhost = Some(true);
         }
+        if self.log_holochain_metrics.is_none() {
+            self.log_holochain_metrics = Some(true);
+        }
     }
 
     pub fn get_json(&self) -> String {
@@ -111,6 +115,7 @@ impl Default for Ad4mConfig {
             localhost: None,
             auto_permit_cap_requests: None,
             tls: None,
+            log_holochain_metrics: None,
         };
         config.prepare();
         config
