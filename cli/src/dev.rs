@@ -51,6 +51,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     localhost: None,
                     auto_permit_cap_requests: Some(true),
                     tls: None,
+                    log_holochain_metrics: None,
                 })
                 .await
                 .join()
@@ -184,6 +185,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     localhost: None,
                     auto_permit_cap_requests: Some(true),
                     tls: None,
+                    log_holochain_metrics: None,
                 })
                 .await
                 .join()
