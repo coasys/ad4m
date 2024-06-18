@@ -21,6 +21,7 @@ export interface HolochainConfiguration {
     useProxy?: boolean,
     useLocalProxy?: boolean;
     useMdns?: boolean;
+    logHolochainMetrics?: boolean; 
 }
 
 export default class HolochainService {
@@ -38,7 +39,8 @@ export default class HolochainService {
             useProxy,
             useLocalProxy,
             useMdns,
-            dataPath
+            dataPath,
+            logHolochainMetrics
         } = config;
 
         this.#dataPath = dataPath
@@ -53,7 +55,9 @@ export default class HolochainService {
         this.#queue = new Map();
         this.#languageDnaHashes = new Map();
 
-        this.logDhtStatus();
+        if (logHolochainMetrics) {
+            this.logDhtStatus();
+        }
     }
 
     async logDhtStatus() {
