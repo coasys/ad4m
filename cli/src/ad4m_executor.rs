@@ -125,6 +125,8 @@ enum Domain {
         tls_cert_file: Option<String>,
         #[arg(short, long, action)]
         tls_key_file: Option<String>,
+        #[arg(short, long, action)]
+        log_holochain_metrics: Option<bool>,
     },
     RunLocalHcServices {}
 }
@@ -171,7 +173,8 @@ async fn main() -> Result<()> {
         admin_credential,
         localhost,
         tls_cert_file,
-        tls_key_file
+        tls_key_file,
+        log_holochain_metrics,
     } = args.domain
     {
         let tls = if tls_cert_file.is_some() && tls_cert_file.is_some() {
@@ -204,7 +207,8 @@ async fn main() -> Result<()> {
                 admin_credential,
                 localhost,
                 auto_permit_cap_requests: Some(true),
-                tls
+                tls,
+                log_holochain_metrics
             }).await;
         }).await;
         

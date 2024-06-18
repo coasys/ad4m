@@ -47,7 +47,9 @@ export interface OuterConfig {
   //Should ad4m-executor connect to an existing holochain instance, or spawn its own
   connectHolochain?: boolean,
   //The credential used by admin client to make request
-  adminCredential?: string
+  adminCredential?: string,
+  // Log holochain metrics
+  logHolochainMetrics?: boolean
 }
 
 export interface SeedFileSchema {
@@ -82,7 +84,7 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
     let { 
       appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
       mocks, gqlPort, adminCredential, runDappServer,
-      dAppPort
+      dAppPort, logHolochainMetrics
     } = config
     if(!gqlPort) gqlPort = 4000
     // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
@@ -170,7 +172,8 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
       languageAliases,
       bootstrapFixtures,
       languageLanguageOnly,
-      adminCredential
+      adminCredential,
+      logHolochainMetrics
     } as CoreConfig);
 
     core.resolvers = createResolvers(core, config)
