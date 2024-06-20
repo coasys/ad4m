@@ -76,10 +76,7 @@ impl ModuleLoader for StringModuleLoader {
                 let module_code = self.modules.get(module_specifier.as_str()).cloned();
                 let module_specifier = module_specifier.clone();
                 let fut = async move {
-                    match module_code {
-                        Some(code) => Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, code.into(), &module_specifier)),
-                        None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
-                    }
+                    Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, module_code.into(), &module_specifier))
                 };
                 Box::pin(fut)
             }
