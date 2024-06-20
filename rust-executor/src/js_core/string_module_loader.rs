@@ -76,7 +76,7 @@ impl ModuleLoader for StringModuleLoader {
                 let module_code = self.modules.get(module_specifier.as_str()).cloned();
                 let module_specifier = module_specifier.clone();
                 let fut = async move {
-                    Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, module_code.into(), &module_specifier))
+                    Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, module_code.unwrap().into(), &module_specifier))
                 };
                 Box::pin(fut)
             }
