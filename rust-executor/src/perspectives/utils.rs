@@ -6,26 +6,40 @@ pub fn prolog_value_to_json_string(value: Value) -> String {
         Value::Float(f) => format!("{}", f),
         Value::Rational(r) => format!("{}", r),
         Value::Atom(a) => format!("{}", a.as_str()),
-        Value::String(s) => 
-            if let Err(_e) = serde_json::from_str::<serde_json::Value>(s.as_str()) {
-                //try unescaping an escape json string
-                let wrapped_s = format!("\"{}\"",s);
-                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(wrapped_s.as_str()) {
-                    json_value.to_string()
-                } else {
-                    //treat as string literal
-                    //escape double quotes
-                    format!("\"{}\"", s
-                        .replace("\"", "\\\"")
-                        .replace("\n", "\\n")
-                        .replace("\t", "\\t")
-                        .replace("\r", "\\r"))
-                }
-                
+        Value::String(s) => {
+            log::debug!("processing string: {}",s);
+            //try unescaping an escape json string
+            let wrapped_s = format!("\"{}\"",s);
+            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(wrapped_s.as_str()) {
+                let r = json_value.to_string();
+                log::debug!("return escaped: {}", r);
+                r
             } else {
-                //return valid json string
-                s
-            },
+                log::debug!("not valid json: {}", wrapped_s);
+                
+                    // try fixing wrong \' escape sequences:
+                    let fixed_s = wrapped_s.replace("\\'", "'");
+                    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(fixed_s.as_str()) {
+                        let r = json_value.to_string();
+                        log::debug!("is valid with fixed \\': {}", r);
+                        r
+                    } else {
+                        log::debug!("nothing helps. manual unescapingl...");
+                            //treat as string literal
+                            //escape double quotes
+                            format!("\"{}\"", s
+                                .replace("\"", "\\\"")
+                                .replace("\n", "\\n")
+                                .replace("\t", "\\t")
+                                .replace("\r", "\\r"))
+                        }
+
+                //} else {
+                    //return valid json string
+                //    s
+                //}
+            }
+        },
         Value::List(l) => {
             let mut string_result = "[".to_string();
             for (i, v) in l.iter().enumerate() {
