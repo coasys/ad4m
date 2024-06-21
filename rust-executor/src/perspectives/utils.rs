@@ -7,24 +7,29 @@ pub fn prolog_value_to_json_string(value: Value) -> String {
         Value::Rational(r) => format!("{}", r),
         Value::Atom(a) => format!("{}", a.as_str()),
         Value::String(s) => {
-            //try unescaping an escape json string
-            let wrapped_s = format!("\"{}\"",s);
-            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(wrapped_s.as_str()) {
-                json_value.to_string()
-            } else {
-                // try fixing wrong \' escape sequences:
-                let fixed_s = wrapped_s.replace("\\'", "'");
-                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(fixed_s.as_str()) {
-                    json_value.to_string()
-                } else {
-                    log::debug!("nothing helps. manual unescapingl...");
-                        //treat as string literal
-                        //escape double quotes
-                        format!("\"{}\"", s
-                            .replace("\"", "\\\"")
-                            .replace("\n", "\\n")
-                            .replace("\t", "\\t")
-                            .replace("\r", "\\r"))
+            match s.as_str() {
+                "true" => String::from("true"),
+                "false" => String::from("false"),
+                _ =>  {
+                    //try unescaping an escaped json string
+                    let wrapped_s = format!("\"{}\"",s);
+                    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(wrapped_s.as_str()) {
+                        json_value.to_string()
+                    } else {
+                        // try fixing wrong \' escape sequences:
+                        let fixed_s = wrapped_s.replace("\\'", "'");
+                        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(fixed_s.as_str()) {
+                            json_value.to_string()
+                        } else {
+                                //treat as string literal
+                                //escape double quotes
+                                format!("\"{}\"", s
+                                    .replace("\"", "\\\"")
+                                    .replace("\n", "\\n")
+                                    .replace("\t", "\\t")
+                                    .replace("\r", "\\r"))
+                        }
+                    }
                 }
             }
         },
