@@ -387,6 +387,7 @@ describe("Prolog + Literals", () => {
                 expect(todo2).to.have.property("comments")
                 // @ts-ignore
                 await todo.setState("todo://review")
+                await sleep(1000)
                 expect(await todo.state).to.equal("todo://review")
                 expect(await todo.comments).to.be.empty
 
