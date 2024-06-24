@@ -1,6 +1,8 @@
 use deno_core::error::AnyError;
+use deno_core::v8::Handle;
 use deno_core::{v8, PollEventLoopOptions, JsRuntime};
-use deno_runtime::worker::MainWorker; // Import the JsRuntime struct.
+use deno_runtime::worker::MainWorker;
+use log::info; // Import the JsRuntime struct.
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -62,7 +64,10 @@ impl Future for SmartGlobalVariableFuture {
                 let result = script.run(scope);
                 match result {
                     Some(result) => {
-                        let result_str = result.to_string(scope).unwrap().to_rust_string_lossy(scope);
+                        info!("Result: {:?}", result.clone());
+                        let result_str = result.open(scope).to_rust_string_lossy(scope);
+                        // let result_str = result.to_string(scope).unwrap().to_rust_string_lossy(scope);
+                        info!("Result: {}", result_str);
                         Poll::Ready(Ok(result_str))
                     }
                     None => Poll::Ready(Err(AnyError::msg("Failed to execute script"))),
