@@ -177,7 +177,7 @@ impl JsCore {
     async fn execute_async_smart(
         &self,
         script: String
-    ) -> Result<String, AnyError> { 
+    ) -> Result<impl Future<Output = Result<String, AnyError>>, AnyError> { 
         let wrapped_script = format!(
             r#"
             (async () => {{
@@ -189,26 +189,22 @@ impl JsCore {
         let mut worker = self.worker.lock().await;
 
         let execute_async = worker.execute_script("js_core", wrapped_script.into());
-        
         let execute_async = execute_async.map_err(|err| anyhow!(err))?;
+        let resolve_fut = worker.js_runtime.resolve(execute_async.into());
 
-        println!("execute_async: {:?}", execute_async);
-
-        let result = worker.js_runtime.resolve(execute_async.into()).await?;
-
-        println!("result: {:?}", result);
-
-        let result = {
-            let mut worker = self.worker.lock().await;
-
-            let mut scope = worker.js_runtime.handle_scope();
-
-            result.open(&mut scope).to_rust_string_lossy(&mut scope)
-        };
-
-        println!("result: {:?}", result);
-
-        Ok(result)
+        let self_clone = self.clone();
+        Ok(async move {
+            let mut worker = self_clone.worker.lock().await;
+            let result_fut = worker.js_runtime.with_event_loop_future(resolve_fut, PollEventLoopOptions::default());
+            match result_fut.await {
+                Ok(value) => {
+                    let mut scope = worker.js_runtime.handle_scope();
+                    let result = value.open(&mut scope).to_rust_string_lossy(&mut scope);
+                    Ok(result)
+                }
+                Err(e) => Err(e)
+            }
+        })
     }
 
     fn generate_execution_slot(
@@ -230,10 +226,12 @@ impl JsCore {
                     tokio::task::spawn_local(async move {
                         // info!("Spawn local driving: {}", id);
                         //let local_variable_name = uuid_to_valid_variable_name(&id);
-                        let script_fut =
-                            js_core_cloned.execute_async_smart(script).await;
+                        let script_fut = js_core_cloned
+                            .execute_async_smart(script)
+                            .await
+                            .expect("Couldn't create execute_async_smart future");
                         //info!("Script fut created: {}", id);
-                        match script_fut {
+                        match script_fut.await {
                             Ok(res) => {
                                 //info!("Script execution completed Succesfully: {}", id);
                                 response_tx
@@ -281,9 +279,11 @@ impl JsCore {
                 let result = js_core.init_engine().await;
                 info!("AD4M JS engine init completed, with result: {:?}", result);
 
-                let init_core_future = js_core
-                    .execute_async_smart(format!("initCore({})", config.get_json()).into());
-                let result = init_core_future.await;
+                let result = js_core
+                    .execute_async_smart(format!("initCore({})", config.get_json()).into())
+                    .await
+                    .expect("to be able to create js execution future")
+                    .await ;
 
                 match result {
                     Ok(res) => {
@@ -305,7 +305,7 @@ impl JsCore {
                 }
 
                 loop {
-                    info!("Main loop running");
+                    //info!("Main loop running");
                     //Listener future for loading JS modules into runtime
                     let module_load_fut = async {
                         loop {
@@ -391,7 +391,7 @@ impl JsCore {
 
                         event_loop_result = js_core.event_loop() => {
                             match event_loop_result {
-                                Ok(_) => info!("AD4M event loop finished"),
+                                Ok(_) => {} //info!("AD4M event loop finished"),
                                 Err(err) => {
                                     error!("AD4M event loop closed with error: {}", err);
                                     break;
