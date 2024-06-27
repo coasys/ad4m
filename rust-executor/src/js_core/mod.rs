@@ -93,7 +93,7 @@ impl JsCoreHandle {
             .expect("couldn't send on channel... it is likely that the main worker thread has crashed...");
 
         let response = response_rx.await?;
-
+        
         response
             .result
             .map_err(|err| anyhow!(err))
@@ -151,9 +151,9 @@ impl JsCore {
     async fn load_module(&self, file_path: String) -> Result<(), AnyError> {
         let mut worker = self.worker.lock().await;
         let url = resolve_url_or_path(&file_path, current_dir()?.as_path())?;
-        let _module_id = worker.js_runtime.load_side_es_module(&url).await?;
-        //TODO; this likely needs to be run (although might be handled by the import in the js code when import() is called)
-        //worker.js_runtime.mod_evaluate(module_id);
+        let module_id = worker.js_runtime.load_side_es_module(&url).await?;
+        let evaluate_fut = worker.js_runtime.mod_evaluate(module_id);
+        worker.js_runtime.with_event_loop_future(evaluate_fut, PollEventLoopOptions::default()).await?;
         Ok(())
     }
 
