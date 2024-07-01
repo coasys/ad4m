@@ -177,7 +177,7 @@ impl JsCore {
     async fn execute_async_smart(
         &self,
         script: String
-    ) -> Result<impl Future<Output = Result<String, AnyError>>, AnyError> { 
+    ) -> Result<SmartGlobalVariableFuture<impl Future<Output = Result<v8::Global<v8::Value>, AnyError>>>, AnyError> { 
         let wrapped_script = format!(
             r#"
             (async () => {{
@@ -185,26 +185,14 @@ impl JsCore {
             }})();
             "#, script
         );
-
-        let mut worker = self.worker.lock().await;
-
-        let execute_async = worker.execute_script("js_core", wrapped_script.into());
-        let execute_async = execute_async.map_err(|err| anyhow!(err))?;
-        let resolve_fut = worker.js_runtime.resolve(execute_async.into());
-
-        let self_clone = self.clone();
-        Ok(async move {
-            let mut worker = self_clone.worker.lock().await;
-            let result_fut = worker.js_runtime.with_event_loop_future(resolve_fut, PollEventLoopOptions::default());
-            match result_fut.await {
-                Ok(value) => {
-                    let mut scope = worker.js_runtime.handle_scope();
-                    let result = value.open(&mut scope).to_rust_string_lossy(&mut scope);
-                    Ok(result)
-                }
-                Err(e) => Err(e)
-            }
-        })
+    
+        let resolve_fut = {
+            let mut worker = self.worker.lock().await;
+            let execute_async = worker.execute_script("js_core", wrapped_script.into());
+            worker.js_runtime.resolve(execute_async.unwrap().into())
+        };
+    
+        Ok(SmartGlobalVariableFuture::new(self.worker.clone(), resolve_fut))
     }
 
     fn generate_execution_slot(
