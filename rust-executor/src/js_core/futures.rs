@@ -64,17 +64,18 @@ where
     type Output = Result<String, AnyError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut value_pin = Pin::new(&mut self.value);
-        let mut worker = match self.worker.try_lock() {
+        let worker = self.worker.clone();
+        let mut worker = match worker.try_lock() {
             Ok(w) => w,
             Err(_) => return Poll::Pending,
         };
-        
-        let scope = &mut worker.js_runtime.handle_scope();
 
+        let mut value_pin = Pin::new(&mut self.value);
+        
         if let Poll::Ready(result) = value_pin.as_mut().poll(cx) {
             match result {
                 Ok(result) => {
+                    let scope = &mut worker.js_runtime.handle_scope();
                     let result = result.open(scope).to_rust_string_lossy(scope);
                     return Poll::Ready(Ok(result));
                 },
@@ -90,6 +91,7 @@ where
             if let Poll::Ready(result) = value_pin.poll(cx) {
                 match result {
                     Ok(result) => {
+                        let scope = &mut worker.js_runtime.handle_scope();
                         let result = result.open(scope).to_rust_string_lossy(scope);
                         return Poll::Ready(Ok(result));
                     },
