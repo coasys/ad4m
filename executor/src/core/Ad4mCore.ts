@@ -33,6 +33,7 @@ export interface InitHolochainParams {
     passphrase?: string
     hcProxyUrl: string,
     hcBootstrapUrl: string,
+    logHolochainMetrics?: boolean
 }
 
 export interface HolochainUnlockConfiguration extends HolochainConfiguration {
@@ -150,6 +151,7 @@ export default class Ad4mCore {
             useMdns: params.hcUseMdns,
             hcProxyUrl: params.hcProxyUrl,
             hcBootstrapUrl: params.hcBootstrapUrl,
+            logHolochainMetrics: this.#config.logHolochainMetrics
         }
 
         this.#holochain = new HolochainService(holochainConfig)

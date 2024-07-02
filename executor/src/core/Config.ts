@@ -34,6 +34,7 @@ export class MainConfig {
     languageLanguageSettings: object | null = null;
     swiplPath: string | undefined = undefined;
     swiplHomePath: string | undefined = undefined;
+    logHolochainMetrics: boolean = true;
 
     constructor(appDataPath = '') {
         this.rootConfigPath = path.join(appDataPath, 'ad4m');
@@ -67,6 +68,7 @@ export interface CoreConfig {
     neighbourhoodLanguageSettings?: object
     languageLanguageSettings?: object
     adminCredential?: string
+    logHolochainMetrics?: boolean
 }
 
 
@@ -84,6 +86,7 @@ export function init(c: CoreConfig): MainConfig {
         fs.mkdirSync(d)
     }
 
+    mainConfig.logHolochainMetrics = c.logHolochainMetrics || true;
     mainConfig.systemLanguages = c.systemLanguages
     mainConfig.preloadLanguages = c.preloadLanguages
     if(c.languageAliases)
