@@ -10,10 +10,10 @@ name = "agent_store"
 
 [dependencies]
 derive_more = "0"
-serde = "1"
-chrono = { version = "0.4.31", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+serde = "1.0.198"
+chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 thiserror = "1.0.20"
 
-hdk = { version = "0.3.0-beta-dev.33" }
-holo_hash =  { version = "0.3.0-beta-dev.22" }
+hdk = { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
+holo_hash =  { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
 agent_store_integrity = { path = "../agent_store_integrity" }
