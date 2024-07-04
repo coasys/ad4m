@@ -24,7 +24,7 @@ export default function ScanQRCode({ changeState, onSuccess, uiState }) {
             requestAnimationFrame(capture);
           }
         } catch (err) {
-          console.error(err);
+          console.error(err); 
         }
       };
 
