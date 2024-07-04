@@ -48,16 +48,18 @@
   "devDependencies": {
     "@apollo/client": "3.7.10",
     "@coasys/ad4m": "*",
+    "@types/node": "^16.11.11",
     "esbuild": "^0.15.5",
     "esbuild-plugin-lit": "^0.0.10",
     "graphql-ws": "5.12.0",
     "np": "^7.6.2",
     "npm-run-all": "^4.1.5",
     "typescript": "^4.6.2",
-    "vite": "^4.1.1",
-    "@types/node": "^16.11.11"
+    "vite": "^4.1.1"
   },
   "dependencies": {
+    "@capacitor-community/barcode-scanner": "^4.0.1",
+    "@capacitor/core": "^6.1.0",
     "@undecaf/barcode-detector-polyfill": "^0.9.15",
     "@undecaf/zbar-wasm": "^0.9.12",
     "auto-bind": "^5.0.1",
