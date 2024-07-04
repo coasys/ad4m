@@ -9,6 +9,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Prolog engine gets respawned when a query caused an error to clean the machine state [PR#483](https://github.com/coasys/ad4m/pull/483)
 - Catch panics in Scryer and handle as error instead of killing the engine thread which caused `channel closed` error in future queries [PR#483](https://github.com/coasys/ad4m/pull/483)
 - Bootstrap seed creation working with cli: `ad4m dev generate-bootstrap` [PR#247](https://github.com/perspect3vism/ad4m/pull/496)
+- Connect capacitor update to include qr code scanning on mobile [PR#483](https://github.com/coasys/ad4m/pull/497)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:

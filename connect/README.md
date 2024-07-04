@@ -90,3 +90,34 @@ ad4mConnect({
     process.exit(0);
   });
 ```
+
+# Extra steps to be used in capacitor:
+
+- On Android
+```diff
+<?xml version="1.0" encoding="utf-8"?>
+<manifest
+  xmlns:android="http://schemas.android.com/apk/res/android"
++  xmlns:tools="http://schemas.android.com/tools"
+  package="com.example">
+
+  <application
++    android:hardwareAccelerated="true"
+  >
+  </application>
+
++  <uses-permission android:name="android.permission.CAMERA" />
+
++  <uses-sdk tools:overrideLibrary="com.google.zxing.client.android" />
+</manifest>
+```
+
+- On IOs
+```diff
+<dict>
++  <key>NSCameraUsageDescription</key>
++  <string>To be able to scan barcodes</string>
+</dict>
+```
+
+- Then run `npx cap sync` & `npx cap build`
