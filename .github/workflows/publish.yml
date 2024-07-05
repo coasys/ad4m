@@ -19,8 +19,6 @@ jobs:
           node-version: 18
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 8
 
       - name: Install Deno
         uses: denoland/setup-deno@v1
@@ -84,8 +82,7 @@ jobs:
         python-version: '3.11'
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - name: install dependencies (ubuntu only)
       if: matrix.platform == 'GH-hosted-ubuntu'
@@ -317,8 +314,6 @@ jobs:
           node-version: 18.x
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 8
 
       - name: Install deps
         run: pnpm install
@@ -417,8 +412,6 @@ jobs:
          go-version: '1.22'
   
      - uses: pnpm/action-setup@v4
-       with:
-         version: 8
   
      - name: Install Linux Deps
        run: |
