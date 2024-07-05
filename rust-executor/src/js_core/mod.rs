@@ -6,6 +6,7 @@ use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
 use once_cell::sync::Lazy;
+use std::collections::HashSet;
 use std::env::current_dir;
 use std::sync::Arc;
 use tokio::runtime::Builder;
@@ -116,6 +117,7 @@ struct JsCoreResponse {
 #[derive(Clone)]
 pub struct JsCore {
     worker: Arc<TokioMutex<MainWorker>>,
+    loaded_modules: Arc<TokioMutex<HashSet<String>>>
 }
 
 pub struct ExternWrapper(ExternIO);
@@ -145,13 +147,20 @@ impl JsCore {
                 PermissionsContainer::allow_all(),
                 main_worker_options(),
             ))),
+            loaded_modules: Arc::new(TokioMutex::new(HashSet::new()))
         }
     }
 
     async fn load_module(&self, file_path: String) -> Result<(), AnyError> {
         let mut worker = self.worker.lock().await;
+        let mut loaded_modules = self.loaded_modules.lock().await;
         let url = resolve_url_or_path(&file_path, current_dir()?.as_path())?;
+        if loaded_modules.contains(url.clone().as_str()) {
+            return Ok(());
+        }
+
         let module_id = worker.js_runtime.load_side_es_module(&url).await?;
+        loaded_modules.insert(url.clone().to_string());
         let evaluate_fut = worker.js_runtime.mod_evaluate(module_id);
         worker.js_runtime.with_event_loop_future(evaluate_fut, PollEventLoopOptions::default()).await?;
         Ok(())
