@@ -639,6 +639,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private handleConnectionChange(event: ConnectionStates) {
+   console.log(event); 
     if (event === "connected") {
       this.changeUIState("requestcap");
     }
@@ -829,6 +830,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   render() {
+    console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
     if (this._isOpen === false) return null;
     if (this.authState === "authenticated") return null;
     return html`

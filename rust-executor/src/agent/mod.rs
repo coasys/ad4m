@@ -43,6 +43,18 @@ pub fn did() -> String {
     did_document().id.clone()
 }
 
+pub fn check_keys_and_create(did: String) -> did_key::Document {
+    let wallet_instance = Wallet::instance();
+    let mut wallet = wallet_instance.lock().expect("wallet lock");
+    let mut wallet_ref = wallet.as_mut().expect("wallet instance");
+    let name = "main".to_string();
+    if wallet_ref.get_did_document(&name).is_none() {
+        wallet_ref.initialize_keys(name, did).unwrap()
+    } else {
+        did_document()
+    }
+}
+
 pub fn create_signed_expression<T: Serialize>(data: T) -> Result<Expression<T>, AnyError> {
     let timestamp = chrono::Utc::now();
     let signature = hex::encode(sign(&signatures::hash_data_and_timestamp(
@@ -293,7 +305,7 @@ impl AgentService {
         let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
         let dump: AgentStore = serde_json::from_str(&file).unwrap();
 
-        self.did = Some(dump.did);
+        self.did = Some(dump.did.clone());
         self.did_document = Some(dump.did_document);
         self.signing_key_id = Some(dump.signing_key_id);
 
@@ -313,8 +325,11 @@ impl AgentService {
             self.agent =
                 Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
         } else {
+            let did_clone = dump.did.clone();
+            let did = check_keys_and_create(did_clone).id.clone();
+
             self.agent = Some(Agent {
-                did: did(),
+                did,
                 perspective: Some(Perspective { links: vec![] }),
                 direct_message_language: None,
             });

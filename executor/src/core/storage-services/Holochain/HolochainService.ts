@@ -21,6 +21,7 @@ export interface HolochainConfiguration {
     useProxy?: boolean,
     useLocalProxy?: boolean;
     useMdns?: boolean;
+    logHolochainMetrics?: boolean; 
 }
 
 export default class HolochainService {
@@ -38,7 +39,8 @@ export default class HolochainService {
             useProxy,
             useLocalProxy,
             useMdns,
-            dataPath
+            dataPath,
+            logHolochainMetrics
         } = config;
 
         this.#dataPath = dataPath
@@ -53,7 +55,9 @@ export default class HolochainService {
         this.#queue = new Map();
         this.#languageDnaHashes = new Map();
 
-        this.logDhtStatus();
+        if (logHolochainMetrics) {
+            this.logDhtStatus();
+        }
     }
 
     async logDhtStatus() {
@@ -258,7 +262,7 @@ export default class HolochainService {
         //4. Call the zome function
         try {
             if (fnName != "sync" && fnName != "current_revision") {
-                console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, JSON.stringify(payload), "\nFor language with address", lang, "\x1b[0m");
+                console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, JSON.stringify(payload).substring(0, 50), "\nFor language with address", lang, "\x1b[0m");
             }
 
             let result = await HOLOCHAIN_SERVICE.callZomeFunction(installed_app_id, dnaNick, zomeName, fnName, encode(payload));
