@@ -4,6 +4,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
 
 ## unreleased
+- ad4m.expression.get() handles literal values client-side to avoid roundtrips, can be overridden with optional flag [PR#498](https://github.com/coasys/ad4m/pull/498)
 
 ### Fixed
 - Prolog engine gets respawned when a query caused an error to clean the machine state [PR#483](https://github.com/coasys/ad4m/pull/483)
