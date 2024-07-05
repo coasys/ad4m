@@ -74,8 +74,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
@@ -123,8 +122,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
@@ -172,8 +170,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
@@ -221,8 +218,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
@@ -271,8 +267,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
@@ -320,8 +315,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - name: Install Deno
       uses: denoland/setup-deno@v1

@@ -43,8 +43,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - run: rustup target add wasm32-unknown-unknown
     - run: cd hc-dna/tests && ./download-hc-binaries.sh
@@ -84,8 +83,7 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - uses: pnpm/action-setup@v4
-      with:
-        version: 8
+
 
     - run: rustup target add wasm32-unknown-unknown
     - run: ./hc-dna/tests/download-hc-binaries.sh && mv ./hc /usr/local/bin
