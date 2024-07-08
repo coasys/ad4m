@@ -3,7 +3,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use deno_core::{resolve_url_or_path, v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
-use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use deno_runtime::{BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
@@ -144,7 +144,7 @@ impl JsCore {
         JsCore {
             worker: Arc::new(TokioMutex::new(MainWorker::from_options(
                 main_module_url(),
-                PermissionsContainer::allow_all(),
+                deno_runtime::deno_permissions::PermissionsContainer::allow_all(),
                 main_worker_options(),
             ))),
             loaded_modules: Arc::new(TokioMutex::new(HashSet::new()))

@@ -10,3 +10,6 @@ members = [
 
 [patch.crates-io]
 notify-rust = { version = "4.6.0", git = "https://github.com/coasys/notify-rust.git" }
+wasmer = { version = "4.3.1", git = "https://github.com/coasys/wasmer.git", rev = "8b3615a7e6fccf7912221642128ef78c7812d61a"}
+wasmer-types = { version = "4.3.1", git = "https://github.com/coasys/wasmer.git", rev = "8b3615a7e6fccf7912221642128ef78c7812d61a"}
+reqwest = { version = "0.11.20", git = "https://github.com/coasys/reqwest.git", rev = "f2c08343e14f784d675ada72bdf4adf32af654e7"}

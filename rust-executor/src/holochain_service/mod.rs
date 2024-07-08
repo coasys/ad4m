@@ -382,12 +382,14 @@ impl HolochainService {
                     // dev - wss://signal.holotest.net
                     // our - ws://207.148.16.17:42697
                     signal_url: local_config.proxy_url,
+                    webrtc_config: None
                 }];
             } else {
                 kitsune_config.transport_pool = vec![
                     TransportConfig::Mem {},
                     TransportConfig::WebRTC {
                         signal_url: local_config.proxy_url,
+                        webrtc_config: None
                     },
                 ];
             }

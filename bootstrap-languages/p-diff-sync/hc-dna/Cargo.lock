@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "hdk"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "getrandom",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "hdk_derive"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "darling 0.14.4",
@@ -934,7 +934,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "holo_hash"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "base64",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_integrity_types"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "holo_hash",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_nonce"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "getrandom",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_secure_primitive"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "paste",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_util"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "cfg-if",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_zome_types"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "derive_more",
@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_bin_data"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "base64",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_block"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "kitsune_p2p_bin_data",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_dht_arc"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "derive_more",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_timestamp"
-version = "0.3.1-rc.0"
+version = "0.4.0-dev.11"
 source = "git+https://github.com/coasys/holochain.git?rev=ed4809715172f80433f8c517bbbad0b6f510838a#ed4809715172f80433f8c517bbbad0b6f510838a"
 dependencies = [
  "chrono",
