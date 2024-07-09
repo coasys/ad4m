@@ -79,11 +79,11 @@ holochain_cli_bundle = { version = "0.4.0-dev.11" }
 holochain_types = { version = "0.4.0-dev.11" }
 holochain_cli_run_local_services = { version = "0.4.0-dev.10" }
 kitsune_p2p_types = { version = "0.4.0-dev.8" }
-# holochain = { version = "0.4.0-dev.11", features = ["test_utils", "default"], git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-# holochain_cli_bundle = { version = "0.4.0-dev.11", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-# holochain_types = { version = "0.4.0-dev.11", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-# holochain_cli_run_local_services = { version = "0.4.0-dev.11", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-# kitsune_p2p_types = { version = "0.4.0-dev.11", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
+# holochain = { version = "0.4.0-dev.11", features = ["test_utils", "default"] }
+# holochain_cli_bundle = { version = "0.4.0-dev.11" }
+# holochain_types = { version = "0.4.0-dev.11" }
+# holochain_cli_run_local_services = { version = "0.4.0-dev.11" }
+# kitsune_p2p_types = { version = "0.4.0-dev.11" }
 
 scryer-prolog = { version = "0.9.4", git = "https://github.com/coasys/scryer-prolog.git", rev = "86024bd9ca8ea5b9f666525d854c590be5ee56a4"}
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
