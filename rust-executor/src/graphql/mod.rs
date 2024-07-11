@@ -6,8 +6,9 @@ mod subscription_resolvers;
 use graphql_types::RequestContext;
 use mutation_resolvers::*;
 use query_resolvers::*;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN;
 use subscription_resolvers::*;
+use warp::reply::with_header;
 
 use crate::js_core::JsCoreHandle;
 use crate::Ad4mConfig;
@@ -24,10 +25,6 @@ use coasys_juniper_graphql_transport_ws::ConnectionConfig;
 use coasys_juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
 use std::path::Path;
-use tokio_rustls::rustls::ServerConfig;
-use tokio_rustls::TlsAcceptor;
-use std::fs::File;
-use std::io::BufReader;
 
 impl coasys_juniper::Context for RequestContext {}
 
@@ -136,6 +133,18 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
     .or(homepage)
     .with(log);
 
+    let routes_with_cors = warp::any()
+        .and(warp::header::optional::<String>("origin"))
+        .and(routes)
+        .map(|origin: Option<String>, reply| {
+            let origin = origin.unwrap_or_else(|| String::from("*"));
+            if origin.contains("fluxsocial.io") {
+                with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+            } else {
+                with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            }
+        });
+
     let address = if config.localhost.unwrap() {
         [127, 0, 0, 1]
     } else {
@@ -143,14 +152,14 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
     };
 
     if let Some(tls_config) = config.tls {
-        warp::serve(routes)
+        warp::serve(routes_with_cors)
             .tls()
             .cert_path(tls_config.cert_file_path)
             .key_path(tls_config.key_file_path)
             .run((address, port))
             .await;
     } else {
-        warp::serve(routes)
+        warp::serve(routes_with_cors)
             .run((address, port))
             .await;
     }
