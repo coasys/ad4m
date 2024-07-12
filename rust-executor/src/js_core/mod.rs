@@ -75,7 +75,7 @@ impl JsCoreHandle {
 
         let response = response_rx.await?;
 
-        info!("Got response: {:?}", response);
+        // info!("Got response: {:?}", response);
 
         response
             .result
