@@ -13,6 +13,6 @@ derive_more = "0"
 serde = "1.0.198"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 
-holo_hash =  { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-hdi = { version = "0.4.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-hdk = { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
+hdk = { version = "0.4.0-dev.9", path = "../../../../../../holochain/crates/hdk" }
+hdi = { version = "0.5.0-dev.8", path = "../../../../../../holochain/crates/hdi" }
+holo_hash = { version = "0.4.0-dev.7", path = "../../../../../../holochain/crates/holo_hash" }
