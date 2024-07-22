@@ -1,6 +1,6 @@
 import { html } from "lit";
 
-export default function Request({ code, changeState, verifyCode, changeCode, isHosting }) {
+export default function Request({ code, changeState, verifyCode, changeCode, isHosting, verifyCodeError }) {
   return html`
     <div class="items">
       <div class="text-center">
@@ -19,6 +19,7 @@ export default function Request({ code, changeState, verifyCode, changeCode, isH
           value=${code}
           @change=${(e: any) => changeCode(e.target.value)}
         />
+        ${verifyCodeError ? html`<p class="error">${verifyCodeError}</p>` : ""}
       </div>
       <div class="buttons">
         <button

@@ -398,10 +398,14 @@ export default class Ad4mConnect {
   }
 
   async verifyCode(code: string): Promise<string> {
-    const jwt = await this.ad4mClient?.agent.generateJwt(this.requestId!, code);
-    this.setToken(jwt);
-    await this.buildClient();
-    await this.checkAuth();
-    return this.token;
+    try {
+      const jwt = await this.ad4mClient?.agent.generateJwt(this.requestId!, code);
+      this.setToken(jwt);
+      await this.buildClient();
+      await this.checkAuth();
+      return this.token;
+    } catch (error) {
+      throw new Error("Invalid code");
+    }
   }
 }

@@ -475,6 +475,9 @@ export class Ad4mConnectElement extends LitElement {
   private _passwordError = null;
 
   @state()
+  private _verifyCodeError = null;
+
+  @state()
   private _isHostingLoading = false;
 
   @state()
@@ -589,8 +592,12 @@ export class Ad4mConnectElement extends LitElement {
     await this._client.ad4mClient.agent.unlock(passcode, holochain);
   }
 
-  private verifyCode(code) {
-    this._client.verifyCode(code);
+  private async verifyCode(code) {
+    try {
+      await this._client.verifyCode(code);
+    } catch (e) {
+      this._verifyCodeError = "Invalid code";
+    }
   }
 
   private changeUrl(url) {
@@ -805,7 +812,8 @@ export class Ad4mConnectElement extends LitElement {
           changeCode: this.changeCode,
           changeState: this.changeUIState,
           verifyCode: this.verifyCode,
-          isHosting: this._client.isHosting
+          isHosting: this._client.isHosting,
+          verifyCodeError: this._verifyCodeError
         });
       }
 
