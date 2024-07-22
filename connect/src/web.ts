@@ -45,16 +45,16 @@ const styles = css`
   :host {
     --primary-color: #fff;
     --heading-color: #fff;
-    --body-color: #a7a7a7;
-    --success-color: #52d652;
-    --background-color: #000;
+    --body-color: #FFFFFF;
+    --success-color: #88F3B4;
+    --background-color: #131533;
     --start-color: #a4adff;
     --end-color: #d273ff;
-    --gradient: linear-gradient(90deg, var(--start-color), var(--end-color));
+    --gradient: #91E3FD;
   }
 
   .wrapper {
-    font-family: "DM Sans", Helvetica, Arial, sans-serif;
+    font-family: "Bricolage Grotesque", sans-serif;
     position: fixed;
     display: grid;
     place-content: center;
@@ -168,7 +168,7 @@ const styles = css`
 
   .button--secondary {
     background: var(--background-color);
-    border: 1px solid var(--primary-color);
+    border: 1px solid var(--gradient);
     color: var(--primary-color);
   }
 
@@ -313,12 +313,7 @@ const styles = css`
     position: fixed;
     top: 0;
     left: 0;
-    background: linear-gradient(
-      90deg,
-      rgba(2, 0, 36, 1) 0%,
-      rgba(38, 3, 23, 1) 41%,
-      rgba(51, 4, 31, 1) 100%
-    );
+    background: var(--background-color);
     height: 100vh;
     width: 100vw;
     padding: 36px;
@@ -440,6 +435,7 @@ const styles = css`
   }
 `;
 
+
 @customElement("ad4m-connect")
 export class Ad4mConnectElement extends LitElement {
   static styles = [styles];
@@ -529,9 +525,21 @@ export class Ad4mConnectElement extends LitElement {
     return this._client.connectionState;
   }
 
+  private injectFont() {
+    const link = document.createElement('link');
+    link.setAttribute("rel", "stylesheet");
+    link.setAttribute(
+      "href",
+      `https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap`
+    );
+    document.head.appendChild(link);
+  }
+
   connectedCallback() {
     super.connectedCallback();
     autoBind(this);
+
+    this.injectFont();
 
     this._isMobile = detectMob();
 
