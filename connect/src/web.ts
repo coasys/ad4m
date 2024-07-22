@@ -805,6 +805,7 @@ export class Ad4mConnectElement extends LitElement {
           changeCode: this.changeCode,
           changeState: this.changeUIState,
           verifyCode: this.verifyCode,
+          isHosting: this._client.isHosting
         });
       }
 

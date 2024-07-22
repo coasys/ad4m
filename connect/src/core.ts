@@ -57,6 +57,7 @@ export default class Ad4mConnect {
   appDomain: string;
   appIconPath: string;
   appUrl?: string;
+  isHosting: boolean = false;
   listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
     ["configstatechange"]: [],
@@ -190,6 +191,7 @@ export default class Ad4mConnect {
             this.setPort(data.port);
             this.setUrl(data.url);
             this.connect();
+            this.isHosting = true;
           }
         }
       }  else {

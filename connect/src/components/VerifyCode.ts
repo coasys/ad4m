@@ -1,12 +1,12 @@
 import { html } from "lit";
 
-export default function Request({ code, changeState, verifyCode, changeCode }) {
+export default function Request({ code, changeState, verifyCode, changeCode, isHosting }) {
   return html`
     <div class="items">
       <div class="text-center">
-        <div class="heading">Please check Ad4m</div>
+        <div class="heading">${isHosting ? "Please check your registered email for hosting" : "Please check Ad4m"}</div>
         <p class="body">
-          Please check AD4M, confirm the request there and enter the 6-digit
+          ${isHosting ? "Please check your registered email for hosting" : "Please check Ad4m"}, confirm the request there and enter the 6-digit
           security code below.
         </p>
       </div>
