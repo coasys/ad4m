@@ -471,6 +471,9 @@ export class Ad4mConnectElement extends LitElement {
   private _passwordError = null;
 
   @state()
+  private _hostingNotRunningError = null;
+
+  @state()
   private _verifyCodeError = null;
 
   @state()
@@ -584,7 +587,11 @@ export class Ad4mConnectElement extends LitElement {
 
       this.changeUIState("connected");
     } catch (e) {
-      this._passwordError = 'Passwords did not match';
+      if (e.message.includes("Passwords did not match")) {
+        this._passwordError = "Passwords did not match";
+      } else {
+        this._hostingNotRunningError = 'Hosting is not running';
+      }
     }
   }
 
@@ -618,6 +625,10 @@ export class Ad4mConnectElement extends LitElement {
 
   private changeUIState(state) {
     this.uiState = state;
+  }
+
+  private setIsHostingRunning(val) {
+    this._hostingNotRunningError = val;
   }
 
   private changeIsRemote(bol: boolean) {
@@ -766,6 +777,8 @@ export class Ad4mConnectElement extends LitElement {
         login: this.loginToHosting,
         checkEmail: this.checkEmail,
         passwordError: this._passwordError,
+        isHostingRunning: this._hostingNotRunningError,
+        setIsHostingRunning: this.setIsHostingRunning,
       });
     }
 

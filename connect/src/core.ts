@@ -190,8 +190,14 @@ export default class Ad4mConnect {
           if (data.serviceId) {
             this.setPort(data.port);
             this.setUrl(data.url);
-            this.connect();
+            
             this.isHosting = true;
+
+            if (!data.paused) {
+              this.connect();
+            } else {
+              throw new Error('Hosting is not running');
+            }
           }
         }
       }  else {

@@ -10,8 +10,26 @@ export default function Hosting({
     login,
     checkEmail,
     passwordError,
-    setHostingStep
+    setHostingStep,
+    isHostingRunning,
+    setIsHostingRunning
 }) {
+    if (isHostingRunning) {
+        return html`
+            <div class="text-center">
+                <p>
+                    Hosting is not running. Please start navigate to your <a href="https://hosting.ad4m.dev/dashboard">dashboard</a> hosting to login.
+                </p>
+                <button
+                    class="button button--full button-secondary"
+                    @click=${() => setIsHostingRunning(null)}
+                >
+                    Back
+                </button>
+            </div>
+        `
+    }
+
     if (step === 0) {
         return html`
         <div class="input">
