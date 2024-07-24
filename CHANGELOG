@@ -10,7 +10,10 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Prolog engine gets respawned when a query caused an error to clean the machine state [PR#483](https://github.com/coasys/ad4m/pull/483)
 - Catch panics in Scryer and handle as error instead of killing the engine thread which caused `channel closed` error in future queries [PR#483](https://github.com/coasys/ad4m/pull/483)
 - Bootstrap seed creation working with cli: `ad4m dev generate-bootstrap` [PR#247](https://github.com/perspect3vism/ad4m/pull/496)
-- Connect capacitor update to include qr code scanning on mobile [PR#483](https://github.com/coasys/ad4m/pull/497)
+- Connect capacitor update to include qr code scanning on mobile [PR#497](https://github.com/coasys/ad4m/pull/497)
+- Removed capacitor barcode scanner [PR#502](https://github.com/coasys/ad4m/pull/502)
+- Show an error when the code is wrong. [PR#502](https://github.com/coasys/ad4m/pull/502)
+- Error handling in connect when hosting is not working [PR#502](https://github.com/coasys/ad4m/pull/502)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
@@ -29,7 +32,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 - Improved performance of SDNA / SubjectClass functions by moving code from client into executor and saving a lot of client <-> executor roundtrips [PR#480](https://github.com/coasys/ad4m/pull/480)
-
+- Update color, logo & brand for ad4m connect. [PR#502](https://github.com/coasys/ad4m/pull/502)
+- Update the verify code header to show "Check Email" if using hosting. [PR#502](https://github.com/coasys/ad4m/pull/502)
 
 ## [0.9.0] - 23/03/2024
 
