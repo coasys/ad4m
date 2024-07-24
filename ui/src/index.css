@@ -128,6 +128,11 @@ html {
   background-color: var(--j-color-primary-50);
 }
 
+:root j-input.one-time-pass::part(input-wrapper) {
+  background-color: var(--j-color-primary-50);
+  border-color: var(--gradient);
+}
+
 :root j-tabs::part(base) {
   display: flex;
   flex-wrap: nowrap;
