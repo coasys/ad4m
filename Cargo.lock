@@ -1128,15 +1128,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bit-set"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0481a0e032742109b1133a095184ee93d88f3dc9e0d28a5d033dc77a073f44f"
-dependencies = [
- "bit-vec 0.7.0",
-]
-
-[[package]]
 name = "bit-vec"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2940,11 +2931,12 @@ dependencies = [
 [[package]]
 name = "deno_core"
 version = "0.283.0"
+source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
 dependencies = [
  "anyhow",
  "bincode",
- "bit-set 0.6.0",
- "bit-vec 0.7.0",
+ "bit-set",
+ "bit-vec 0.6.3",
  "bytes",
  "cooked-waker",
  "deno_core_icudata",
@@ -3267,6 +3259,7 @@ dependencies = [
 [[package]]
 name = "deno_ops"
 version = "0.159.0"
+source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
 dependencies = [
  "proc-macro-rules",
  "proc-macro2",
@@ -4952,7 +4945,7 @@ version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f551fdf23ef80329f754919669147a71c67b6cfe3569cd93b6fabdd62044377"
 dependencies = [
- "bit-set 0.5.3",
+ "bit-set",
  "num-integer",
  "num-traits",
  "trilean",
@@ -7193,7 +7186,7 @@ version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18bfda24d3930aa647f90044d5ef87d0c8120f13b86b2d60e8aade66e656e659"
 dependencies = [
- "bit-set 0.5.3",
+ "bit-set",
  "gcollections",
  "num-integer",
  "num-traits",
@@ -8768,7 +8761,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e536ae46fcab0876853bd4a632ede5df4b1c2527a58f6c5a4150fe86be858231"
 dependencies = [
  "arrayvec 0.7.4",
- "bit-set 0.5.3",
+ "bit-set",
  "bitflags 2.6.0",
  "codespan-reporting",
  "hexf-parse",
@@ -10490,7 +10483,7 @@ version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4c2511913b88df1637da85cc8d96ec8e43a3f8bb8ccb71ee1ac240d6f3df58d"
 dependencies = [
- "bit-set 0.5.3",
+ "bit-set",
  "bit-vec 0.6.3",
  "bitflags 2.6.0",
  "lazy_static",
@@ -12024,7 +12017,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2ae0d3cc44e736916c19ba2297954d4ec711ab1ec8c6c6edfefac76fa4e4b5d"
 dependencies = [
  "base64 0.12.3",
- "bit-set 0.5.3",
+ "bit-set",
  "bitvec",
  "blake2 0.8.1",
  "bytes",
@@ -12197,7 +12190,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f9da09dc3f4dfdb6374cbffff7a2cffcec316874d4429899eefdc97b3b94dcd"
 dependencies = [
- "bit-set 0.5.3",
+ "bit-set",
  "html5ever",
  "markup5ever_rcdom",
 ]
@@ -12408,6 +12401,7 @@ dependencies = [
 [[package]]
 name = "serde_v8"
 version = "0.192.0"
+source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
 dependencies = [
  "num-bigint",
  "serde",
@@ -16001,7 +15995,7 @@ dependencies = [
  "android_system_properties",
  "arrayvec 0.7.4",
  "ash",
- "bit-set 0.5.3",
+ "bit-set",
  "bitflags 2.6.0",
  "block",
  "cfg_aliases",
