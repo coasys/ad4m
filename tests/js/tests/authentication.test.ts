@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, AuthInfoInput, CapabilityInput } from "@perspect3vism/ad4m";
+import { Ad4mClient, AuthInfoInput, CapabilityInput } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -7,6 +7,7 @@ import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
+import { ExceptionInfo } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 
 //@ts-ignore
 global.fetch = fetch
@@ -252,6 +253,75 @@ describe("Authentication integration tests", () => {
             }
 
             await expect(call()).to.be.rejectedWith("Capability is not matched");
+        })
+
+        it("user with revoked token can not query agent status", async () => {
+            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
+                appName: "demo-app",
+                appDesc: "demo-desc",
+                appDomain: "test.ad4m.org",
+                appUrl: "https://demo-link",
+                capabilities: [
+                    {
+                        with: {
+                            domain:"agent",
+                            pointers:["*"]
+                        },
+                        can: ["READ"]
+                    }
+                ] as CapabilityInput[]
+            } as AuthInfoInput)
+            let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appUrl":"demo-url","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["READ"]}]}}`)
+            let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
+
+            // @ts-ignore
+            let authenticatedAppAd4mClient = new Ad4mClient(apolloClient(gqlPort, jwt), false)
+            expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
+
+            let oldApps = await adminAd4mClient!.agent.getApps();
+            let newApps = await adminAd4mClient!.agent.revokeToken(requestId);
+            // revoking token should not change the number of apps
+            expect(newApps.length).to.be.equal(oldApps.length);
+            newApps.forEach((app, i) => {
+                if(app.requestId === requestId) {
+                    expect(app.revoked).to.be.true;
+                }
+            })
+
+            const call = async () => {
+                return await authenticatedAppAd4mClient!.agent.status()
+            }
+
+            await expect(call()).to.be.rejectedWith("Unauthorized access");
+        })
+
+        it("requesting a capability toke should trigger a CapabilityRequested exception", async () => {
+            let excpetions: ExceptionInfo[] = [];
+            adminAd4mClient!.runtime.addExceptionCallback((e) => { excpetions.push(e); return null; })
+            adminAd4mClient!.runtime.subscribeExceptionOccurred();
+
+            let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
+                appName: "demo-app",
+                appDesc: "demo-desc",
+                appDomain: "test.ad4m.org",
+                appUrl: "https://demo-link",
+                capabilities: [
+                    {
+                        with: {
+                            domain:"agent",
+                            pointers:["*"]
+                        },
+                        can: ["READ"]
+                    }
+                ] as CapabilityInput[]
+            } as AuthInfoInput)
+            
+            await sleep(1000);
+
+            expect(excpetions.length).to.be.equal(1);
+            expect(excpetions[0].type).to.be.equal("CAPABILITY_REQUESTED");
+            let auth_info = JSON.parse(excpetions[0].addon!);
+            expect(auth_info.requestId).to.be.equal(requestId);
         })
     })
 })

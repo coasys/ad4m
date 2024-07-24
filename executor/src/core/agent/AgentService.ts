@@ -1,146 +1,53 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { Key } from "../../wallet_extension";
 import {
   Language,
   Expression,
   PublicSharing,
   ReadOnlyLanguage,
-  ExceptionType,
-} from "@perspect3vism/ad4m";
-import { Agent, ExpressionProof, AgentSignature, EntanglementProof } from "@perspect3vism/ad4m";
-import Signatures from "./Signatures";
+} from "@coasys/ad4m";
+import { Agent, ExpressionProof, AgentSignature } from "@coasys/ad4m";
 import * as PubSubDefinitions from "../graphQL-interface/SubscriptionDefinitions";
 import { resolver } from "@transmute/did-key.js";
-import { v4 as uuidv4 } from "uuid";
-import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
-import {
-  ALL_CAPABILITY,
-  AuthInfo,
-  AuthInfoExtended,
-  DefaultTokenValidPeriod,
-  genRequestKey,
-  genRandomDigits,
-  AGENT_AUTH_CAPABILITY,
-  Capability,
-} from "./Auth";
-import * as secp from "@noble/secp256k1";
-import { getPubSub } from "../utils";
+import { getPubSub, tagExpressionSignatureStatus } from "../utils";
 
 
 export default class AgentService {
-  #did?: string;
-  #didDocument?: string;
-  #signingKeyId?: string;
-  #file: string;
-  #appsFile: string;
-  #apps: AuthInfoExtended[];
-  #requestingAuthInfo?: AuthInfoExtended;
-  #fileProfile: string;
-  #agent?: Agent;
   #agentLanguage?: Language;
   #pubSub: PubSub;
-  #requests: Map<string, AuthInfo>;
-  #tokenValidPeriod: number;
-  #adminCredential: string;
-
-  #readyPromise: Promise<void>;
-  #readyPromiseResolve?: (value: void | PromiseLike<void>) => void;
 
   constructor(rootConfigPath: string, adminCredential?: string) {
-    this.#file = path.join(rootConfigPath, "agent.json");
-    this.#fileProfile = path.join(rootConfigPath, "agentProfile.json");
-    this.#appsFile = path.join(rootConfigPath, "apps.json");
-    try {
-      this.#apps = JSON.parse(fs.readFileSync(this.#appsFile).toString());
-    } catch (e) {
-      this.#apps = [];
-    }
     this.#pubSub = getPubSub();
-    this.#readyPromise = new Promise((resolve) => {
-      this.#readyPromiseResolve = resolve;
-    });
-    this.#requests = new Map();
-    this.#tokenValidPeriod = DefaultTokenValidPeriod;
-    if (adminCredential) {
-      this.#adminCredential = adminCredential;
-    } else {
-      console.warn(
-        "adminCredential is not set or empty, empty token will possess admin capabililities."
-      );
-      this.#adminCredential = "";
-    }
   }
 
-  get did() {
-    return this.#did;
-  }
-
-  get agent() {
-    return this.#agent;
-  }
-
-  get ready(): Promise<void> {
-    return this.#readyPromise;
-  }
-
-  get signingKeyId(): string {
-    if (!this.#signingKeyId) {
-        throw new Error("No signing key id on AgentService")
+  getTaggedAgentCopy(): Agent {
+    const agent = AGENT.agent();
+    if (!agent) throw new Error("No agent");
+    const copy = JSON.parse(JSON.stringify(agent));
+    if(copy.perspective) {
+        for(let link of copy.perspective.links) {
+            tagExpressionSignatureStatus(link)
+        }
     }
-    return this.#signingKeyId!
-  }
-
-  signingChecks() {
-    if (!this.isInitialized) {
-      throw new Error("Can't sign without keystore");
-    }
-    if (!this.isUnlocked()) {
-      throw new Error("Can't sign with locked keystore");
-    }
-    if (!this.#signingKeyId) {
-      throw new Error("Can't sign without signingKeyId");
-    }
+    return copy;
   }
 
   createSignedExpression(data: any): Expression {
-    this.signingChecks()
-
-    const timestamp = new Date().toISOString();
-    const payloadBytes = Signatures.buildMessage(data, timestamp);
-
-    const signature = WALLET.sign(payloadBytes);
-    const sigBuffer = Buffer.from(signature);
-    const sigHex = sigBuffer.toString("hex");
-
-    let proof = new ExpressionProof(sigHex.toString(), this.#signingKeyId!);
-    proof.valid = true;
-    proof.invalid = false;
-
-    const signedExpresssion = {
-      author: this.#did,
-      timestamp,
-      data,
-      proof,
-    } as Expression;
-
-    return signedExpresssion;
+    return AGENT.createSignedExpression(data);
   }
 
-  signString(data: string): string {
-    this.signingChecks()
+  get did(): string {
+    return AGENT.did();
+  }
 
-    const payloadBytes = Signatures.buildMessageRaw(data)
-    const signature = WALLET.sign(payloadBytes);
-    const sigBuffer = Buffer.from(signature);
-    const sigHex = sigBuffer.toString("hex");
-    return sigHex
+  get agent(): Agent {
+    return AGENT.agent();
   }
 
   async updateAgent(a: Agent) {
-    this.#agent = a;
+    AGENT.save_agent_profile(a);
     await this.storeAgentProfile();
-    await this.#pubSub.publish(PubSubDefinitions.AGENT_UPDATED, a);
+    await this.#pubSub.publish(PubSubDefinitions.AGENT_UPDATED, this.getTaggedAgentCopy());
   }
 
   setAgentLanguage(lang: Language) {
@@ -155,8 +62,8 @@ export default class AgentService {
   }
 
   async ensureAgentExpression() {
-    const currentAgent = this.agent;
-    const agentDid = currentAgent?.did;
+    const currentAgent = AGENT.agent();
+    const agentDid = AGENT.did();
     if (!agentDid) throw Error("No agent did found");
 
     const agentLanguage = this.getAgentLanguage();
@@ -177,11 +84,13 @@ export default class AgentService {
   }
 
   async storeAgentProfile() {
-    fs.writeFileSync(this.#fileProfile, JSON.stringify(this.#agent));
+    let agent = AGENT.agent();
+
+    console.log("Storing agent profile", JSON.stringify(agent));
 
     const agentLanguage = this.getAgentLanguage();
 
-    if (this.#agent?.did) {
+    if (agent?.did) {
       let adapter = agentLanguage.expressionAdapter!.putAdapter;
 
       let isPublic = function isPublic(
@@ -192,7 +101,7 @@ export default class AgentService {
 
       try {
         if (isPublic(adapter)) {
-          await adapter.createPublic(this.#agent);
+          await adapter.createPublic(agent);
         } else {
           console.warn("Got a ReadOnlyLanguage for agent language");
         }
@@ -204,34 +113,18 @@ export default class AgentService {
     }
   }
 
-  private getSigningKey(): Key {
-    return WALLET.getMainKey();
-  }
-
-  async createNewKeys() {
-    WALLET.createMainKey()
-    const didDocument = WALLET.getMainKeyDocument()
-    const key = didDocument.verificationMethod[0]
-    
-    this.#did = key.controller;
-    this.#didDocument = JSON.stringify(await resolver.resolve(this.#did));
-    this.#agent = new Agent(this.#did);
-    this.#signingKeyId = key.id;
-  }
-
+  // TODO: need to be removed once runtime stuff gets merged
   isInitialized() {
-    return fs.existsSync(this.#file);
+    return AGENT.isInitialized();
   }
 
+  // TODO: need to be removed once runtime stuff gets merged
   isUnlocked() {
-    return WALLET.isUnlocked()
+    return AGENT.isUnlocked();
   }
 
   async unlock(password: string) {
-    // @ts-ignore
-    WALLET.unlock(password);
-    await this.#pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, this.dump());
-    this.#readyPromiseResolve!();
+    AGENT.unlock(password);
     try {
       await this.storeAgentProfile();
     } catch (e) {
@@ -242,167 +135,6 @@ export default class AgentService {
       console.debug("Continuing anyway...");
     }
   }
-
-  async lock(password: string) {
-    // @ts-ignore
-    WALLET.lock(password);
-    await this.#pubSub.publish(PubSubDefinitions.AGENT_STATUS_CHANGED, this.dump());
-  }
-
-  async save(password: string) {
-    const dump = {
-      did: this.#did,
-      didDocument: this.#didDocument,
-      signingKeyId: this.#signingKeyId,
-      // @ts-ignore
-      keystore: WALLET.export(password),
-      agent: this.#agent,
-    };
-
-    fs.writeFileSync(this.#file, JSON.stringify(dump));
-    this.#readyPromiseResolve!();
-  }
-
-  load() {
-    if (!this.isInitialized()) return;
-
-    const dump = JSON.parse(fs.readFileSync(this.#file).toString());
-
-    this.#did = dump.did;
-    this.#didDocument = dump.didDocument;
-    this.#signingKeyId = dump.signingKeyId;
-    WALLET.load(dump.keystore);
-    if (fs.existsSync(this.#fileProfile))
-      this.#agent = JSON.parse(fs.readFileSync(this.#fileProfile).toString());
-    else {
-      this.#agent = new Agent(this.#did!);
-    }
-  }
-
-  dump() {
-    return {
-      agent: this.#agent,
-      isInitialized: this.isInitialized(),
-      isUnlocked: WALLET.isUnlocked(),
-      did: this.#did,
-      didDocument: this.#didDocument,
-    };
-  }
-
-  async getCapabilities(token: string) {
-    if (token == this.#adminCredential) {
-      return [ALL_CAPABILITY];
-    }
-
-    if (token === "") {
-      return [AGENT_AUTH_CAPABILITY];
-    }
-
-    const payload = await JWT.verifyJwt(token);
-
-    //@ts-ignore
-    return payload.capabilities.capabilities;
-  }
-
-  isAdminCredential(token: string) {
-    return token == this.#adminCredential;
-  }
-
-  async requestCapability(authInfo: AuthInfo) {
-    let requestId = uuidv4();
-    let authExtended = {
-      requestId,
-      auth: authInfo,
-    } as AuthInfoExtended;
-
-    await this.#pubSub.publish(PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC, {
-      title: "Request to authenticate application",
-      message: `${authInfo.appName} is waiting for authentication, go to ad4m launcher for more information.`,
-      type: ExceptionType.CapabilityRequested,
-      addon: JSON.stringify(authExtended),
-    } as ExceptionInfo);
-
-    return requestId;
-  }
-
-  // TODO, we may want to change the capability request workflow.
-  // https://github.com/perspect3vism/ad4m-executor/issues/73
-  permitCapability(authExt: string, capabilities: Capability[]) {
-    console.log("AgentService.permitCapability(): admin user capabilities: ", capabilities);
-    console.log("AgentService.permitCapability(): auth info: ", authExt);
-
-    let { requestId, auth }: AuthInfoExtended = JSON.parse(authExt);
-    let rand = genRandomDigits();
-    this.#requests.set(genRequestKey(requestId, rand), auth);
-
-    this.#requestingAuthInfo = JSON.parse(authExt);
-
-    return rand;
-  }
-
-  async generateJwt(requestId: string, rand: string) {
-    const authKey = genRequestKey(requestId, rand);
-    const auth = this.#requests.get(authKey);
-
-    if (!auth) {
-      throw new Error("Can't find permitted request");
-    }
-
-    const jwt = await JWT.generateJwt(this.did || "", `${auth.appName}:${this.did || ""}`, this.#tokenValidPeriod, auth);
-
-    this.#requests.delete(authKey);
-
-    if (requestId === this.#requestingAuthInfo?.requestId) {
-      const apps = [...this.#apps, { ...this.#requestingAuthInfo, token: jwt }];
-      this.#apps = apps;
-      fs.writeFileSync(this.#appsFile, JSON.stringify(apps));
-
-      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);      
-    }
-
-    return jwt;
-  }
-
-  getApps(): AuthInfoExtended[] {
-    return this.#apps;
-  }
-
-  async removeApp(requestId: string) {
-    try {
-      this.#apps = this.#apps.filter((app: any) => app.requestId !== requestId);
-
-      fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
-
-      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
-    } catch (e) {
-      console.error("Error while removing app", e);
-    }
-  }
-
-  async revokeAppToken(requestId: string) {
-    try {
-      this.#apps = this.#apps.map((app: any) =>
-        app.requestId === requestId ? { ...app, revoked: true } : app
-      );
-
-      fs.writeFileSync(this.#appsFile, JSON.stringify(this.#apps));
-
-      await this.#pubSub.publish(PubSubDefinitions.APPS_CHANGED, null);
-    } catch (e) {
-      console.error("Error while revoking token", e);
-    }
-  }
-
-  async signMessage(msg: string) {
-    this.signingChecks()
-
-    const payloadBytes = Signatures.buildMessageRaw(msg)
-    const signature = WALLET.sign(payloadBytes);
-    const sigBuffer = Buffer.from(signature);
-    const sigHex = sigBuffer.toString("hex");
-
-    return new AgentSignature(sigHex, WALLET.getMainKey().publicKey);
-  }
 }
 
 export function init(
@@ -410,6 +142,6 @@ export function init(
   adminCredential?: string
 ): AgentService {
   const agent = new AgentService(rootConfigPath, adminCredential);
-  agent.load();
+  AGENT.load();
   return agent;
 }

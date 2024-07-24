@@ -3,7 +3,7 @@ This guide will get you up and running with AD4m and React.
 ### Installing
 
 ```
-npm install @perspect3vism/ad4m @perspect3vism/ad4m-connect @ad4m/react
+npm install @coasys/ad4m @coasys/ad4m-connect @ad4m/react
 ```
 
 ### Initializing
@@ -11,7 +11,7 @@ npm install @perspect3vism/ad4m @perspect3vism/ad4m-connect @ad4m/react
 Create a new React app and authorize AD4M using [ad4m-connect](https://github.com/perspect3vism/ad4m/tree/dev/connect):
 
 ```jsx filename="App.ts"
-import Ad4mConnect from "@perspect3vism/ad4m-connect";
+import Ad4mConnect from "@coasys/ad4m-connect";
 import { useEffect } from "react";
 
 const options = {
@@ -47,7 +47,7 @@ Let's fetch and display your [perspectives](/perspectives/) from ad4m using the 
 To do this we'll also need to save a ref to the AD4m Client returned in `.connect()`.
 
 ```jsx filename="App.ts"  {2, 7, 8, 13, 16-18, 22-24}
-import Ad4mConnect from "@perspect3vism/ad4m-connect";
+import Ad4mConnect from "@coasys/ad4m-connect";
 import { useEffect, useState } from "react";
 
 const options = {...};
@@ -81,7 +81,7 @@ export default function App() {
 If this is your first ADAM app, the list will be empty. Let's create a button that creates a new perspective for us:
 
 ```jsx filename="App.ts"  {20-22, 30}
-import Ad4mConnect from "@perspect3vism/ad4m-connect";
+import Ad4mConnect from "@coasys/ad4m-connect";
 import { useEffect, useState } from "react";
 
 const options = {...};
@@ -123,26 +123,26 @@ Let's say we want to create a list of tasks to be completed.
 First, we need a task model. We can use the [SDNA](/social-dna/) helpers to create this:
 
 ```jsx filename="models/Task.ts"
-import { SDNAClass, subjectProperty, subjectFlag } from "@perspect3vism/ad4m";
+import { SDNAClass, SubjectProperty, SubjectFlag } from "@coasys/ad4m";
 
 @SDNAClass({
   name: "Task",
 })
 export default class Task {
-  @subjectFlag({
+  @SubjectFlag({
     through: "flux://entry_type",
     value: "flux://has_task",
   })
   type: string;
 
-  @subjectProperty({
+  @SubjectProperty({
     through: "rdf://title",
     writable: true,
     resolveLanguage: "literal",
   })
   title: string;
 
-  @subjectProperty({
+  @SubjectProperty({
     through: "rdf://status",
     writable: true,
     resolveLanguage: "literal",
@@ -187,7 +187,7 @@ export default function PerspectiveDetails({ id: string }) {
 Include the newly created component in our `App.ts` file:
 
 ```jsx filename="App.ts"  {4,14}
-import Ad4mConnect from "@perspect3vism/ad4m-connect";
+import Ad4mConnect from "@coasys/ad4m-connect";
 import { useEffect } from "react";
 import { usePerspectives } from "@adam/react";
 import PerspectiveDetails from "/components/PerspectiveDetails";

@@ -1,0 +1,22 @@
+{
+  "name": "@coasys/hooks-helpers",
+  "version": "0.10.0-rc2",
+  "description": "",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "private": false,
+  "type": "module",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@coasys/ad4m": "*",
+    "@coasys/ad4m-connect": "*",
+    "uuid": "*"
+  }
+}

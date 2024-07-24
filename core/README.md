@@ -14,13 +14,13 @@ on the user's machine.
 
 The easiest way to get that is to use ad4m-cli:
 ```sh
-npm install -g @perspect3vism/ad4m-cli
-ad4m executor run &
+cargo install ad4m
+ad4m-executor run
 ```
 
 Then use `Ad4mClient` to connect to and work with the running ad4m-executor like this:
 ```
-npm install --save @perspect3vism/ad4m
+npm install --save @coasys/ad4m
 npm install --save-exact @apollo/client@3.7.10
 npm install --save graphql-ws
 npm install --save ws
@@ -28,7 +28,7 @@ npm install --save ws
 
 In your code:
 ```js
-import { Ad4mClient } from '@perspect3vism/ad4m'
+import { Ad4mClient } from '@coasys/ad4m'
 import { ApolloClient, InMemoryCache } from "@apollo/client/core";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { createClient } from 'graphql-ws';

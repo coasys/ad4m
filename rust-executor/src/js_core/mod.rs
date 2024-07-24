@@ -19,19 +19,22 @@ use tokio::sync::{
 use log::{error, info};
 use options::{main_module_url, main_worker_options};
 
+mod agent_extension;
 mod futures;
-mod jwt_extension;
 mod options;
+mod languages_extension;
 mod pubsub_extension;
+mod signature_extension;
 mod string_module_loader;
 mod utils_extension;
 mod wallet_extension;
+mod utils;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 use crate::holochain_service::maybe_get_holochain_service;
 use crate::Ad4mConfig;
 
-static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
+pub(crate) static JS_CORE_HANDLE: Lazy<Arc<TokioMutex<Option<JsCoreHandle>>>> =
     Lazy::new(|| Arc::new(TokioMutex::new(None)));
 
 pub struct JsCoreHandle {
@@ -100,6 +103,7 @@ impl JsCoreHandle {
 #[derive(Debug)]
 struct JsCoreRequest {
     script: String,
+    #[allow(dead_code)]
     id: String,
     response_tx: oneshot::Sender<JsCoreResponse>
 }
@@ -158,7 +162,7 @@ impl JsCore {
             .worker
             .lock()
             .await;
-        worker.bootstrap(&BootstrapOptions::default());
+        worker.bootstrap(BootstrapOptions::default());
         worker
             .execute_main_module(&main_module_url())
             .await

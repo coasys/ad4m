@@ -1,14 +1,19 @@
-use juniper::{
+use crate::agent::capabilities::{AuthInfo, Capability};
+use crate::agent::signatures::verify;
+use crate::js_core::JsCoreHandle;
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link, Notification, TriggeredNotification};
+use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
+use deno_core::anyhow::anyhow;
+use deno_core::error::AnyError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-
-use crate::js_core::JsCoreHandle;
 
 #[derive(Clone)]
 pub struct RequestContext {
-    pub capability: String,
+    pub capabilities: Result<Vec<Capability>, String>,
     pub js_handle: JsCoreHandle,
+    pub auto_permit_cap_requests: bool,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -46,16 +51,6 @@ pub struct Apps {
     pub token: String,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthInfo {
-    pub app_desc: String,
-    pub app_icon_path: Option<String>,
-    pub app_name: String,
-    pub app_url: String,
-    pub capabilities: Vec<Capability>,
-}
-
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfoInput {
@@ -73,13 +68,6 @@ pub struct AuthInfoInput {
     pub capabilities: Option<Vec<CapabilityInput>>,
 }
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Capability {
-    pub can: Vec<String>,
-    pub with: Resource,
-}
-
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityInput {
@@ -93,7 +81,19 @@ pub struct CapabilityInput {
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
 
-#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize)]
+impl Into<chrono::DateTime<chrono::Utc>> for DateTime {
+    fn into(self) -> chrono::DateTime<chrono::Utc> {
+        self.0
+    }
+}
+
+impl From<chrono::DateTime<chrono::Utc>> for DateTime {
+    fn from(date: chrono::DateTime<chrono::Utc>) -> Self {
+        DateTime(date)
+    }
+}
+
+#[derive(GraphQLObject, Default, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
     #[graphql(name = "deviceKey")]
@@ -133,16 +133,17 @@ pub struct ExceptionInfo {
     pub addon: Option<String>,
     pub message: String,
     pub title: String,
-    pub r#type: f64,
+    pub r#type: ExceptionType,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ExpressionProof {
-    pub invalid: Option<bool>,
-    pub key: Option<String>,
-    pub signature: Option<String>,
-    pub valid: Option<bool>,
+#[derive(GraphQLEnum, Default, Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ExceptionType {
+    LanguageIsNotLoaded = 0,
+    ExpressionIsNotVerified = 1,
+    AgentIsUntrusted = 2,
+    #[default]
+    CapabilityRequested = 3,
+    InstallNotificationRequest = 4
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -161,7 +162,7 @@ pub struct ExpressionRendered {
     pub data: String,
     pub icon: Icon,
     pub language: LanguageRef,
-    pub proof: ExpressionProof,
+    pub proof: DecoratedExpressionProof,
     pub timestamp: String,
 }
 
@@ -234,16 +235,14 @@ pub struct LanguageRef {
     pub name: String,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Link {
-    pub predicate: Option<String>,
-    pub source: String,
-    pub target: String,
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Language {
+    pub name: String,
 }
 
-#[derive(GraphQLEnum, Debug, Deserialize, Serialize, Clone)]
+#[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
 pub enum LinkStatus {
+    #[default]
     #[serde(rename = "shared")]
     Shared,
     #[serde(rename = "local")]
@@ -260,16 +259,6 @@ impl std::fmt::Display for LinkStatus {
     }
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkExpression {
-    pub author: String,
-    pub data: Link,
-    pub proof: ExpressionProof,
-    pub timestamp: String,
-    pub status: Option<LinkStatus>,
-}
-
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionInput {
@@ -280,18 +269,12 @@ pub struct LinkExpressionInput {
     pub status: Option<LinkStatus>,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkExpressionMutations {
-    pub additions: Vec<LinkExpression>,
-    pub removals: Vec<LinkExpression>,
-}
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionUpdated {
-    pub new_link: LinkExpression,
-    pub old_link: LinkExpression,
+    pub new_link: DecoratedLinkExpression,
+    pub old_link: DecoratedLinkExpression,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -304,27 +287,67 @@ pub struct LinkInput {
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct LinkMutations {
-    pub additions: Vec<LinkInput>,
-    pub removals: Vec<LinkExpressionInput>,
-}
-
-#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct LinkQuery {
     pub from_date: Option<DateTime>,
-    pub limit: Option<f64>,
+    pub limit: Option<i32>,
     pub predicate: Option<String>,
     pub source: Option<String>,
     pub target: Option<String>,
     pub until_date: Option<DateTime>,
 }
 
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkMutations {
+    pub additions: Vec<LinkInput>,
+    pub removals: Vec<LinkExpressionInput>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DecoratedPerspectiveDiff {
+    pub additions: Vec<DecoratedLinkExpression>,
+    pub removals: Vec<DecoratedLinkExpression>,
+}
+
+impl DecoratedPerspectiveDiff {
+    pub fn from_additions(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions,
+            removals: vec![]
+        }
+    }
+
+    pub fn from_removals(removals: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions: vec![],
+            removals,
+        }
+    }
+
+    pub fn from(additions: Vec<DecoratedLinkExpression>, removals: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions,
+            removals,
+        }
+    }
+}
+
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DecoratedNeighbourhoodExpression {
+    pub author: String,
+    pub data: Neighbourhood,
+    pub proof: DecoratedExpressionProof,
+    pub timestamp: String,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -337,26 +360,149 @@ pub struct OnlineAgent {
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Perspective {
-    pub links: Vec<LinkExpression>,
+    pub links: Vec<DecoratedLinkExpression>,
 }
+
+impl Perspective {
+    pub fn verify_link_signatures(&mut self) {
+        for link in &mut self.links {
+            link.verify_signature();
+        }
+    }
+}
+
+impl From<PerspectiveInput> for Perspective {
+    fn from(input: PerspectiveInput) -> Self {
+        let links = input.links
+            .into_iter()
+            .map(|link: LinkExpressionInput| DecoratedLinkExpression::try_from(link))
+            .filter_map(Result::ok)
+            .collect();
+        Perspective { links }
+    }
+}
+
+impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
+    type Error = AnyError;
+    fn try_from(input: LinkExpressionInput) -> Result<Self, Self::Error> {
+        let data = Link {
+            predicate: input.data.predicate,
+            source: input.data.source,
+            target: input.data.target,
+        };
+        Ok(DecoratedLinkExpression {
+            author: input.author,
+            timestamp: input.timestamp,
+            data: data,
+            proof: DecoratedExpressionProof {
+                key: input.proof.key.ok_or(anyhow!("Key is required"))?,
+                signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
+                valid: input.proof.valid,
+                invalid: input.proof.invalid,
+            },
+            status: input.status,
+        })
+    }
+}
+
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveExpression {
     pub author: String,
     pub data: Perspective,
-    pub proof: ExpressionProof,
+    pub proof: DecoratedExpressionProof,
     pub timestamp: String,
+}
+
+impl From<Expression<Perspective>> for PerspectiveExpression {
+    fn from(expr: Expression<Perspective>) -> Self {
+        PerspectiveExpression {
+            author: expr.author,
+            data: expr.data,
+            proof: DecoratedExpressionProof {
+                key: expr.proof.key,
+                signature: expr.proof.signature,
+                valid: None,
+                invalid: None,
+            },
+            timestamp: expr.timestamp,
+        }
+    }
+}
+
+impl PerspectiveExpression {
+    pub fn verify_signatures(&mut self) {
+        self.data.verify_link_signatures();
+
+        let perspective_expression = Expression::<Perspective> {
+            author: self.author.clone(),
+            data: self.data.clone(),
+            proof: ExpressionProof {
+                key: self.proof.key.clone(),
+                signature: self.proof.signature.clone(),
+            },
+            timestamp: self.timestamp.clone(),
+        };
+
+        let valid = match verify(&perspective_expression) {
+            Ok(valid) => valid,
+            Err(_) => false,
+        };
+
+        self.proof.valid = Some(valid);
+        self.proof.invalid = Some(!valid);
+    }
+}
+
+#[derive(GraphQLEnum, Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub enum PerspectiveState {
+    #[default]
+    Private,
+    NeighbourhoodCreationInitiated,
+    NeighbourhoodJoinInitiated,
+    LinkLanguageFailedToInstall,
+    LinkLanguageInstalledButNotSynced,
+    Synced,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveHandle {
-    pub name: Option<String>,
-    pub neighbourhood: Option<Neighbourhood>,
-    pub shared_url: Option<String>,
-    pub state: String,
     pub uuid: String,
+    pub name: Option<String>,
+    pub neighbourhood: Option<DecoratedNeighbourhoodExpression>,
+    pub shared_url: Option<String>,
+    pub state: PerspectiveState,
+}
+
+
+impl PerspectiveHandle {
+    pub fn new(
+        uuid: String,
+        name: Option<String>,
+        neighbourhood: Option<DecoratedNeighbourhoodExpression>,
+        shared_url: Option<String>,
+        state: PerspectiveState,
+    ) -> Self {
+        PerspectiveHandle {
+            name,
+            uuid,
+            neighbourhood,
+            shared_url,
+            state,
+        }
+    }
+
+    pub fn new_from_name(name: String) -> Self {
+        PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            name: Some(name),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+        }
+    }
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -370,6 +516,21 @@ pub struct PerspectiveInput {
 pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
+
+
+#[derive(GraphQLInputObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationInput {
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: String,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    pub webhook_auth: String,
+}
+
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -409,22 +570,22 @@ pub struct NeighbourhoodSignalFilter {
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct PerspectiveLinkFilter {
     pub perspective: PerspectiveHandle,
-    pub link: LinkExpression,
+    pub link: DecoratedLinkExpression,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveLinkUpdatedFilter {
-    pub new_link: LinkExpression,
-    pub old_link: LinkExpression,
+    pub new_link: DecoratedLinkExpression,
+    pub old_link: DecoratedLinkExpression,
     pub perspective: PerspectiveHandle,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkUpdated {
-    pub new_link: LinkExpression,
-    pub old_link: LinkExpression,
+    pub new_link: DecoratedLinkExpression,
+    pub old_link: DecoratedLinkExpression,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
@@ -497,7 +658,7 @@ impl GetFilter for NeighbourhoodSignalFilter {
 
 // Implement the trait for the `PerspectiveLinkFilter` struct
 impl GetValue for PerspectiveLinkFilter {
-    type Value = LinkExpression;
+    type Value = DecoratedLinkExpression;
 
     fn get_value(&self) -> Self::Value {
         self.link.clone()
@@ -637,6 +798,38 @@ impl GetValue for PerspectiveExpression {
 
 //Implement the trait for `PerspectiveExpression`
 impl GetFilter for PerspectiveExpression {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetValue for Notification {
+    type Value = Notification;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetFilter for Notification {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetValue for TriggeredNotification {
+    type Value = TriggeredNotification;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+//Implement the trait for `Notification`
+impl GetFilter for TriggeredNotification {
     fn get_filter(&self) -> Option<String> {
         None
     }

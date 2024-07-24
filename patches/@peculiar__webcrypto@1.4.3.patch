@@ -1,0 +1,16 @@
+diff --git a/build/webcrypto.js b/build/webcrypto.js
+index 5fa3589075174f5b52d6e5ef81e632377aedd396..7d39c7bc08f95e04a3e1ef3472d8d22eefd91f9d 100644
+--- a/build/webcrypto.js
++++ b/build/webcrypto.js
+@@ -5,8 +5,9 @@
+ 'use strict';
+ 
+ var core = require('webcrypto-core');
+-var crypto = require('crypto');
+-var process = require('process');
++import crypto from 'node:crypto';
++import process from 'node:process';
++import {Buffer} from 'node:buffer';
+ var tslib = require('tslib');
+ var jsonSchema = require('@peculiar/json-schema');
+ var pvtsutils = require('pvtsutils');

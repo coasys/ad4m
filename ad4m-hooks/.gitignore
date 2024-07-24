@@ -1,0 +1,25 @@
+node_modules
+dist
+package-lock.json
+
+**/.vitepress/cache
+
+# Log files
+*.log
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.turbo
+dev-dist
+.DS_Store
+
+cachedb
+# Local Netlify folder
+.netlify
+!register.js

@@ -1,8 +1,8 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { Address, Expression } from '@perspect3vism/ad4m';
+import { Address, Expression } from '@coasys/ad4m';
 
-export let ad4mExecutorVersion = "0.7.1";
+export let ad4mExecutorVersion = "0.10.0-rc2";
 export let agentLanguageAlias = "did";
 export let languageLanguageAlias = "lang";
 export let neighbourhoodLanguageAlias = "neighbourhood";
@@ -34,6 +34,7 @@ export class MainConfig {
     languageLanguageSettings: object | null = null;
     swiplPath: string | undefined = undefined;
     swiplHomePath: string | undefined = undefined;
+    logHolochainMetrics: boolean = true;
 
     constructor(appDataPath = '') {
         this.rootConfigPath = path.join(appDataPath, 'ad4m');
@@ -67,6 +68,7 @@ export interface CoreConfig {
     neighbourhoodLanguageSettings?: object
     languageLanguageSettings?: object
     adminCredential?: string
+    logHolochainMetrics?: boolean
 }
 
 
@@ -84,6 +86,7 @@ export function init(c: CoreConfig): MainConfig {
         fs.mkdirSync(d)
     }
 
+    mainConfig.logHolochainMetrics = c.logHolochainMetrics || true;
     mainConfig.systemLanguages = c.systemLanguages
     mainConfig.preloadLanguages = c.preloadLanguages
     if(c.languageAliases)

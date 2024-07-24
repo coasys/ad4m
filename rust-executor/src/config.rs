@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    pub cert_file_path: String,
+    pub key_file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ad4mConfig {
     pub app_data_path: Option<String>,
@@ -21,7 +27,11 @@ pub struct Ad4mConfig {
     pub hc_proxy_url: Option<String>,
     pub hc_bootstrap_url: Option<String>,
     pub connect_holochain: Option<bool>,
-    pub admin_credential: Option<String>
+    pub admin_credential: Option<String>,
+    pub localhost: Option<bool>,
+    pub auto_permit_cap_requests: Option<bool>,
+    pub tls: Option<TlsConfig>,
+    pub log_holochain_metrics: Option<bool>,
 }
 
 impl Ad4mConfig {
@@ -60,7 +70,7 @@ impl Ad4mConfig {
             self.hc_proxy_url = Some("wss://signal.holo.host".to_string());
         }
         if self.hc_bootstrap_url.is_none() {
-            self.hc_bootstrap_url = Some("https://bootstrap.holo.host".to_string());
+            self.hc_bootstrap_url = Some("https://bootstrap.holo.host/".to_string());
         }
         if self.hc_use_bootstrap.is_none() {
             self.hc_use_bootstrap = Some(true);
@@ -70,6 +80,12 @@ impl Ad4mConfig {
         }
         if self.hc_use_proxy.is_none() {
             self.hc_use_proxy = Some(true)
+        }
+        if self.localhost.is_none() {
+            self.localhost = Some(true);
+        }
+        if self.log_holochain_metrics.is_none() {
+            self.log_holochain_metrics = Some(true);
         }
     }
 
@@ -95,7 +111,11 @@ impl Default for Ad4mConfig {
             hc_proxy_url: None,
             hc_bootstrap_url: None,
             connect_holochain: None,
-            admin_credential: None
+            admin_credential: None,
+            localhost: None,
+            auto_permit_cap_requests: None,
+            tls: None,
+            log_holochain_metrics: None,
         };
         config.prepare();
         config

@@ -1,4 +1,4 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@perspect3vism/ad4m";
+import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
 import fs from "fs";
@@ -29,7 +29,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 link.timestamp = new Date().toISOString();
                 link.data = new Link({source: "src", target: "target", predicate: "pred"});
                 link.proof = new ExpressionProof("sig", "key");
-                const publishPerspective = await ad4mClient.neighbourhood.publishFromPerspective(create.uuid, socialContext.address, 
+                const publishPerspective = await ad4mClient.neighbourhood.publishFromPerspective(create.uuid, socialContext.address,
                     new Perspective(
                         [link]
                     )
@@ -40,8 +40,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 const perspective = await ad4mClient.perspective.byUUID(create.uuid);
                 expect(perspective?.neighbourhood).not.to.be.undefined;
-                expect(perspective?.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
-                expect(perspective?.neighbourhood!.meta.links.length).to.be.equal(1);
+                expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
+                expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
                 expect(perspective?.state).to.be.equal(PerspectiveState.Synced);
             })
 
@@ -57,14 +57,14 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
                 await testContext.makeAllNodesKnown()
-                
+
                 expect(bobP1!.name).not.to.be.undefined;
                 expect(bobP1!.sharedUrl).to.be.equal(neighbourhoodUrl)
                 expect(bobP1!.neighbourhood).not.to.be.undefined;;
-                expect(bobP1!.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
-                expect(bobP1!.neighbourhood!.meta.links.length).to.be.equal(0);
+                expect(bobP1!.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
+                expect(bobP1!.neighbourhood!.data.meta.links.length).to.be.equal(0);
             })
-            
+
             it('shared link created by Alice received by Bob', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob
@@ -93,9 +93,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
                 }
-                
+
                 expect(bobLinks.length).to.be.equal(1)
+                expect(bobLinks[0].data.target).to.be.equal('test://test')
+                expect(bobLinks[0].proof.valid).to.be.true;
             })
+
 
             it('local link created by Alice NOT received by Bob', async () => {
                 const alice = testContext.alice
@@ -124,7 +127,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                     tries++
                 }
-                
+
                 expect(bobLinks.length).to.be.equal(0)
             })
 
@@ -140,7 +143,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 const perspectives = await alice.perspective.all();
             })
-            
+
             // it('can get the correct state change signals', async () => {
             //     const aliceP1 = await testContext.alice.perspective.add("state-changes")
             //     expect(aliceP1.state).to.be.equal(PerspectiveState.Private);
@@ -200,6 +203,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
             //     expect(bobSyncChangeData).to.be.equal(PerspectiveState.Synced);
             // })
 
+
             describe('with set up and joined NH for Telepresence', async () => {
                 let aliceNH: NeighbourhoodProxy|undefined
                 let bobNH: NeighbourhoodProxy|undefined
@@ -217,7 +221,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                     const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
                     await testContext.makeAllNodesKnown()
-                    
+
                     aliceNH = aliceP1.getNeighbourhoodProxy()
                     bobNH = bobP1!.getNeighbourhoodProxy()
                     aliceDID = (await alice.agent.me()).did
@@ -255,7 +259,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     expect(aliceOnline[0].did).to.be.equal(bobDID)
                     console.log(aliceOnline[0].status);
                     expect(aliceOnline[0].status.data.links).to.deep.equal(testPerspective.links)
-                    
+
                     expect(bobOnline.length).to.be.equal(1)
                     expect(bobOnline[0].did).to.be.equal(aliceDID)
                     expect(bobOnline[0].status.data.links).to.deep.equal(testPerspective.links)
@@ -263,7 +267,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await aliceNH!.setOnlineStatusU(PerspectiveUnsignedInput.fromLink(new Link({
                         source: "test://source",
-                        target: "test://target" 
+                        target: "test://target"
                     })))
 
                     const bobOnline2 = await bobNH!.onlineAgents()
@@ -276,7 +280,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     // TODO: Signature check for the whole perspective is broken
                     // Got to fix that and add back this assertion
                     //expect(bobOnline2[0].status.proof.valid).to.be.true
-                    
+
                 })
 
                 it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
@@ -317,7 +321,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     //@ts-ignore
                     expect(bobData.data.links).to.deep.equal(aliceSignal.links)
 
-                    
+
                     let link2 = new Link({source: "bob", target: "alice", predicate: "signal"});
                     const bobSignal = new PerspectiveUnsignedInput([link2])
 

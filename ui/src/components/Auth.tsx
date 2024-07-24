@@ -1,7 +1,7 @@
 import { useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { copyTextToClipboard } from "../util";
-import { capSentence } from "@perspect3vism/ad4m";
+import { capSentence } from "@coasys/ad4m";
 
 interface Capability {
   with: Resource;
@@ -159,7 +159,7 @@ const Auth = () => {
                 <j-button
                   full
                   size="lg"
-                  variant=""
+                  variant="primary"
                   onClick={closeSecretCodeModal}
                 >
                   Close

@@ -1,10 +1,10 @@
-import { 
-    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta, 
-    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression, 
+import {
+    Address, Expression, Language, LanguageContext, LinkSyncAdapter, InteractionCall, InteractionMeta,
+    PublicSharing, ReadOnlyLanguage, LanguageMetaInternal, LanguageMetaInput, PerspectiveExpression,
     parseExprUrl, Literal, TelepresenceAdapter, PerspectiveState
-} from '@perspect3vism/ad4m';
-import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@perspect3vism/ad4m';
-import { ExceptionInfo } from '@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver';
+} from '@coasys/ad4m';
+import { ExpressionRef, LanguageRef, LanguageExpression, LanguageLanguageInput, ExceptionType, PerspectiveDiff } from '@coasys/ad4m';
+import { ExceptionInfo } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
 import fs from 'node:fs'
 import path from 'node:path'
 import * as Config from './Config'
@@ -13,11 +13,9 @@ import type AgentService from './agent/AgentService'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
 import yaml from "js-yaml";
 import { v4 as uuidv4 } from 'uuid';
-import RuntimeService from './RuntimeService';
-import Signatures from './agent/Signatures';
 import { Ad4mDb } from './db';
 import stringify from 'json-stable-stringify'
-import { getPubSub } from './utils';
+import { getPubSub, tagExpressionSignatureStatus } from './utils';
 
 function cloneWithoutCircularReferences(obj: any, seen: WeakSet<any> = new WeakSet()): any {
     if (typeof obj === 'object' && obj !== null) {
@@ -25,17 +23,17 @@ function cloneWithoutCircularReferences(obj: any, seen: WeakSet<any> = new WeakS
         return;
       }
       seen.add(obj);
-  
+
       const clonedObj: any = Array.isArray(obj) ? [] : {};
       for (const key in obj) {
         if (obj.hasOwnProperty(key)) {
           clonedObj[key] = cloneWithoutCircularReferences(obj[key], seen);
         }
       }
-  
+
       return clonedObj;
     }
-  
+
     return obj;
 }
 
@@ -45,8 +43,6 @@ type SyncStateChangeObserver = (state: PerspectiveState, lang: LanguageRef)=>voi
 
 interface Services {
     holochainService: HolochainService,
-    runtimeService: RuntimeService,
-    signatures: Signatures,
     db: Ad4mDb
 }
 
@@ -86,8 +82,6 @@ export default class LanguageController {
     #telepresenceSignalObservers: TelepresenceSignalObserver[];
     #syncStateChangeObservers: SyncStateChangeObserver[];
     #holochainService: HolochainService
-    #runtimeService: RuntimeService;
-    #signatures: Signatures;
     #db: Ad4mDb;
     #config: Config.MainConfig;
     #pubSub: PubSub;
@@ -100,8 +94,6 @@ export default class LanguageController {
     constructor(context: object, services: Services) {
         this.#context = context
         this.#holochainService = services.holochainService
-        this.#runtimeService = services.runtimeService
-        this.#signatures = services.signatures
         this.#db = services.db
         this.#languages = new Map()
         this.#languages.set("literal", {
@@ -140,7 +132,7 @@ export default class LanguageController {
             }
             const agentLanguage = await this.installLanguage(this.#config.languageAliases[Config.agentLanguageAlias], null);
             this.#agentLanguage = agentLanguage!;
-            ((this.#context as LanguageContext).agent as AgentService).setAgentLanguage(agentLanguage!)
+            ((this.#context as LanguageContext).agent as unknown as AgentService).setAgentLanguage(agentLanguage!)
 
             //Install the neighbourhood language and set
             if (this.#config.neighbourhoodLanguageSettings) {
@@ -203,18 +195,21 @@ export default class LanguageController {
     }
 
     callLinkObservers(diff: PerspectiveDiff, ref: LanguageRef) {
+        LANGUAGE_CONTROLLER.perspectiveDiffReceived(diff, ref.address)
         this.#linkObservers.forEach(o => {
             o(diff, ref)
         })
     }
 
     callSyncStateChangeObservers(syncState: PerspectiveState, ref: LanguageRef) {
+        LANGUAGE_CONTROLLER.syncStateChanged(syncState, ref.address)
         this.#syncStateChangeObservers.forEach(o => {
             o(syncState, ref)
         })
     }
 
     callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
+        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, ref.address)
         this.#telepresenceSignalObservers.forEach(o => {
             o(signal, ref)
         })
@@ -225,7 +220,8 @@ export default class LanguageController {
         hash: string,
     }> {
         if(!path.isAbsolute(sourceFilePath))
-            sourceFilePath = path.join(process.env.PWD!, sourceFilePath)
+            // @ts-ignore
+            sourceFilePath = path.join(Deno.cwd()!, sourceFilePath)
 
         const bundleBytes = fs.readFileSync(sourceFilePath)
         if (bundleBytes.length === 0) {
@@ -264,13 +260,15 @@ export default class LanguageController {
 
         const customSettings = this.getSettings(hash)
         const storageDirectory = this.getLanguageStoragePath(hash)
-        const Holochain = this.#holochainService.getDelegateForLanguage(hash)
+
+        const Holochain = this.#holochainService?.getDelegateForLanguage(hash)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: hash, pubsub: this.#pubSub});
         const language = await create({...this.#context, customSettings, storageDirectory, Holochain, ad4mSignal})
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
+                console.log("LINKS CALLBACK", diff)
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
 
@@ -313,7 +311,7 @@ export default class LanguageController {
         }
         const customSettings = this.getSettings(hash)
         const storageDirectory = this.getLanguageStoragePath(hash)
-        const Holochain = this.#holochainService.getDelegateForLanguage(hash)
+        const Holochain = this.#holochainService?.getDelegateForLanguage(hash)
         //@ts-ignore
         const ad4mSignal = this.#context.ad4mSignal.bind({language: address, pubsub: this.#pubSub});
         //@ts-ignore
@@ -385,7 +383,7 @@ export default class LanguageController {
         const language = this.#languages.get(address)
         if (language) return language
 
-        if(!languageMeta) { 
+        if(!languageMeta) {
             //Check that the metafile already exists with language with this address to avoid refetch
             const metaFile = path.join(path.join(this.#config.languagesPath, address), "meta.json");
 
@@ -410,7 +408,7 @@ export default class LanguageController {
                 languageMeta = {data: {}};
             }
         }
-       
+
 
         console.log("LanguageController.installLanguage: INSTALLING LANGUAGE:", languageMeta.data)
         let bundlePath = path.join(path.join(this.#config.languagesPath, address), "bundle.js");
@@ -451,21 +449,29 @@ export default class LanguageController {
         const {languagePath, sourcePath} = await this.saveLanguageBundle(source, languageMeta, hash);
         console.log(new Date(), "LanguageController.installLanguage: installed language");
         try {
-            return (await this.loadLanguage(sourcePath)).language
+            const {language} = await this.loadLanguage(sourcePath);
+
+            let newLang = {
+                ...language,
+                linksAdapter: cloneWithoutCircularReferences(language).linksAdapter,
+                telepresenceAdapter: cloneWithoutCircularReferences(language).telepresenceAdapter
+            };
+
+            return newLang
         } catch(e) {
             console.error("LanguageController.installLanguage: ERROR LOADING NEWLY INSTALLED LANGUAGE")
             console.error("LanguageController.installLanguage: ======================================")
             console.error(e)
             //fs.rmdirSync(languagePath, {recursive: true})
             //@ts-ignore
-            throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
+            // throw Error(`Error loading language [${sourcePath}]: ${e.toString()}`)
         }
     }
 
     async languageRemove(hash: String): Promise<void> {
         //Teardown any intervals the language has running
         const language = this.#languages.get(hash as string);
-        if (language?.teardown) { 
+        if (language?.teardown) {
             language.teardown();
         }
 
@@ -473,7 +479,7 @@ export default class LanguageController {
         this.#languages.delete(hash as string);
         this.#languageConstructors.delete(hash as string);
         try {
-            await this.#holochainService.removeDnaForLang(hash as string);
+            await this.#holochainService?.removeDnaForLang(hash as string);
         } catch(e) {
             console.log("No DNA found for language installed");
         }
@@ -508,10 +514,10 @@ export default class LanguageController {
             }
             const languageMetaData = languageMeta.data as LanguageExpression;
             const languageAuthor = languageMeta.author;
-            const trustedAgents: string[] = this.#runtimeService.getTrustedAgents();
+            const trustedAgents: string[] = await RUNTIME_SERVICE.getTrustedAgents();
             const agentService = (this.#context as LanguageContext).agent as AgentService;
             //Check if the author of the language is in the trusted agent list the current agent holds, if so then go ahead and install
-            if (trustedAgents.find((agent) => agent === languageAuthor) || agentService.agent! === languageAuthor) {
+            if (trustedAgents.find((agent) => agent === languageAuthor) || AGENT.did() === languageAuthor) {
                 //Get the language source so we can generate a hash and check against the hash given in the language meta information
                 const languageSource = await this.getLanguageSource(address);
                 if (!languageSource) {
@@ -525,13 +531,8 @@ export default class LanguageController {
                 if (languageHash == languageMetaData.address) {
                     //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                     const lang = await this.installLanguage(address, languageMeta)
-
-                      let newLang = {
-                        ...lang,
-                        linksAdapter: cloneWithoutCircularReferences(lang).linksAdapter
-                      };
                     // @ts-ignore
-                    return newLang
+                    return lang
                 } else {
                     throw new Error("Calculated languageHash did not match address found in meta information")
                 }
@@ -578,12 +579,8 @@ export default class LanguageController {
                     if (sourceLanguageTemplated.meta.address === languageHash) {
                         //TODO: in here we are getting the source again even though we have already done that before, implement installLocalLanguage()?
                         const lang = await this.installLanguage(address, languageMeta)
-                        let newLang = {
-                            ...lang,
-                            linksAdapter: cloneWithoutCircularReferences(lang).linksAdapter
-                        };
                           // @ts-ignore
-                        return newLang!
+                        return lang!
                     } else {
                         throw new Error(`Templating of original source language did not result in the same language hash of un-trusted language trying to be installed... aborting language install. Expected hash: ${languageHash}. But got: ${sourceLanguageTemplated.meta.address}`)
                     }
@@ -628,7 +625,7 @@ export default class LanguageController {
             //Unpack the DNA
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             console.log("LanguageController.readAndTemplateHolochainDNA: unpacking DNA");
-            let unpackPath = (await this.#holochainService.unpackDna(tempDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
+            let unpackPath = (await this.#holochainService?.unpackDna(tempDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
             fs.unlinkSync(tempDnaPath);
             //TODO: are all dna's using the same dna.yaml?
             const dnaYamlPath = path.join(unpackPath, "dna.yaml");
@@ -664,7 +661,7 @@ export default class LanguageController {
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             console.log("LanguageController.readAndTemplateHolochainDNA: packing DNA");
-            let packPath = (await this.#holochainService.packDna(unpackPath)).replace(/(\r\n|\n|\r)/gm, "");
+            let packPath = (await this.#holochainService?.packDna(unpackPath)).replace(/(\r\n|\n|\r)/gm, "");
             const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
 
             //Cleanup temp directory
@@ -1004,7 +1001,7 @@ export default class LanguageController {
                 address = await putAdapter.addressOf(content);
             }
         } catch (e) {
-            throw new Error(`Incompatible putAdapter in Languge ${JSON.stringify(lang)}\nError was: ${e}`)
+            throw new Error(`Incompatible putAdapter in Languge ${JSON.stringify(lang)}\nError was: ${JSON.stringify(e)}`)
         }
 
         // This makes sure that Expression references used in Links (i.e. in Perspectives) use the aliased Language schemas.
@@ -1062,7 +1059,7 @@ export default class LanguageController {
                 if (!lang.expressionAdapter) {
                     throw Error("Language does not have an expresionAdapter!")
                 };
-                
+
                 const langIsImmutable = await this.isImmutableExpression(ref);
                 if (langIsImmutable) {
                     console.log("Calling cache for expression...");
@@ -1093,39 +1090,7 @@ export default class LanguageController {
 
     async tagExpressionSignatureStatus(expression: Expression) {
         if(expression) {
-            try{
-                if(!await this.#signatures.verify(expression)) {
-                    let expressionString = JSON.stringify(expression);
-                    let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
-                    console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)
-                    expression.proof.invalid = true
-                    expression.proof.valid = false
-                } else {
-                    expression.proof.valid = true
-                    expression.proof.invalid = false
-                }
-            } catch(e) {
-                let expressionFormatted;
-                if (typeof expression === "string") {
-                    expressionFormatted = expression.substring(0, 50);
-                } else if (typeof expression === "object") {
-                    let expressionString = JSON.stringify(expression);
-                    expressionFormatted =  expressionString.substring(0, 50)
-                } else {
-                    expressionFormatted = expression;
-                }
-                let errMsg = `Error trying to verify signature for expression: ${expressionFormatted}`
-                console.error(errMsg)
-                console.error(e)
-                await this.#pubSub.publish(
-                    PubSubDefinitions.EXCEPTION_OCCURRED_TOPIC,
-                    {
-                        title: "Failed to get expression",
-                        message: errMsg,
-                        type: ExceptionType.ExpressionIsNotVerified,
-                    } as ExceptionInfo
-                );
-            }
+            tagExpressionSignatureStatus(expression)
         }
     }
 

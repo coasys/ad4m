@@ -1,6 +1,6 @@
 import { Arg, Mutation, PubSub, Query, Resolver, Subscription } from "type-graphql";
 import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkExpressionUpdated, LinkInput, LinkMutations } from "../links/Links";
-import { Neighbourhood } from "../neighbourhood/Neighbourhood";
+import { Neighbourhood, NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { LinkStatus } from "./PerspectiveProxy";
@@ -37,7 +37,16 @@ export default class PerspectiveResolver {
         p2.name = 'test-perspective-2'
         p2.uuid = '00002'
         p2.sharedUrl = 'neighbourhood://Qm12345'
-        p2.neighbourhood = new Neighbourhood("language://Qm12345", new Perspective())
+        const neighbourhood = new NeighbourhoodExpression();
+        neighbourhood.data = new Neighbourhood("language://Qm12345", new Perspective());
+        neighbourhood.author = "did:ad4m:test"
+        neighbourhood.timestamp = Date.now()
+        neighbourhood.proof = {
+            signature: '',
+            key: '',
+            valid: true
+        }
+        p2.neighbourhood = neighbourhood
         p2.state = PerspectiveState.Synced
         return [p1, p2]
     }
@@ -171,6 +180,39 @@ export default class PerspectiveResolver {
     perspectiveRemoveLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @PubSub() pubSub: any): Boolean {
         pubSub.publish(LINK_REMOVED_TOPIC)
         return true
+    }
+
+    @Mutation(returns => Boolean)
+    perspectiveAddSdna(@Arg('uuid') uuid: string, @Arg('name') name: string, @Arg('sdnaCode') sdnaCode: string, @Arg('sdnaType') sdnaType: string, @PubSub() pubSub: any): Boolean {
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    perspectiveExecuteCommands(
+        @Arg('uuid') uuid: string,
+        @Arg('commands') commands: string,
+        @Arg('expression') expression: string,
+        @Arg('parameters', type => String, {nullable: true}) parameters: string
+    ): Boolean {
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    perspectiveCreateSubject(
+        @Arg('uuid') uuid: string,
+        @Arg('subjectClass') SubjectClass: string,
+        @Arg('expressionAddress') expressionAddress: string
+    ): Boolean {
+        return true
+    }
+
+    @Mutation(returns => String)
+    perspectiveGetSubjectData(
+        @Arg('uuid') uuid: string,
+        @Arg('subjectClass') SubjectClass: string,
+        @Arg('expressionAddress') expressionAddress: string
+    ): String {
+        return ""
     }
 
     @Subscription({topics: PERSPECTIVE_ADDED_TOPIC, nullable: true})

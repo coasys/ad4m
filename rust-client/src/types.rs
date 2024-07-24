@@ -1,16 +1,18 @@
+use serde::{Deserialize, Serialize};
+
 use crate::agent::by_did::{ByDidAgentByDid, ByDidAgentByDidPerspectiveLinks};
 use crate::agent::me::{MeAgent, MeAgentPerspectiveLinks};
 use crate::perspectives::query_links::QueryLinksPerspectiveQueryLinks;
 use crate::perspectives::subscription_link_added::SubscriptionLinkAddedPerspectiveLinkAdded;
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Link {
     pub predicate: Option<String>,
     pub source: String,
     pub target: String,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ExpressionProof {
     pub invalid: Option<bool>,
     pub key: Option<String>,
@@ -18,7 +20,7 @@ pub struct ExpressionProof {
     pub valid: Option<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LinkExpression {
     pub author: String,
     pub data: Link,
@@ -27,7 +29,7 @@ pub struct LinkExpression {
     pub status: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PerspectiveExpression {
     pub author: String,
     pub data: Perspective,
@@ -217,10 +219,10 @@ impl From<LinkExpression> for LinkExpressionInput {
     }
 }
 
-use crate::perspectives::all::AllPerspectivesNeighbourhoodMetaLinks;
+use crate::perspectives::all::AllPerspectivesNeighbourhoodDataMetaLinks;
 
-impl From<AllPerspectivesNeighbourhoodMetaLinks> for LinkExpression {
-    fn from(link: AllPerspectivesNeighbourhoodMetaLinks) -> Self {
+impl From<AllPerspectivesNeighbourhoodDataMetaLinks> for LinkExpression {
+    fn from(link: AllPerspectivesNeighbourhoodDataMetaLinks) -> Self {
         Self {
             author: link.author,
             timestamp: link.timestamp,
@@ -240,7 +242,7 @@ impl From<AllPerspectivesNeighbourhoodMetaLinks> for LinkExpression {
     }
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
 }
@@ -449,4 +451,16 @@ impl From<ByDidAgentByDid> for Agent {
             }),
         }
     }
+}
+
+pub struct Neighbourhood {
+    pub link_language: String,
+    pub meta: Perspective,
+}
+
+pub struct NeighbourhoodExpression {
+    pub author: String,
+    pub data: Neighbourhood,
+    pub proof: ExpressionProof,
+    pub timestamp: String,
 }

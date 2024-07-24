@@ -1,21 +1,17 @@
-import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language  } from '@perspect3vism/ad4m'
-import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@perspect3vism/ad4m'
+import type { Address, PublicSharing, PerspectiveHandle, Perspective, LanguageLanguageInput, LanguageExpression, LanguageMetaInput, AgentExpression, Language, NeighbourhoodExpression  } from '@coasys/ad4m'
+import { parseExprUrl, LanguageRef, Neighbourhood, PerspectiveState } from '@coasys/ad4m'
 
 import * as Config from './Config'
 import * as Db from './db'
 import type { Ad4mDb } from './db'
 import HolochainService, { HolochainConfiguration } from './storage-services/Holochain/HolochainService';
 import AgentService from './agent/AgentService'
-import PerspectivesController from './PerspectivesController'
 import LanguageController from './LanguageController'
 import * as DIDs from './agent/DIDs'
 import type { DIDResolver } from './agent/DIDs'
-import Signatures from './agent/Signatures'
 import * as PubSubDefinitions from './graphQL-interface/SubscriptionDefinitions'
-import EntanglementProofController from './EntanglementProof'
 import fs from 'node:fs'
 import { AgentInfoResponse } from '@holochain/client'
-import RuntimeService from './RuntimeService'
 import { v4 as uuidv4 } from 'uuid';
 import { MainConfig } from './Config'
 import { getPubSub, sleep } from "./utils";
@@ -37,6 +33,7 @@ export interface InitHolochainParams {
     passphrase?: string
     hcProxyUrl: string,
     hcBootstrapUrl: string,
+    logHolochainMetrics?: boolean
 }
 
 export interface HolochainUnlockConfiguration extends HolochainConfiguration {
@@ -54,16 +51,11 @@ export default class Ad4mCore {
     //#IPFS?: IPFSType
 
     #agentService: AgentService
-    #runtimeService: RuntimeService
-
     #db: Ad4mDb
     #didResolver: DIDResolver
-    #signatures: Signatures
 
-    #perspectivesController?: PerspectivesController
     #languageController?: LanguageController
 
-    #entanglementProofController?: EntanglementProofController
     #languagesReady: Promise<void>
     #resolveLanguagesReady: (value: void) => void
 
@@ -73,14 +65,9 @@ export default class Ad4mCore {
         this.#config = Config.init(config);
 
         this.#agentService = new AgentService(this.#config.rootConfigPath, this.#config.adminCredential)
-        this.#runtimeService = new RuntimeService(this.#config)
-        this.#agentService.ready.then(() => {
-            this.#runtimeService.did = this.#agentService!.did!
-        })
-        this.#agentService.load()
+        const agent = AGENT.load();
         this.#db = Db.init(this.#config.dataPath)
         this.#didResolver = DIDs.init(this.#config.dataPath)
-        this.#signatures = new Signatures()
         const that = this
         this.#resolveLanguagesReady = () => {}
         this.#languagesReady = new Promise(resolve => {
@@ -119,33 +106,12 @@ export default class Ad4mCore {
       }
     }
 
-    get holochainService(): HolochainService {
-        if (!this.#holochain) {
-            throw Error("No holochain service")
-        }
+    get holochainService(): HolochainService | undefined {
         return this.#holochain
     }
 
     get agentService(): AgentService {
         return this.#agentService
-    }
-
-    get runtimeService(): RuntimeService {
-        return this.#runtimeService
-    }
-
-    get signatureService(): Signatures {
-        if (!this.#signatures) {
-            throw Error("No signature service")
-        }
-        return this.#signatures
-    }
-
-    get perspectivesController(): PerspectivesController {
-        if (!this.#perspectivesController) {
-            throw Error("No perspectiveController")
-        }
-        return this.#perspectivesController
     }
 
     get languageController(): LanguageController {
@@ -155,26 +121,8 @@ export default class Ad4mCore {
         return this.#languageController!
     }
 
-    get entanglementProofController(): EntanglementProofController {
-        if (!this.#entanglementProofController) {
-            this.#entanglementProofController = new EntanglementProofController(this.#config.rootConfigPath, this.#agentService);
-        }
-        return this.#entanglementProofController
-    }
-
-    get database(): Ad4mDb {
-        return this.#db
-    }
-
     async exit() {
         console.log("Exiting gracefully...")
-        console.log("Stopping Prolog engines")
-        for(let ph of this.perspectivesController.allPerspectiveHandles()) {
-            const perspective = this.perspectivesController.perspective(ph.uuid)
-            perspective.clearPolling()
-        }
-        console.log("Stopping IPFS")
-        //await this.#IPFS?.stop({timeout: 15});
         console.log("Stopping Holochain conductor")
         await this.#holochain?.stop();
         console.log("Done.")
@@ -203,17 +151,14 @@ export default class Ad4mCore {
             useMdns: params.hcUseMdns,
             hcProxyUrl: params.hcProxyUrl,
             hcBootstrapUrl: params.hcBootstrapUrl,
+            logHolochainMetrics: this.#config.logHolochainMetrics
         }
 
-        this.#holochain = new HolochainService(holochainConfig, this.#agentService, this.entanglementProofController)
+        this.#holochain = new HolochainService(holochainConfig)
         await this.#holochain.run({
             ...holochainConfig,
             passphrase: params.passphrase!
         });
-    }
-
-    async waitForAgent(): Promise<void> {
-        return this.#agentService.ready
     }
 
     async waitForLanguages(): Promise<void> {
@@ -231,75 +176,15 @@ export default class Ad4mCore {
     initControllers() {
         this.#languageController = new LanguageController({
             agent: this.#agentService,
-            runtime: this.#runtimeService,
             //IPFS: this.#IPFS,
-            signatures: this.#signatures,
             ad4mSignal: this.languageSignal,
             config: this.#config,
-        }, { holochainService: this.#holochain!, runtimeService: this.#runtimeService, signatures: this.#signatures, db: this.#db } )
-
-        this.#perspectivesController = new PerspectivesController(this.#config.rootConfigPath, {
-            db: this.#db,
-            agentService: this.agentService,
-            languageController: this.#languageController,
-            config: this.#config
-        })
-
-        this.entanglementProofController
+        }, { holochainService: this.#holochain!, db: this.#db } )
     }
 
     async initLanguages() {
         await this.#languageController!.loadLanguages()
         this.#resolveLanguagesReady()
-    }
-
-    async neighbourhoodPublishFromPerspective(uuid: string, linkLanguage: string, meta: Perspective): Promise<string> {
-        // We only work on the PerspectiveID object.
-        // On PerspectiveController.update() below, the instance will get updated as well, but we don't need the
-        // instance object here
-        const perspectiveID = this.#perspectivesController!.perspective(uuid).plain()
-
-        const neighbourhood = new Neighbourhood(linkLanguage, meta);
-        let language = await this.#languageController!.installLanguage(linkLanguage, null)
-        if (!language!.linksAdapter) {
-            throw Error("Language used is not a link language");
-        }
-
-        // Create neighbourhood
-        const neighbourhoodAddress = await (this.languageController.getNeighbourhoodLanguage().expressionAdapter!.putAdapter as PublicSharing).createPublic(neighbourhood)
-        const neighbourhoodUrl = `${Config.neighbourhoodLanguageAlias}://${neighbourhoodAddress}`
-
-        //Add shared perspective to original perpspective and then update controller
-        perspectiveID.sharedUrl = neighbourhoodUrl
-        perspectiveID.neighbourhood = neighbourhood;
-        perspectiveID.state = PerspectiveState.Synced;
-        await this.#perspectivesController!.replace(perspectiveID, neighbourhood, false, PerspectiveState.Synced)
-        return neighbourhoodUrl
-    }
-
-    async installNeighbourhood(url: Address): Promise<PerspectiveHandle> {
-        const perspectives = this.#perspectivesController!.allPerspectiveHandles();
-        if (perspectives.some(p => p.sharedUrl === url)) {
-            throw Error(`Neighbourhood with URL ${url} already installed`);
-        }
-
-        let neighbourHoodExp = await this.languageController.getPerspective(parseExprUrl(url).expression);
-        if (neighbourHoodExp == null) {
-            throw Error(`Could not find neighbourhood with URL ${url}`);
-        };
-        console.log("Core.installNeighbourhood(): Got neighbourhood", neighbourHoodExp);
-        let neighbourhood: Neighbourhood = neighbourHoodExp.data;
-        let state = PerspectiveState.NeighbourhoodJoinInitiated;
-
-        try {
-            await this.languageController.languageByRef({address: neighbourhood.linkLanguage} as LanguageRef)
-            state = PerspectiveState.LinkLanguageInstalledButNotSynced;
-        } catch (e) {
-            state = PerspectiveState.LinkLanguageFailedToInstall;
-        }
-
-        console.log("Core.installNeighbourhood(): Creating perspective", url, neighbourhood, state);
-        return await this.#perspectivesController!.add("", url, neighbourhood, true, state);
     }
 
     async languageApplyTemplateAndPublish(sourceLanguageHash: string, templateData: object): Promise<LanguageRef> {
@@ -358,14 +243,14 @@ export default class Ad4mCore {
         console.log("wait for languages");
         await this.waitForLanguages()
         console.log("finished wait");
-        const agent = this.#agentService.agent!
+        const agent = AGENT.agent();
         if(agent.directMessageLanguage) return
         console.log("Agent doesn't have direct message language set yet. Creating from template...")
 
         console.log("Cloning direct message language from template...");
         const templateParams = {
             uid: uuidv4(),
-            recipient_did: this.#agentService.agent?.did,
+            recipient_did: agent?.did,
             recipient_hc_agent_pubkey: Buffer.from(await HOLOCHAIN_SERVICE.getAgentKey()).toString('hex')
         }
         console.debug("Now creating clone with parameters:", templateParams)
@@ -394,7 +279,8 @@ export default class Ad4mCore {
     }
 
     async myDirectMessageLanguage(): Promise<Language> {
-        const dmLang = this.#agentService.agent!.directMessageLanguage!
+        const agent = AGENT.agent();
+        const dmLang = agent!.directMessageLanguage!
         return await this.#languageController!.languageByRef(new LanguageRef(dmLang))
     }
 }

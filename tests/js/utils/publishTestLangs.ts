@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, LanguageMetaInput } from "@perspect3vism/ad4m";
+import { Ad4mClient, LanguageMetaInput } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { exit } from "process";
 import { fileURLToPath } from 'url';

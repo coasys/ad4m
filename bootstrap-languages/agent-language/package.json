@@ -1,6 +1,5 @@
 {
-  "name": "@perspect3vism/agent-language",
-  "version": "0.7.1",
+  "name": "@coasys/agent-language",
   "description": "AD4M Language implementation for Holochain profile DNA",
   "main": "index.js",
   "scripts": {
@@ -11,15 +10,15 @@
     "compile-dna": "cd hc-dna && ./build.sh && cd ..",
     "compile-dna-windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd ..",
     "build": "run-script-os",
-    "build:linux": "yarn compile-dna && yarn build:common",
-    "build:macos": "yarn compile-dna && yarn build:common",
-    "build:windows": "yarn compile-dna-windows && yarn build:common",
-    "build:common": "yarn rollup-dna && yarn rollup-icons && yarn rollup-expression-ui && deno run --allow-all esbuild.ts"
+    "build:linux": "pnpm compile-dna && pnpm build:common",
+    "build:macos": "pnpm compile-dna && pnpm build:common",
+    "build:windows": "pnpm compile-dna-windows && pnpm build:common",
+    "build:common": "pnpm rollup-dna && pnpm rollup-icons && pnpm rollup-expression-ui && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@perspect3vism/ad4m": "*",
+    "@coasys/ad4m": "*",
     "@perspect3vism/rollup-plugin-dna": "^0.0.2",
     "@rollup/plugin-commonjs": "^17.0.0",
     "@rollup/plugin-json": "^4.1.0",
@@ -44,5 +43,6 @@
     "email-validator": "^2.0.4",
     "md5": "^2.3.0",
     "postcss": "^8.2.1"
-  }
+  },
+  "version": "0.10.0-rc2"
 }

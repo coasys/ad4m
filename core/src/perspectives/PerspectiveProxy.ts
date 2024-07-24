@@ -1,7 +1,6 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
-import { Neighbourhood } from "../neighbourhood/Neighbourhood";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
@@ -9,6 +8,7 @@ import { Subject } from "../subject/Subject";
 import { ExpressionRendered } from "../expression/Expression";
 import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../subject/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
+import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
@@ -25,6 +25,21 @@ interface Parameter {
  * a reference to the PerspectiveClient object that created it.
  */
 export class PerspectiveProxy {
+    /** Unique ID of the perspective */
+    uuid: string;
+
+    /** Given name of the perspective */
+    name: string;
+
+    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood URL */
+    sharedUrl: string|null;
+
+    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
+    neighbourhood: NeighbourhoodExpression|null;
+
+    /** Returns the state of the perspective **/
+    state: PerspectiveState|null;
+
     #handle: PerspectiveHandle
     #client: PerspectiveClient
     #perspectiveLinkAddedCallbacks: LinkCallback[]
@@ -39,6 +54,11 @@ export class PerspectiveProxy {
         this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
+        this.uuid = this.#handle.uuid;
+        this.name = this.#handle.name;
+        this.sharedUrl = this.#handle.sharedUrl;
+        this.neighbourhood = this.#handle.neighbourhood;
+        this.state = this.#handle.state;
         this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
         this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
         this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
@@ -46,80 +66,7 @@ export class PerspectiveProxy {
     }
 
     async executeAction(actions, expression, parameters: Parameter[]) {
-        const replaceThis = (input: string|undefined) => {
-            if(input) {
-                if (input === 'this') {
-                    return expression
-                } else {
-                    return input
-                }
-            } else {
-                return undefined
-            }
-        }
-
-        const replaceParameters = (input: string|undefined) => {
-            if(parameters) {
-                let output = input
-                for(const parameter of parameters) {
-                    output = output.replace(parameter.name, parameter.value)
-                }
-                return output
-            } else
-                return input
-        }
-
-        for(let command of actions) {
-            let source = replaceThis(replaceParameters(command.source))
-            let predicate = replaceThis(replaceParameters(command.predicate))
-            let target = replaceThis(replaceParameters(command.target))
-            let local = command?.local ?? false
-
-            switch(command.action) {
-                case 'addLink':
-                    await this.add(new Link({source, predicate, target}), local ? 'local' : 'shared')
-                    break;
-                case 'removeLink':
-                    const linkExpressions = await this.get(new LinkQuery({source, predicate, target}))
-                    for (const linkExpression of linkExpressions) {
-                        await this.remove(linkExpression)
-                    }
-                    break;
-                case 'setSingleTarget':
-                    await this.setSingleTarget(new Link({source, predicate, target}), local ? 'local' : 'shared')
-                    break;
-                case 'collectionSetter':
-                    const links = await this.get(new LinkQuery({ source, predicate }))
-                    await this.removeLinks(links);
-                    await this.addLinks(parameters.map(p => new Link({source, predicate, target: p.value})), local ? 'local' : 'shared')
-                    break;
-            }
-        }
-    }
-
-    /** Unique ID of the perspective */
-    get uuid(): string {
-        return this.#handle.uuid
-    }
-
-    /** Given name of the perspective */
-    get name(): string {
-        return this.#handle.name
-    }
-
-    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood URL */
-    get sharedUrl(): string|void {
-        return this.#handle.sharedUrl
-    }
-
-    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
-    get neighbourhood(): Neighbourhood|void {
-        return this.#handle.neighbourhood
-    }
-
-    /** Returns the state of the perspective **/
-    get state(): PerspectiveState {
-        return this.#handle.state
+        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters))
     }
 
     /** Returns all the links of this perspective that matches the LinkQuery */
@@ -320,36 +267,20 @@ export class PerspectiveProxy {
         await this.executeAction(action, exprAddr, undefined)
     }
 
-    /** Set the perspective's Social DNA code to the given string.
-     * This will replace all previous SDNA code elements with the new one.
-     */
-    async setSdna(sdnaCode: string) {
-        await this.setSingleTarget(new Link({
-            source: "ad4m://self",
-            predicate: "ad4m://has_zome",
-            target: Literal.from(sdnaCode).toUrl()
-        }), 'shared')
-    }
-
     /** Returns the perspective's Social DNA code
      * This will return all SDNA code elements in an array.
      */
     async getSdna(): Promise<string[]> {
         let links = await this.get(new LinkQuery({
-            source: "ad4m://self",
-            predicate: "ad4m://has_zome"
+            predicate: "ad4m://sdna"
         }))
 
         return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
     }
 
     /** Adds the given Social DNA code to the perspective's SDNA code */
-    async addSdna(sdnaCode: string) {
-        await this.add(new Link({
-            source: "ad4m://self",
-            predicate: "ad4m://has_zome",
-            target: Literal.from(sdnaCode).toUrl()
-        }))
+    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom") {
+        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType)
     }
 
     /** Returns all the Subject classes defined in this perspectives SDNA */
@@ -385,15 +316,26 @@ export class PerspectiveProxy {
      * @param exprAddr The address of the expression to be turned into a subject instance
      */
     async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
-        let result = await this.infer(`subject_class("${className}", C), constructor(C, Actions)`)
-        if(!result.length) {
-            throw "No constructor found for given subject class: " + className
+        let className: string;
+
+        if(typeof subjectClass === "string") {
+            className = subjectClass
+
+            await this.#client.createSubject(this.#handle.uuid, JSON.stringify({className}), exprAddr);
+        } else {
+            let query = this.buildQueryFromTemplate(subjectClass as object)
+            await this.#client.createSubject(this.#handle.uuid, JSON.stringify({query}), exprAddr);
         }
 
-        let actions = result.map(x => eval(x.Actions))
-        await this.executeAction(actions[0], exprAddr, undefined)
         return this.getSubjectProxy(exprAddr, subjectClass)
+    }
+
+    async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
+        if (typeof subjectClass === "string") {
+            return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
+        }
+        let query = this.buildQueryFromTemplate(subjectClass as object)
+        return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({query}), exprAddr))
     }
 
     /** Removes a subject instance by running its (SDNA defined) destructor,
@@ -468,6 +410,11 @@ export class PerspectiveProxy {
         return instances
     }
 
+    /** Returns all subject proxies of the given subject class.
+     *  @param subjectClass Either a string with the name of the subject class, or an object
+     * with the properties of the subject class. In the latter case, all subject classes
+     * that match the given properties will be used.
+     */
     async getAllSubjectProxies<T>(subjectClass: T): Promise<T[]> {
         let classes = []
         if(typeof subjectClass === "string") {
@@ -484,18 +431,7 @@ export class PerspectiveProxy {
     }
 
 
-    /** Returns all subject classes that match the given template object.
-     * This function looks at the properties of the template object and
-     * its setters and collections to create a Prolog query that finds
-     * all subject classes that would be converted to a proxy object
-     * with exactly the same properties and collections.
-     *
-     * Since there could be multiple subject classes that match the given
-     * criteria, this function returns a list of class names.
-     *
-     * @param obj The template object
-     */
-    async subjectClassesByTemplate(obj: object): Promise<string[]> {
+    private buildQueryFromTemplate(obj: object): string {
         // Collect all string properties of the object in a list
         let properties = []
 
@@ -566,6 +502,23 @@ export class PerspectiveProxy {
 
 
         query += "."
+
+        return query;
+    }
+
+    /** Returns all subject classes that match the given template object.
+     * This function looks at the properties of the template object and
+     * its setters and collections to create a Prolog query that finds
+     * all subject classes that would be converted to a proxy object
+     * with exactly the same properties and collections.
+     *
+     * Since there could be multiple subject classes that match the given
+     * criteria, this function returns a list of class names.
+     *
+     * @param obj The template object
+     */
+    async subjectClassesByTemplate(obj: object): Promise<string[]> {
+        const query = this.buildQueryFromTemplate(obj);
         let result = await this.infer(query)
         if(!result) {
             return []
@@ -581,11 +534,14 @@ export class PerspectiveProxy {
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
     async ensureSDNASubjectClass(jsClass: any): Promise<void> {
-        if((await this.subjectClassesByTemplate(new jsClass)).length > 0) {
+        const subjectClass = await this.subjectClassesByTemplate(new jsClass)
+        if(subjectClass.length > 0) {
             return
         }
 
-        await this.addSdna(jsClass.generateSDNA())
+        const { name, sdna } = jsClass.generateSDNA();
+
+        await this.addSdna(name, sdna, 'subject_class');
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {

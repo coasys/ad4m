@@ -48,8 +48,14 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     admin_credential: Some(String::from("*")),
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
+                    localhost: None,
+                    auto_permit_cap_requests: Some(true),
+                    tls: None,
+                    log_holochain_metrics: None,
                 })
-                .await;
+                .await
+                .join()
+                .expect("Error awaiting executor main thread");
             });
 
             let test_res = tokio::task::spawn(async move {
@@ -176,8 +182,14 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     admin_credential: None,
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
+                    localhost: None,
+                    auto_permit_cap_requests: Some(true),
+                    tls: None,
+                    log_holochain_metrics: None,
                 })
-                .await;
+                .await
+                .join()
+                .expect("Error awaiting executor main thread");
             });
 
             //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening

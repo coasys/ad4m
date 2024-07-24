@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, CapabilityInput, AuthInfoInput } from "@perspect3vism/ad4m";
+import { Ad4mClient, CapabilityInput, AuthInfoInput } from "@coasys/ad4m";
 import fs from "fs";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -91,7 +91,7 @@ describe("Apps integration tests", () => {
       const oldApps = await adminAd4mClient!.agent.getApps();
   
       expect(oldApps.length).to.be.equal(1);
-      expect(oldApps[0].revoked).to.be.equal(null);
+      expect(oldApps[0].revoked).to.be.false;
   
       const newApps = await adminAd4mClient!.agent.revokeToken(requestId);
   

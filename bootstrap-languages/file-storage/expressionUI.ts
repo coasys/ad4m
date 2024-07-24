@@ -1,4 +1,4 @@
-import type { ExpressionUI } from "@perspect3vism/ad4m";
+import type { ExpressionUI } from "@coasys/ad4m";
 import Icon from './build/Icon.js'
 import ConstructorIcon from './build/ConstructorIcon.js'
 

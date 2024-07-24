@@ -7,6 +7,16 @@ pub enum LiteralValue {
     Json(serde_json::Value),
 }
 
+impl ToString for LiteralValue {
+    fn to_string(&self) -> String {
+        match self {
+            LiteralValue::String(string) => string.clone(),
+            LiteralValue::Number(number) => number.to_string(),
+            LiteralValue::Json(json) => json.to_string(),
+        }
+    }
+}
+
 pub struct Literal {
     value: Option<LiteralValue>,
     url: Option<String>,

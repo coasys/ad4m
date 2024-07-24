@@ -1,15 +1,23 @@
 [package]
-name = "rust-executor"
-version = "0.7.1"
+name = "ad4m-executor"
+version = "0.10.0-rc2"
 edition = "2021"
-authors = ["Nicolas Luck <nicolas@perspect3vism.org>"]
-description = "A command-line interface to AD4M (i.e. the AD4M executor) - https://ad4m.dev"
+authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
+description = "Runtime implementation of AD4M as library - https://ad4m.dev"
 keywords = ["ad4m", "perspect3vism", "cli"]
 license = "CAL-1.0"
 homepage = "https://ad4m.dev"
 repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
+
+include = [
+    "src/**/*",
+    "dapp/dist", # Symlink to the dapp directory
+    "executor/lib/bundle.js", # Symlink to the executor directory
+    "build.rs",
+    "Cargo.toml"
+]
 
 [lib]
 name = "rust_executor"
@@ -22,15 +30,15 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-deno_core = "0.218.0"
-deno_runtime = "0.128.0"
+deno_core = "0.230.0"
+deno_runtime = "0.132.0"
 tokio = { version = "1.25.0", features = ["full"] }
 url = "2.3.1"
 futures = "0.3.28"
 tokio-stream = { version = "0.1.12", features = ["sync"] }
 lazy_static = "1.4.0"
 
-chrono = { version = "0.4.30", features = ["serde"] }
+chrono = { version = "0.4.31", features = ["serde"] }
 env_logger = "0.10.0"
 serde_json = "1.0.95"
 uuid = "1.3.0"
@@ -52,27 +60,47 @@ multibase = "0.9.1"
 multihash = { version = "0.18.0", features = ["sha2"] }
 cid = "0.10.1"
 once_cell = "1.17.1"
-hyper = { version = "1.0.0-rc.4", features = ["full"] }
-http-body-util = "0.1.0-rc.3"
-hyper-util = { git = "https://github.com/hyperium/hyper-util.git" }
 rust-embed="8.0.0"
 dirs = "5.0.1"
+rocket = "0.5.0"
 
-juniper = { git = "https://github.com/graphql-rust/juniper", features = ["chrono"], rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_subscriptions = { git = "https://github.com/graphql-rust/juniper", rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_graphql_transport_ws = { git = "https://github.com/graphql-rust/juniper", rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
-juniper_warp = { git = "https://github.com/graphql-rust/juniper", features = ["subscriptions"], rev = "57628de8649be071b04a3fedb45c47add7dc5192" }
+coasys_juniper = { version="0.16.0", features = ["chrono"] }
+coasys_juniper_subscriptions = { version="0.17.0" }
+coasys_juniper_graphql_transport_ws = { version="0.4.0" }
+coasys_juniper_warp = { version="0.8.0", features = ["subscriptions"] }
 warp = "0.3.4"
 
 jsonwebtoken = "8.3.0"
 
-holochain = { version = "0.2.2", features = ["test_utils", "default"] }
-holochain_cli_bundle = { version = "0.2.2" }
-holochain_types = { version = "0.2.2" }
-holochain_cli_run_local_services = { version = "0.2.2" }
+webbrowser = "0.8.12"
 
-scryer-prolog = { version = "0.9.1", git = "https://github.com/coasys/scryer-prolog", rev = "0e90381eee2d455bf34be0209ef29996daf51c65", features = ["multi_thread"] }
+holochain = { version = "0.3.0-beta-dev.39", features = ["test_utils", "default"] }
+holochain_cli_bundle = { version = "0.3.0-beta-dev.36" }
+holochain_types = { version = "0.3.0-beta-dev.35" }
+holochain_cli_run_local_services = { version = "0.3.0-beta-dev.23" }
+kitsune_p2p_types = { version = "0.3.0-beta-dev.22" }
+
+scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
+
+ad4m-client = { path = "../rust-client", version="0.10.0-rc2" }
+reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
+
+rusqlite = { version = "0.29.0", features = ["bundled"] }
+fake = { version = "2.9.2", features = ["derive"] }
+sha2 = "0.10.8"
+regex = "1.5.4"
+json5 = "0.4"
+
+include_dir = "0.6.0"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 
 [dev-dependencies]
 maplit = "1.0.2"
+lazy_static = "1.4.0"
+itertools = "0.10.1"
+
+[build-dependencies]
+fs_extra = "1.3.0"

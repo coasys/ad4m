@@ -1,4 +1,4 @@
-import { InteractionCall, LanguageMetaInput, Literal, parseExprUrl } from '@perspect3vism/ad4m'
+import { InteractionCall, LanguageMetaInput, Literal, parseExprUrl } from '@coasys/ad4m'
 import { TestContext } from './integration.test'
 import fs from "fs";
 import { expect } from "chai";
@@ -144,6 +144,8 @@ export default function expressionTests(testContext: TestContext) {
                 const expr2 = JSON.parse(expr2Raw)
                 console.log(expr2)
 
+                expr.proof.valid = true
+                expr.proof.invalid = false
                 expect(expr2).to.be.eql(expr)
             })
         })

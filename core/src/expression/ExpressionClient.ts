@@ -2,6 +2,7 @@ import { ApolloClient, gql } from "@apollo/client/core";
 import { InteractionCall, InteractionMeta } from "../language/Language";
 import unwrapApolloResult from "../unwrapApolloResult";
 import { ExpressionRendered } from "./Expression";
+import { Literal } from "../Literal";
 
 export class ExpressionClient {
     #apolloClient: ApolloClient<any>
@@ -10,7 +11,19 @@ export class ExpressionClient {
         this.#apolloClient = client
     }
 
-    async get(url: string): Promise<ExpressionRendered> {
+    async get(url: string, alwaysGet: boolean = false): Promise<ExpressionRendered> {
+        if(!alwaysGet){
+            try {
+                let literalValue = Literal.fromUrl(url).get();
+                if (typeof literalValue === 'object' && literalValue !== null) {
+                    if ('author' in literalValue && 'timestamp' in literalValue && 'data' in literalValue && 'proof' in literalValue) {
+                        return literalValue;
+                    }
+                }
+            } catch(e) {}
+        }
+        
+
         const { expression } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query expression($url: String!) {
                 expression(url: $url) {

@@ -1,26 +1,30 @@
 #![allow(non_snake_case)]
-use juniper::{graphql_object, FieldResult};
-
+use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
+use crate::{db::Ad4mDb, holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string}, runtime_service::RuntimeService, types::{DecoratedLinkExpression, Notification}};
+use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
+use std::{env};
 use super::graphql_types::*;
-use super::utils::get_capabilies;
-use super::RequestContext;
+
+use crate::{agent::{capabilities::*, signatures}};
 
 pub struct Query;
 
 #[graphql_object(context = RequestContext)]
 impl Query {
     async fn agent(&self, context: &RequestContext) -> FieldResult<Agent> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agent", null, {{ capabilities: {} }}))"#,
-                capabilities
-            ))
-            .await?;
-        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        AgentService::with_global_instance(|agent_service| {
+            let mut agent = agent_service.agent.clone().ok_or(FieldError::new(
+                "Agent not found",
+                Value::null(),
+            ))?;
+
+            if agent.perspective.is_some() {
+                agent.perspective.as_mut().unwrap().verify_link_signatures();
+            }
+
+            Ok(agent)
+        })
     }
 
     #[graphql(name = "agentByDID")]
@@ -29,82 +33,69 @@ impl Query {
         context: &RequestContext,
         did: String,
     ) -> FieldResult<Option<Agent>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(
-                format!(
-                    r#"JSON.stringify(
-                    await core.callResolver("Query", "agentByDID", 
-                        {{ did: "{}" }}, 
-                        {{ capabilities: {} }}
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        let agent_instance = AgentService::global_instance();
+        let did_match = {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            did == agent_ref.did.clone().unwrap()
+        };
+
+        if !did_match {
+            let mut js = context.js_handle.clone();
+            let result = js
+                .execute(
+                    format!(
+                        r#"JSON.stringify(
+                        await core.callResolver("Query", "agentByDID",
+                            {{ did: "{}" }},
+                        )
+                    )"#,
+                        did,
                     )
-                )"#,
-                    did, capabilities
+                    .into(),
                 )
-                .into(),
-            )
-            .await?;
-        let result: JsResultType<Option<Agent>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+                .await?;
+            let result: JsResultType<Option<Agent>> = serde_json::from_str(&result)?;
+            result.get_graphql_result()
+        } else {
+            let agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            Ok(agent_ref.agent.clone())
+        }
+
     }
 
     async fn agent_get_apps(&self, context: &RequestContext) -> FieldResult<Vec<Apps>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentGetApps", {{ capabilities: {} }}))"#,
-                capabilities
-            ))
-            .await?;
-        let result: JsResultType<Vec<Apps>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        Ok(apps_map::get_apps())
     }
 
     async fn agent_get_entanglement_proofs(
         &self,
-        context: &RequestContext,
+        _context: &RequestContext,
     ) -> FieldResult<Vec<EntanglementProof>> {
-        let _capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentGetEntanglementProofs", null, null))"#
-            ))
-            .await?;
-        let result: JsResultType<Vec<EntanglementProof>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let proofs = get_entanglement_proofs();
+        Ok(proofs)
     }
 
-    async fn agent_is_locked(&self, context: &RequestContext) -> FieldResult<bool> {
-        let _capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentIsLocked", null, null))"#
-            ))
-            .await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+    async fn agent_is_locked(&self, _context: &RequestContext) -> FieldResult<bool> {
+        AgentService::with_global_instance(|agent_service| {
+            let _agent = agent_service.agent.clone().ok_or(FieldError::new(
+                "Agent not found",
+                Value::null(),
+            ))?;
+
+            Ok(!agent_service.is_unlocked())
+        })
     }
 
     async fn agent_status(&self, context: &RequestContext) -> FieldResult<AgentStatus> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "agentStatus", {{ capabilities: {} }}))"#,
-                capabilities
-            ))
-            .await?;
-        let result: JsResultType<AgentStatus> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+
+        AgentService::with_global_instance(|agent_service| {
+            Ok(agent_service.dump())
+        })
     }
 
     async fn expression(
@@ -112,14 +103,12 @@ impl Query {
         context: &RequestContext,
         url: String,
     ) -> FieldResult<Option<ExpressionRendered>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}, {{ capabilities: {} }}))"#,
-                url,
-                capabilities
+                r#"JSON.stringify(await core.callResolver("Query", "expression", {{ url: "{}" }}))"#,
+                url
             ))
             .await?;
         let result: JsResultType<Option<ExpressionRendered>> = serde_json::from_str(&result)?;
@@ -131,14 +120,12 @@ impl Query {
         context: &RequestContext,
         url: String,
     ) -> FieldResult<Vec<InteractionMeta>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionInteractions", {{ url: "{}" }}, {{ capabilities: {} }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "expressionInteractions", {{ url: "{}" }}))"#,
                 url,
-                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<InteractionMeta>> = serde_json::from_str(&result)?;
@@ -155,14 +142,12 @@ impl Query {
             .map(|url| format!("\"{}\"", url))
             .collect::<Vec<String>>()
             .join(",");
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionMany", {{ urls: [{}] }}, {{ capabilities: {} }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "expressionMany", {{ urls: [{}] }}))"#,
                 urls_string,
-                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<Option<ExpressionRendered>>> = serde_json::from_str(&result)?;
@@ -174,14 +159,12 @@ impl Query {
         context: &RequestContext,
         url: String,
     ) -> FieldResult<Option<String>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(&context.capabilities, &EXPRESSION_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "expressionRaw", {{ url: "{}" }}, {{ capabilities: {} }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "expressionRaw", {{ url: "{}" }}))"#,
                 url,
-                capabilities
             ))
             .await?;
         let result: JsResultType<Option<String>> = serde_json::from_str(&result)?;
@@ -189,17 +172,15 @@ impl Query {
     }
 
     async fn get_trusted_agents(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "getTrustedAgents", {{ capabilities: {} }}))"#,
-                capabilities
-            ))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY,
+        )?;
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            let agents = runtime_service.get_trusted_agents();
+            Ok(agents)
+        })
     }
 
     async fn language(
@@ -207,14 +188,12 @@ impl Query {
         context: &RequestContext,
         address: String,
     ) -> FieldResult<LanguageHandle> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "language", {{ address: "{}" }}, {{ capabilities: {} }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "language", {{ address: "{}" }}))"#,
                 address,
-                capabilities
             ))
             .await?;
         let result: JsResultType<LanguageHandle> = serde_json::from_str(&result)?;
@@ -226,14 +205,12 @@ impl Query {
         context: &RequestContext,
         address: String,
     ) -> FieldResult<LanguageMeta> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languageMeta", {{ address: "{}" }}, {{ capabilities: {} }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "languageMeta", {{ address: "{}" }}))"#,
                 address,
-                capabilities
             ))
             .await?;
         let result: JsResultType<LanguageMeta> = serde_json::from_str(&result)?;
@@ -245,14 +222,12 @@ impl Query {
         context: &RequestContext,
         address: String,
     ) -> FieldResult<String> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languageSource", {{ address: "{}" }}, {{ capabilities: {} }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "languageSource", {{ address: "{}" }}))"#,
                 address,
-                capabilities
             ))
             .await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
@@ -264,15 +239,13 @@ impl Query {
         context: &RequestContext,
         filter: Option<String>,
     ) -> FieldResult<Vec<LanguageHandle>> {
-        let filter_string = filter.map_or("null".to_string(), |f| format!("\"{}\"", f));
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        let filter_string = filter.map_or("null".to_string(), |f| format!("{}", f));
+        check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "languages", {{ filter: "{}" }}, {{ capabilities: {} }}))"#,
+                r#"JSON.stringify(await core.callResolver("Query", "languages", {{ filter: "{}" }}))"#,
                 filter_string,
-                capabilities
             ))
             .await?;
         let result: JsResultType<Vec<LanguageHandle>> = serde_json::from_str(&result)?;
@@ -282,46 +255,45 @@ impl Query {
     async fn neighbourhood_has_telepresence_adapter(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<bool> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodHasTelepresenceAdapter", {{ perspectiveUUID: "{}" }}, {{ capabilities: {} }}))"#, perspectiveUUID, capabilities))
-            .await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let uuid = perspectiveUUID;
+        check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .has_telepresence_adapter()
+            .await)
     }
 
     async fn neighbourhood_online_agents(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<Vec<OnlineAgent>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOnlineAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: {} }}))"#, perspectiveUUID, capabilities))
-            .await?;
-        let result: JsResultType<Vec<OnlineAgent>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let uuid = perspectiveUUID;
+        check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .online_agents()
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))
     }
 
     async fn neighbourhood_other_agents(
         &self,
         context: &RequestContext,
+        #[allow(non_snake_case)]
         perspectiveUUID: String,
     ) -> FieldResult<Vec<String>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "neighbourhoodOtherAgents", {{ perspectiveUUID: "{}" }}, {{ capabilities: {} }}))"#, perspectiveUUID, capabilities))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let uuid = perspectiveUUID;
+        check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
+        get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .others()
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))
     }
 
     async fn perspective(
@@ -329,18 +301,16 @@ impl Query {
         context: &RequestContext,
         uuid: String,
     ) -> FieldResult<Option<PerspectiveHandle>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspective", {{ uuid: "{}" }}, {{ capabilities: {} }}))"#,
-                uuid,
-                capabilities
-            ))
-            .await?;
-        let result: JsResultType<Option<PerspectiveHandle>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        if let Some(p) = get_perspective(&uuid) {
+            Ok(Some(p.persisted.lock().await.clone()))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn perspective_query_links(
@@ -348,18 +318,16 @@ impl Query {
         context: &RequestContext,
         query: LinkQuery,
         uuid: String,
-    ) -> FieldResult<Vec<LinkExpression>> {
-        let query_string = serde_json::to_string(&query)?;
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryLinks", {{ query: {}, uuid: "{}" }}, {{ capabilities: {} }}))"#,
-            query_string, uuid, capabilities
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<LinkExpression>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+    ) -> FieldResult<Vec<DecoratedLinkExpression>> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .get_links(&query)
+            .await?)
     }
 
     async fn perspective_query_prolog(
@@ -368,16 +336,15 @@ impl Query {
         query: String,
         uuid: String,
     ) -> FieldResult<String> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "perspectiveQueryProlog", {{ query: '{}', uuid: "{}" }}, {{ capabilities: {} }}))"#,
-            query, uuid, capabilities
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        Ok(prolog_resolution_to_string(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .prolog_query(query)
+            .await?))
     }
 
     async fn perspective_snapshot(
@@ -385,32 +352,33 @@ impl Query {
         context: &RequestContext,
         uuid: String,
     ) -> FieldResult<Perspective> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspectiveSnapshot", {{ uuid: "{}" }}, {{ capabilities: {} }}))"#,
-                uuid,
-                capabilities
-            ))
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let all_links = get_perspective(&uuid)
+            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .get_links(&LinkQuery::default())
             .await?;
-        let result: JsResultType<Perspective> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        Ok(Perspective {
+            links: all_links,
+        })
     }
 
     async fn perspectives(&self, context: &RequestContext) -> FieldResult<Vec<PerspectiveHandle>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "perspectives", {{ capabilities: {} }}))"#,
-                capabilities
-            ))
-            .await?;
-        let result: JsResultType<Vec<PerspectiveHandle>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec!["*".into()]),
+        )?;
+
+        let mut result = Vec::new();
+        for p in all_perspectives().iter() {
+            let handle = p.persisted.lock().await.clone();
+            result.push(handle);
+        }
+        Ok(result)
     }
 
     async fn runtime_friend_status(
@@ -418,70 +386,87 @@ impl Query {
         context: &RequestContext,
         did: String,
     ) -> FieldResult<PerspectiveExpression> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
+        )?;
+
+        let friends = RuntimeService::with_global_instance(|runtime_service| {
+            runtime_service.get_friends()
+        });
+
+        if !friends.contains(&did.clone()) {
+            log::error!("Friend not found: {}", did);
+
+            return Ok(PerspectiveExpression::default());
+        }
+
         let mut js = context.js_handle.clone();
         let result = js
             .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriendStatus", {{ did: "{}" }}, {{ capabilities: {} }}))"#,
+                r#"JSON.stringify(await core.friendsDirectMessageLanguage("{}") ? await (await core.friendsDirectMessageLanguage("{}")).directMessageAdapter.status()  : null)"#,
                 did,
-                capabilities
+                did
             ))
             .await?;
-        let result: JsResultType<PerspectiveExpression> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let result: PerspectiveExpression = serde_json::from_str(&result)?;
+        Ok(result)
     }
 
     async fn runtime_friends(&self, context: &RequestContext) -> FieldResult<Vec<String>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeFriends", {{ capabilities: {} }}))"#,
-                capabilities
-            ))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(&context.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)?;
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            let friends = runtime_service.get_friends();
+            Ok(friends)
+        })
     }
 
     async fn runtime_hc_agent_infos(&self, context: &RequestContext) -> FieldResult<String> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeHcAgentInfos", {{ capabilities: {} }}))"#, capabilities))
-            .await?;
-        let result: JsResultType<String> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
+        )?;
+
+        let interface = get_holochain_service().await;
+        let infos = interface.agent_infos().await?;
+
+        let encoded_infos: Vec<String> = infos
+            .iter()
+            .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))
+            .collect();
+
+        Ok(serde_json::to_string(&encoded_infos)?)
     }
 
-    async fn runtime_info(&self, context: &RequestContext) -> FieldResult<RuntimeInfo> {
-        let _capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(await core.callResolver("Query", "runtimeInfo", null))"#,
-            ))
-            .await?;
-        let result: JsResultType<RuntimeInfo> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+    async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {
+        AgentService::with_global_instance(|agent_service| {
+            agent_service.agent.clone().ok_or(FieldError::new(
+                "Agent not found",
+                Value::null(),
+            ))?;
+
+            Ok(RuntimeInfo {
+                is_initialized: agent_service.is_initialized(),
+                is_unlocked: agent_service.is_unlocked(),
+                ad4m_executor_version: env!("CARGO_PKG_VERSION").to_string(),
+            })
+        })
     }
 
     async fn runtime_known_link_language_templates(
         &self,
         context: &RequestContext,
     ) -> FieldResult<Vec<String>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(r#"JSON.stringify(await core.callResolver("Query", "runtimeKnownLinkLanguageTemplates", {{ capabilities: {} }}))"#, capabilities))
-            .await?;
-        let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
+        )?;
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            let languages = runtime_service.get_know_link_languages();
+            Ok(languages)
+        })
     }
 
     async fn runtime_message_inbox(
@@ -489,39 +474,32 @@ impl Query {
         context: &RequestContext,
         filter: Option<String>,
     ) -> FieldResult<Vec<PerspectiveExpression>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
+        check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
         let filter_str = filter
             .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
             .unwrap_or_else(|| String::from("{ filter: null }"));
         let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageInbox", {}, {{ capabilities: {} }}))"#,
-            filter_str, capabilities
+             r#"JSON.stringify(await (await core.myDirectMessageLanguage()).directMessageAdapter.inbox("{}"))"#,
+            filter_str,
         );
         let mut js = context.js_handle.clone();
         let result = js.execute(script).await?;
-        let result: JsResultType<Vec<PerspectiveExpression>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        let result: Vec<PerspectiveExpression> = serde_json::from_str(&result)?;
+        println!("llllll inbox result: {:?}", result);
+        Ok(result)
     }
 
     async fn runtime_message_outbox(
         &self,
         context: &RequestContext,
-        filter: Option<String>,
+        _filter: Option<String>,
     ) -> FieldResult<Vec<SentMessage>> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let filter_str = filter
-            .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
-            .unwrap_or_else(|| String::from("{ filter: null }"));
-        let script = format!(
-            r#"JSON.stringify(await core.callResolver("Query", "runtimeMessageOutbox", {}, {{ capabilities: {} }}))"#,
-            filter_str, capabilities
-        );
-        let mut js = context.js_handle.clone();
-        let result = js.execute(script).await?;
-        let result: JsResultType<Vec<SentMessage>> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(&context.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)?;
+
+        RuntimeService::with_global_instance(|runtime_service| {
+            let outbox = runtime_service.get_outbox();
+            Ok(outbox)
+        })
     }
 
     async fn runtime_verify_string_signed_by_did(
@@ -529,24 +507,27 @@ impl Query {
         context: &RequestContext,
         data: String,
         did: String,
-        did_signing_key_id: String,
+        _did_signing_key_id: String,
         signed_data: String,
     ) -> FieldResult<bool> {
-        let capabilities =
-            get_capabilies(context.js_handle.clone(), context.capability.clone()).await?;
-        let mut js = context.js_handle.clone();
-        let result = js
-            .execute(format!(
-                r#"JSON.stringify(
-                await core.callResolver("Query", "runtimeVerifyStringSignedByDid",
-                    {{ data: "{}", did: "{}", didSigningKeyId: "{}", signedData: "{}" }},
-                    {{ capabilities: {} }}
-                )
-            )"#,
-                data, did, did_signing_key_id, signed_data, capabilities
-            ))
-            .await?;
-        let result: JsResultType<bool> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        signatures::verify_string_signed_by_did(&did, &data, &signed_data)
+            .map_err(|e| e.to_string())
+            .map_err(|e| coasys_juniper::FieldError::new(e, coasys_juniper::Value::Null))
+    }
+
+
+    async fn runtime_notifications(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<Vec<Notification>> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        let notifications_result = Ad4mDb::with_global_instance(|db| {
+            db.get_notifications()
+        });
+        if let Err(e) = notifications_result {
+            return Err(FieldError::new(e.to_string(), Value::null()));
+        }
+        Ok(notifications_result.unwrap())
     }
 }

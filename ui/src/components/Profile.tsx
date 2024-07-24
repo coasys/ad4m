@@ -79,6 +79,14 @@ function Profile() {
     }
   }
 
+  const onOpenDApp = async () => {
+    try {
+      await invoke("open_dapp")
+    } catch (error) {
+      console.log(error)
+    }
+  }
+
   return (
     <div>
       <j-popover placement="bottom">
@@ -97,6 +105,10 @@ function Profile() {
           <j-menu-item onClick={() => onCheckUpdate()}>
             Check updates
             <j-icon size="xs" slot="start" name="arrow-repeat"></j-icon>
+          </j-menu-item>
+          <j-menu-item onClick={() => onOpenDApp()}>
+            Connect Web3
+            <j-icon size="xs" slot="start" name="link"></j-icon>
           </j-menu-item>
           <j-menu-item onClick={() => setShowProfileInfo(true)}>
             Profile details
@@ -182,7 +194,7 @@ function Profile() {
               <j-text>{`${profile.firstName} ${profile.lastName}`}</j-text>
             </j-box>
 
-            <j-button onClick={() => setShowProfileInfo(false)}>Close</j-button>
+            <j-button variant="secondary" onClick={() => setShowProfileInfo(false)}>Close</j-button>
           </j-box>
         </j-modal>
       )}

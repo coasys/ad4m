@@ -16,6 +16,10 @@ pub enum AgentFunctions {
         /// Agent passphrase
         #[arg(short, long)]
         passphrase: Option<String>,
+
+        /// Agent passphrase
+        #[arg(short, long)]
+        holochain: Option<bool>,
     },
     /// Lookup agent by DID
     ByDID {
@@ -87,14 +91,20 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
                 println!("Agent locked");
             }
         }
-        AgentFunctions::Unlock { passphrase } => {
+        AgentFunctions::Unlock { passphrase, holochain } => {
             let pp = if passphrase.is_some() {
                 passphrase.unwrap()
             } else {
                 readline_masked("Passphrase: ")?
             };
 
-            let result = ad4m_client.agent.unlock(pp).await?;
+            let holo = if holochain.is_some() {
+                holochain.unwrap()
+            } else {
+                true
+            };
+
+            let result = ad4m_client.agent.unlock(pp, holo).await?;
             if let Some(error) = result.error {
                 bail!(error);
             } else {

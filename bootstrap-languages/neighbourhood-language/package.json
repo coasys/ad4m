@@ -1,6 +1,5 @@
 {
-  "name": "@perspect3vism/neighbourhood-language",
-  "version": "0.7.1",
+  "name": "@coasys/neighbourhood-language",
   "description": "This is a Language for storing AD4M neighbourhood objects",
   "main": "index.js",
   "scripts": {
@@ -8,5 +7,6 @@
     "build": "deno run --allow-all esbuild.ts"
   },
   "author": "joshuadparkin@gmail.com",
-  "license": "ISC"
+  "license": "ISC",
+  "version": "0.10.0-rc2"
 }

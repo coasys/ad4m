@@ -1,0 +1,12 @@
+{
+  "name": "@coasys/centralized-file-storage",
+  "version": "0.7.1",
+  "description": "This is a Language for storing AD4M file objects",
+  "main": "index.js",
+  "scripts": {
+    "test-disabled": "echo \"No file language integration tests\"",
+    "build": "deno run --allow-all esbuild.ts"
+  },
+  "author": "joshuadparkin@gmail.com",
+  "license": "ISC"
+}

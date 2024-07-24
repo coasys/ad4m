@@ -8,7 +8,7 @@ This package makes it easy for AD4M apps to connect to a local or remote AD4M ex
 
 ## Installation
 
-`npm install -s @perspect3vism/ad4m-connect`
+`npm install -s @coasys/ad4m-connect`
 
 ## Properties
 
@@ -30,7 +30,7 @@ This package makes it easy for AD4M apps to connect to a local or remote AD4M ex
 ## In the Browser
 
 ```js
-import Ad4mConnectUI from "@perspect3vism/ad4m-connect";
+import Ad4mConnectUI from "@coasys/ad4m-connect";
 
 const ui = Ad4mConnect({
   appName: "Example",
@@ -57,7 +57,7 @@ ui.connect().then((client) => {
 Call ad4mConnect with parameters of your app:
 
 ```js
-const { ad4mConnect } = require("@perspect3vism/ad4m-connect/electron");
+const { ad4mConnect } = require("@coasys/ad4m-connect/electron");
 
 ad4mConnect({
   // Provide the name of your app to be displayed in the dialog
@@ -90,3 +90,34 @@ ad4mConnect({
     process.exit(0);
   });
 ```
+
+# Extra steps to be used in capacitor:
+
+- On Android
+```diff
+<?xml version="1.0" encoding="utf-8"?>
+<manifest
+  xmlns:android="http://schemas.android.com/apk/res/android"
++  xmlns:tools="http://schemas.android.com/tools"
+  package="com.example">
+
+  <application
++    android:hardwareAccelerated="true"
+  >
+  </application>
+
++  <uses-permission android:name="android.permission.CAMERA" />
+
++  <uses-sdk tools:overrideLibrary="com.google.zxing.client.android" />
+</manifest>
+```
+
+- On IOs
+```diff
+<dict>
++  <key>NSCameraUsageDescription</key>
++  <string>To be able to scan barcodes</string>
+</dict>
+```
+
+- Then run `npx cap sync` & `npx cap build`

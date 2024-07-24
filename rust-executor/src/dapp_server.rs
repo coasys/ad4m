@@ -1,62 +1,29 @@
-use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::Ipv4Addr;
+use std::path::Path;
 
-use http_body_util::Full;
-use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
-use log::info;
+use rocket::fs::FileServer;
+use rocket::Config;
+use include_dir::{include_dir, Dir};
 
-use rust_embed::*;
+const DAPP: Dir = include_dir!("dapp/dist");
 
-#[derive(RustEmbed)]
-#[folder = "dapp/"]
-struct Asset;
+pub(crate) async fn serve_dapp(port: u16, app_dir: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config = Config {
+        port,
+        address: Ipv4Addr::new(127, 0, 0, 1).into(),
+        ..Config::debug_default()
+    };
 
-
-async fn serve_file(req: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-    let path = req.uri().path();
-    let path_clone = path.clone().replace("/", "");
-    let mut base = path_clone.as_str();
-
-    if base == "" {
-        base = "index.html";
+    let dir = Path::new(&app_dir).join("dapp");
+    if !dir.exists() {
+        DAPP.extract(dir.clone())?;
     }
 
-    match Asset::get(base) {
-        Some(content) => {
-            let response = Response::new(Full::new(Bytes::from(content.data.into_owned())));
-            Ok(response)
-        },
-        None => {
-            let response = Response::new(Full::new(Bytes::from("File not found")));
-            Ok(response)
-        },
-    }
-}
+    rocket::build()
+        .configure(&config)
+        .mount("/", FileServer::from(dir.to_str().expect("Failed to convert path to string")))
+        .launch()
+        .await?;
 
-pub(crate) async fn serve_dapp(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-
-    let listener = TcpListener::bind(addr).await?;
-
-    info!("Listening dapp on http://{}", addr);
-
-    loop {
-        let (stream, _) = listener.accept().await?;
-
-        let io = TokioIo::new(stream);
-
-        tokio::task::spawn(async move {
-            if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service_fn(serve_file))
-                .await
-            {
-                println!("Error serving connection: {:?}", err);
-            }
-        });
-    }
+    Ok(())
 }

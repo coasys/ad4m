@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/file-storage",
+  "name": "@coasys/file-storage",
   "version": "0.0.1",
   "description": "An AD4M Language for file storage leveraging a holochain DNA",
   "main": "index.js",
@@ -12,16 +12,15 @@
     "compile-dna": "cd hc-dna && ./build.sh && cd ..",
     "compile-dna-windows": "cd hc-dna && powershell -ExecutionPolicy Bypass -File ./build.ps1 && cd ..",
     "build": "run-script-os",
-    "build:linux": "yarn compile-dna && yarn build:common",
-    "build:macos": "yarn compile-dna && yarn build:common",
-    "build:windows": "yarn compile-dna-windows && yarn build:common",
-    "build:common": "yarn rollup-dna && yarn rollup-icons && yarn rollup-expression-ui && deno run --allow-all esbuild.ts"
+    "build:linux": "pnpm compile-dna && pnpm build:common",
+    "build:macos": "pnpm compile-dna && pnpm build:common",
+    "build:windows": "pnpm compile-dna-windows && pnpm build:common",
+    "build:common": "pnpm rollup-dna && pnpm rollup-icons && pnpm rollup-expression-ui && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@perspect3vism/ad4m": "*",
-    "@perspect3vism/ad4m-test": "*",
+    "@coasys/ad4m": "*",
     "@perspect3vism/rollup-plugin-dna": "^0.0.2",
     "@rollup/plugin-commonjs": "^14.0.0",
     "@rollup/plugin-node-resolve": "^8.0.0",
@@ -29,6 +28,7 @@
     "@tsconfig/svelte": "^1.0.0",
     "@types/express": "^4.17.8",
     "@types/uuid": "9.0.1",
+    "@types/node": "^18.0.0",
     "browserify": "^17.0.0",
     "pako": "2.1.0",
     "rollup": "^2.3.4",

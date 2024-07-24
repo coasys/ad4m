@@ -2,11 +2,11 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
-    instanceQuery, Subject, subjectProperty,
-    subjectCollection, subjectFlag,
+    InstanceQuery, Subject, SubjectProperty,
+    SubjectCollection, SubjectFlag,
     SDNAClass,
     SubjectEntity,
-} from "@perspect3vism/ad4m";
+} from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
 import path from "path";
@@ -70,7 +70,7 @@ describe("Prolog + Literals", () => {
             expect(classes.length).to.equal(0)
 
             let sdna = readFileSync("./sdna/subject.pl").toString()
-            await perspective.setSdna(sdna)
+            await perspective.addSdna("Todo", sdna, "subject_class")
 
             let retrievedSdna = await perspective.getSdna()
             expect(retrievedSdna).to.deep.equal([sdna])
@@ -263,18 +263,18 @@ describe("Prolog + Literals", () => {
             })
             class Message {
                 //@ts-ignore
-                @subjectFlag({
+                @SubjectFlag({
                     through: "ad4m://type",
                     value: "ad4m://message"
                 })
                 type: string = ""
 
                 //@ts-ignore
-                @instanceQuery()
+                @InstanceQuery()
                 static async all(perspective: PerspectiveProxy): Promise<Message[]> { return [] }
 
                 //@ts-ignore
-                @subjectProperty({
+                @SubjectProperty({
                     through: "todo://state",
                     initial: "todo://ready",
                     writable: true,
@@ -303,20 +303,20 @@ describe("Prolog + Literals", () => {
                 // isSubjectInstance = [hasLink("todo://state")]
 
                 //@ts-ignore
-                @instanceQuery()
+                @InstanceQuery()
                 static async all(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @instanceQuery({where: {state: "todo://ready"}})
+                @InstanceQuery({where: {state: "todo://ready"}})
                 static async allReady(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @instanceQuery({where: { state: "todo://done" }})
+                @InstanceQuery({where: { state: "todo://done" }})
                 static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @instanceQuery({condition: 'triple("ad4m://self", _, Instance)'})
+                @InstanceQuery({condition: 'triple("ad4m://self", _, Instance)'})
                 static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
                 //@ts-ignore
-                @subjectProperty({
+                @SubjectProperty({
                     through: "todo://state",
                     initial:"todo://ready",
                     writable: true,
@@ -325,36 +325,36 @@ describe("Prolog + Literals", () => {
                 state: string = ""
 
                 //@ts-ignore
-                @subjectProperty({
+                @SubjectProperty({
                     through: "todo://has_title",
                     writable: true,
                     resolveLanguage: "literal"
                 })
                 title: string = ""
 
-                @subjectProperty({
+                @SubjectProperty({
                     getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
                 })
                 isLiked: boolean = false
 
                 //@ts-ignore
-                @subjectCollection({ through: "todo://comment" })
+                @SubjectCollection({ through: "todo://comment" })
                 // @ts-ignore
                 comments: string[] = []
 
                 //@ts-ignore
-                @subjectCollection({ through: "flux://entry_type" })
+                @SubjectCollection({ through: "flux://entry_type" })
                 entries: string[] = []
 
                 //@ts-ignore
-                @subjectCollection({
+                @SubjectCollection({
                     through: "flux://entry_type",
                     where: { isInstance: Message }
                 })
                 messages: string[] = []
 
                 //@ts-ignore
-                @subjectCollection({
+                @SubjectCollection({
                     through: "flux://entry_type",
                     where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
                 })
@@ -363,7 +363,7 @@ describe("Prolog + Literals", () => {
 
             it("should generate correct SDNA from a JS class", async () => {
                 // @ts-ignore
-                let sdna = Todo.generateSDNA()
+                const { name, sdna } = Todo.generateSDNA();
 
                 const regExp = /\("Todo", ([^)]+)\)/;
                 const matches = regExp.exec(sdna);
@@ -387,6 +387,7 @@ describe("Prolog + Literals", () => {
                 expect(todo2).to.have.property("comments")
                 // @ts-ignore
                 await todo.setState("todo://review")
+                await sleep(1000)
                 expect(await todo.state).to.equal("todo://review")
                 expect(await todo.comments).to.be.empty
 
@@ -401,7 +402,7 @@ describe("Prolog + Literals", () => {
                 expect(todos.length).to.equal(3)
             })
 
-            it("can retrieve all mathching instance through instanceQuery(where: ..)", async () => {
+            it("can retrieve all mathching instance through InstanceQuery(where: ..)", async () => {
                 let todos = await Todo.allReady(perspective!)
                 expect(todos.length).to.equal(1)
                 expect(await todos[0].state).to.equal("todo://ready")
@@ -411,7 +412,7 @@ describe("Prolog + Literals", () => {
                 expect(await todos[0].state).to.equal("todo://done")
             })
 
-            it("can retrieve matching instance through instanceQuery(condition: ..)", async () => {
+            it("can retrieve matching instance through InstanceQuery(condition: ..)", async () => {
                 let todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(0)
 
@@ -447,7 +448,7 @@ describe("Prolog + Literals", () => {
                     name: "Test"
                 })
                 class Test {
-                    @subjectProperty({through: "test://test_numer"})
+                    @SubjectProperty({through: "test://test_numer"})
                     number: number = 0
                 }
 
@@ -496,7 +497,8 @@ describe("Prolog + Literals", () => {
             describe("with Message subject class registered", () => {
                 before(async () => {
                     // @ts-ignore
-                    perspective!.addSdna(Message.generateSDNA())
+                    const { name, sdna } = Message.generateSDNA();
+                    perspective!.addSdna(name, sdna, "subject_class")
                 })
 
                 it("can find instances through the exact flag link", async() => {
@@ -548,25 +550,32 @@ describe("Prolog + Literals", () => {
                 })
                 class Recipe extends SubjectEntity {
                     //@ts-ignore
-                    @subjectFlag({
+                    @SubjectFlag({
                         through: "ad4m://type",
                         value: "ad4m://recipe"
                     })
                     type: string = ""
 
                     //@ts-ignore
-                    @subjectProperty({
+                    @SubjectProperty({
                         through: "recipe://name",
                         writable: true,
                     })
                     name: string = ""
 
+                    // @ts-ignore
+                    @SubjectProperty({
+                        through: "recipe://boolean",
+                        writable: true,
+                    })
+                    booleanTest: boolean = false
+
                     //@ts-ignore
-                    @subjectCollection({ through: "recipe://entries" })
+                    @SubjectCollection({ through: "recipe://entries" })
                     entries: string[] = []
 
                     // @ts-ignore
-                    @subjectCollection({
+                    @SubjectCollection({
                         through: "recipe://entries",
                         where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
                     })
@@ -574,22 +583,31 @@ describe("Prolog + Literals", () => {
                     ingredients: [];
 
                     //@ts-ignore
-                    @subjectCollection({ through: "recipe://comment" })
+                    @SubjectCollection({ through: "recipe://comment" })
                     // @ts-ignore
                     comments: string[] = []
 
                     //@ts-ignore
-                    @subjectProperty({
+                    @SubjectProperty({
                         through: "recipe://local",
                         writable: true,
                         local: true
                     })
                     local: string = ""
+
+                    @SubjectProperty({
+                        through: "recipe://resolve",
+                        writable: true,
+                        resolveLanguage: "literal"
+                    })
+                    resolve: string = ""
+
                 }
 
                 before(async () => {
                     // @ts-ignore
-                    perspective!.addSdna(Recipe.generateSDNA())
+                    const { name, sdna } = Recipe.generateSDNA();
+                    perspective!.addSdna(name, sdna, 'subject_class')
                 })
 
                 it("save() & get()", async () => {
@@ -597,6 +615,7 @@ describe("Prolog + Literals", () => {
                     const recipe = new Recipe(perspective!, root)
 
                     recipe.name = "recipe://test";
+                    recipe.booleanTest = false;
 
                     await recipe.save();
 
@@ -605,6 +624,7 @@ describe("Prolog + Literals", () => {
                     await recipe2.get();
 
                     expect(recipe2.name).to.equal("recipe://test")
+                    expect(recipe2.booleanTest).to.equal(false)
                 })
 
                 it("update()", async () => {
@@ -641,6 +661,7 @@ describe("Prolog + Literals", () => {
                     const recipe2 = new Recipe(perspective!, root);
 
                     await recipe2.get();
+                    console.log("comments:", recipe2.comments)
 
                     expect(recipe2.comments.length).to.equal(2)
                 })
@@ -669,6 +690,16 @@ describe("Prolog + Literals", () => {
 
                     expect(links!.length).to.equal(1)
                     expect(links![0].status).to.equal('LOCAL')
+                })
+
+                it("query()", async () => {
+                    let recipes = await Recipe.query(perspective!, { page: 1, size: 2 });
+
+                    expect(recipes.length).to.equal(2)
+
+                    recipes = await Recipe.query(perspective!, { page: 2, size: 1 });
+
+                    expect(recipes.length).to.equal(1)
                 })
 
                 it("delete()", async () => {
@@ -705,6 +736,22 @@ describe("Prolog + Literals", () => {
                     await recipe2.get();
 
                     expect(recipe2.ingredients.length).to.equal(1)
+                })
+
+                it("can implement the resolveLanguage property type", async () => {
+                    let root = Literal.from("Active record implementation test resolveLanguage").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.resolve = "Test name literal";
+
+                    await recipe.save();
+                    await recipe.get();
+
+                    //@ts-ignore
+                    let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
+                    expect(links.length).to.equal(1)
+                    let literal = Literal.fromUrl(links[0].data.target).get()
+                    expect(literal.data).to.equal(recipe.resolve)
                 })
             })
         })

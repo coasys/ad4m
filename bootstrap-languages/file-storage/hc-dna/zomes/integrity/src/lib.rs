@@ -27,12 +27,12 @@ pub struct FileExpression {
     pub data: FileMetadata,
 }
 
-#[hdk_entry_defs]
+#[hdk_entry_types]
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     FileExpression(FileExpression),
 
-    #[entry_def(visibility = "public")]
+    #[entry_type(visibility = "public")]
     FileChunk(FileChunk),
 }

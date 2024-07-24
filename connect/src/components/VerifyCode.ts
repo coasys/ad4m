@@ -1,12 +1,12 @@
 import { html } from "lit";
 
-export default function Request({ code, changeState, verifyCode, changeCode }) {
+export default function Request({ code, changeState, verifyCode, changeCode, isHosting, verifyCodeError }) {
   return html`
     <div class="items">
       <div class="text-center">
-        <div class="heading">Please check Ad4m</div>
+        <div class="heading">${isHosting ? "Please check your emails for the 2FA security code that was sent from the ADAM hosting service" : "Please check your ADAM Launcher"}</div>
         <p class="body">
-          Please check AD4M, confirm the request there and enter the 6-digit
+          ${isHosting ? "Please check your emails for the 2FA security code that was sent from the ADAM hosting service" : "Please check your ADAM Launcher"}, confirm the request there and enter the 6-digit
           security code below.
         </p>
       </div>
@@ -19,6 +19,7 @@ export default function Request({ code, changeState, verifyCode, changeCode }) {
           value=${code}
           @change=${(e: any) => changeCode(e.target.value)}
         />
+        ${verifyCodeError ? html`<p class="error">${verifyCodeError}</p>` : ""}
       </div>
       <div class="buttons">
         <button

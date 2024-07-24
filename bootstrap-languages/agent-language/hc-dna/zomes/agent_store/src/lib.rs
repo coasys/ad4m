@@ -26,7 +26,7 @@ pub fn create_agent_expression(agent_expression: AgentExpression) -> ExternResul
         did_hash,
         agent_expression_hash,
         LinkTypes::ProfileLink,
-        LinkTag::from("".as_bytes().to_owned()),
+        LinkTag::new("profile"),
     )?;
 
     Ok(())
@@ -36,7 +36,7 @@ pub fn create_agent_expression(agent_expression: AgentExpression) -> ExternResul
 pub fn get_agent_expression(did: Did) -> ExternResult<Option<AgentExpression>> {
     let expression_links = get_latest_link(
         hash_entry(did)?,
-        Some(LinkTag::from("".as_bytes().to_owned())),
+        Some(LinkTag::new("profile")),
     )
     .map_err(|error| err(format!("{}", error).as_ref()))?;
 

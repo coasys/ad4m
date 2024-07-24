@@ -6,7 +6,15 @@ pub fn data_path() -> PathBuf {
     home_dir().expect("Could not get home dir").join(".ad4m")
 }
 
+pub fn data_dev_path() -> PathBuf {
+    home_dir().expect("Could not get home dir").join(".ad4m-dev")
+}
+
 pub fn log_path() -> PathBuf {
+    data_path().join("ad4m.log")
+}
+
+pub fn log_dev_path() -> PathBuf {
     data_path().join("ad4m.log")
 }
 
@@ -22,7 +30,7 @@ pub fn app_url() -> String {
 
 #[cfg(feature = "custom-protocol")]
 pub fn app_tray_message_url() -> String {
-    "index.html/tray_message".to_string()
+    "tray.html".to_string()
 }
 
 #[cfg(not(feature = "custom-protocol"))]

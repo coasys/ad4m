@@ -1,5 +1,5 @@
 const { app } = require("electron");
-const { ad4mConnect } = require("@perspect3vism/ad4m-connect/electron");
+const { ad4mConnect } = require("@coasys/ad4m-connect/electron");
 
 console.log({ ad4mConnect });
 

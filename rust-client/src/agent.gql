@@ -108,8 +108,8 @@ mutation Lock($passphrase: String!) {
   }
 }
 
-mutation Unlock($passphrase: String!) {
-  agentUnlock(passphrase: $passphrase) {
+mutation Unlock($passphrase: String!, $holochain: Boolean!) {
+  agentUnlock(passphrase: $passphrase, holochain: $holochain) {
     isInitialized
     isUnlocked
     did

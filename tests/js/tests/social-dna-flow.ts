@@ -1,6 +1,7 @@
-import { Link, LinkQuery, Literal } from "@perspect3vism/ad4m";
+import { Link, LinkQuery, Literal } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { expect } from "chai";
+import { sleep } from "../utils/utils";
 
 export default function socialDNATests(testContext: TestContext) {
     return  () => {
@@ -31,18 +32,15 @@ export default function socialDNATests(testContext: TestContext) {
 
                 const perspective = await ad4mClient.perspective.add("sdna-test");
                 expect(perspective.name).to.be.equal("sdna-test");
-            
-                await perspective.add(new Link({
-                    source: 'ad4m://self', 
-                    predicate: 'ad4m://has_zome',
-                    target: Literal.from(sdna.join('\n')).toUrl(),
-                }))
 
-                let sDNAFacts = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "ad4m://self", predicate: "ad4m://has_zome"}));
+                await perspective.addSdna("Todo", sdna.join('\n'), "flow");
+                
+
+                let sDNAFacts = await ad4mClient!.perspective.queryLinks(perspective.uuid, new LinkQuery({source: "ad4m://self", predicate: "ad4m://has_flow"}));
                 expect(sDNAFacts.length).to.be.equal(1);
                 let flows = await perspective.sdnaFlows()
                 expect(flows[0]).to.be.equal('TODO')
-
+                
                 await perspective.add(new Link({source: 'ad4m://self', target: 'test-lang://1234'}))
                 let availableFlows = await perspective.availableFlows('test-lang://1234')
                 expect(availableFlows.length).to.be.equal(1)
@@ -69,6 +67,7 @@ export default function socialDNATests(testContext: TestContext) {
 
 
                 await perspective.runFlowAction('TODO', 'test-lang://1234', "Start")
+                await sleep(100)
                 todoState = await perspective.flowState('TODO', 'test-lang://1234')
                 expect(todoState).to.be.equal(0.5)
 
@@ -87,6 +86,7 @@ export default function socialDNATests(testContext: TestContext) {
 
 
                 await perspective.runFlowAction('TODO', 'test-lang://1234', "Finish")
+                await sleep(100)
                 todoState = await perspective.flowState('TODO', 'test-lang://1234')
                 expect(todoState).to.be.equal(1)
 

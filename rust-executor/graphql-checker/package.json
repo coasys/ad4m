@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/graphql-checker",
+  "name": "@coasys/graphql-checker",
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",

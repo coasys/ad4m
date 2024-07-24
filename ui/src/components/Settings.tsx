@@ -1,4 +1,4 @@
-import { Agent, Literal } from "@perspect3vism/ad4m";
+import { Agent, Literal } from "@coasys/ad4m";
 import { useContext, useEffect, useState } from "react";
 import {
   PREDICATE_FIRSTNAME,
@@ -15,6 +15,7 @@ import { AgentContext } from "../context/AgentContext";
 import ActionButton from "./ActionButton";
 import { appWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/api/shell";
+import { writeText } from '@tauri-apps/api/clipboard'
 
 type Props = {
   did: String;
@@ -57,21 +58,33 @@ const Profile = (props: Props) => {
     methods: { toggleExpertMode },
   } = useContext(Ad4minContext);
 
+  const [appState, setAppState] = useState({} as any);
+
   const [trustedAgents, setTrustedAgents] = useState<any[]>([]);
 
   const [trustedAgentModalOpen, settrustedAgentModalOpen] = useState(false);
 
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
+  const [showAgentSelection, setShowAgentSelection] = useState(false);
+  const [createAgent, setCreateAgent] = useState(false);
+  const [newAgentName, setNewAgentName] = useState("");
+  const [file, setFile] = useState<File | null>(null);
 
   const [proxy, setProxy] = useState("");
 
   const [qrcodeModal, setQRCodeModal] = useState(false);
+
+  const [copied, setCopied] = useState(false);
 
   const [password, setPassword] = useState("");
 
   const [showPassword, setShowPassword] = useState(false);
 
   const [loadingProxy, setLoadingProxy] = useState(false);
+
+  const [showAddHcAgentInfos, setShowAddHcAgentInfos] = useState(false);
+
+  const [addHcAgentInfos, setAddHcAgentInfos] = useState("");
 
   function openLogs() {
     appWindow.emit("copyLogs");
@@ -88,6 +101,11 @@ const Profile = (props: Props) => {
     let { value } = event.target;
     setPassword(value);
   };
+
+  const getAppState = useCallback(async () => {
+    const state = await invoke("get_app_agent_list");
+    setAppState(JSON.parse(state))
+  }, []);
 
   const getTrustedAgents = useCallback(async () => {
     if (url) {
@@ -123,10 +141,31 @@ const Profile = (props: Props) => {
     }
   }, [url]);
 
+  const getAgentInfo = async () => {
+    const info = await client?.runtime.hcAgentInfos();
+
+    console.log("info", info);
+
+    await writeText(info);
+
+    setCopied(true);
+
+    setTimeout(() => {
+      setCopied(false);
+      closeSecretCodeModal();
+    }, 3000);
+  }
+
+  const addAgentInfo = async (info: string) => {
+    await client?.runtime.hcAddAgentInfos(info);
+    setShowAddHcAgentInfos(false);
+  }
+
   useEffect(() => {
     fetchCurrentAgentProfile();
     getTrustedAgents();
-  }, [fetchCurrentAgentProfile, getTrustedAgents]);
+    getAppState();
+  }, [fetchCurrentAgentProfile, getTrustedAgents, getAppState]);
 
   useEffect(() => {
     const getProxy = async () => {
@@ -195,6 +234,19 @@ const Profile = (props: Props) => {
     }
   };
 
+  const creatAgentFunc = async () => {
+    await invoke("add_app_agent_state", {
+      agent: {
+        name: newAgentName,
+        path: `.${newAgentName.toLowerCase()}`,
+        bootstrap: file,
+      }
+    });
+
+    setCreateAgent(false);
+    getAppState();
+  }
+
   return (
     <div>
       <j-box px="500" my="500">
@@ -253,10 +305,47 @@ const Profile = (props: Props) => {
         </j-button>
       </j-box>
 
+      {expertMode && (
+        <div>
+          <j-box px="500" my="500">
+            <j-button
+              onClick={() => {
+                getAgentInfo()
+              }}
+              full
+              variant="secondary"
+            >
+              <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
+              Copy Holochain Agent Info(s)
+            </j-button>
+          </j-box>
+
+          <j-box px="500" my="500">
+            <j-button
+              onClick={() => {
+                setShowAddHcAgentInfos(true)
+              }}
+              full
+              variant="secondary"
+            >
+              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+              Add Holochain Agent Info(s)
+            </j-button>
+          </j-box>
+        </div>
+      )}
+
       <j-box px="500" my="500">
         <j-button onClick={openLogs} full variant="secondary">
           <j-icon size="sm" slot="start" name="clipboard"></j-icon>
           Show logs
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button onClick={() => setShowAgentSelection(true)} full variant="secondary">
+          <j-icon size="sm" slot="start" name="server"></j-icon>
+          Select agent
         </j-button>
       </j-box>
 
@@ -270,6 +359,37 @@ const Profile = (props: Props) => {
           Delete Agent
         </j-button>
       </j-box>
+
+      {showAddHcAgentInfos && (
+        <j-modal
+          open={showAddHcAgentInfos}
+          onToggle={(e: any) => setAddHcAgentInfos(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Add Holochain Agents Info
+              </j-text>
+            </j-box>
+            <j-box pb="500">
+            <j-input
+              placeholder="Encoded Holochain AgentInfo string"
+              label="Input another agent's info string here.."
+              size="lg"
+              required
+              onInput={(e: any) => setAddHcAgentInfos(e.target.value)}
+            ></j-input>
+            <j-box p="400"></j-box>
+            <j-button
+              onClick={() => addAgentInfo(addHcAgentInfos)}
+              full
+              loading={loading}>
+                Add Agent Info
+              </j-button>
+            </j-box>
+          </j-box>
+        </j-modal>
+      )}
 
       {trustedAgentModalOpen && (
         <j-modal
@@ -330,6 +450,87 @@ const Profile = (props: Props) => {
           </j-box>
         </j-modal>
       )}
+
+      {showAgentSelection && (
+        <j-modal
+          size="fullscreen"
+          open={showAgentSelection}
+          onToggle={(e: any) => setShowAgentSelection(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Select agent
+              </j-text>
+            </j-box>
+            <j-text>
+              Disclaimer: After changing the agent you will have to restart the launcher
+              for it to start using the new agent
+            </j-text>
+            <j-box p="200"></j-box>
+            {
+              appState.agent_list.map((agent: any) => (
+                <>
+                  <j-button
+                    full
+                    variant={ agent.path === appState.selected_agent.path ? "primary" : "secondary"}
+                    onClick={() => {
+                      invoke("set_selected_agent", { agent });
+                      getAppState();
+                      setShowAgentSelection(false);
+                    }}
+                  >
+                    {agent.name}
+                  </j-button>
+                  <j-box p="300"></j-box>
+                </>
+              ))
+            }
+            <j-button full onCLick={() => setCreateAgent(true)} variant="secondary">
+              <j-icon name="plus"></j-icon>
+              Add new agent
+            </j-button>
+          </j-box>
+        </j-modal>
+      )}
+
+      {
+        createAgent && (
+          <j-modal
+            open={createAgent}
+            onToggle={(e: any) => setCreateAgent(e.target.open)}
+          >
+            <j-box px="400" py="600">
+              <j-box pb="500">
+                <j-text nomargin size="600" color="black" weight="600">
+                  Create new agent
+                </j-text>
+              </j-box>
+              <j-input
+                placeholder="Agent name"
+                label="Name"
+                size="lg"
+                onInput={(e) => setNewAgentName(e.target.value)}
+                required></j-input>
+                <j-box p="200"></j-box>
+                <j-input
+                  label="Bootstrap file path (absolute path)"
+                  size="lg"
+                  placeholder="ex. /path/to/agent-bootstrap.json"
+                onInput={(e) => setFile(e.target.value)}
+                required
+                ></j-input>
+                <j-box p="200"></j-box>
+                <j-button
+                  variant="primary"
+                  full
+                  onClick={creatAgentFunc}>
+                  Create Agent
+                  </j-button>
+            </j-box>
+          </j-modal>
+        )
+      }
 
       {clearAgentModalOpen && (
         <j-modal

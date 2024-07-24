@@ -1,26 +1,113 @@
 # Changelog
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).  
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
 
 ## unreleased
 
+### Fixed
+- Prolog engine gets respawned when a query caused an error to clean the machine state [PR#483](https://github.com/coasys/ad4m/pull/483)
+- Catch panics in Scryer and handle as error instead of killing the engine thread which caused `channel closed` error in future queries [PR#483](https://github.com/coasys/ad4m/pull/483)
+- Bootstrap seed creation working with cli: `ad4m dev generate-bootstrap` [PR#247](https://github.com/perspect3vism/ad4m/pull/496)
+- Connect capacitor update to include qr code scanning on mobile [PR#497](https://github.com/coasys/ad4m/pull/497)
+- Removed capacitor barcode scanner [PR#502](https://github.com/coasys/ad4m/pull/502)
+- Show an error when the code is wrong. [PR#502](https://github.com/coasys/ad4m/pull/502)
+- Error handling in connect when hosting is not working [PR#502](https://github.com/coasys/ad4m/pull/502)
+
 ### Added
+- Prolog predicates needed in new Flux mention notification trigger:
+ - agent_did/1
+ - remove_html_tags/2
+ - string_includes/2
+ - literal_from_url/3
+ - json_property/3
+[PR#483](https://github.com/coasys/ad4m/pull/483) 
+- Triggered notifications are handled through operating system notifications [PR#483](https://github.com/coasys/ad4m/pull/483)
+
+- App notifications implemented. ADAM apps can register Prolog queries with the executor which will be checked on every perspective change. If the change adds a new match, it will trigger the publishing of a notifications via subscriptions in client interface [PR#475](https://github.com/coasys/ad4m/pull/475), as well as calling a web hook if given [PR#482](https://github.com/coasys/ad4m/pull/482)
+- Support ADAM executor hosting service alpha [PR#474](https://github.com/coasys/ad4m/pull/474)
+- Complete instructions in README [PR#473](https://github.com/coasys/ad4m/pull/473)
 
 ### Changed
- 
+- Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
+- Improved performance of SDNA / SubjectClass functions by moving code from client into executor and saving a lot of client <-> executor roundtrips [PR#480](https://github.com/coasys/ad4m/pull/480)
+- Update color, logo & brand for ADAM launcher. [PR#501](https://github.com/coasys/ad4m/pull/501)
+- Update color, logo & brand for ad4m-connect. [PR#502](https://github.com/coasys/ad4m/pull/502)\
+- Update the verify code header to show "Check Email" if using hosting. [PR#502](https://github.com/coasys/ad4m/pull/502)
+- ad4m.expression.get() handles literal values client-side to avoid roundtrips, can be overridden with optional flag [PR#498](https://github.com/coasys/ad4m/pull/498)
+
+## [0.9.0] - 23/03/2024
+
+### Added
+ - Add ability to get and add Holochain agent infos through launcher [PR#463](https://github.com/coasys/ad4m/pull/463)
+ - Added new packages that provide reusable hooks for `react` & `vue` to interact with ad4m `ad4m-react-hooks` & `ad4m-vue-hooks`. Also updated docs for the hooks [PR#450](https://github.com/coasys/ad4m/pull/450)
+ - Hard-wired Hosted ad4m client `AgentInfo` in the executor. [PR#453](https://github.com/coasys/ad4m/pull/453)
+ - Added ability to handle multiple agents in launcher. [PR#459](https://github.com/coasys/ad4m/pull/459)
+ - Added a way to show & add new `AgentInfo` in launcher. [PR#463](https://github.com/coasys/ad4m/pull/463)
+ - `ad4m-executor` binary prints capability request challange to stdout to enable app hand-shake [PR#471](https://github.com/coasys/ad4m/pull/471)
+
+### Changed
+ - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):
+   - Added back window decorations to splashscreen to not stay in the users way
+   - Separate mandatory password input from optional profile fields and start agent generation early
+   - Show popup making the user aware of the system tray icon
+   - Fixed JScore service in rust crashing on windows
+- Update Holochain to 0.3.0-beta-dev.35 [PR#443](https://github.com/coasys/ad4m/pull/443)
+- Improve readability of logs [PR#443](https://github.com/coasys/ad4m/pull/443)
+- Update Holochain to 0.3.0-beta-dev.37 [PR#449](https://github.com/coasys/ad4m/pull/449)
+- Update cli to correctly show `AgentInfo` in base64 encoded format & add. Also removes the use of jscore for getting the `AgentInfo` [PR#451](https://github.com/coasys/ad4m/pull/451)
+- Expression signing & verification migrated to Rust. [PR#452](https://github.com/coasys/ad4m/pull/452)
+- SDNA imporvements [PR#457](https://github.com/coasys/ad4m/pull/457):
+  - Change SDNA Decorator names to PascalCase
+  - Add validation for decorators.
+  - Improved Docs for sdna & subject classes.
+  - Added typedoc for decorators.
+- Split `ad4m` binary into two seperate binaries `ad4m` which is client & `ad4m-executor` to spawn your executor. [PR#464](https://github.com/coasys/ad4m/pull/464)
+- Updated all cargo dependency to use crates.io package instead of github. [PR#465](https://github.com/coasys/ad4m/pull/465)
+
+### Deprecated
+
+### Removed
+- Removed holochain toggle from Login page in launcher. [PR#467](https://github.com/coasys/ad4m/pull/467)
+
+### Fixed
+- Fix ADAM proxy [PR#442](https://github.com/coasys/ad4m/pull/442) and [PR#446](https://github.com/coasys/ad4m/pull/446)
+- Fixed `p-diff-sync` language to use correct function name `send_remote_signal` instead of `recv_send_remote_signal ` [PR#454](https://github.com/coasys/ad4m/pull/454)
+- SDNA imporvements [PR#457](https://github.com/coasys/ad4m/pull/457):
+  - Fixed value returns as undefined if the property was boolean and set to false in `SubjectEntity.
+  - Fixed links in docs.
+- Fixed flaky integration tests [PR#462](https://github.com/coasys/ad4m/pull/462)
+- Fixed `p-diff-sync`'s Deno incompatibilities [PR#471](https://github.com/coasys/ad4m/pull/471)
+
+## [0.8.0] - 12/12/2023
+
+### Added
+ - Toggle on startup to enable/disable Holochain [#425](https://github.com/coasys/ad4m/pull/425)
+ - New EAS Expression language (Ethereum Attestation Service) [#421](https://github.com/coasys/ad4m/pull/421)
+ - Simple SDNA Governance to ensure multiple SDNAS cannot be set in the same neighbourhood [#422](https://github.com/coasys/ad4m/pull/422)
+ - Ability to wipe agent on login incase password was forgotten [#420](https://github.com/coasys/ad4m/pull/420)
+ - Query method to SubjectEntity to enable pagination [#417](https://github.com/coasys/ad4m/pull/417)
+ - Added override option to ensureSDNASubjectClass [#417](https://github.com/coasys/ad4m/pull/417)
+
+### Changed
+ - Used pnpm as main package manager for project [#421](https://github.com/coasys/ad4m/pull/421)
+ - Upgrade to Holochain 0.3.0-dev.27 [#427](https://github.com/coasys/ad4m/pull/428)
+ - Agent & File storage boostrap languages now use centralized backend by default [#430](https://github.com/coasys/ad4m/pull/430)
+
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+ - DApp server now works and has functioning UI [#421](https://github.com/coasys/ad4m/pull/421)
+ - Reduced CPU consumption of AD4M by up to 90% [#433](https://github.com/coasys/ad4m/pull/433)
 
 ## [0.7.1] - 20/10/2023
 
 ### Added
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -65,7 +152,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Whole ADAM Layer package now runs from a single binary; either ADAM CLI or ADAM Launcher
  - ADAM Languages now expected to be Deno compatible modules; not old ESM node JS
  - JS executor now builds to be a Deno bundle to be consumed by rust-executor
- 
+
 ### Deprecated
 
 ### Removed
@@ -95,7 +182,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Changed
  - Moved code that deals with the IPFS repo lock from JS to Rust, improving (in most cases: unblocking) startup of the Launcher on Windows [PR#392](https://github.com/coasys/ad4m/pull/392)
- 
+
 ### Deprecated
 
 ### Removed
@@ -115,7 +202,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Added local links support to SDNA. [PR#370](https://github.com/perspect3vism/ad4m/pull/370)
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -131,7 +218,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Added
 
 ### Changed
- 
+
 ### Deprecated
 
 ### Removed
@@ -147,7 +234,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Changed
  - ipfs repo.lock now handled in the executor so ad4m-host startups will not have ipfs repo.lock conflicts [PR#333](https://github.com/perspect3vism/ad4m/pull/333)
  - Perspective diff sync now uses mutex locks to ensure its not updating its internal state in conflicting ways [PR#334](https://github.com/perspect3vism/ad4m/pull/334)
- 
+
 ### Deprecated
 
 ### Removed
@@ -171,7 +258,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Improved CI workflow where holochain binaries are always downloaded and used for all tests and builds [PR#325](https://github.com/perspect3vism/ad4m/pull/325)
 
 - Launcher automatically authenticates with the proxy on login. [PR#303](https://github.com/perspect3vism/ad4m/pull/303)
- 
+
 ### Deprecated
 
 ### Removed

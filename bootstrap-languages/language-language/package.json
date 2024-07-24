@@ -1,5 +1,5 @@
 {
-  "name": "@perspect3vism/language-language",
+  "name": "@coasys/language-language",
   "version": "0.4.0",
   "description": "An AD4M Language for storing of language bundles on Cloudflare",
   "main": "index.js",

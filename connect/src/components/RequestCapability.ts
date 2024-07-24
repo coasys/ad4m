@@ -1,6 +1,7 @@
 import { html } from "lit";
 import Logo from "./Logo";
-import { capSentence } from "@perspect3vism/ad4m";
+import { capSentence } from "@coasys/ad4m";
+import AppLogo from "./AppLogo";
 
 export default function CapNotMatchedFirst({
   capabilities,
@@ -21,7 +22,7 @@ export default function CapNotMatchedFirst({
       html`<div class="dialog__connect">
         <img class="dialog__connect-app" src=${appiconpath} alt="Logo" />
         <div class="dialog__connect-check"></div>
-        <div class="dialog__connect-ad4m">${Logo()}</div>
+        <div class="dialog__connect-ad4m">${AppLogo()}</div>
       </div>`}
       <div>
         <p class="text-center"><b>This will allow the developer to:</b></p>

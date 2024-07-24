@@ -21,6 +21,7 @@ import ScanQRCode from "./components/ScanQRCode";
 import Header from "./components/Header";
 import autoBind from "auto-bind";
 import { getForVersion, removeForVersion, setForVersion } from "./utils";
+import Hosting from "./components/Hosting";
 
 export { getAd4mClient } from "./utils";
 
@@ -44,16 +45,16 @@ const styles = css`
   :host {
     --primary-color: #fff;
     --heading-color: #fff;
-    --body-color: #a7a7a7;
-    --success-color: #52d652;
-    --background-color: #000;
+    --body-color: #FFFFFF;
+    --success-color: #88F3B4;
+    --background-color: #131533;
     --start-color: #a4adff;
     --end-color: #d273ff;
-    --gradient: linear-gradient(90deg, var(--start-color), var(--end-color));
+    --gradient: #91E3FD;
   }
 
   .wrapper {
-    font-family: "DM Sans", Helvetica, Arial, sans-serif;
+    font-family: "Bricolage Grotesque", sans-serif;
     position: fixed;
     display: grid;
     place-content: center;
@@ -167,7 +168,7 @@ const styles = css`
 
   .button--secondary {
     background: var(--background-color);
-    border: 1px solid var(--primary-color);
+    border: 1px solid var(--gradient);
     color: var(--primary-color);
   }
 
@@ -312,12 +313,7 @@ const styles = css`
     position: fixed;
     top: 0;
     left: 0;
-    background: linear-gradient(
-      90deg,
-      rgba(2, 0, 36, 1) 0%,
-      rgba(38, 3, 23, 1) 41%,
-      rgba(51, 4, 31, 1) 100%
-    );
+    background: var(--background-color);
     height: 100vh;
     width: 100vw;
     padding: 36px;
@@ -365,6 +361,43 @@ const styles = css`
     }
   }
 
+  .md-ring {
+    display: block;
+    position: relative;
+    width: 30px;
+    height: 30px;
+    margin-right: 10px;
+  }
+  .md-ring div {
+    box-sizing: border-box;
+    display: block;
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    margin: 4px;
+    border: 2px solid var(--primary-color);
+    border-radius: 50%;
+    animation: md-ring 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+    border-color: var(--primary-color) transparent transparent transparent;
+  }
+  .md-ring div:nth-child(1) {
+    animation-delay: -0.45s;
+  }
+  .md-ring div:nth-child(2) {
+    animation-delay: -0.3s;
+  }
+  .md-ring div:nth-child(3) {
+    animation-delay: -0.15s;
+  }
+  @keyframes md-ring {
+    0% {
+      transform: rotate(0deg);
+    }
+    100% {
+      transform: rotate(360deg);
+    }
+  }
+
   .disconnected {
     position: fixed;
     top: 0;
@@ -402,6 +435,7 @@ const styles = css`
   }
 `;
 
+
 @customElement("ad4m-connect")
 export class Ad4mConnectElement extends LitElement {
   static styles = [styles];
@@ -425,6 +459,27 @@ export class Ad4mConnectElement extends LitElement {
   private _isOpen: boolean = false;
 
   @state()
+  private _hostingStep = 0;
+  
+  @state()
+  private _email = "";
+  
+  @state()
+  private _passowrd = "";
+
+  @state()
+  private _passwordError = null;
+
+  @state()
+  private _hostingNotRunningError = null;
+
+  @state()
+  private _verifyCodeError = null;
+
+  @state()
+  private _isHostingLoading = false;
+
+  @state()
   private uiState:
     | "settings"
     | "start"
@@ -432,6 +487,7 @@ export class Ad4mConnectElement extends LitElement {
     | "requestcap"
     | "verifycode"
     | "disconnected"
+    | "hosting"
     | "agentlocked" = "start";
 
   @property({ type: String, reflect: true })
@@ -449,9 +505,12 @@ export class Ad4mConnectElement extends LitElement {
   @property({ type: String, reflect: true })
   capabilities = [];
 
+  @property({ type: Boolean, reflect: true })
+  hosting = false;
+
   // TODO: localstorage doesnt work here
   @property({ type: String })
-  token = getForVersion("ad4murl") || "";
+  token = getForVersion("ad4mToken") || "";
 
   // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
@@ -469,9 +528,21 @@ export class Ad4mConnectElement extends LitElement {
     return this._client.connectionState;
   }
 
+  private injectFont() {
+    const link = document.createElement('link');
+    link.setAttribute("rel", "stylesheet");
+    link.setAttribute(
+      "href",
+      `https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap`
+    );
+    document.head.appendChild(link);
+  }
+
   connectedCallback() {
     super.connectedCallback();
     autoBind(this);
+
+    this.injectFont();
 
     this._isMobile = detectMob();
 
@@ -496,12 +567,52 @@ export class Ad4mConnectElement extends LitElement {
     this.loadFont();
   }
 
-  private async unlockAgent(passcode) {
-    await this._client.ad4mClient.agent.unlock(passcode);
+  private async checkEmail() {
+    try {
+      const exist = await this._client.checkEmail(this._email);
+
+        if (exist) {
+          this._hostingStep = 1;
+        } else {
+          this._hostingStep = 2;
+        }
+      } catch (e) {
+        console.log(e)
+      }
   }
 
-  private verifyCode(code) {
-    this._client.verifyCode(code);
+  private async loginToHosting() {
+    try {
+      await this._client.loginToHosting(this._email, this._passowrd);
+
+      this.changeUIState("connected");
+    } catch (e) {
+      if (e.message.includes("Passwords did not match")) {
+        this._passwordError = "Passwords did not match";
+      } else {
+        this._hostingNotRunningError = 'Hosting is not running';
+      }
+    }
+  }
+
+  private changeEmail(email: string) {
+    this._email = email;
+  } 
+
+  private changePassword(passowrd: string) {
+    this._passowrd = passowrd;
+  }
+
+  private async unlockAgent(passcode, holochain = true) {
+    await this._client.ad4mClient.agent.unlock(passcode, holochain);
+  }
+
+  private async verifyCode(code) {
+    try {
+      await this._client.verifyCode(code);
+    } catch (e) {
+      this._verifyCodeError = "Invalid code";
+    }
   }
 
   private changeUrl(url) {
@@ -514,6 +625,10 @@ export class Ad4mConnectElement extends LitElement {
 
   private changeUIState(state) {
     this.uiState = state;
+  }
+
+  private setIsHostingRunning(val) {
+    this._hostingNotRunningError = val;
   }
 
   private changeIsRemote(bol: boolean) {
@@ -550,6 +665,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private handleConnectionChange(event: ConnectionStates) {
+   console.log(event); 
     if (event === "connected") {
       this.changeUIState("requestcap");
     }
@@ -640,15 +756,39 @@ export class Ad4mConnectElement extends LitElement {
     this._isOpen = val;
   }
 
+  setHostingStep(step: number) {
+    this._hostingStep = step;
+  }
+
   renderViews() {
     if (this.connectionState === "connecting") {
       return Loading();
     }
 
+    if (this.uiState === "hosting") {
+      return Hosting({
+        email: this._email,
+        password: this._passowrd,
+        changeEmail: this.changeEmail,
+        changePassword: this.changePassword,
+        changeState: this.changeUIState,
+        step: this._hostingStep,
+        setHostingStep: this.setHostingStep,
+        login: this.loginToHosting,
+        checkEmail: this.checkEmail,
+        passwordError: this._passwordError,
+        isHostingRunning: this._hostingNotRunningError,
+        setIsHostingRunning: this.setIsHostingRunning,
+      });
+    }
+
     if (this.uiState === "qr") {
       return ScanQRCode({
         changeState: this.changeUIState,
-        onSuccess: (url) => this._client.connect(url),
+        onSuccess: (url) => {
+          this.changeUrl(url);
+          this._client.connect(url)
+        },
         uiState: this.uiState,
       });
     }
@@ -682,6 +822,7 @@ export class Ad4mConnectElement extends LitElement {
         hasClickedDownload: this._hasClickedDownload,
         onDownloaded: this.onDownloaded,
         changeState: this.changeUIState,
+        hosting: this.hosting
       });
     }
 
@@ -692,6 +833,8 @@ export class Ad4mConnectElement extends LitElement {
           changeCode: this.changeCode,
           changeState: this.changeUIState,
           verifyCode: this.verifyCode,
+          isHosting: this._client.isHosting,
+          verifyCodeError: this._verifyCodeError
         });
       }
 
@@ -717,6 +860,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   render() {
+    console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
     if (this._isOpen === false) return null;
     if (this.authState === "authenticated") return null;
     return html`

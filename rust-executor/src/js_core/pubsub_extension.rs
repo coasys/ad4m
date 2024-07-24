@@ -1,15 +1,16 @@
 use std::borrow::Cow;
 
-use deno_core::{error::AnyError, include_js_files, op, Extension, Op};
+use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
 
 use crate::pubsub::get_global_pubsub;
 
-#[op]
-async fn publish(topic: String, data: String) -> Result<(), AnyError> {
+#[op2(async)]
+async fn publish(#[string] topic: String, #[string] data: String) -> Result<(), AnyError> {
     let pub_sub = get_global_pubsub().await;
     pub_sub.publish(&topic, &data).await;
     Ok(())
 }
+
 
 pub fn build() -> Extension {
     Extension {

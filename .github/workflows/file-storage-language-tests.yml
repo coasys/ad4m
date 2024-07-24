@@ -26,7 +26,7 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.73.0
+        toolchain: 1.76.0
 
     - name: Cache cargo
       id: cache-cargo
@@ -44,7 +44,8 @@ jobs:
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
-        cache: 'npm'
+
+    - uses: pnpm/action-setup@v4
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
@@ -52,10 +53,10 @@ jobs:
         deno-version: v1.32.4
 
     - run: rustup target add wasm32-unknown-unknown
-    - run: yarn install
+    - run: pnpm install
     - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: yarn run build-languages
-    - run: cd bootstrap-languages/file-storage/hc-dna/tests && yarn install && yarn run test
+    - run: pnpm run build-languages
+    - run: cd bootstrap-languages/file-storage/hc-dna/tests && pnpm install && pnpm run test
 
   integration:
     name: Integration Test
@@ -72,7 +73,7 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.73.0
+        toolchain: 1.76.0
 
     - name: Cache cargo
       id: cache-cargo
@@ -90,7 +91,8 @@ jobs:
       uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
-        cache: 'npm'
+
+    - uses: pnpm/action-setup@v4
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
@@ -98,7 +100,7 @@ jobs:
         deno-version: v1.32.4
 
     - run: rustup target add wasm32-unknown-unknown
-    - run: yarn install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: yarn run build
-    - run: cd bootstrap-languages/file-storage && yarn run integration-test
+    - run: pnpm install
+    - run: cargo install holochain_cli --version 0.3.0-beta-dev.27 || echo "hc already installed"
+    - run: pnpm run build
+    - run: cd bootstrap-languages/file-storage && pnpm run integration-test

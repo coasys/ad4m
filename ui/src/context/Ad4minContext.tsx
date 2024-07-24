@@ -1,5 +1,6 @@
-import { Ad4mClient, ExceptionType } from "@perspect3vism/ad4m";
-import { ExceptionInfo } from "@perspect3vism/ad4m/lib/src/runtime/RuntimeResolver";
+import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
+import { sendNotification } from "@tauri-apps/api/notification";
+import { ExceptionInfo, Notification as NotificationType } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { createContext, useCallback, useEffect, useState } from "react";
 import {
   buildAd4mClient,
@@ -22,6 +23,7 @@ type State = {
   connected: boolean;
   connectedLaoding: boolean;
   expertMode: boolean;
+  notifications: NotificationType[];
 };
 
 type ContextProps = {
@@ -32,6 +34,7 @@ type ContextProps = {
     handleTrustAgent: (str: string) => void;
     handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void;
     toggleExpertMode: () => void;
+    handleNotification: (notification: NotificationType) => void;
   };
 };
 
@@ -48,6 +51,7 @@ const initialState: ContextProps = {
     connected: false,
     connectedLaoding: true,
     expertMode: getForVersion("expertMode") === "true",
+    notifications: [],
   },
   methods: {
     configureEndpoint: () => null,
@@ -55,6 +59,7 @@ const initialState: ContextProps = {
     handleTrustAgent: () => null,
     handleLogin: () => null,
     toggleExpertMode: () => null,
+    handleNotification: () => null,
   },
 };
 
@@ -128,6 +133,14 @@ export function Ad4minProvider({ children }: any) {
               auth: exception.addon!,
             }));
           }
+
+          if (exception.type === ExceptionType.InstallNotificationRequest) {
+            setState((prev) => ({
+              ...prev,
+              notifications: [...prev.notifications, JSON.parse(exception.addon!)],
+            }));
+          }
+
           Notification.requestPermission().then((response) => {
             if (response === "granted") {
               new Notification(exception.title, { body: exception.message });
@@ -139,6 +152,21 @@ export function Ad4minProvider({ children }: any) {
 
           return null;
         });
+
+        // @ts-ignore
+        client.runtime.addNotificationTriggeredCallback((notification) => {
+          console.log("Notification triggered: ", notification);
+          const match = notification.triggerMatch;
+          const parsed = JSON.parse(match);
+          const firstMatch = parsed[0];
+          const title = firstMatch?.Title
+          sendNotification({
+            icon: notification.notification.appIconPath,
+            title: notification.notification.appName + (title ? ": " + title : ""),
+            body: firstMatch?.Description || "Received a new notification",
+            //body: match
+          });
+        })
       }
     },
     []
@@ -224,6 +252,19 @@ export function Ad4minProvider({ children }: any) {
     }));
   };
 
+  const handleNotification = (notification: NotificationType) => {
+    setState((prev) => {
+      const filteredNotifications = prev.notifications.filter(
+        (n) => n.id !== notification.id
+      );
+
+      return {
+        ...prev,
+        notifications: filteredNotifications,
+      }
+    });
+  }
+
   const configureEndpoint = async (url: string) => {
     if (url) {
       setState((prev) => ({
@@ -270,6 +311,7 @@ export function Ad4minProvider({ children }: any) {
           resetEndpoint,
           handleLogin,
           toggleExpertMode,
+          handleNotification
         },
       }}
     >

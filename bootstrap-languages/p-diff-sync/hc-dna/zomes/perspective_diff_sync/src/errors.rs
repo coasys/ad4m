@@ -1,5 +1,5 @@
 use hdk::prelude::*;
-use holo_hash::error::HoloHashError;
+use holo_hash::HoloHashError;
 use std::convert::Infallible;
 
 #[derive(thiserror::Error, Debug)]

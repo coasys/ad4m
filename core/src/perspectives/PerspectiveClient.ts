@@ -24,16 +24,19 @@ name
 sharedUrl
 state
 neighbourhood {
-    linkLanguage
-    meta {
-        links
-            {
-                author
-                timestamp
-                data { source, predicate, target }
-                proof { valid, invalid, signature, key }
-            }
+    data {
+        linkLanguage
+        meta {
+            links
+                {
+                    author
+                    timestamp
+                    data { source, predicate, target }
+                    proof { valid, invalid, signature, key }
+                }
+        }
     }
+    author
 }
 `
 
@@ -278,6 +281,42 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, link }
         }))
+    }
+
+    async addSdna(uuid: string,  name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom"): Promise<boolean> {
+        return unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $sdnaType: String!) {
+                perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType)
+            }`,
+            variables: { uuid, name, sdnaCode, sdnaType }
+        })).perspectiveAddSdna
+    }
+
+    async executeCommands(uuid: string, commands: string, expression: string, parameters: string): Promise<boolean> {
+        return unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveExecuteCommands($uuid: String!, $commands: String!, $expression: String!, $parameters: String) {
+                perspectiveExecuteCommands(uuid: $uuid, commands: $commands, expression: $expression, parameters: $parameters)
+            }`,
+            variables: { uuid, commands, expression, parameters }
+        })).perspectiveExecuteCommands
+    }
+
+    async createSubject(uuid: string, subjectClass: string, expressionAddress: string): Promise<boolean> {
+        return unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveCreateSubject($uuid: String!, $subjectClass: String!, $expressionAddress: String!) {
+                perspectiveCreateSubject(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress)
+            }`,
+            variables: { uuid, subjectClass, expressionAddress }
+        })).perspectiveCreateSubject
+    }
+
+    async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
+        return unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveGetSubjectData($uuid: String!, $subjectClass: String!, $expressionAddress: String!) {
+                perspectiveGetSubjectData(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress)
+            }`,
+            variables: { uuid, subjectClass, expressionAddress }
+        })).perspectiveGetSubjectData
     }
 
     // ExpressionClient functions, needed for Subjects:
