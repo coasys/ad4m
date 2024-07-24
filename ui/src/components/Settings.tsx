@@ -470,7 +470,7 @@ const Profile = (props: Props) => {
             <j-box p="200"></j-box>
             {
               appState.agent_list.map((agent: any) => (
-                <>                
+                <>
                   <j-button
                     full
                     variant={ agent.path === appState.selected_agent.path ? "primary" : "secondary"}
@@ -485,8 +485,8 @@ const Profile = (props: Props) => {
                   <j-box p="300"></j-box>
                 </>
               ))
-            } 
-            <j-button full onCLick={() => setCreateAgent(true)}>
+            }
+            <j-button full onCLick={() => setCreateAgent(true)} variant="secondary">
               <j-icon name="plus"></j-icon>
               Add new agent
             </j-button>

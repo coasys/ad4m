@@ -1,6 +1,6 @@
 export const MainHeader = {
   width: "calc(100% - 40px)",
-  background: "#000",
+  backgroundColor: "var(--j-color-primary-100)",
   display: "flex",
   justifyContent: "space-between",
   padding: `20px`,
@@ -11,7 +11,7 @@ export const cardStyle = {
   width: "100%",
   border: "1px solid var(--j-color-ui-200)",
   borderRadius: "var(--j-border-radius)",
-  backgroundColor: "var(--j-color-ui-50)",
+  backgroundColor: "var(--j-color-primary-100)",
   padding: "var(--j-space-500)",
   marginBottom: "var(--j-space-500)",
   position: "relative",
