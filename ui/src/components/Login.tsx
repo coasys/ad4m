@@ -116,7 +116,8 @@ const Login = (props: any) => {
             ></Logo>
 
             <j-text size="800" color="black">
-              The First Social Network
+            A social layer
+            for the <i style={{fontFamily: "Noto Serif"}}>Wise Web</i>
             </j-text>
 
             <j-flex direction="column" gap="200">
