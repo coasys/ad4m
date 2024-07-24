@@ -21,8 +21,8 @@ dot-structures = "0.1.0"
 itertools = "0.10.3"
 perspective_diff_sync_integrity = { path = "../perspective_diff_sync_integrity" }
 sha2 = "0.10.5"
-hdk = { version = "0.4.0-dev.9", path = "../../../../../../holochain/crates/hdk" }
-holo_hash = { version = "0.4.0-dev.7", path = "../../../../../../holochain/crates/holo_hash" }
+hdk = { version = "0.4.0-dev.9", git = "https://github.com/coasys/holochain", rev = "60b035888f15b9989e2852f6399f692fb73f5a7e" }
+holo_hash = { version = "0.4.0-dev.7", git = "https://github.com/coasys/holochain", rev = "60b035888f15b9989e2852f6399f692fb73f5a7e"}
 
 [features]
 test = []

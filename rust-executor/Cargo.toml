@@ -74,26 +74,21 @@ jsonwebtoken = "8.3.0"
 
 webbrowser = "0.8.12"
 
-# holochain = { version = "0.3.1-rc.0", features = ["test_utils", "default"] }
-# holochain_cli_bundle = { version = "0.3.1-rc.0" }
-# holochain_types = { version = "0.3.1-rc.0" }
-# holochain_cli_run_local_services = { version = "0.3.1-rc.0" }
-# kitsune_p2p_types = { version = "0.3.1-rc.0" }
 # holochain = { version = "0.4.0-dev.11", features = ["test_utils", "default"], git = "https://github.com/coasys/holochain.git", rev = "f5c2ca0e7021e12520f57ec15d383c7708fc4a92" }
 # holochain_cli_bundle = { version = "0.4.0-dev.11", git = "https://github.com/coasys/holochain.git", rev = "f5c2ca0e7021e12520f57ec15d383c7708fc4a92" }
 # holochain_types = { version = "0.4.0-dev.11", git = "https://github.com/coasys/holochain.git", rev = "f5c2ca0e7021e12520f57ec15d383c7708fc4a92" }
 # holochain_cli_run_local_services = { version = "0.4.0-dev.10", git = "https://github.com/coasys/holochain.git", rev = "f5c2ca0e7021e12520f57ec15d383c7708fc4a92" }
 # kitsune_p2p_types = { version = "0.4.0-dev.8", git = "https://github.com/coasys/holochain.git", rev = "f5c2ca0e7021e12520f57ec15d383c7708fc4a92" }
-holochain = { version = "0.4.0-dev.11", features = ["test_utils", "default"], path = "../../holochain/crates/holochain" }
-holochain_cli_bundle = { version = "0.4.0-dev.11", path = "../../holochain/crates/hc_bundle" }
-holochain_types = { version = "0.4.0-dev.11", path = "../../holochain/crates/holochain_types" }
-holochain_cli_run_local_services = { version = "0.4.0-dev.10", path = "../../holochain/crates/hc_run_local_services" }
-kitsune_p2p_types = { version = "0.4.0-dev.8", path = "../../holochain/crates/kitsune_p2p/types" }
-# holochain = { version = "0.3.1-rc.0", features = ["test_utils", "default"], git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-# holochain_cli_bundle = { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-# holochain_types = { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-# holochain_cli_run_local_services = { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
-# kitsune_p2p_types = { version = "0.3.1-rc.0", git = "https://github.com/coasys/holochain.git", rev = "ed4809715172f80433f8c517bbbad0b6f510838a" }
+# holochain = { version = "0.4.0-dev.11", features = ["test_utils", "default"], path = "../../holochain/crates/holochain" }
+# holochain_cli_bundle = { version = "0.4.0-dev.11", path = "../../holochain/crates/hc_bundle" }
+# holochain_types = { version = "0.4.0-dev.11", path = "../../holochain/crates/holochain_types" }
+# holochain_cli_run_local_services = { version = "0.4.0-dev.10", path = "../../holochain/crates/hc_run_local_services" }
+# kitsune_p2p_types = { version = "0.4.0-dev.8", path = "../../holochain/crates/kitsune_p2p/types" }
+holochain = { version = "0.4.0-dev.11", features = ["test_utils", "default"], git = "https://github.com/coasys/holochain", rev = "60b035888f15b9989e2852f6399f692fb73f5a7e"}
+holochain_cli_bundle = { version = "0.4.0-dev.11", git = "https://github.com/coasys/holochain", rev = "60b035888f15b9989e2852f6399f692fb73f5a7e" }
+holochain_types = { version = "0.4.0-dev.11", git = "https://github.com/coasys/holochain", rev = "60b035888f15b9989e2852f6399f692fb73f5a7e" }
+holochain_cli_run_local_services = { version = "0.4.0-dev.10", git = "https://github.com/coasys/holochain", rev = "60b035888f15b9989e2852f6399f692fb73f5a7e" }
+kitsune_p2p_types = { version = "0.4.0-dev.8", git = "https://github.com/coasys/holochain", rev = "60b035888f15b9989e2852f6399f692fb73f5a7e"}
 
 scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
