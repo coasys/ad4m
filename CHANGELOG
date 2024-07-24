@@ -33,6 +33,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 - Improved performance of SDNA / SubjectClass functions by moving code from client into executor and saving a lot of client <-> executor roundtrips [PR#480](https://github.com/coasys/ad4m/pull/480)
 - Update color, logo & brand for ad4m connect. [PR#502](https://github.com/coasys/ad4m/pull/502)
+- Update color, logo & brand for ad4m launcher. [PR#501](https://github.com/coasys/ad4m/pull/501)
 - Update the verify code header to show "Check Email" if using hosting. [PR#502](https://github.com/coasys/ad4m/pull/502)
 
 ## [0.9.0] - 23/03/2024
