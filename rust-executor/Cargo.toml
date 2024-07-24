@@ -55,7 +55,7 @@ fs_extra = "1.3.0"
 os_info = "3.7.0"
 semver = "1.0.17"
 did-key = "0.2.1"
-zip = {version = "2.1", git = "https://github.com/coasys/zip.git", rev = "b2bb94e32c2e94b18279cd1b36e4c198b183c826"}
+zip = {version = "2.1", git = "https://github.com/coasys/zip2.git", rev = "a6e30f1d6379e2818814ba9662ad565e43f26afe"}
 multibase = "0.9.1"
 multihash = { version = "0.18.0", features = ["sha2"] }
 cid = "0.10.1"
