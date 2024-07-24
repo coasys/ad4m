@@ -10,8 +10,26 @@ export default function Hosting({
     login,
     checkEmail,
     passwordError,
-    setHostingStep
+    setHostingStep,
+    isHostingRunning,
+    setIsHostingRunning
 }) {
+    if (isHostingRunning) {
+        return html`
+            <div class="text-center">
+                <p>
+                    Hosted executor does not seem to be running. Please check the logs in your <a href="https://hosting.ad4m.dev/dashboard">ADAM hosting dashboard</a> and potentially restart your executor there.
+                </p>
+                <button
+                    class="button button--full button-secondary"
+                    @click=${() => setIsHostingRunning(null)}
+                >
+                    Back
+                </button>
+            </div>
+        `
+    }
+
     if (step === 0) {
         return html`
         <div class="input">
