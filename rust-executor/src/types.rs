@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use coasys_juniper::{
     GraphQLObject, GraphQLValue,
 };
+use url::Url;
 
 use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput}};
 use regex::Regex;
@@ -401,4 +402,35 @@ pub struct TriggeredNotification {
     pub notification: Notification,
     pub perspective_id: String,
     pub trigger_match: String,
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelApiType {
+    OpenAi
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelApi {
+    pub name: String,
+    pub base_url: Url,
+    pub api_key: String,
+    pub api_type: ModelApiType,
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModel {
+    pub name: String,
+    pub file_name: String,
+    pub tokenizer_source: String,
+    pub model_parameters: String,
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Model {
+    Api(ModelApi),
+    Local(LocalModel),
 }

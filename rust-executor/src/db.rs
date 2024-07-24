@@ -159,6 +159,21 @@ impl Ad4mDb {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS models (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                model_type TEXT NOT NULL,
+                base_url TEXT,
+                api_key TEXT,
+                api_type TEXT,
+                file_name TEXT,
+                tokenizer_source TEXT,
+                model_parameters TEXT
+             )",
+            [],
+        )?;
+
         Ok(Self { conn })
     }
     pub fn add_notification(&self, notification: NotificationInput) -> Result<String, rusqlite::Error> {
