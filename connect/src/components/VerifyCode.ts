@@ -4,9 +4,9 @@ export default function Request({ code, changeState, verifyCode, changeCode, isH
   return html`
     <div class="items">
       <div class="text-center">
-        <div class="heading">${isHosting ? "Please check your registered email for hosting" : "Please check Ad4m"}</div>
+        <div class="heading">${isHosting ? "Please check your emails for the 2FA security code that was sent from the ADAM hosting service" : "Please check your ADAM Launcher"}</div>
         <p class="body">
-          ${isHosting ? "Please check your registered email for hosting" : "Please check Ad4m"}, confirm the request there and enter the 6-digit
+          ${isHosting ? "Please check your emails for the 2FA security code that was sent from the ADAM hosting service" : "Please check your ADAM Launcher"}, confirm the request there and enter the 6-digit
           security code below.
         </p>
       </div>

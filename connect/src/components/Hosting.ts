@@ -18,7 +18,7 @@ export default function Hosting({
         return html`
             <div class="text-center">
                 <p>
-                    Hosting is not running. Please start navigate to your <a href="https://hosting.ad4m.dev/dashboard">dashboard</a> hosting to login.
+                    Hosted executor does not seem to be running. Please check the logs in your <a href="https://hosting.ad4m.dev/dashboard">ADAM hosting dashboard</a> and potentially restart your executor there.
                 </p>
                 <button
                     class="button button--full button-secondary"
