@@ -116,6 +116,7 @@ const Login = (props: any) => {
             ></Logo>
 
             <j-text size="800" color="black">
+            ADAM Layer<br></br>
             A social layer
             for the <i style={{fontFamily: "Noto Serif"}}>Wise Web</i>
             </j-text>
@@ -130,6 +131,7 @@ const Login = (props: any) => {
               </j-button>
             </j-flex>
           </div>
+          <img src="holochain-large.png" style="float: left;"></img>
         </div>
       )}
       {currentIndex === 1 && (
