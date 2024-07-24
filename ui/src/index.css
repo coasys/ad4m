@@ -123,6 +123,10 @@ html {
   background-color: var(--j-color-primary-50);
 }
 
+:root j-input::part(input-wrapper) {
+  border-color: var(--gradient);
+}
+
 :root j-input.one-time-pass::part(input-field) {
   font-size: var(--j-font-size-800);
   border-color: var(--gradient);
