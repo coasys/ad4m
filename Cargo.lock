@@ -122,7 +122,7 @@ dependencies = [
  "uuid 1.10.0",
  "warp",
  "webbrowser",
- "zip 2.1.3",
+ "zip 2.1.3 (git+https://github.com/coasys/zip2.git?rev=a6e30f1d6379e2818814ba9662ad565e43f26afe)",
 ]
 
 [[package]]
@@ -2853,6 +2853,8 @@ checksum = "83ace6c86376be0b6cdcf3fb41882e81d94b31587573d1cfa9d01cd06bba210d"
 [[package]]
 name = "deno_ast"
 version = "0.38.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "584547d27786a734536fde7088f8429d355569c39410427be44695c300618408"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
@@ -2892,6 +2894,7 @@ dependencies = [
 [[package]]
 name = "deno_broadcast_channel"
 version = "0.148.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "async-trait",
  "deno_core",
@@ -2902,6 +2905,7 @@ dependencies = [
 [[package]]
 name = "deno_cache"
 version = "0.86.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "async-trait",
  "deno_core",
@@ -2914,6 +2918,7 @@ dependencies = [
 [[package]]
 name = "deno_canvas"
 version = "0.23.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "deno_webgpu",
@@ -2924,6 +2929,7 @@ dependencies = [
 [[package]]
 name = "deno_console"
 version = "0.154.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
 ]
@@ -2967,6 +2973,7 @@ checksum = "a13951ea98c0a4c372f162d669193b4c9d991512de9f2381dd161027f34b26b1"
 [[package]]
 name = "deno_cron"
 version = "0.34.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2979,6 +2986,7 @@ dependencies = [
 [[package]]
 name = "deno_crypto"
 version = "0.168.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3012,6 +3020,7 @@ dependencies = [
 [[package]]
 name = "deno_fetch"
 version = "0.178.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "bytes",
  "data-url",
@@ -3029,6 +3038,7 @@ dependencies = [
 [[package]]
 name = "deno_ffi"
 version = "0.141.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "dlopen2",
@@ -3045,6 +3055,7 @@ dependencies = [
 [[package]]
 name = "deno_fs"
 version = "0.64.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "async-trait",
  "base32",
@@ -3063,6 +3074,7 @@ dependencies = [
 [[package]]
 name = "deno_http"
 version = "0.152.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "async-compression",
  "async-trait",
@@ -3099,6 +3111,7 @@ dependencies = [
 [[package]]
 name = "deno_io"
 version = "0.64.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "async-trait",
  "deno_core",
@@ -3116,6 +3129,7 @@ dependencies = [
 [[package]]
 name = "deno_kv"
 version = "0.62.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3153,6 +3167,7 @@ dependencies = [
 [[package]]
 name = "deno_napi"
 version = "0.84.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "libloading 0.7.4",
@@ -3174,6 +3189,7 @@ dependencies = [
 [[package]]
 name = "deno_net"
 version = "0.146.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "deno_tls",
@@ -3189,6 +3205,7 @@ dependencies = [
 [[package]]
 name = "deno_node"
 version = "0.91.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "aead-gcm-stream",
  "aes",
@@ -3273,6 +3290,7 @@ dependencies = [
 [[package]]
 name = "deno_permissions"
 version = "0.14.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "deno_terminal",
@@ -3288,6 +3306,7 @@ dependencies = [
 [[package]]
 name = "deno_runtime"
 version = "0.162.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_ast",
  "deno_broadcast_channel",
@@ -3359,6 +3378,7 @@ dependencies = [
 [[package]]
 name = "deno_tls"
 version = "0.141.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "deno_native_certs",
@@ -3384,6 +3404,7 @@ dependencies = [
 [[package]]
 name = "deno_url"
 version = "0.154.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "urlpattern",
@@ -3392,6 +3413,7 @@ dependencies = [
 [[package]]
 name = "deno_web"
 version = "0.185.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "async-trait",
  "base64-simd 0.8.0",
@@ -3408,6 +3430,7 @@ dependencies = [
 [[package]]
 name = "deno_webgpu"
 version = "0.121.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "raw-window-handle 0.6.2",
@@ -3420,6 +3443,7 @@ dependencies = [
 [[package]]
 name = "deno_webidl"
 version = "0.154.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
 ]
@@ -3427,6 +3451,7 @@ dependencies = [
 [[package]]
 name = "deno_websocket"
 version = "0.159.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "bytes",
  "deno_core",
@@ -3447,6 +3472,7 @@ dependencies = [
 [[package]]
 name = "deno_webstorage"
 version = "0.149.0"
+source = "git+https://github.com/coasys/deno.git?rev=67f33167d1643bd4bcc14bfc40d2316c76be848a#67f33167d1643bd4bcc14bfc40d2316c76be848a"
 dependencies = [
  "deno_core",
  "deno_web",
@@ -16941,33 +16967,6 @@ dependencies = [
  "crc32fast",
  "crossbeam-utils",
  "flate2",
-]
-
-[[package]]
-name = "zip"
-version = "2.1.3"
-dependencies = [
- "aes",
- "arbitrary",
- "bzip2",
- "constant_time_eq",
- "crc32fast",
- "crossbeam-utils",
- "deflate64",
- "displaydoc",
- "flate2",
- "hmac 0.12.1",
- "indexmap 2.2.6",
- "lzma-rs",
- "memchr",
- "pbkdf2",
- "rand 0.8.5",
- "sha1",
- "thiserror",
- "time",
- "zeroize",
- "zopfli",
- "zstd",
 ]
 
 [[package]]

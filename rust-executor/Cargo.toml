@@ -32,7 +32,7 @@ path = "src/main.rs"
 [dependencies]
 url = { version = "2.4.1", features = ["expose_internals"] }
 deno_core = {version = "0.283.0", git = "https://github.com/coasys/deno_core.git", rev = "b2bb94e32c2e94b18279cd1b36e4c198b183c826" }
-deno_runtime = {version = "0.162.0", git = "https://github.com/coasys/deno.git", rev = "f339804dd995a04eaacb467b6dcf9a04b21a7b81"}
+deno_runtime = {version = "0.162.0", git = "https://github.com/coasys/deno.git", rev = "67f33167d1643bd4bcc14bfc40d2316c76be848a"}
 tokio = { version = "1.25.0", features = ["full"] }
 futures = "0.3.28"
 tokio-stream = { version = "0.1.12", features = ["sync"] }
