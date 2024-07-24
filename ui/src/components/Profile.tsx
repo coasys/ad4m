@@ -194,7 +194,7 @@ function Profile() {
               <j-text>{`${profile.firstName} ${profile.lastName}`}</j-text>
             </j-box>
 
-            <j-button onClick={() => setShowProfileInfo(false)}>Close</j-button>
+            <j-button variant="secondary" onClick={() => setShowProfileInfo(false)}>Close</j-button>
           </j-box>
         </j-modal>
       )}
