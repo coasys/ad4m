@@ -210,9 +210,6 @@ export class ModelInput {
     local?: LocalModelInput;
 }
 
-@registerEnumType(ModelApiType, {
-    name: "ModelApiType",
-})
 export enum ModelApiType {
     OpenAi = "OpenAi",
 }
