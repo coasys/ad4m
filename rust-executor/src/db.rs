@@ -3,7 +3,8 @@ use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use crate::types::{Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff};
+use url::Url;
+use crate::types::{Expression, ExpressionProof, Link, LinkExpression, Model, ModelApi, ModelApiType, LocalModel, Notification, PerspectiveDiff};
 use crate::graphql::graphql_types::{EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression, PerspectiveHandle, SentMessage};
 
 #[derive(Serialize, Deserialize)]
@@ -163,13 +164,12 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS models (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
-                model_type TEXT NOT NULL,
-                base_url TEXT,
+                api_base_url TEXT,
                 api_key TEXT,
                 api_type TEXT,
-                file_name TEXT,
-                tokenizer_source TEXT,
-                model_parameters TEXT
+                local_file_name TEXT,
+                local_tokenizer_source TEXT,
+                local_model_parameters TEXT
              )",
             [],
         )?;
@@ -815,6 +815,72 @@ impl Ad4mDb {
         Ok(expression.map(|e| serde_json::from_str(&e).unwrap()))
     }
 
+    pub fn add_model(&self, model: &Model) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT INTO models (name, api_base_url, api_key, api_type, local_file_name, local_tokenizer_source, local_model_parameters)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                model.name,
+                model.api.as_ref().map(|api| api.base_url.to_string()),
+                model.api.as_ref().map(|api| api.api_key.clone()),
+                model.api.as_ref().map(|api| serde_json::to_string(&api.api_type).unwrap()),
+                model.local.as_ref().map(|local| local.file_name.clone()),
+                model.local.as_ref().map(|local| local.tokenizer_source.clone()),
+                model.local.as_ref().map(|local| local.model_parameters.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_models(&self) -> Ad4mDbResult<Vec<Model>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM models")?;
+        let model_iter = stmt.query_map([], |row| {
+            let api = if let (Some(base_url), Some(api_key), Some(api_type)) = (
+                row.get::<_, Option<String>>(2)?.map(|s| s.to_string()),
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ) {
+                Some(ModelApi {
+                    base_url: Url::parse(&base_url).unwrap(),
+                    api_key,
+                    api_type: serde_json::from_str(&api_type).unwrap(),
+                })
+            } else {
+                None
+            };
+
+            let local = if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) = (row.get(5)?, row.get(6)?, row.get(7)?) {
+                Some(LocalModel {
+                    file_name,
+                    tokenizer_source,
+                    model_parameters,
+                })
+            } else {
+                None
+            };
+
+            Ok(Model {
+                name: row.get(1)?,
+                api,
+                local,
+            })
+        })?;
+
+        let mut models = Vec::new();
+        for model in model_iter {
+            models.push(model?);
+        }
+        Ok(models)
+    }
+
+    pub fn remove_model(&self, name: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM models WHERE name = ?1",
+            params![name],
+        )?;
+        Ok(())
+    }
+
     pub fn with_global_instance<F, R>(func: F) -> R
     where
         F: FnOnce(&Ad4mDb) -> R,
@@ -833,6 +899,7 @@ impl Ad4mDb {
 mod tests {
     use super::*;
     use crate::{db::Ad4mDb, graphql::graphql_types::NotificationInput};
+    use url::Url;
     use uuid::Uuid;
     use fake::{Fake, Faker};
     use chrono::Utc;
@@ -1057,6 +1124,67 @@ fn can_handle_notifications() {
     let notifications_after_removal = db.get_notifications().unwrap();
     assert!(notifications_after_removal.iter().all(|n| n.id != notification_id));
 }
+
+#[test]
+fn test_models_crud() {
+    let db = Ad4mDb::new(":memory:").unwrap();
+
+    // Create a test model with ModelApi
+    let test_model_api = Model {
+        name: "Test Model API".to_string(),
+        api: Some(ModelApi {
+            base_url: Url::parse("https://api.example.com").unwrap(),
+            api_key: "test_api_key".to_string(),
+            api_type: ModelApiType::OpenAi,
+        }),
+        local: None,
+    };
+
+    // Create a test model with LocalModel
+    let test_model_local = Model {
+        name: "Test Model Local".to_string(),
+        api: None,
+        local: Some(LocalModel {
+            file_name: "test_model.bin".to_string(),
+            tokenizer_source: "test_tokenizer".to_string(),
+            model_parameters: "test_parameters".to_string(),
+        }),
+    };
+
+    // Add the test models
+    db.add_model(&test_model_api).unwrap();
+    db.add_model(&test_model_local).unwrap();
+
+    // Get all models
+    let models = db.get_models().unwrap();
+
+    // Ensure the test models are in the list of models and have all properties set
+    let retrieved_model_api = models.iter().find(|m| m.name == "Test Model API").unwrap();
+    assert_eq!(retrieved_model_api.name, "Test Model API");
+    assert!(retrieved_model_api.api.is_some());
+    assert!(retrieved_model_api.local.is_none());
+    assert_eq!(retrieved_model_api.api.as_ref().unwrap().base_url, Url::parse("https://api.example.com").unwrap());
+    assert_eq!(retrieved_model_api.api.as_ref().unwrap().api_key, "test_api_key");
+    assert_eq!(retrieved_model_api.api.as_ref().unwrap().api_type, ModelApiType::OpenAi);
+
+    let retrieved_model_local = models.iter().find(|m| m.name == "Test Model Local").unwrap();
+    assert_eq!(retrieved_model_local.name, "Test Model Local");
+    assert!(retrieved_model_local.api.is_none());
+    assert!(retrieved_model_local.local.is_some());
+    assert_eq!(retrieved_model_local.local.as_ref().unwrap().file_name, "test_model.bin");
+    assert_eq!(retrieved_model_local.local.as_ref().unwrap().tokenizer_source, "test_tokenizer");
+    assert_eq!(retrieved_model_local.local.as_ref().unwrap().model_parameters, "test_parameters");
+
+    // Remove the test models
+    db.remove_model("Test Model API").unwrap();
+    db.remove_model("Test Model Local").unwrap();
+
+    // Ensure the test models are removed
+    let models_after_removal = db.get_models().unwrap();
+    assert!(models_after_removal.iter().all(|m| m.name != "Test Model API" && m.name != "Test Model Local"));
+}
+
+
 }
 
 

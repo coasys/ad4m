@@ -1,7 +1,7 @@
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
 use coasys_juniper::{
-    GraphQLObject, GraphQLValue,
+    GraphQLEnum, GraphQLObject, GraphQLValue
 };
 use url::Url;
 
@@ -404,7 +404,7 @@ pub struct TriggeredNotification {
     pub trigger_match: String,
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(GraphQLEnum, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelApiType {
     OpenAi
@@ -413,7 +413,6 @@ pub enum ModelApiType {
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelApi {
-    pub name: String,
     pub base_url: Url,
     pub api_key: String,
     pub api_type: ModelApiType,
@@ -422,7 +421,6 @@ pub struct ModelApi {
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModel {
-    pub name: String,
     pub file_name: String,
     pub tokenizer_source: String,
     pub model_parameters: String,
@@ -430,7 +428,8 @@ pub struct LocalModel {
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub enum Model {
-    Api(ModelApi),
-    Local(LocalModel),
+pub struct Model {
+    pub name: String,
+    pub api: Option<ModelApi>,
+    pub local: Option<LocalModel>,
 }
