@@ -146,8 +146,8 @@ export class ModelApi {
     @Field()
     apiKey: string;
 
-    @Field(type => ModelApiType)
-    apiType: ModelApiType;
+    @Field()
+    apiType: String;
 }
 
 @ObjectType()
@@ -182,8 +182,8 @@ export class ModelApiInput {
     @Field()
     apiKey: string;
 
-    @Field(type => ModelApiType)
-    apiType: ModelApiType;
+    @Field()
+    apiType: string;
 }
 
 @InputType()
@@ -208,10 +208,6 @@ export class ModelInput {
 
     @Field(type => LocalModelInput, { nullable: true })
     local?: LocalModelInput;
-}
-
-export enum ModelApiType {
-    OpenAi = "OpenAi",
 }
 
 
@@ -422,7 +418,7 @@ export default class RuntimeResolver {
                 api: {
                     baseUrl: "https://api.example.com",
                     apiKey: "test-api-key",
-                    apiType: ModelApiType.OpenAi
+                    apiType: "OpenAi"
                 },
                 local: {
                     fileName: "test-model.bin",
