@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
-use std::collections::HashMap;
-use crate::{db::Ad4mDb, types::Notification, perspectives::perspective_instance::{Command, Parameter, SubjectClass, SubjectClassOption}, runtime_service::{self, RuntimeService}};
-use ad4m_client::literal::Literal;
+use crate::{db::Ad4mDb, perspectives::perspective_instance::{Command, Parameter, SubjectClass, SubjectClassOption}, runtime_service::{self, RuntimeService}, types::{LocalModel, Model, ModelApi, ModelApiType, Notification}};
+use std::str::FromStr;
+use url::Url;
 use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
 use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
 
@@ -1146,6 +1146,59 @@ impl Mutation {
             db.update_notification(id, &notification)
         }).map_err(|e| e.to_string())?;
             
+        Ok(true)
+    }
+
+    async fn runtime_add_model(
+        &self,
+        context: &RequestContext,
+        model: ModelInput,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        let model = if let Some(api) = model.api {
+            let base_url = Url::parse(&api.base_url)?;
+            let api_type = ModelApiType::from_str(&api.api_type).map_err(|e| e.to_string())?;
+            Model {
+                name: model.name,
+                api: Some(ModelApi {
+                    base_url,
+                    api_key: api.api_key,
+                    api_type,
+                }),
+                local: None,
+            }
+        } else {
+            Model {
+                name: model.name,
+                api: None,
+                local: model.local.map(|local| LocalModel {
+                    file_name: local.file_name,
+                    tokenizer_source: local.tokenizer_source,
+                    model_parameters: local.model_parameters,
+                }),
+            }
+        };
+        
+
+        Ad4mDb::with_global_instance(|db| {
+            db.add_model(&model)
+        }).map_err(|e| e.to_string())?;
+
+        Ok(true)
+    }
+
+    async fn runtime_remove_model(
+        &self,
+        context: &RequestContext,
+        name: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.remove_model(&name)
+        }).map_err(|e| e.to_string())?;
+
         Ok(true)
     }
 }

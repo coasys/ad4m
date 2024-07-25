@@ -4,7 +4,7 @@ use coasys_juniper::{
     GraphQLEnum, GraphQLObject, GraphQLValue
 };
 use url::Url;
-
+use std::str::FromStr;
 use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput}};
 use regex::Regex;
 
@@ -408,6 +408,18 @@ pub struct TriggeredNotification {
 #[serde(rename_all = "camelCase")]
 pub enum ModelApiType {
     OpenAi
+}
+
+impl FromStr for ModelApiType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "openai" => Ok(ModelApiType::OpenAi),
+            "OpenAi" => Ok(ModelApiType::OpenAi),
+            _ => Err(format!("Unknown ModelApiType: {}", s)),
+        }
+    }
 }
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]

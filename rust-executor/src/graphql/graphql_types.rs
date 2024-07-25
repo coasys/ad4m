@@ -595,6 +595,31 @@ pub struct PerspectiveStateFilter {
     pub perspective: PerspectiveHandle,
 }
 
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelApiInput {
+    pub base_url: String,
+    pub api_key: String,
+    pub api_type: String,
+}
+
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelInput {
+    pub file_name: String,
+    pub tokenizer_source: String,
+    pub model_parameters: String,
+}
+
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInput {
+    pub name: String,
+    pub api: Option<ModelApiInput>,
+    pub local: Option<LocalModelInput>,
+}
+
+
 #[derive(Debug, Deserialize, Serialize)]
 pub enum JsResultType<T>
 where
