@@ -174,8 +174,6 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
             with_header(response, "Cross-Origin-Opener-Policy", opener_policy)
         });
 
-    let routes_with_cors = routes_with_cors.or(options);
-
     let address = if config.localhost.unwrap() {
         [127, 0, 0, 1]
     } else {
