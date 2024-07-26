@@ -4,7 +4,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). More specifically:
 
 ## unreleased
-- ad4m.expression.get() handles literal values client-side to avoid roundtrips, can be overridden with optional flag [PR#498](https://github.com/coasys/ad4m/pull/498)
 
 ### Fixed
 - Prolog engine gets respawned when a query caused an error to clean the machine state [PR#483](https://github.com/coasys/ad4m/pull/483)
@@ -32,9 +31,10 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 - Improved performance of SDNA / SubjectClass functions by moving code from client into executor and saving a lot of client <-> executor roundtrips [PR#480](https://github.com/coasys/ad4m/pull/480)
-- Update color, logo & brand for ad4m connect. [PR#502](https://github.com/coasys/ad4m/pull/502)
-- Update color, logo & brand for ad4m launcher. [PR#501](https://github.com/coasys/ad4m/pull/501)
+- Update color, logo & brand for ADAM launcher. [PR#501](https://github.com/coasys/ad4m/pull/501)
+- Update color, logo & brand for ad4m-connect. [PR#502](https://github.com/coasys/ad4m/pull/502)\
 - Update the verify code header to show "Check Email" if using hosting. [PR#502](https://github.com/coasys/ad4m/pull/502)
+- ad4m.expression.get() handles literal values client-side to avoid roundtrips, can be overridden with optional flag [PR#498](https://github.com/coasys/ad4m/pull/498)
 
 ## [0.9.0] - 23/03/2024
 
