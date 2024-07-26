@@ -34,6 +34,10 @@ fn schema() -> Schema {
     Schema::new(Query, Mutation, Subscription)
 }
 
+fn reply_with_header(reply: impl warp::Reply, name: &'static str, value: String) -> warp::reply::WithHeader<impl warp::Reply> {
+    warp::reply::with_header(reply, name, value)
+}
+
 pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> Result<(), AnyError> {
     let port = config.gql_port.expect("Did not get gql port");
     let app_data_path = config.app_data_path.expect("Did not get app data path");
@@ -126,7 +130,16 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
     })
     .or(warp::post()
         .and(warp::path("graphql"))
-        .and(qm_graphql_filter))
+        .and(qm_graphql_filter.clone()))
+    .or(warp::get() //This is required for the ad4m-connect port checker to have the correct cors headers set
+        .and(warp::path("graphql"))
+        .map(|| {
+            warp::reply::with_status(
+                "GraphQL GET request received",
+                warp::http::StatusCode::OK
+            )
+        })
+    ) 
     .or(warp::get()
         .and(warp::path("playground"))
         .and(playground_filter("/graphql", Some("/subscriptions"))))
@@ -138,12 +151,30 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
         .and(routes)
         .map(|origin: Option<String>, reply| {
             let origin = origin.unwrap_or_else(|| String::from("*"));
-            if origin.contains("fluxsocial.io") {
-                with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+            let (allow_origin, embedder_policy, resource_policy, opener_policy) = if origin.contains("fluxsocial.io") {
+                (
+                    origin,
+                    "require-corp".to_string(),
+                    "cross-origin".to_string(),
+                    "same-origin".to_string(),
+                )
+            
             } else {
-                with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            }
+                (
+                    "*".to_string(),
+                    "unsafe-none".to_string(),
+                    "cross-origin".to_string(),
+                    "unsafe-none".to_string(),
+                )
+            };
+            
+            let response = with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin);
+            let response = with_header(response, "Cross-Origin-Embedder-Policy", embedder_policy);
+            let response = with_header(response, "Cross-Origin-Resource-Policy", resource_policy);
+            with_header(response, "Cross-Origin-Opener-Policy", opener_policy)
         });
+
+    let routes_with_cors = routes_with_cors.or(options);
 
     let address = if config.localhost.unwrap() {
         [127, 0, 0, 1]
