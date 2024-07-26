@@ -256,6 +256,8 @@ export default class Ad4mConnect {
     }
 
     try {
+      this.notifyConnectionChange("connecting");
+
       await connectWebSocket(this.url, 10000);
       return this.buildClient();
     } catch (e) {
