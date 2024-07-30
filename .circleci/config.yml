@@ -8,13 +8,13 @@ orbs:
 jobs:
   build-and-test:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
+      - image: coasys/ad4m-ci-linux:latest@sha256:112b4f077be8923ca4440e68cc14c9caa37de0707e53a01c6e6a89125c0c094a
     resource_class: xlarge
     steps:
       - checkout
       - restore_cache:
           keys:
-            - hc-0.3.0-beta-dev-27-v7
+            - hc-0.3.2-rc1
             - hc-
             - rust-cache-{{ checksum "Cargo.lock" }}
             - rust-cache-
@@ -25,7 +25,7 @@ jobs:
             if [ ! -f "$HOME/.cargo/bin/hc" ]; then
               git clone https://github.com/holochain/holochain.git
               cd holochain
-              git checkout holochain-0.3.0-beta-dev.27
+              git checkout holochain-0.3.2-rc.1
               cd crates/hc
               cargo build --release
               pwd
@@ -42,7 +42,7 @@ jobs:
             fi
             echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
       - save_cache:
-          key: hc-0.3.0-beta-dev-27-v7
+          key: hc-0.3.2-rc1
           paths:
             - /home/circleci/.cargo/bin
       - restore_cache:
@@ -96,7 +96,7 @@ jobs:
           at: .
       - restore_cache:
           keys:
-            - hc-0.3.0-beta-dev-27-v7
+            - hc-hc-0.3.2-rc1
             - hc-
       - restore_cache:
           keys:
