@@ -6,7 +6,7 @@ import {
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
-import { checkPort, connectWebSocket } from "./utils";
+import { checkPort, connectWebSocket, removeForVersion } from "./utils";
 import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
@@ -415,5 +415,12 @@ export default class Ad4mConnect {
     } catch (error) {
       throw new Error("Invalid code");
     }
+  }
+
+  clearState() {
+    this.setToken(null);
+    this.setPort(12000);
+    this.notifyConnectionChange("not_connected");
+    this.notifyAuthChange("unauthenticated");
   }
 }
