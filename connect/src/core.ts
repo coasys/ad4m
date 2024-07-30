@@ -6,7 +6,7 @@ import {
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
-import { checkPort, connectWebSocket, removeForVersion } from "./utils";
+import { checkPort, connectWebSocket, removeForVersion, setForVersion } from "./utils";
 import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
@@ -194,6 +194,8 @@ export default class Ad4mConnect {
             this.setUrl(data.url);
             
             this.isHosting = true;
+
+            setForVersion('ad4mhosting', 'true');
 
             if (!data.paused) {
               this.connect();
