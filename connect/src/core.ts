@@ -75,6 +75,7 @@ export default class Ad4mConnect {
     port,
     token,
     url,
+    hosting
   }: Ad4mConnectOptions) {
     autoBind(this);
     //! @fayeed - make it support node.js
@@ -87,6 +88,7 @@ export default class Ad4mConnect {
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
     this.token = token || this.token;
+    this.isHosting = hosting || false;
     this.buildClient();
   }
 
@@ -391,6 +393,22 @@ export default class Ad4mConnect {
   async requestCapability(invalidateToken = false): Promise<string> {
     if (invalidateToken) {
       this.setToken(null);
+    }
+
+    if (this.isHosting) {
+      let token = localStorage.getItem('hosting_token');
+
+      const response = await fetch('https://hosting.ad4m.dev/api/service/checkStatus', {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token
+        },
+      });
+
+      if (response.status === 200) {
+        console.error('Looks like the client is not running you might not recieve the mail with the code, please check your dashboard logs.');
+      }
     }
 
     this.requestId = await this.ad4mClient?.agent.requestCapability({

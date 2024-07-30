@@ -517,7 +517,7 @@ export class Ad4mConnectElement extends LitElement {
   capabilities = [];
 
   @property({ type: Boolean, reflect: true })
-  hosting = false;
+  hosting = getForVersion("ad4mhosting") === "true" || false;
 
   // TODO: localstorage doesnt work here
   @property({ type: String })
@@ -569,6 +569,7 @@ export class Ad4mConnectElement extends LitElement {
       port: this.port || parseInt(getForVersion("ad4mport")) || 12000,
       token: this.token || getForVersion("ad4mtoken"),
       url: this.url || getForVersion("ad4murl"),
+      hosting: this.hosting,
     });
 
     this._client.on("configstatechange", this.handleConfigChange);
