@@ -159,7 +159,7 @@ const Auth = () => {
                 <j-button
                   full
                   size="lg"
-                  variant=""
+                  variant="primary"
                   onClick={closeSecretCodeModal}
                 >
                   Close

@@ -65,9 +65,8 @@ jobs:
       with:
         deno-version: v1.32.4
 
-    - uses: pnpm/action-setup@v2
-      with:
-        version: 8
+    - uses: pnpm/action-setup@v4
+
 
     - name: install dependencies (ubuntu only)
       if: matrix.platform == 'GH-hosted-ubuntu'
@@ -213,8 +212,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg"
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.dmg
+        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg"
+        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg
         asset_content_type: application/octet-stream
 
     - name: Upload Release Macos update Asset
@@ -226,7 +225,7 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/macos/ADAM Launcher.app.tar.gz"
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.app.tar.gz
+        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.app.tar.gz
         asset_content_type: application/octet-stream
 
     - name: Upload Release Macos update sig Asset
@@ -238,7 +237,7 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/macos/ADAM Launcher.app.tar.gz.sig"
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_x64.app.tar.gz.sig
+        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.app.tar.gz.sig
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI Macos Binary
@@ -311,9 +310,7 @@ jobs:
         with:
           node-version: 16.x
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 8
+      - uses: pnpm/action-setup@v4
 
       - name: Extract version
         id: extract_version
@@ -438,9 +435,7 @@ jobs:
        with:
          go-version: '1.22'
   
-     - uses: pnpm/action-setup@v2
-       with:
-         version: 8
+     - uses: pnpm/action-setup@v4
   
      - name: Install Linux Deps
        run: |

@@ -53,9 +53,7 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
 
-    - uses: pnpm/action-setup@v2
-      with:
-        version: 8
+    - uses: pnpm/action-setup@v4
 
     - name: Install Deno
       uses: denoland/setup-deno@v1
