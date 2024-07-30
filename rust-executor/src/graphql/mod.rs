@@ -6,8 +6,9 @@ mod subscription_resolvers;
 use graphql_types::RequestContext;
 use mutation_resolvers::*;
 use query_resolvers::*;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN;
 use subscription_resolvers::*;
+use warp::reply::with_header;
 
 use crate::js_core::JsCoreHandle;
 use crate::Ad4mConfig;
@@ -24,10 +25,6 @@ use coasys_juniper_graphql_transport_ws::ConnectionConfig;
 use coasys_juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use warp::{http::Response, Filter};
 use std::path::Path;
-use tokio_rustls::rustls::ServerConfig;
-use tokio_rustls::TlsAcceptor;
-use std::fs::File;
-use std::io::BufReader;
 
 impl coasys_juniper::Context for RequestContext {}
 
@@ -35,6 +32,10 @@ type Schema = RootNode<'static, Query, Mutation, Subscription>;
 
 fn schema() -> Schema {
     Schema::new(Query, Mutation, Subscription)
+}
+
+fn reply_with_header(reply: impl warp::Reply, name: &'static str, value: String) -> warp::reply::WithHeader<impl warp::Reply> {
+    warp::reply::with_header(reply, name, value)
 }
 
 pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> Result<(), AnyError> {
@@ -129,12 +130,49 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
     })
     .or(warp::post()
         .and(warp::path("graphql"))
-        .and(qm_graphql_filter))
+        .and(qm_graphql_filter.clone()))
+    .or(warp::get() //This is required for the ad4m-connect port checker to have the correct cors headers set
+        .and(warp::path("graphql"))
+        .map(|| {
+            warp::reply::with_status(
+                "GraphQL GET request received",
+                warp::http::StatusCode::OK
+            )
+        })
+    ) 
     .or(warp::get()
         .and(warp::path("playground"))
         .and(playground_filter("/graphql", Some("/subscriptions"))))
     .or(homepage)
     .with(log);
+
+    let routes_with_cors = warp::any()
+        .and(warp::header::optional::<String>("origin"))
+        .and(routes)
+        .map(|origin: Option<String>, reply| {
+            let origin = origin.unwrap_or_else(|| String::from("*"));
+            let (allow_origin, embedder_policy, resource_policy, opener_policy) = if origin.contains("fluxsocial.io") {
+                (
+                    origin,
+                    "require-corp".to_string(),
+                    "cross-origin".to_string(),
+                    "same-origin".to_string(),
+                )
+            
+            } else {
+                (
+                    "*".to_string(),
+                    "unsafe-none".to_string(),
+                    "cross-origin".to_string(),
+                    "unsafe-none".to_string(),
+                )
+            };
+            
+            let response = with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin);
+            let response = with_header(response, "Cross-Origin-Embedder-Policy", embedder_policy);
+            let response = with_header(response, "Cross-Origin-Resource-Policy", resource_policy);
+            with_header(response, "Cross-Origin-Opener-Policy", opener_policy)
+        });
 
     let address = if config.localhost.unwrap() {
         [127, 0, 0, 1]
@@ -143,14 +181,14 @@ pub async fn start_server(js_core_handle: JsCoreHandle, config: Ad4mConfig) -> R
     };
 
     if let Some(tls_config) = config.tls {
-        warp::serve(routes)
+        warp::serve(routes_with_cors)
             .tls()
             .cert_path(tls_config.cert_file_path)
             .key_path(tls_config.key_file_path)
             .run((address, port))
             .await;
     } else {
-        warp::serve(routes)
+        warp::serve(routes_with_cors)
             .run((address, port))
             .await;
     }
