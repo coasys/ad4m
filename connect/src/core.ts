@@ -57,6 +57,7 @@ export default class Ad4mConnect {
   appDomain: string;
   appIconPath: string;
   appUrl?: string;
+  isHosting: boolean = false;
   listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
     ["configstatechange"]: [],
@@ -189,7 +190,14 @@ export default class Ad4mConnect {
           if (data.serviceId) {
             this.setPort(data.port);
             this.setUrl(data.url);
-            this.connect();
+            
+            this.isHosting = true;
+
+            if (!data.paused) {
+              this.connect();
+            } else {
+              throw new Error('Hosting is not running');
+            }
           }
         }
       }  else {
@@ -248,6 +256,8 @@ export default class Ad4mConnect {
     }
 
     try {
+      this.notifyConnectionChange("connecting");
+
       await connectWebSocket(this.url, 10000);
       return this.buildClient();
     } catch (e) {
@@ -396,10 +406,14 @@ export default class Ad4mConnect {
   }
 
   async verifyCode(code: string): Promise<string> {
-    const jwt = await this.ad4mClient?.agent.generateJwt(this.requestId!, code);
-    this.setToken(jwt);
-    await this.buildClient();
-    await this.checkAuth();
-    return this.token;
+    try {
+      const jwt = await this.ad4mClient?.agent.generateJwt(this.requestId!, code);
+      this.setToken(jwt);
+      await this.buildClient();
+      await this.checkAuth();
+      return this.token;
+    } catch (error) {
+      throw new Error("Invalid code");
+    }
   }
 }

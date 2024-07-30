@@ -1,8 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap');
+
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
-    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
-    sans-serif;
+  font-family: "Bricolage Grotesque", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -21,11 +22,11 @@ html {
   --j-color-subtractor: 100%;
   --j-color-multiplier: -1;
   --j-border-width: 3px;
-  --start-color: #a4adff;
-  --end-color: #d273ff;
   --j-scrollbar-width: 2px;
-  --gradient: linear-gradient(90deg, var(--start-color), var(--end-color));
-  --j-color-primary-50: hsl(610, 50%, calc((90% - 100%) * -1));
+  --gradient: #91E3FD;
+  --j-color-primary-50: #131533;
+  --j-tab-item-border-selected: 0px 4px 0px -2px var(--gradient);
+  /* --j-color-primary-500: var(--gradient); */
 }
 
 ::-webkit-scrollbar {
@@ -34,6 +35,19 @@ html {
 
 :root j-button[variant="primary"]::part(base) {
   background: var(--gradient);
+  color: var(--j-color-primary-50);
+}
+
+:root j-button[variant="secondary"]::part(base) {
+  background: var(--j-color-primary-50);
+  border-color: var(--gradient);
+  color: var(--gradient);
+}
+
+:root j-button::part(base) {
+  /* background: var(--j-color-primary-50); */
+  /* border-color: var(--gradient); */
+  color: var(--gradient);
 }
 
 :root j-checkbox[checked]::part(toggle) {
@@ -44,11 +58,21 @@ html {
   padding-bottom: 0;
 }
 
+:root j-menu::part(base) {
+  background-color: var(--j-color-primary-70);
+  border-color: var(--j-color-primary-100);
+}
+
+:root j-menu-item::part(base):hover {
+  background-color: var(--j-color-primary-100);
+}
+
 :root j-avatar::part(base) {
   border-radius: 4px;
 }
 
 :root j-modal::part(modal) {
+  background-color: var(--j-color-primary-50);
   box-shadow: 0px 0px 40px 20px
     hsla(var(--j-color-primary-hue), var(--j-color-saturation), 20%, 0.05);
 }
@@ -73,7 +97,7 @@ html {
 }
 
 :root j-popover::part(content) {
-  background: var(--j-color-ui-50);
+  background: var(--j-color-primary-50);
   box-shadow: 0px 0px 40px 20px
     hsla(var(--j-color-primary-hue), var(--j-color-saturation), 20%, 0.05);
   border-radius: 6px;
@@ -89,8 +113,29 @@ html {
   gap: var(--j-space-400);
 }
 
+:root j-toggle[checked]::part(toggle)  {
+  background: var(--gradient);
+}
+
+:root j-input::part(base) {
+  font-size: var(--j-font-size-400);
+  border-color: var(--gradient);
+  background-color: var(--j-color-primary-50);
+}
+
+:root j-input::part(input-wrapper) {
+  border-color: var(--gradient);
+}
+
 :root j-input.one-time-pass::part(input-field) {
   font-size: var(--j-font-size-800);
+  border-color: var(--gradient);
+  background-color: var(--j-color-primary-50);
+}
+
+:root j-input.one-time-pass::part(input-wrapper) {
+  background-color: var(--j-color-primary-50);
+  border-color: var(--gradient);
 }
 
 :root j-tabs::part(base) {
@@ -108,9 +153,18 @@ html {
   border-bottom: 1px solid var(--j-color-ui-200);
 }
 
+:root j-tab-item::part(base) {
+  color: var(--gradient);
+  /* box-shadow: var(--gradient) ; */
+}
+
+:root j-tab-item[checked]::part(base) {
+    box-shadow: 0px 2px 0px 0px var(--gradient);
+}
+
 j-tabs {
   z-index: 10;
-  background-color: var(--j-color-white);
+  /* background-color: var(--j-color-white); */
   position: sticky;
   top: 0;
   left: 0;

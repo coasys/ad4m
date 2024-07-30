@@ -35,9 +35,7 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
 
-    - uses: pnpm/action-setup@v2
-      with:
-        version: 8
+    - uses: pnpm/action-setup@v4
 
     - name: Cache cargo
       id: cache-cargo

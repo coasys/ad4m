@@ -187,6 +187,23 @@ impl Wallet {
             .insert(name, Key::from(key));
     }
 
+    pub fn initialize_keys(&mut self, name: String, did: String) -> Option<did_key::Document>{
+        if self.keys.is_none() {
+            self.keys = Some(Keys::new());
+            let key = did_key::resolve(did.as_str()).expect("Failed to get key pair");
+            self.keys
+                .as_mut()
+                .unwrap()
+                .by_name
+                .insert(name.clone(), Key::from(key));
+            let key = did_key::resolve(did.as_str()).expect("Failed to get key pair");
+            let did_document = key.get_did_document(did_key::Config::default());
+            Some(did_document)
+        } else {
+            None
+        }
+    }
+
     pub fn get_public_key(&self, name: &String) -> Option<Vec<u8>> {
         self.keys
             .as_ref()?
