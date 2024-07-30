@@ -21,6 +21,7 @@ export type Ad4mConnectOptions = {
   token?: string;
   url?: string;
   hosting?: boolean;
+  mobile?: boolean;
 };
 
 export type AuthStates = "authenticated" | "locked" | "unauthenticated";
@@ -408,7 +409,7 @@ export default class Ad4mConnect {
         },
       });
 
-      if (response.status === 200) {
+      if (response.status !== 200) {
         console.error('Looks like the client is not running you might not recieve the mail with the code, please check your dashboard logs.');
       }
     }

@@ -513,6 +513,9 @@ export class Ad4mConnectElement extends LitElement {
   @property({ type: String, reflect: true })
   appIconPath = null;
 
+  @property({ type: Boolean, reflect: true })
+  mobile = null;
+
   @property({ type: String, reflect: true })
   capabilities = [];
 
@@ -892,7 +895,7 @@ export class Ad4mConnectElement extends LitElement {
   render() {
     console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
     if (this._isOpen === false) {
-      if (this.authState === "authenticated" && this._isMobile) {
+      if (this.authState === "authenticated" && this.mobile) {
         return MobileAppLogoButton(({
           openModal: () => {
             this.changeUIState("settings");
