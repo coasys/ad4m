@@ -2,7 +2,7 @@
 name = "direct-message-integrity"
 version = "0.1.0"
 authors = ["Nicolas Luck <nicolas@lucksus.eu>", "Joshua Parkin <joshuadparkin@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -10,8 +10,8 @@ name = "direct_message_integrity"
 
 [dependencies]
 derive_more = "0"
-serde = "1"
-chrono = { version = "0.4.31", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+serde = "1.0.198"
+chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 
-hdi = { version = "0.4.0-beta-dev.29" }
-holo_hash = { version = "0.3.0-beta-dev.22"}
+hdi = { version = "0.4.2-rc.1", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
+holo_hash =  { version = "0.3.2-rc.1", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }

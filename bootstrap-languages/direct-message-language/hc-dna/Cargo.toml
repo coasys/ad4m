@@ -3,6 +3,7 @@ members = [
   "zomes/direct-message",
   "zomes/direct-message-integrity"
 ]
+resolver="2"
 
 [profile.dev]
 opt-level = "z"
