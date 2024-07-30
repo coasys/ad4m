@@ -1,6 +1,6 @@
 [package]
 authors = ["josh@junto.foundation"]
-edition = "2018"
+edition = "2021"
 name = "agent_store"
 version = "0.0.1"
 

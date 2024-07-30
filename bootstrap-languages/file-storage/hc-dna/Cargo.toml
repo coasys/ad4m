@@ -3,6 +3,7 @@ members = [
   "zomes/integrity",
   "zomes/file_storage"
 ]
+resolver="2"
 
 [profile.dev]
 opt-level = "z"

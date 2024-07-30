@@ -2,7 +2,7 @@
 name = "direct-message"
 version = "0.1.0"
 authors = ["Nicolas Luck <nicolas@lucksus.eu>"]
-edition = "2018"
+edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
